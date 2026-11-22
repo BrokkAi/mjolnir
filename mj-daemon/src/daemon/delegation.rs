@@ -23,6 +23,9 @@ enum ChildCompletion {
     /// handback. The verdict wakes the child; this checks again if the review
     /// ends without waking it (a cancel).
     AwaitingReview,
+    /// The child is a supervisor with live depth-2 workers or undelivered
+    /// `SubagentFinished` mail; no handback reminder, no parent notice, no park.
+    AwaitingChildren,
     /// The daemon began handing off before the completion could be admitted;
     /// the next daemon settles the child.
     Draining,
@@ -193,6 +196,79 @@ fn spawn_with_quota_source_reader(
     (services, task)
 }
 
+/// Refresh the power-ranking table at startup and once an hour.
+///
+/// The fetch is its own task so a five-second timeout cannot stall delegation.
+/// Daemon tests do not call the public host unless `MJ_POWER_RANKING_URL` is set.
+fn spawn_power_ranking_refresh(state: &Arc<RuntimeState>, cancellation: CancellationToken) {
+    if cfg!(test) && std::env::var_os("MJ_POWER_RANKING_URL").is_none() {
+        return;
+    }
+    let ranking = state.power_ranking.clone();
+    mj_core::runtime::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = tick.tick() => {
+                    if let Err(error) = ranking.refresh(mj_core::clock::epoch_seconds()).await {
+                        tracing::warn!(%error, "power-ranking refresh task failed");
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn spawn_quota_telemetry_refresh(
+    state: &Arc<RuntimeState>,
+    reports: Arc<std::sync::Mutex<BTreeMap<String, mj_controller::quota::QuotaReportPublication>>>,
+    cancellation: CancellationToken,
+) {
+    let state = state.clone();
+    mj_core::runtime::spawn(async move {
+        let mut poll_tick = tokio::time::interval(Duration::from_secs(10 * 60));
+        poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut category_tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        category_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = poll_tick.tick() => {
+                    let profiles: Vec<(String, String)> = reports
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .iter()
+                        .map(|(profile_id, pub_record)| {
+                            (profile_id.clone(), pub_record.cache_identity.clone())
+                        })
+                        .collect();
+                    let telemetry = state.quota_telemetry.clone();
+                    let now = mj_core::clock::epoch_seconds() as i64;
+                    if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
+                        telemetry.refresh_from_store(&profiles, now)
+                    })
+                    .await
+                    {
+                        tracing::warn!(%error, "quota telemetry refresh failed");
+                    }
+                }
+                _ = category_tick.tick() => {
+                    let telemetry = state.quota_telemetry.clone();
+                    if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
+                        telemetry.refresh_category_stats_from_store()
+                    })
+                    .await
+                    {
+                        tracing::warn!(%error, "category burn observation refresh failed");
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn run(
     state: Arc<RuntimeState>,
     mut updates: DelegationUpdates,
@@ -200,6 +276,8 @@ async fn run(
     cancellation: CancellationToken,
 ) -> Result<()> {
     let backend = policy.services.backend.clone();
+    spawn_power_ranking_refresh(&state, cancellation.clone());
+    spawn_quota_telemetry_refresh(&state, policy.reports.clone(), cancellation.clone());
     // Housekeeping for stores written by builds that kept acknowledged rows.
     if let Err(error) =
         mj_core::runtime::spawn_blocking(mj_controller::database::prune_acknowledged_delegations)
@@ -452,7 +530,12 @@ async fn run(
                 if let Some((id, ordinal, judged)) = completion_ids.remove(&task_id) {
                     match result {
                         Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); parked_behind.remove(&id); }
-                        Ok(ChildCompletion::RetryPark | ChildCompletion::AwaitingReview | ChildCompletion::Draining) => {
+                        Ok(
+                            ChildCompletion::RetryPark
+                            | ChildCompletion::AwaitingReview
+                            | ChildCompletion::AwaitingChildren
+                            | ChildCompletion::Draining,
+                        ) => {
                             parked_behind.remove(&id);
                             let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
@@ -680,6 +763,18 @@ async fn settle_child(
     // verdict, not forgetting to hand back: no reminder, no notice, no park.
     if review_open {
         return Ok(ChildCompletion::AwaitingReview);
+    }
+    // A supervisor with live depth-2 workers or undelivered finish mail is
+    // waiting for its children, not forgetting to hand back.
+    if relation.supervisor {
+        let supervisor_id = child_id.clone();
+        let active = mj_core::runtime::spawn_blocking(move || {
+            crate::server_runtime::api::supervisor_active_children_sync(&supervisor_id)
+        })
+        .await??;
+        if !active.is_empty() {
+            return Ok(ChildCompletion::AwaitingChildren);
+        }
     }
     // As for a reviewer above, the queue owns a handback until the daemon has
     // executed it. A handback can wait in the queue while the review host
@@ -1688,9 +1783,21 @@ mod tests {
             Self::with_report_backend(name, true).await
         }
 
+        async fn new_supervisor(name: &str) -> Self {
+            Self::with_report_backend_and_supervisor(name, true, true).await
+        }
+
         /// `report_backend` says whether to install the test's own report
         /// backend; a test that runs the delegation loop leaves it to the loop.
         async fn with_report_backend(name: &str, report_backend: bool) -> Self {
+            Self::with_report_backend_and_supervisor(name, report_backend, false).await
+        }
+
+        async fn with_report_backend_and_supervisor(
+            name: &str,
+            report_backend: bool,
+            supervisor: bool,
+        ) -> Self {
             let workspace = mj_controller::database::create_workspace(name).unwrap();
             let parent = crate::daemon::tests::runtime_test_session(
                 "parent",
@@ -1705,6 +1812,7 @@ mod tests {
             mj_controller::database::save_session(&parent).unwrap();
             let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
             relation.handback_tool = true;
+            relation.supervisor = supervisor;
             mj_controller::database::save_subagent_session(&child, &relation).unwrap();
             let manager =
                 crate::daemon::tests::TestRemoteManager::for_sessions(&["child", "parent"]).await;
@@ -2059,6 +2167,7 @@ mod tests {
                 ChildCompletion::FollowUpSent => "FollowUpSent",
                 ChildCompletion::ParkAfterParentTurn { .. } => "ParkAfterParentTurn",
                 ChildCompletion::AwaitingReview => "AwaitingReview",
+                ChildCompletion::AwaitingChildren => "AwaitingChildren",
                 ChildCompletion::AwaitingHandback => "AwaitingHandback",
                 ChildCompletion::Draining => "Draining",
                 ChildCompletion::Settled => "Settled",
@@ -2444,5 +2553,104 @@ mod tests {
         drop(copy);
         assert!(futures::poll!(&mut waiting).is_ready());
         assert!(!deferral.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn supervisor_awaits_live_depth_two_children_and_undelivered_mail() {
+        if !isolated(
+            "supervisor_awaits_live_depth_two_children_and_undelivered_mail",
+            "delegation-supervisor-awaiting-children",
+        ) {
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let mut held = HeldChild::new_supervisor("supervisor").await;
+        let sup_session = mj_controller::database::load_state()
+            .unwrap()
+            .sessions
+            .remove("child")
+            .unwrap();
+        // Add a live depth-2 worker under the supervisor.
+        let mut d2_session = sup_session.clone();
+        d2_session.id = "depth2-worker".into();
+        d2_session.state = mj_core::state::SessionState::Running;
+        let d2_record = mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            child_session_id: "depth2-worker".into(),
+            parent_session_id: "child".into(),
+            task_name: "leaf-task".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: std::path::PathBuf::new(),
+            initial_prompt: "leaf".into(),
+            request_key: "req-leaf".into(),
+            created_at: "2026-11-21T00:00:00Z".into(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: true,
+            supervisor: false,
+        };
+        mj_controller::database::save_subagent_session(&d2_session, &d2_record).unwrap();
+        held.state.owner().edit_sessions(|sessions| {
+            sessions.insert(d2_session.id.clone(), d2_session.clone());
+        });
+
+        let now = mj_core::clock::epoch_millis();
+        let turn = turn_at("sup-turn-1", 10, now, None);
+        held.child_ended(&turn).await;
+
+        // While depth-2 worker has_live_worker(), supervisor yields AwaitingChildren:
+        // no handback reminder, no parent notice, no park.
+        let (done, sent) = held.settle(None, &turn).await;
+        assert!(matches!(done, ChildCompletion::AwaitingChildren));
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(held.told(), 0);
+        assert_eq!(held.parks.parks.load(Ordering::SeqCst), 0);
+
+        // Simulated daemon restart: re-evaluating from fresh SQLite still yields AwaitingChildren.
+        let reloaded = mj_controller::database::load_state().unwrap();
+        assert!(reloaded.sessions["depth2-worker"].state.has_live_worker());
+        let (done_again, sent_again) = held.settle(None, &turn).await;
+        assert!(matches!(done_again, ChildCompletion::AwaitingChildren));
+        assert!(sent_again.is_empty(), "{sent_again:?}");
+
+        // Park depth-2 worker, but leave an undelivered SubagentFinished mailbox row:
+        // supervisor still yields AwaitingChildren.
+        d2_session.state = mj_core::state::SessionState::Parked;
+        mj_controller::database::save_session(&d2_session).unwrap();
+        held.state.owner().edit_sessions(|sessions| {
+            sessions.get_mut("depth2-worker").unwrap().state = mj_core::state::SessionState::Parked;
+        });
+        let finished_event = mj_core::mailbox::MailboxEvent {
+            key: "subagent-finished:depth2-worker:1".into(),
+            source: "mjolnir".into(),
+            wake: true,
+            created_at_ms: now as u64,
+            body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                report: Box::new(
+                    serde_json::from_value(serde_json::json!({
+                        "child_session_id": "depth2-worker",
+                        "task_name": "leaf-task",
+                        "state": "completed",
+                        "finished": true,
+                        "output": "leaf done",
+                    }))
+                    .unwrap(),
+                ),
+            },
+        };
+        mj_controller::database::enqueue_mailbox_event(
+            &finished_event.key,
+            "child",
+            &serde_json::to_string(&finished_event).unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let (done_mail, sent_mail) = held.settle(None, &turn).await;
+        assert!(matches!(done_mail, ChildCompletion::AwaitingChildren));
+        assert!(sent_mail.is_empty(), "{sent_mail:?}");
     }
 }

@@ -392,6 +392,9 @@ fn sealed_selection_difference(retained: &MoveSelection, requested: &MoveSelecti
     if retained.oracle != requested.oracle || retained.oracle_choice != requested.oracle_choice {
         parts.push("oracle choice (send the one the Move was sealed with)".to_owned());
     }
+    if retained.supervisors != requested.supervisors {
+        parts.push("supervisors choice (send the one the Move was sealed with)".to_owned());
+    }
     if retained.session_id != requested.session_id || parts.is_empty() {
         parts.push("the session".to_owned());
     }
@@ -1229,11 +1232,17 @@ impl Controller {
                 .or(retained.selection.target_template_id.clone());
             selection.subagents = selection.subagents.or(retained.selection.subagents.clone());
             selection.oracle = selection.oracle.or(retained.selection.oracle);
+            selection.supervisors = selection.supervisors.or(retained.selection.supervisors);
             selection.oracle_choice = selection
                 .oracle_choice
                 .or(retained.selection.oracle_choice.clone());
             if retained.selection.oracle.is_none() && selection.oracle == Some(source.oracle) {
                 selection.oracle = None;
+            }
+            if retained.selection.supervisors.is_none()
+                && selection.supervisors == Some(source.supervisors)
+            {
+                selection.supervisors = None;
             }
             if retained.selection.oracle_choice.is_none()
                 && selection.oracle_choice.as_ref() == source.oracle_choice.as_deref()
@@ -1332,6 +1341,9 @@ impl Controller {
                 selection.oracle = sealed.oracle;
                 selection.oracle_choice = sealed.oracle_choice.clone();
             }
+            if selection.supervisors.is_none() {
+                selection.supervisors = sealed.supervisors;
+            }
             ensure!(
                 retained.selection == selection,
                 "{}",
@@ -1362,18 +1374,24 @@ impl Controller {
                 .oracle_choice
                 .as_ref()
                 .or(source.oracle_choice.as_deref())
-                .or_else(|| {
-                    self.config
-                        .subagents
-                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
-                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
+            && !self.config.subagents.oracle_configured()
         {
             selection.oracle = Some(false);
             selection.oracle_choice = None;
             executor.notify_notice(mj_core::state::ORACLE_UNAVAILABLE_NOTICE);
         }
         let policy = move_subagent_policy(source, &selection);
+        let requested_supervisors = selection.supervisors.unwrap_or(source.supervisors);
+        if requested_supervisors && !policy.uses_mjolnir() {
+            if selection.supervisors == Some(true) {
+                return Err(mj_core::refusal::Refusal::precondition(
+                    "supervisors require Mjolnir delegation (--subagents mjolnir)",
+                )
+                .into());
+            }
+            selection.supervisors = Some(false);
+        }
         // An unchanged delegation policy on the same target mode has already
         // been admitted. Changing credentials for the same harness does not
         // change its eligible models, but a YOLO destination reads a different
@@ -1593,7 +1611,10 @@ impl Controller {
                                 .keep_dir_entries
                                 .iter()
                                 .filter(|entry| {
-                                    entry.path == *skip || entry.path.starts_with(skip)
+                                    entry
+                                        .path
+                                        .strip_prefix(&source.id)
+                                        .is_ok_and(|rel| rel == *skip || rel.starts_with(skip))
                                 })
                                 .map(|entry| entry.bytes)
                                 .sum();
@@ -2764,9 +2785,13 @@ impl Controller {
                     .clone()
                     .or_else(|| self.state.sessions.get(&id).and_then(|s| s.subagents.clone()))
                     .unwrap_or_default();
-                let is_subagent = self.state.subagents.contains_key(&id);
+                let subagent = if self.state.subagents.contains_key(&id) {
+                    crate::database::load_subagent(&id)?
+                } else {
+                    None
+                };
                 let destination_has_parent_role = destination_subagents
-                    .for_launch(dest_profile.kind, is_subagent)
+                    .for_launch(dest_profile.kind, subagent.as_ref())
                     .parent_role()
                     .is_some();
 
@@ -2984,6 +3009,9 @@ impl Controller {
                             }
                             if let Some(oracle) = operation.selection.oracle {
                                 session.oracle = oracle;
+                            }
+                            if let Some(supervisors) = operation.selection.supervisors {
+                                session.supervisors = supervisors;
                             }
                             if let Some(choice) = &operation.selection.oracle_choice {
                                 session.oracle_choice = Some(Box::new(choice.clone()));
@@ -3210,6 +3238,7 @@ impl Controller {
             if operation.selection.subagents.is_some()
                 || operation.selection.oracle.is_some()
                 || operation.selection.oracle_choice.is_some()
+                || operation.selection.supervisors.is_some()
             {
                 let session = self.state.sessions.get_mut(&id).unwrap();
                 if let Some(policy) = &operation.selection.subagents {
@@ -3220,6 +3249,9 @@ impl Controller {
                 }
                 if let Some(choice) = &operation.selection.oracle_choice {
                     session.oracle_choice = Some(Box::new(choice.clone()));
+                }
+                if let Some(supervisors) = operation.selection.supervisors {
+                    session.supervisors = supervisors;
                 }
                 crate::database::save_resumed_session(session, None)?;
             }
@@ -4092,6 +4124,7 @@ fn legacy_shim_move_operation(
             resource_allocation: None,
             subagents: None,
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
         },
         source_profile_id: legacy.source_profile_id.clone(),
@@ -4176,13 +4209,16 @@ fn move_keeps_profile_and_policy(
             .oracle_choice
             .as_ref()
             .is_none_or(|choice| Some(choice) == source.oracle_choice.as_deref())
+        && selection
+            .supervisors
+            .is_none_or(|supervisors| supervisors == source.supervisors)
 }
 
 pub(crate) fn parent_tools_enabled(
     policy: &mj_core::subagent::SubagentPolicy,
     harness: mj_core::config::HarnessKind,
 ) -> bool {
-    policy.for_launch(harness, false).parent_role().is_some()
+    policy.for_launch(harness, None).parent_role().is_some()
 }
 
 pub(in crate::controller) fn move_children(
@@ -4190,9 +4226,9 @@ pub(in crate::controller) fn move_children(
     parent_session_id: &str,
 ) -> Vec<mj_core::subagent::InPlaceSubagent> {
     state
-        .subagents
-        .values()
-        .filter(|relation| relation.parent_session_id == parent_session_id)
+        .descendant_subagent_ids(parent_session_id)
+        .into_iter()
+        .filter_map(|child_id| state.subagents.get(&child_id))
         // These children are named to the primary after an in-place swap, and
         // the oracle is never named to it. A Move stops the oracle through the
         // ordinary stop path, so it needs no listing.

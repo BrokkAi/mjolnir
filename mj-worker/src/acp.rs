@@ -665,6 +665,14 @@ async fn run_inner(
             resolved,
         }) = restart.reload_launch_config
         {
+            let resolved_environment = if supervisor_spec.is_some() {
+                // `prepare_harness_launch` already merged login_environment and
+                // applied `exclude_from_harness_environment`; re-running
+                // `with_overrides` would re-introduce excluded shell variables.
+                Ok(environment)
+            } else {
+                mj_core::login_environment::with_overrides(&environment).await
+            };
             if let Some(supervisor) = supervisor_spec {
                 let (supervisor_path, supervisor_spec) = *supervisor;
                 if let Err(error) = supervisor_spec.write_spec(&supervisor_path) {
@@ -673,7 +681,7 @@ async fn run_inner(
                     return Err(error);
                 }
             }
-            match mj_core::login_environment::with_overrides(&environment).await {
+            match resolved_environment {
                 Ok(environment) => {
                     spec.apply_reload_accepted_config(&launch_config);
                     spec.environment = environment;

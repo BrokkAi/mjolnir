@@ -382,6 +382,8 @@ pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         subagent_kind: None,
+        supervisor: false,
+        supervisors_enabled: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,

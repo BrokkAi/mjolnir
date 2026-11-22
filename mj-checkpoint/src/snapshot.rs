@@ -2295,12 +2295,19 @@ pub fn capture_session_snapshot(
             }
         }
         for (repository, raw, inputs) in pending {
-            check_consent_inputs(
-                raw,
-                inputs,
-                consent.repositories.get(&repository.id).unwrap_or(&none),
-            )
-            .map_err(|error| session_error(&repository.id, error))?;
+            let repo_consent = consent.repositories.get(&repository.id).unwrap_or(&none);
+            check_consent_inputs(raw, inputs, repo_consent)
+                .map_err(|error| session_error(&repository.id, error))?;
+            if !raw
+                && let Some(keep_dir) = &repository.keep_dir
+            {
+                check_keep_dir_consent(
+                    &repository_key(&repository.id),
+                    keep_dir,
+                    &repo_consent.untracked,
+                )
+                .map_err(|error| session_error(&repository.id, error))?;
+            }
         }
         Ok(())
     };
@@ -2785,53 +2792,19 @@ fn tracked_keep_paths(
     Ok(paths)
 }
 
-fn include_ignored_keep_paths(
-    runner: &dyn GitCommandRunner,
-    checkout: &Path,
-    inventory: &mut WorkspaceInventory,
-    keep: &Path,
-) -> Result<()> {
+fn strip_keep_paths_from_untracked(inventory: &mut WorkspaceInventory, keep: &Path) {
     let local_keep = match keep.strip_prefix(&inventory.checkout.checkout_path) {
         Ok(path) if !path.as_os_str().is_empty() => path,
         _ if inventory.checkout.checkout_path.starts_with(keep) => Path::new("."),
-        _ => return Ok(()),
+        _ => return,
     };
-    let paths = git_bytes(
-        runner,
-        checkout,
-        [
-            "--literal-pathspecs",
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--",
-            local_keep.to_str().context("keep path is not UTF-8")?,
-        ],
-        &[],
-        "inspect ignored keep files",
-    )?;
-    for path in paths
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-    {
-        let path = mj_core::path_input::from_git_bytes(path)?;
-        let full_path = checkout.join(&path);
-        let metadata = fs::symlink_metadata(&full_path)?;
-        let (bytes, identity) = if metadata.is_dir() {
-            nested_repository_inventory(&full_path)?
+    inventory.untracked.retain(|entry| {
+        if local_keep == Path::new(".") {
+            false
         } else {
-            (metadata.len(), file_identity(&metadata)?)
-        };
-        inventory.untracked.push(UntrackedPath {
-            checkout: inventory.checkout.clone(),
-            path,
-            bytes,
-            identity,
-        });
-    }
-    Ok(())
+            !entry.path.starts_with(local_keep)
+        }
+    });
 }
 
 fn repository_inventory(
@@ -2858,7 +2831,11 @@ fn repository_inventory(
         && let Some(keep) = keep_relative(repository)?
     {
         inventory.keep_dir = repository.keep_dir.clone();
-        include_ignored_keep_paths(runner, &repository.checkout, &mut inventory, &keep)?;
+        // `.mj/keep/<session-id>/` files are owned exclusively by
+        // `scan_keep_dir` / `keep_dir_entries` / `check_keep_dir_consent` so
+        // preflight and dialogs never double-count them in both `untracked`
+        // and `keep_dir_entries`.
+        strip_keep_paths_from_untracked(&mut inventory, &keep);
         inventory.tracked_keep_files = tracked_keep_paths(
             runner,
             &repository.checkout,
@@ -2880,7 +2857,7 @@ fn repository_inventory(
         for (path, nested) in &mut inventory.worktrees {
             let directory = repository.checkout.join(path.as_path());
             nested.keep_dir = repository.keep_dir.clone();
-            include_ignored_keep_paths(runner, &directory, nested, &keep)?;
+            strip_keep_paths_from_untracked(nested, &keep);
             nested.tracked_keep_files =
                 tracked_keep_paths(runner, &directory, &nested.checkout, &keep, None)?;
             nested.tracked_keep_files.extend(tracked_keep_paths(
@@ -7448,9 +7425,29 @@ mod tests {
             "expected Untracked refusal for changed identity, got: {err:#}"
         );
 
-        // 4. A file created in `.mj/keep/` after preflight is refused by check_keep_dir_consent.
+        // 4. A file created in `.mj/keep/` after preflight is owned solely by
+        //    keep_dir scanning (never duplicated into `inventory.untracked`),
+        //    and is refused directly by `capture_session_snapshot` as well as
+        //    `check_keep_dir_consent`.
+        fs::remove_file(r.checkout.join("late-scratch.txt")).unwrap();
         fs::create_dir_all(&keep_dir).unwrap();
         fs::write(keep_dir.join("note.txt"), "keep note\n").unwrap();
+        let inv_with_keep = session_inventory(&FileGit, std::slice::from_ref(&input)).unwrap();
+        assert!(
+            inv_with_keep["workspace"].untracked.is_empty(),
+            "keep_dir files must not be duplicated into inventory.untracked: {:?}",
+            inv_with_keep["workspace"].untracked
+        );
+        let err = capture_session_snapshot(
+            &FileGit,
+            std::slice::from_ref(&input),
+            &SessionCaptureConsent::default(),
+        )
+        .expect_err("capture_session_snapshot must refuse unapproved keep_dir file");
+        assert!(
+            matches!(err.downcast_ref::<SnapshotRefused>(), Some(SnapshotRefused::Untracked(_))),
+            "expected Untracked refusal from capture_session_snapshot, got: {err:#}"
+        );
         let err = check_keep_dir_consent(
             &inv2["workspace"].checkout,
             &keep_dir,

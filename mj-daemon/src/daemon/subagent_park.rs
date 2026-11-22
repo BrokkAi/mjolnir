@@ -17,20 +17,24 @@ impl RuntimeState {
         &self,
         backend: &Arc<crate::server_runtime::api::ApiBackend>,
     ) {
-        assert!(
-            self.report_backend.set(Arc::downgrade(backend)).is_ok(),
-            "report backend is installed once"
-        );
+        *self
+            .report_backend
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::downgrade(backend));
     }
 
     pub(crate) fn quota_report_backend(
         &self,
     ) -> Option<Arc<crate::server_runtime::api::ApiBackend>> {
-        self.report_backend.get().and_then(std::sync::Weak::upgrade)
+        self.report_backend
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
     }
 
     pub(crate) async fn reconcile_parent_reports(&self, parent_id: &str) -> Result<()> {
-        if let Some(backend) = self.report_backend.get().and_then(std::sync::Weak::upgrade) {
+        if let Some(backend) = self.quota_report_backend() {
             backend.reconcile_parent_reports(parent_id).await?;
         }
         Ok(())

@@ -614,47 +614,6 @@ fn todo_commits(contents: &[u8]) -> Vec<String> {
     commits
 }
 
-/// Fails unless every object the operation names is in the restored clone.
-/// The bundle was imported just before, so a missing object means the
-/// archive cannot give the operation back.
-#[allow(dead_code)]
-pub(super) fn verify_objects(
-    runner: &dyn GitCommandRunner,
-    repository: &Path,
-    operation: &SavedGitOperation,
-) -> Result<()> {
-    if operation.objects.is_empty() {
-        return Ok(());
-    }
-    let input = operation
-        .objects
-        .iter()
-        .map(|object| format!("{object}\n"))
-        .collect::<String>();
-    let output = git_bytes(
-        runner,
-        repository,
-        ["cat-file", "--batch-check=%(objectname)"],
-        input.as_bytes(),
-        "verify the Git operation's objects",
-    )?;
-    let output = std::str::from_utf8(&output).context("decode git cat-file --batch-check")?;
-    let answers = output.lines().collect::<Vec<_>>();
-    ensure!(
-        answers.len() == operation.objects.len(),
-        "git cat-file answered {} of {} Git operation objects",
-        answers.len(),
-        operation.objects.len()
-    );
-    for (object, answer) in operation.objects.iter().zip(answers) {
-        ensure!(
-            answer.eq_ignore_ascii_case(object),
-            "restore Git operation: object {object} is missing from the restored clone"
-        );
-    }
-    Ok(())
-}
-
 /// Preserves the working files of unmerged paths from a legacy archive as
 /// ordinary unstaged edits, drops the saved in-progress Git operation state
 /// (without recreating index conflict stages or `.git/MERGE_HEAD` /

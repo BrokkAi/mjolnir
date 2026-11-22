@@ -218,9 +218,20 @@ fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() 
     dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot { profiles });
 
     // Opening the subagents dialog populates options from the process cache immediately.
+    dashboard.config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
+        model: "fast".into(),
+        effort: None,
+    }];
     dashboard.begin_settings_section("subagents", None);
     assert_eq!(dashboard.take_profile_hydration(), None);
-    let model_path = vec!["subagents".into(), "straightforward".into(), "model".into()];
+    choose(&mut dashboard, "straightforward");
+    choose(&mut dashboard, "0");
+    let model_path = vec![
+        "subagents".into(),
+        "straightforward".into(),
+        "0".into(),
+        "model".into(),
+    ];
     setup_dialog_mut(&mut dashboard.mode)
         .unwrap()
         .focus_path(&model_path);
@@ -231,6 +242,7 @@ fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() 
     let effort_path = vec![
         "subagents".into(),
         "straightforward".into(),
+        "0".into(),
         "effort".into(),
     ];
     setup_dialog_mut(&mut dashboard.mode)
@@ -243,12 +255,16 @@ fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() 
     // Closing and reopening preserves the cached model and effort options.
     dashboard.handle_key(key(KeyCode::Esc));
     dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(key(KeyCode::Esc));
     dashboard.begin_settings_section("subagents", None);
     assert_eq!(dashboard.take_profile_hydration(), None);
+    choose(&mut dashboard, "straightforward");
+    choose(&mut dashboard, "0");
     setup_dialog_mut(&mut dashboard.mode)
         .unwrap()
         .focus_path(&model_path);
     dashboard.handle_key(key(KeyCode::Enter));
     let (models, _) = open_choices(setup_dialog_mut(&mut dashboard.mode).unwrap());
-    assert_eq!(models, vec![Value::Null, json!("fast"), json!("smart")]);
+    assert_eq!(models, vec![json!("fast"), json!("smart")]);
 }

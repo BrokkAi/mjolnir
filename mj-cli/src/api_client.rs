@@ -16,7 +16,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mj_daemon::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ExportRequest, GithubTokenResponse, MailboxEventRequest, MailboxEventResponse, PromptRequest,
-    PromptResponse, PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
+    PromptResponse, PurgeUntrackedRequest, PurgeUntrackedResponse, PushedBranch,
+    ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
     SessionMessageRequest, SessionMessageResponse, StartSessionRequest, StartSessionResponse,
     SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
@@ -861,6 +862,22 @@ impl ApiClient {
         serde_json::from_slice(&body).context("read the suspend answer")
     }
 
+    pub(crate) async fn purge_untracked(
+        &self,
+        request: &PurgeUntrackedRequest,
+    ) -> Result<PurgeUntrackedResponse> {
+        // No total or read timeout. Ctrl-C drops this process, which closes
+        // the connection, and the daemon stops the batch on that disconnect.
+        let response = self
+            .send(
+                self.http
+                    .post(self.url("/checkpoints/purge-untracked"))
+                    .json(request),
+            )
+            .await?;
+        decode(response).await
+    }
+
     pub(crate) async fn destroy(&self, session_id: &str) -> Result<()> {
         self.send(
             self.http
@@ -1159,7 +1176,7 @@ impl ApiError {
         }
         let remedy = match self.code.as_deref() {
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
-                " Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings → Sub-agents."
+                " Configure [subagents.straightforward] and optionally [subagents.subtle] in config.toml or TUI Settings → Sub-agents."
             }
             _ => "",
         };

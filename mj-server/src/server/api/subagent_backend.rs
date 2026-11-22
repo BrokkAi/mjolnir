@@ -23,6 +23,7 @@ impl UploadBody {
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn push_notice(&self, _session_id: &str, _message: String) {}
     /// Current login failures from the daemon's publication; memory only.
     fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
         Ok(Default::default())
@@ -42,6 +43,30 @@ pub trait SubagentBackend: Send + Sync {
     fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+
+    /// Current trailing-60-minute velocity and durable placement reservations.
+    fn quota_telemetry(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<mj_controller::quota_telemetry::QuotaTelemetrySnapshot>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+        mj_controller::quota_telemetry::QuotaTelemetryStore::new()
+    }
+
+    /// Current power-ranking snapshot (compiled baseline or cached fetch).
+    fn power_ranking(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<mj_controller::power_ranking::PowerRankingSnapshot>> {
+        Box::pin(async {
+            Ok(mj_controller::power_ranking::PowerRankingSnapshot::baseline().clone())
+        })
+    }
+
+    /// Record an accepted placement in the daemon's in-memory telemetry so
+    /// burst spawns before the next 10-minute poll see its reservation.
+    fn record_placement(&self, _profile_id: &str, _category: &str) {}
 
     /// Cheap token for this session's durable wait inputs. Backends without
     /// a committed publication leave filtering to the detailed observation.

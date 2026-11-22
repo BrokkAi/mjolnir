@@ -26,11 +26,14 @@ async function mount(page, {
   extraTargets = [],
   gitIdentity = { name: 'Fixture Author', email: 'fixture@example.test', per_directory: false },
   gitIdentityError = null,
+  primaryConfigured = false,
+  subagentsConfigured = false,
+  lastSubagentPolicies = {},
 } = {}) {
   const state = {
     snapshot: {
       revision: 1, workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }], sessions: [],
-      profiles, subagents_configured: false, last_subagent_policies: {},
+      profiles, primary_configured: primaryConfigured, subagents_configured: subagentsConfigured, last_subagent_policies: lastSubagentPolicies,
       targets: targets || [
         containerTarget,
         { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older'] },
@@ -1527,4 +1530,59 @@ test('group creation is single flight and leaving it preserves the draft while i
     { sources: ['example/app', 'example/shared'] },
     { sources: ['example/app', 'example/shared'] },
   ]);
+});
+
+test('Auto (Primary) posts profile_id null and Supervisors checkbox tracks delegation mode and target availability', async ({ page }) => {
+  const state = await mount(page, {
+    primaryConfigured: true,
+    subagentsConfigured: true,
+    lastSubagentPolicies: { '': { mode: 'mjolnir' } },
+    targets: [
+      { ...defaultContainerTarget, id: 'container', supervisors_available: true },
+      { ...defaultContainerTarget, id: 'nosup', supervisors_available: false },
+    ],
+  });
+  await expect(page.locator('#new-profile option[value=""]')).toHaveText('Auto (Primary)');
+  await page.locator('#new-profile').selectOption('');
+  await page.locator('#new-next').click();
+  // Target step: container has supervisors_available: true.
+  await page.locator('#new-target input[value="container"]').check();
+  await page.locator('#new-next').click();
+  // Project step
+  await page.getByRole('button', { name: /existing/ }).click();
+  // Review step: Mjolnir + supervisors_available: true -> #new-supervisors visible.
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  await expect(page.locator('#new-supervisors')).toBeVisible();
+  await expect(page.locator('#new-supervisors')).not.toBeChecked();
+  await page.locator('#new-supervisors').check();
+  await expect(page.locator('#new-supervisors')).toBeChecked();
+  // Switching delegation to None hides #new-supervisors.
+  await page.locator('#new-subagents').selectOption('none');
+  await expect(page.locator('#new-supervisors')).toHaveCount(0);
+  // Switching back to Mjolnir restores #new-supervisors.
+  await page.locator('#new-subagents').selectOption('mjolnir');
+  await expect(page.locator('#new-supervisors')).toBeVisible();
+  await expect(page.locator('#new-supervisors')).toBeChecked();
+  // Switching target to nosup (supervisors_available: false) hides #new-supervisors.
+  await page.locator('#new-back').click();
+  await page.locator('#new-back').click();
+  await page.locator('#new-target input[value="nosup"]').check();
+  await page.locator('#new-next').click();
+  await page.getByRole('button', { name: /existing/ }).click();
+  await expect(page.locator('#new-supervisors')).toHaveCount(0);
+  // Switch back to container and submit with Auto (Primary) + supervisors: true.
+  await page.locator('#new-back').click();
+  await page.locator('#new-back').click();
+  await page.locator('#new-target input[value="container"]').check();
+  await page.locator('#new-next').click();
+  await page.getByRole('button', { name: /existing/ }).click();
+  await expect(page.locator('#new-supervisors')).toBeChecked();
+  await page.locator('#new-next').click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toMatchObject({
+    action: 'new',
+    profile_id: null,
+    target_id: 'container',
+    supervisors: true,
+  });
 });

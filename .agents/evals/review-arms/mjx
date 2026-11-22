@@ -16,6 +16,31 @@ case "${REVIEW_ARMS_INSTANCE:-default}" in
   *) echo "mjx: REVIEW_ARMS_INSTANCE must be default or private" >&2; exit 2 ;;
 esac
 mj=/home/jonathan/.cargo/bin/mj
+# The RQL pilot's private instance runs only its pinned build. A call that reached
+# it with the installed mj replaced the pinned daemon and migrated its store
+# (2026-11-21), so the pin is read from one file and any other binary is refused.
+pilot=
+prev=
+# Every form clap accepts for `-i, --instance <NAME>`, in any position.
+for arg in "$@"; do
+  case "$arg" in
+    --instance=rql-census-pilot|-irql-census-pilot|-i=rql-census-pilot) pilot=1 ;;
+    rql-census-pilot) case "$prev" in --instance|-i) pilot=1 ;; esac ;;
+  esac
+  prev=$arg
+done
+if [ -n "$pilot" ]; then
+  pin=${REVIEW_ARMS_PILOT_PIN:-/mnt/optane/review-arms-pilot/bin/pinned.json}
+  read -r pinned_mj pinned_worker < <(python3 -I -c '
+import json, sys
+p = json.load(open(sys.argv[1]))
+print(p["mj"], p["worker"])' "$pin") || { echo "mjx: cannot read the pilot pin $pin" >&2; exit 2; }
+  if [ -n "${REVIEW_ARMS_MJ:-}" ] && { [ "$REVIEW_ARMS_MJ" != "$pinned_mj" ] || [ "${REVIEW_ARMS_MJ_WORKER:-}" != "$pinned_worker" ]; }; then
+    echo "mjx: rql-census-pilot is pinned to $pinned_mj and $pinned_worker ($pin)" >&2; exit 2
+  fi
+  REVIEW_ARMS_MJ=$pinned_mj
+  REVIEW_ARMS_MJ_WORKER=$pinned_worker
+fi
 if [ -n "${REVIEW_ARMS_MJ:-}" ]; then
   mj=$REVIEW_ARMS_MJ
   [ -n "${REVIEW_ARMS_MJ_WORKER:-}" ] || { echo "mjx: REVIEW_ARMS_MJ needs REVIEW_ARMS_MJ_WORKER" >&2; exit 2; }

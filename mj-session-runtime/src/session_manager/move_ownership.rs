@@ -133,10 +133,15 @@ pub fn worker_subagent_queue_enabled(
     agent_mailboxes_enabled: bool,
 ) -> bool {
     let managed_subagent = subagent.is_some();
-    let launch_policy = policy.for_launch(harness, managed_subagent);
+    let launch_policy = if managed_subagent {
+        mj_core::subagent::SubagentPolicy::None
+    } else {
+        policy.for_launch(harness, None)
+    };
     mj_core::worker_launch::resolve_subagent_mcp_role(
         &launch_policy,
         managed_subagent,
+        false,
         subagent.unwrap_or(false),
         agent_mailboxes_enabled,
         !managed_subagent,

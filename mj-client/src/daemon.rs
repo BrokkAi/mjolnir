@@ -682,6 +682,8 @@ pub struct CreateSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3923,7 +3925,9 @@ pub const RUNTIME_REVIEW_IDENTITY_PROTOCOL: u32 = RUNTIME_SHELL_INTERRUPT_PROTOC
 /// Typed suspend consent, suspend preflight, and removal of publication consent and delete_branch.
 pub const SUSPEND_CONSENT_PROTOCOL: u32 = RUNTIME_REVIEW_IDENTITY_PROTOCOL + 1;
 pub const MOVE_ORIGIN_DELTA_PROTOCOL: u32 = SUSPEND_CONSENT_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = MOVE_ORIGIN_DELTA_PROTOCOL;
+/// Supervisor delegation adds `supervisors` on session creation/move and runtime feed.
+pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = SUPERVISORS_PROTOCOL;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";

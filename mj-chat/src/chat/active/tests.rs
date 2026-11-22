@@ -1052,6 +1052,7 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

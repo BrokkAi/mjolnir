@@ -158,11 +158,16 @@ pub fn apply_value(
     } else {
         *draft.pointer_mut(&pointer(path)).unwrap() = value;
     }
-    if changed && path.len() == 3 && path[0] == "subagents" && key == "model" {
-        draft["subagents"][&path[1]]["effort"] = Value::Null;
-    }
-    if changed && path.len() == 4 && path[0] == "subagents" && path[1] == "yolo" && key == "model" {
-        draft["subagents"]["yolo"][&path[2]]["effort"] = Value::Null;
+    if changed
+        && path.len() == 4
+        && path[0] == "subagents"
+        && matches!(
+            path[1].as_str(),
+            "primary" | "straightforward" | "subtle" | "oracle"
+        )
+        && key == "model"
+    {
+        draft["subagents"][&path[1]][path[2].parse::<usize>().unwrap()]["effort"] = Value::Null;
     }
     if changed && path.len() == 4 && path[0] == "review" && path[1] == "reviewers" && key == "model"
     {
@@ -294,7 +299,13 @@ pub fn add_entry(
         if collection == ["review", "reviewers"] && array.len() >= mj_core::config::MAX_REVIEWERS {
             return Err("At most three reviewers are allowed.".into());
         }
-        array.push(if collection == ["review", "reviewers"] {
+        let is_subagent_list = collection.len() == 2
+            && collection[0] == "subagents"
+            && matches!(
+                collection[1].as_str(),
+                "primary" | "straightforward" | "subtle" | "oracle"
+            );
+        array.push(if collection == ["review", "reviewers"] || is_subagent_list {
             json!({"model":"", "effort":null})
         } else if collection.last().is_some_and(|key| key == "repositories") {
             schema::repository_default()

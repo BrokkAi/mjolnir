@@ -131,9 +131,6 @@ pub enum CheckpointRepositoryCapture {
 #[serde(deny_unknown_fields)]
 pub struct CheckpointExportSpec {
     pub protocol_version: u32,
-    /// One suspension's explicit consent; ordinary checkpoints remain strict.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub ignore_nested_repositories: bool,
     /// Typed consent for untracked files, keep-dir files, and in-progress operations.
     #[serde(default)]
     pub consent: mj_core::suspend_consent::CaptureConsent,

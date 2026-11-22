@@ -2417,7 +2417,24 @@ def known_engine_grep_input(raw):
     )
 
 
+def engine_compaction(call):
+    """The pinned Claude bridge's marker for an automatic context compaction.
+
+    It summarizes the session's own conversation and runs no tool, so only this
+    exact shape passes: a think card with the compaction marker and nothing that
+    could name a path, an input or an output."""
+    meta = call.get("_meta")
+    air = meta.get("jetbrains", {}).get("air") if isinstance(meta, dict) and isinstance(meta.get("jetbrains"), dict) else None
+    return (call.keys() <= {"toolCallId", "title", "kind", "status", "_meta"}
+            and call.get("kind") == "think" and call.get("title") == "Compact conversation"
+            and call.get("status") in {"completed", "pending", "in_progress"}
+            and meta == {"jetbrains": {"air": air}} and isinstance(air, dict)
+            and air == {"version": 1, "contextCompaction": {"version": 1}})
+
+
 def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq, claude_code_version):
+    if isinstance(call, dict) and engine_compaction(call):
+        return
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
         yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"

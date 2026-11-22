@@ -302,6 +302,8 @@ pub struct StartSessionRequest {
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
+    #[serde(default)]
+    pub supervisors: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Review for this session: `off`, `push` or `inherit`. Omitted follows
@@ -912,6 +914,8 @@ pub struct LaunchOptions {
     /// same revision describe the same configuration, so a caller can build a
     /// form without mixing halves of two different worlds.
     pub revision: u64,
+    #[serde(default)]
+    pub primary_configured: bool,
     pub profiles: Vec<LaunchProfile>,
     pub targets: Vec<LaunchTarget>,
     pub bundles: Vec<LaunchBundle>,

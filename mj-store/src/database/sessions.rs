@@ -82,6 +82,13 @@ pub(super) fn save_new_session_to(
              ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
             params![session.last_profile, session.oracle],
         )?;
+        if policy.uses_mjolnir() {
+            tx.execute(
+                "INSERT INTO supervisor_preference(profile_id, enabled) VALUES(?1, ?2)
+                 ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+                params![session.last_profile, session.supervisors],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())
@@ -129,7 +136,7 @@ pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
-    register_subagent_with_startup(session, subagent, Vec::new(), None)
+    register_subagent_with_startup(session, subagent, Vec::new(), None, None)
 }
 
 /// Publish the child and its complete initial input in the same transaction.
@@ -139,10 +146,12 @@ pub fn register_subagent_with_startup(
     subagent: &mj_core::subagent::SubagentRecord,
     startup: Vec<super::startup::StartupDelivery>,
     report_dir: Option<&str>,
+    category: Option<&str>,
 ) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
     let report_dir = report_dir.map(str::to_owned);
+    let category = category.map(str::to_owned);
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -182,7 +191,7 @@ pub fn register_subagent_with_startup(
             Some(&subagent.parent_session_id),
         )?;
         super::session_create::insert_create_intent(&tx, &session, false)?;
-        super::usage::record_child_accounting(&tx, &subagent)?;
+        super::usage::record_child_accounting(&tx, &subagent, category.as_deref())?;
         tx.execute(
             "INSERT INTO subagent_sessions(
                  child_session_id, parent_session_id, request_key, record_json
@@ -1371,6 +1380,10 @@ pub(super) fn rename_profile_references_at(
         params![old_id, new_id],
     )?;
     tx.execute(
+        "UPDATE session_contexts SET profile_id = ?2 WHERE profile_id = ?1",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
         "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
         params![old_id, new_id],
     )?;
@@ -1393,6 +1406,16 @@ pub(super) fn rename_profile_references_at(
     )?;
     tx.execute(
         "DELETE FROM oracle_preference WHERE profile_id = ?1",
+        [old_id],
+    )?;
+    tx.execute(
+        "INSERT INTO supervisor_preference(profile_id, enabled)
+         SELECT ?2, enabled FROM supervisor_preference WHERE profile_id = ?1
+         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
+        "DELETE FROM supervisor_preference WHERE profile_id = ?1",
         [old_id],
     )?;
     tx.commit()?;
@@ -2170,7 +2193,8 @@ pub(super) fn rebind_session_bundle_to(
     )?;
     if changed == 0 {
         tx.execute(
-            "INSERT INTO session_contexts(session_id, bundle_id, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO session_contexts(session_id, bundle_id, created_at, profile_id)
+             VALUES (?1, ?2, ?3, (SELECT last_profile FROM sessions WHERE session_id = ?1))",
             params![session_id, canonical_bundle, Utc::now().to_rfc3339()],
         )?;
     }

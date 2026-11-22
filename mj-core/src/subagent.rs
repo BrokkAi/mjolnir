@@ -90,6 +90,7 @@ pub enum SubagentTaskType {
     Straightforward,
     Subtle,
     Oracle,
+    Supervisor,
 }
 
 impl SubagentTaskType {
@@ -98,6 +99,7 @@ impl SubagentTaskType {
             Self::Straightforward => "straightforward",
             Self::Subtle => "subtle",
             Self::Oracle => "oracle",
+            Self::Supervisor => "supervisor",
         }
     }
 }
@@ -120,7 +122,7 @@ impl SubagentPolicy {
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
-                SubagentTaskType::Oracle => None,
+                SubagentTaskType::Oracle | SubagentTaskType::Supervisor => None,
             },
             _ => None,
         }
@@ -150,11 +152,19 @@ impl SubagentPolicy {
     pub fn updates_remembered_choice(&self, harness: crate::config::HarnessKind) -> bool {
         harness.supports_delegation_tools()
     }
-    pub fn for_launch(&self, harness: crate::config::HarnessKind, is_child: bool) -> Self {
+    pub fn for_launch(
+        &self,
+        harness: crate::config::HarnessKind,
+        subagent: Option<&SubagentRecord>,
+    ) -> Self {
         if !harness.supports_delegation_tools() {
             Self::Native
-        } else if is_child {
-            Self::None
+        } else if let Some(record) = subagent {
+            if record.supervisor {
+                self.clone()
+            } else {
+                Self::None
+            }
         } else {
             self.clone()
         }
@@ -311,6 +321,11 @@ pub fn delegation_policy(limit: usize, offers_subtle: bool) -> String {
             },
         )
         .replace("$N", &limit.to_string())
+}
+
+/// The supervisor's delegation policy document.
+pub fn supervisor_delegation_policy() -> &'static str {
+    include_str!("../assets/supervisor-delegation.md")
 }
 
 /// Identity of one finish already sent to the parent in a notification.
@@ -903,6 +918,10 @@ pub struct SubagentRecord {
     /// reads as false and keeps reporting through its last message.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handback_tool: bool,
+    /// Whether this depth-1 worker is a supervisor that may delegate to
+    /// depth-2 non-supervisor workers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor: bool,
 }
 
 /// Relationship and lifecycle metadata published to control surfaces.
@@ -934,6 +953,8 @@ pub struct SubagentMetadata {
     pub reported_finish: Option<SubagentFinishIdentity>,
     #[serde(default)]
     pub handback_tool: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor: bool,
 }
 
 impl From<&SubagentRecord> for SubagentMetadata {
@@ -952,6 +973,7 @@ impl From<&SubagentRecord> for SubagentMetadata {
             noticed_turn: record.noticed_turn,
             reported_finish: record.reported_finish.clone(),
             handback_tool: record.handback_tool,
+            supervisor: record.supervisor,
         }
     }
 }
@@ -978,6 +1000,59 @@ impl SubagentMetadata {
         record.noticed_turn = self.noticed_turn;
         record.reported_finish = self.reported_finish.clone();
         record.handback_tool = self.handback_tool;
+        record.supervisor = self.supervisor;
+    }
+
+    /// Build a `SubagentRecord` view for shared validation and launch helpers.
+    pub fn to_record_view(&self) -> SubagentRecord {
+        SubagentRecord {
+            kind: self.kind,
+            reviewer_launch: None,
+            child_session_id: self.child_session_id.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            task_name: self.task_name.clone(),
+            profile_id: self.profile_id.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            working_directory: self.working_directory.clone(),
+            initial_prompt: String::new(),
+            request_key: self.request_key.clone(),
+            created_at: self.created_at.clone(),
+            noticed_turn: self.noticed_turn,
+            reported_finish: self.reported_finish.clone(),
+            handback_tool: self.handback_tool,
+            supervisor: self.supervisor,
+        }
+    }
+}
+
+/// Shared depth-2 delegation invariant checked by both `State::validate_subagent`
+/// and `Controller::register_subagent_inner`.
+pub fn validate_subagent_parent(
+    parent_subagent: Option<&SubagentRecord>,
+    requested_kind: SubagentKind,
+    requested_supervisor: bool,
+) -> anyhow::Result<()> {
+    if requested_supervisor && requested_kind != SubagentKind::Worker {
+        anyhow::bail!("only worker sub-agents can be supervisors");
+    }
+    if requested_kind == SubagentKind::Reviewer {
+        return Ok(());
+    }
+    match parent_subagent {
+        None => Ok(()),
+        Some(parent) if parent.kind == SubagentKind::Worker && parent.supervisor => {
+            if requested_supervisor {
+                anyhow::bail!("supervisors cannot spawn nested supervisors (maximum depth is 2)");
+            }
+            if requested_kind == SubagentKind::Oracle {
+                anyhow::bail!("supervisors cannot spawn oracles");
+            }
+            Ok(())
+        }
+        Some(_) => {
+            anyhow::bail!("sub-agent sessions cannot spawn their own sub-agents")
+        }
     }
 }
 
@@ -1023,7 +1098,7 @@ pub enum SubagentMcpRole {
     #[default]
     #[serde(alias = "fixed_parent")]
     Parent,
-
+    Supervisor,
     MessageOnly,
     FetchOnly,
     Child,
@@ -1046,7 +1121,7 @@ impl SubagentMcpRole {
         ]
         .map(str::to_owned)
         .into();
-        if matches!(self, Self::Child | Self::FetchOnly) {
+        if matches!(self, Self::Child | Self::FetchOnly | Self::Supervisor) {
             args.extend(["--role".to_owned(), self.id().to_owned()]);
         }
         args
@@ -1056,6 +1131,7 @@ impl SubagentMcpRole {
     pub fn id(self) -> &'static str {
         match self {
             Self::Parent => "parent",
+            Self::Supervisor => "supervisor",
             Self::MessageOnly => "message_only",
             Self::FetchOnly => "fetch_only",
             Self::Child => "child",
@@ -1074,6 +1150,14 @@ impl SubagentMcpRole {
                 "close",
                 "fetch",
                 "ask_oracle",
+            ],
+            Self::Supervisor => &[
+                "spawn",
+                "list_agents",
+                "send_message",
+                "close",
+                "fetch",
+                "handback",
             ],
             Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
             Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
@@ -1095,6 +1179,7 @@ impl std::str::FromStr for SubagentMcpRole {
         match value {
             "parent" => Ok(Self::Parent),
             "fixed_parent" => Ok(Self::Parent),
+            "supervisor" => Ok(Self::Supervisor),
             "message_only" => Ok(Self::MessageOnly),
             "fetch_only" => Ok(Self::FetchOnly),
             "child" => Ok(Self::Child),
@@ -2243,6 +2328,26 @@ mod tests {
             crate::config::HarnessKind::Dsh,
             crate::config::HarnessKind::OpenCode,
         ] {
+            let worker = SubagentRecord {
+                kind: SubagentKind::Worker,
+                reviewer_launch: None,
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: "task".into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: String::new(),
+                request_key: "req".into(),
+                created_at: String::new(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: true,
+                supervisor: false,
+            };
+            let mut supervisor = worker.clone();
+            supervisor.supervisor = true;
             for policy in [
                 SubagentPolicy::Native,
                 SubagentPolicy::Mjolnir {
@@ -2253,8 +2358,20 @@ mod tests {
                 default_effort.clone(),
                 SubagentPolicy::None,
             ] {
-                assert_eq!(policy.for_launch(harness, true), SubagentPolicy::None);
-                assert_eq!(policy.for_launch(harness, false), policy);
+                assert_eq!(policy.for_launch(harness, Some(&worker)), SubagentPolicy::None);
+                assert_eq!(policy.for_launch(harness, Some(&supervisor)), policy);
+                assert_eq!(policy.for_launch(harness, None), policy);
+            }
+            // Depth-2 invariant: top-level -> supervisor ok; supervisor -> worker ok;
+            // supervisor -> supervisor/oracle refused; worker -> worker refused.
+            assert!(validate_subagent_parent(None, SubagentKind::Worker, true).is_ok());
+            assert!(validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, false).is_ok());
+            assert!(validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, true).is_err());
+            assert!(validate_subagent_parent(Some(&supervisor), SubagentKind::Oracle, false).is_err());
+            assert!(validate_subagent_parent(Some(&worker), SubagentKind::Worker, false).is_err());
+            assert!(validate_subagent_parent(Some(&worker), SubagentKind::Reviewer, false).is_ok());
+            // Keep existing serde round-trip check below for completeness.
+            for policy in [SubagentPolicy::Native, SubagentPolicy::None] {
                 assert_eq!(
                     serde_json::from_value::<SubagentPolicy>(
                         serde_json::to_value(&policy).unwrap()

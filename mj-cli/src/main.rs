@@ -194,6 +194,8 @@ enum Command {
     Sessions(api_commands::SessionsArgs),
     /// Save a recovery copy and release the environment for later Resume.
     Suspend(api_commands::SuspendArgs),
+    /// Remove legacy untracked checkpoint payloads from stopped sessions.
+    PurgeUntracked(api_commands::PurgeUntrackedArgs),
     /// Permanently destroy a session, its environment, and recovery archive.
     Destroy(api_commands::DestroyArgs),
     /// Read recent cleanup notices, including after a session was destroyed.
@@ -365,6 +367,9 @@ struct MoveArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
+    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
+    #[arg(long, value_parser = ["enabled", "disabled"])]
+    supervisors: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -940,6 +945,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Sessions(_)) => "sessions",
         Some(Command::Suspend(_)) => "suspend",
         Some(Command::Restart(_)) => "restart",
+        Some(Command::PurgeUntracked(_)) => "purge-untracked",
         Some(Command::Destroy(_)) => "destroy",
         Some(Command::Notices(_)) => "notices",
         Some(Command::Resume(_)) => "resume",
@@ -1288,6 +1294,9 @@ async fn run_command(
         Some(Command::Restart(args)) => api_commands::restart_session(args)
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::PurgeUntracked(args)) => api_commands::purge_untracked(args)
+            .await
+            .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -1429,6 +1438,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     let selection = MoveSelection {
         subagents,
         oracle: oracle_enabled,
+        supervisors: args.supervisors.as_deref().map(|choice| choice == "enabled"),
         oracle_choice,
         consent: mj_core::suspend_consent::SuspendConsent {
             discard_untracked: if args.discard_untracked {
@@ -3201,6 +3211,7 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+            supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,

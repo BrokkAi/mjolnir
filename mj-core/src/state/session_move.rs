@@ -110,6 +110,9 @@ pub struct MoveSelection {
     /// Oracle choice for the destination; omitted retains the session value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
+    /// Supervisors choice for the destination; omitted retains the session value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisors: Option<bool>,
     /// Destination oracle model override; omitted retains the session value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<crate::config::SubagentChoice>,
@@ -564,6 +567,7 @@ impl LegacyMoveOperation {
                 resource_allocation: sel.and_then(|s| s.resource_allocation.clone()),
                 subagents: sel.and_then(|s| s.subagents.clone()),
                 oracle: sel.and_then(|s| s.oracle),
+                supervisors: None,
                 oracle_choice: sel.and_then(|s| s.oracle_choice.clone()),
             },
             source_profile_id: self.source_profile_id.clone(),

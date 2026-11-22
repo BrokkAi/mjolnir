@@ -53,6 +53,7 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn push_notice(&self, _session_id: &str, _message: String) {}
     fn workspace_admission(
         &self,
         _session_id: String,
@@ -95,6 +96,20 @@ pub trait ExportRuntime: Send + Sync {
     fn quota_preferences(&self) -> Vec<String> {
         Vec::new()
     }
+
+    fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
+        Default::default()
+    }
+
+    fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+        mj_controller::quota_telemetry::QuotaTelemetryStore::new()
+    }
+
+    fn power_ranking(&self) -> mj_controller::power_ranking::PowerRankingSnapshot {
+        mj_controller::power_ranking::PowerRankingSnapshot::baseline().clone()
+    }
+
+    fn record_placement(&self, _profile_id: &str, _category: &str) {}
 
     /// Whether a child is still waiting for its review's verdict. A child's
     /// handback or ended turn is not final while it is.
@@ -290,6 +305,9 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn push_notice(&self, session_id: &str, message: String) {
+        RuntimeState::push_notice(self, session_id, message);
+    }
     fn workspace_admission(
         &self,
         session_id: String,
@@ -365,6 +383,25 @@ impl ExportRuntime for RuntimeState {
 
     fn quota_preferences(&self) -> Vec<String> {
         self.with_config(|config| config.quota.prefer.clone())
+    }
+
+    fn quota_telemetry(&self) -> mj_controller::quota_telemetry::QuotaTelemetrySnapshot {
+        self.quota_telemetry.snapshot()
+    }
+    fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+        self.quota_telemetry.clone()
+    }
+
+    fn power_ranking(&self) -> mj_controller::power_ranking::PowerRankingSnapshot {
+        self.power_ranking.snapshot()
+    }
+
+    fn record_placement(&self, profile_id: &str, category: &str) {
+        self.quota_telemetry.record_placement(
+            profile_id,
+            category,
+            mj_core::clock::epoch_seconds() as i64,
+        );
     }
 
     fn child_review(&self, child_session_id: String) -> BoxFuture<'_, crate::daemon::ChildReview> {
@@ -731,13 +768,14 @@ impl ApiBackend {
             .lock()
             .map_err(|_| anyhow!("profile health lock poisoned"))?;
         let now = std::time::SystemTime::now();
+        let now_seconds = i64::try_from(mj_core::clock::epoch_seconds()).unwrap_or(i64::MAX);
         for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
-                    let quota = crate::server::api::CandidateQuota::from_report(
-                        quota_reports
-                            .get(&profile_id)
-                            .and_then(|publication| publication.report.as_ref()),
+                    let quota = crate::server::api::CandidateQuota::from_publication(
+                        quota_reports.get(&profile_id),
+                        harness,
+                        now_seconds,
                     );
                     let unhealthy = choices
                         .models
@@ -752,6 +790,9 @@ impl ApiBackend {
                     let may_consume_credits = config
                         .enabled_profile(&profile_id)
                         .is_some_and(|profile| profile.load_balancing_may_consume_credits);
+                    let cache_identity = quota_reports
+                        .get(&profile_id)
+                        .map(|publication| publication.cache_identity.clone());
                     candidates
                         .offered
                         .push(crate::server::api::SubagentCandidate {
@@ -761,6 +802,7 @@ impl ApiBackend {
                             quota,
                             may_consume_credits,
                             unhealthy,
+                            cache_identity,
                         });
                 }
                 Ok(None) => candidates
@@ -1283,24 +1325,57 @@ impl ApiBackend {
                 context,
                 files,
             } => {
-                let selection = if let Some(selection) = prepared.and_then(|p| p.spawn.clone()) {
-                    selection
-                } else {
+                let (selection, reservation) =
+                    if let Some(selection) = prepared.and_then(|p| p.spawn.clone()) {
+                        (selection, None)
+                    } else {
                     let parent = self
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
-                    let yolo = self.exports.session_is_yolo_target(parent_session_id);
+                    let requested_supervisor =
+                        *task_type == mj_core::subagent::SubagentTaskType::Supervisor;
+                    let parent_subagent = blocking("load parent subagent record", {
+                        let parent_id = parent_session_id.to_owned();
+                        move || mj_controller::database::load_subagent(&parent_id)
+                    })
+                    .await?;
+                    mj_core::subagent::validate_subagent_parent(
+                        parent_subagent.as_ref(),
+                        mj_core::subagent::SubagentKind::Worker,
+                        requested_supervisor,
+                    )?;
+                    if requested_supervisor {
+                        ensure!(
+                            parent.supervisors,
+                            "supervisors are not enabled for this session"
+                        );
+                        ensure!(
+                            parent
+                                .subagents
+                                .as_ref()
+                                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
+                            "supervisors require Mjolnir delegation"
+                        );
+                    }
+                    let execution_policy = if self.exports.session_is_yolo_target(parent_session_id)
+                    {
+                        mj_core::config::ExecutionPolicy::Unconstrained
+                    } else {
+                        mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                    };
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
-                        yolo,
+                        execution_policy,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                    // Hold the atomic placement reservation until registration succeeds.
+                    let reservation = selection.reservation.clone();
                     // This wire queue can contain requests accepted by older workers.
                     let ranges = files
                         .iter()
@@ -1331,7 +1406,7 @@ impl ApiBackend {
                         fast_mode: selection.fast_mode,
                         prompt,
                     };
-                    if prepared.is_some() {
+                    let selected = if prepared.is_some() {
                         blocking("persist selected spawn", {
                             let parent = parent_session_id.to_owned();
                             let request = request.request_id.clone();
@@ -1344,12 +1419,14 @@ impl ApiBackend {
                         .await?
                     } else {
                         selected
-                    }
+                    };
+                    (selected, Some(reservation))
                 };
                 let relation = self
                     .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                         no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
+                        supervisor: *task_type == mj_core::subagent::SubagentTaskType::Supervisor,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
                         task_name: task_name.clone(),
@@ -1361,8 +1438,12 @@ impl ApiBackend {
                         initial_prompt: selection.prompt,
                         request_key: request.request_id.clone(),
                         report_root: None,
+                        category: task_type.id().to_owned(),
                     })
                     .await?;
+                if let Some(reservation) = reservation {
+                    reservation.commit(Some(relation.child_session_id.clone()));
+                }
                 let report_dir = blocking("load sub-agent report directory", {
                     let child_id = relation.child_session_id.clone();
                     move || mj_controller::database::load_subagent_report(&child_id)
@@ -1629,6 +1710,21 @@ impl ApiBackend {
                         ),
                         crate::daemon::ChildReview::Closed => {}
                     }
+                    if record.supervisor {
+                        let active = self.supervisor_active_children(&child_id).await?;
+                        if !active.is_empty() {
+                            let list = active
+                                .iter()
+                                .map(|child| {
+                                    format!("{} ({})", child.task_name, child.child_session_id)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            bail!(
+                                "wait for or close your running sub-agents before calling handback: {list}"
+                            );
+                        }
+                    }
                 }
                 let maximum = record.kind.max_handback_chars();
                 let characters = message.chars().count();
@@ -1717,7 +1813,11 @@ impl ApiBackend {
                 .subagents
                 .get(&child)
                 .context("child relationship no longer exists")?;
-            controller.ensure_subagent_slot_available(&relation.parent_session_id, Some(&child))
+            controller.ensure_subagent_slot_available_for(
+                &relation.parent_session_id,
+                Some(&child),
+                relation.supervisor,
+            )
         })
         .await?;
         Arc::clone(&self.exports)
@@ -2219,6 +2319,52 @@ impl ApiBackend {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveChildSummary {
+    pub child_session_id: String,
+    pub task_name: String,
+}
+
+pub(crate) fn supervisor_active_children_sync(
+    supervisor_id: &str,
+) -> Result<Vec<ActiveChildSummary>> {
+    let children = mj_controller::database::list_subagents(supervisor_id)?;
+    let pending_finished =
+        mj_controller::database::pending_subagent_finished_children(supervisor_id)?;
+    let state = mj_controller::database::load_state()?;
+    let mut active = Vec::new();
+    for child in children {
+        if child.kind != mj_core::subagent::SubagentKind::Worker {
+            continue;
+        }
+        let has_live_worker = state
+            .sessions
+            .get(&child.child_session_id)
+            .is_some_and(|session| session.state.has_live_worker());
+        let has_pending_finish = pending_finished.contains(&child.child_session_id);
+        if has_live_worker || has_pending_finish {
+            active.push(ActiveChildSummary {
+                child_session_id: child.child_session_id,
+                task_name: child.task_name,
+            });
+        }
+    }
+    Ok(active)
+}
+
+impl ApiBackend {
+    pub(crate) async fn supervisor_active_children(
+        &self,
+        supervisor_id: &str,
+    ) -> Result<Vec<ActiveChildSummary>> {
+        let supervisor_id = supervisor_id.to_owned();
+        blocking("load supervisor active children", move || {
+            supervisor_active_children_sync(&supervisor_id)
+        })
+        .await
+    }
 
     async fn reconcile_children(&self, parent_id: &str) -> Result<Reconciled> {
         let mut reconciled = Reconciled::default();
@@ -2250,6 +2396,10 @@ impl ApiBackend {
                 // A child whose review is open is still pending: it may end
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
+            } else if child.relation.supervisor
+                && !self.supervisor_active_children(&id).await?.is_empty()
+            {
+                ChildDisposition::NotNews("the supervisor awaits its sub-agents")
             } else {
                 if inputs.queue_known() {
                     for failed in inputs.failed_deliveries(&id) {
@@ -3942,6 +4092,9 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn push_notice(&self, session_id: &str, message: String) {
+        self.exports.push_notice(session_id, message);
+    }
     fn subagent_work_liveness(
         &self,
         child_session_id: String,
@@ -3979,6 +4132,25 @@ impl SubagentBackend for ApiBackend {
 
     fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {
         Box::pin(async move { Ok(self.exports.quota_preferences()) })
+    }
+
+    fn quota_telemetry(
+        &self,
+    ) -> BoxFuture<'_, Result<mj_controller::quota_telemetry::QuotaTelemetrySnapshot>> {
+        Box::pin(async move { Ok(self.exports.quota_telemetry()) })
+    }
+    fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+        self.exports.quota_telemetry_store()
+    }
+
+    fn power_ranking(
+        &self,
+    ) -> BoxFuture<'_, Result<mj_controller::power_ranking::PowerRankingSnapshot>> {
+        Box::pin(async move { Ok(self.exports.power_ranking()) })
+    }
+
+    fn record_placement(&self, profile_id: &str, category: &str) {
+        self.exports.record_placement(profile_id, category);
     }
 
     fn wait_revision(&self, session_id: &str) -> Result<Option<u64>> {
@@ -4267,6 +4439,7 @@ impl SubagentBackend for ApiBackend {
                 .lock()
                 .map_err(|_| anyhow!("profile health lock poisoned"))?;
             let now = std::time::SystemTime::now();
+            let now_seconds = i64::try_from(mj_core::clock::epoch_seconds()).unwrap_or(i64::MAX);
             let mut candidates = crate::server::api::SubagentCandidates {
                 unavailable,
                 ..Default::default()
@@ -4295,19 +4468,21 @@ impl SubagentBackend for ApiBackend {
                             .map(|mark| (model.value.clone(), mark))
                     })
                     .collect();
+                let publication = quota_reports.get(&profile_id);
                 candidates
                     .offered
                     .push(crate::server::api::SubagentCandidate {
                         profile_id: profile_id.clone(),
                         harness,
                         choices: choices.clone(),
-                        quota: crate::server::api::CandidateQuota::from_report(
-                            quota_reports
-                                .get(&profile_id)
-                                .and_then(|publication| publication.report.as_ref()),
+                        quota: crate::server::api::CandidateQuota::from_publication(
+                            publication,
+                            harness,
+                            now_seconds,
                         ),
                         may_consume_credits: profile.load_balancing_may_consume_credits,
                         unhealthy,
+                        cache_identity: publication.map(|p| p.cache_identity.clone()),
                     });
             }
             Ok(candidates)

@@ -1114,7 +1114,7 @@ class SteerLab:
                 for session in sorted(known):
                     try:
                         self.cli(
-                            "destroy", "--session", session, "--delete-branch", "--json",
+                            "destroy", "--session", session, "--json",
                             case="cleanup",
                         )
                     except Exception as error:

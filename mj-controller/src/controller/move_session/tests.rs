@@ -168,6 +168,7 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
             resource_allocation: None,
             subagents: None,
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
         },
         source_profile_id: "p1".to_owned(),

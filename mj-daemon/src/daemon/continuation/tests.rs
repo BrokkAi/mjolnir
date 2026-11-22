@@ -928,9 +928,12 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 },
             },
             unhealthy,
+            cache_identity: None,
         }
     })
     .collect();
+    let telemetry = mj_controller::quota_telemetry::QuotaTelemetrySnapshot::default();
+    let power_ranking = mj_controller::power_ranking::PowerRankingSnapshot::baseline();
     let ordered = quota::destinations(
         &config,
         "source",
@@ -938,17 +941,20 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "model",
         candidates,
         1,
+        mj_core::config::ExecutionPolicy::Unconstrained,
+        mj_controller::profile_scheduler::Placement::TopLevel,
+        Some("primary"),
+        &telemetry,
+        power_ranking,
     )
     .unwrap();
-    assert_eq!(
-        ordered
-            .iter()
-            .map(|c| c.profile_id.as_str())
-            .collect::<Vec<_>>(),
-        // A top-level quota move ranks a profile inside a five-hour window
-        // below unwindowed and unknown quota, above paid credits and API.
-        ["healthy", "unknown", "windowed", "paid", "api"]
-    );
+    let ids: Vec<&str> = ordered.iter().map(|c| c.profile_id.as_str()).collect();
+    // Unified tier ladder (legacy top-level active-5h tier retired):
+    // both included subscriptions ("healthy", "windowed") lead Tier 0 above
+    // "unknown" (Tier 2), "paid" (Tier 4), and "api" (Tier 5).
+    assert_eq!(ids.len(), 5);
+    assert!(ids[..2].contains(&"healthy") && ids[..2].contains(&"windowed"));
+    assert_eq!(&ids[2..], ["unknown", "paid", "api"]);
 }
 
 fn quota_move_request() -> mj_core::state::MoveSessionRequest {
@@ -963,6 +969,102 @@ fn quota_move_request() -> mj_core::state::MoveSessionRequest {
         }, "queue":"start", "acknowledge_interruption":false
     }))
     .unwrap()
+}
+
+#[test]
+fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
+    use mj_controller::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
+    use mj_controller::quota::QuotaWindow;
+    use mj_core::config::{ExecutionPolicy, HarnessKind};
+
+    let store = mj_controller::quota_telemetry::QuotaTelemetryStore::new();
+    let now = 1_700_000_000;
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let candidate = move |id: &str, remaining_percent| ScheduledCandidate {
+        profile_id: id.into(),
+        harness: HarnessKind::Codex,
+        model: "model".into(),
+        effort: None,
+        may_consume_credits: false,
+        quota: CandidateQuota::Subscription {
+            monthly_price_usd: None,
+            paid_credits: None,
+            refreshed_at_epoch_seconds: now as u64,
+            windows: vec![QuotaWindow {
+                label: "weekly".into(),
+                remaining_percent: Some(remaining_percent),
+                resets_at_epoch_seconds: Some(now + 86400),
+                duration_seconds: Some(604800),
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+            }],
+        },
+        cache_identity: Some(id.into()),
+    };
+    let first_store = store.clone();
+    let first_barrier = barrier.clone();
+    let first = std::thread::spawn(move || {
+        let mut candidates = vec![candidate("nearly-empty", 3)];
+        let reservation = first_store
+            .draw_and_reserve(
+                &mut candidates,
+                ExecutionPolicy::Unconstrained,
+                Placement::TopLevel,
+                Some("primary"),
+                None,
+                &[],
+                mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        first_barrier.wait();
+        reservation
+    });
+    let second_store = store.clone();
+    let second = std::thread::spawn(move || {
+        barrier.wait();
+        let mut candidates = vec![candidate("nearly-empty", 3), candidate("peer", 80)];
+        let reservation = second_store
+            .draw_and_reserve(
+                &mut candidates,
+                ExecutionPolicy::Unconstrained,
+                Placement::TopLevel,
+                Some("primary"),
+                None,
+                &[],
+                mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        (candidates[0].profile_id.clone(), reservation)
+    });
+    let first = first.join().unwrap();
+    let (second_pick, second_reservation) = second.join().unwrap();
+    assert_eq!(second_pick, "peer");
+    drop(first);
+    assert_eq!(
+        store
+            .snapshot()
+            .recent_placements
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        1
+    );
+    drop(second_reservation);
+    assert_eq!(
+        store
+            .snapshot()
+            .recent_placements
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        0
+    );
 }
 
 fn private_quota_move_error() -> anyhow::Error {
@@ -1123,6 +1225,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             abstention.notice =
                 quota::move_notice("the weekly quota is exhausted", "destination", &fallback);
             quota::Plan::Move {
+                reservation: None,
                 request: Box::new(quota_move_request()),
                 destination: "destination".into(),
                 reason: "the weekly quota is exhausted".into(),
@@ -1580,6 +1683,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
             mj_controller::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: request.cache_identity(),
+                last_good: None,
                 report: Some(observed),
             },
         );
@@ -1690,6 +1794,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             QuotaReportPublication {
                 login_error: None,
                 cache_identity: identity.clone(),
+                last_good: None,
                 report: None,
             },
         )])));
@@ -1895,6 +2000,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 QuotaReportPublication {
                     login_error: None,
                     cache_identity: identity.into(),
+                    last_good: None,
                     report: Some(report),
                 },
             );
@@ -2416,6 +2522,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
                     abstention.notice =
                         quota::move_notice("quota exhausted", "destination", &recovery);
                     quota::Plan::Move {
+                        reservation: None,
                         request: Box::new(quota_move_request()),
                         destination: "destination".into(),
                         reason: "quota exhausted".into(),
@@ -2674,6 +2781,7 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
                         abstention.notice =
                             quota::move_notice("quota exhausted", destination, &fallback);
                         Ok(quota::Plan::Move {
+                            reservation: None,
                             request: Box::new(request),
                             destination: destination.into(),
                             reason: "quota exhausted".into(),

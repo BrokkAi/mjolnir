@@ -149,6 +149,11 @@ pub const SESSION_MESSAGE_MCP_ENV: &str = "MJ_SESSION_MESSAGE_MCP";
 /// installation. The worker consumes this directive before starting a harness.
 pub const SESSION_PROJECT_TOOLS_ROOTS: &str = "MJ_SESSION_PROJECT_TOOLS_ROOTS";
 
+/// Absolute path of this session's scratch directory,
+/// `<checkout>/.mj/keep/<session-id>/`. Move copies that directory; suspend
+/// does not save it. The worker sets it after creating the directory.
+pub const SESSION_KEEP_DIR_ENV: &str = "MJ_KEEP_DIR";
+
 /// Whether this worker executes the harness or only preserves recovered state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -197,6 +202,12 @@ pub struct WorkerLaunchConfig {
     /// Explicit child identity; older launch files deliver handbacks unchecked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_kind: Option<crate::subagent::SubagentKind>,
+    /// Whether this child is a depth-1 supervisor.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor: bool,
+    /// Whether this top-level session may spawn depth-1 supervisors.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisors_enabled: bool,
     /// Legacy wire flag retained for older workers. New workers ignore it.
     /// Mailbox delivery and hooks are always present in protocol-41 workers.
     #[serde(default = "default_agent_mailboxes_enabled")]
@@ -480,10 +491,14 @@ impl ReviewMcpDelivery {
 pub fn resolve_subagent_mcp_role(
     subagents: &crate::subagent::SubagentPolicy,
     managed_subagent: bool,
+    supervisor: bool,
     handback_tool: bool,
     _legacy_agent_mailboxes_enabled: bool,
     message_mcp_granted: bool,
 ) -> Option<crate::subagent::SubagentMcpRole> {
+    if managed_subagent && supervisor {
+        return Some(crate::subagent::SubagentMcpRole::Supervisor);
+    }
     subagents.parent_role().or_else(|| {
         if managed_subagent {
             Some(if handback_tool {
@@ -546,6 +561,7 @@ impl WorkerLaunchConfig {
         resolve_subagent_mcp_role(
             &self.subagents,
             self.is_managed_subagent(),
+            self.supervisor,
             self.handback_tool,
             self.agent_mailboxes_enabled,
             self.environment

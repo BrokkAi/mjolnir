@@ -422,7 +422,7 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
     assert!(retained_metadata_bytes < LARGE_PAYLOAD_BYTES / 100);
     // A preparation cancellation reaches readers cloned for parallel verification.
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let archive = open_archive_cancellable(&path, Some(cancelled.clone())).unwrap();
+    let archive = open_archive_cancellable(&path, Some(cancelled.clone()), None).unwrap();
     let mut parallel_reader = archive.clone();
     cancelled.store(true, std::sync::atomic::Ordering::Release);
     let mut entry = parallel_reader.by_index(0).unwrap();
@@ -3594,6 +3594,34 @@ fn empty_tar() -> Vec<u8> {
     body
 }
 
+fn uncompressed_untracked_excess(manifest: &ArchiveManifest) -> u64 {
+    manifest
+        .payloads
+        .iter()
+        .filter(|payload| {
+            matches!(
+                payload.role,
+                PayloadRole::GitUntrackedTar { .. }
+                    | PayloadRole::GitLinkedWorktreeUntrackedTar { .. }
+            ) && payload.size > 1024
+        })
+        .map(|payload| payload.size - 1024)
+        .sum()
+}
+
+fn compressed_untracked_entries(path: &Path) -> u64 {
+    let file = fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut total = 0_u64;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).unwrap();
+        if entry.name().contains("untracked.tar") {
+            total += entry.compressed_size();
+        }
+    }
+    total
+}
+
 fn origin_delta_repository(repository: &mut RepositorySnapshot) {
     repository.committed_bundle.clear();
     repository.staged_patch.clear();
@@ -3791,7 +3819,13 @@ fn purge_replaces_primary_and_linked_untracked_files_and_restores_without_them()
         panic!("expected a rewritten archive, got {:?}", report.kind);
     };
     assert_eq!(report.schema_version, schema);
-    assert!(report.bytes_reclaimed > 0);
+    let uncompressed = uncompressed_untracked_excess(&before.manifest);
+    assert!(uncompressed > dry.bytes_reclaimed);
+    assert!(uncompressed > report.bytes_reclaimed);
+    assert_eq!(
+        report.bytes_reclaimed,
+        source_len.saturating_sub(fs::metadata(&destination).unwrap().len())
+    );
     assert_eq!(report.stash_untracked_notes, dry.stash_untracked_notes);
     let streamed = verify_archive_streaming(&destination).unwrap();
     assert_eq!(streamed.archive_sha256, archive_sha256);
@@ -3898,6 +3932,43 @@ fn purge_dry_run_and_already_clean_archives_do_not_write() {
 }
 
 #[test]
+fn purge_reports_on_disk_bytes_for_a_compressible_untracked_payload() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut archive_input = input();
+    let repetitive = vec![b'a'; 64 * 1024];
+    archive_input.repositories[0].untracked_tar = tar_with_file("pad.txt", &repetitive, 0o644);
+    archive_input.repositories[1].untracked_tar.clear();
+    let source = directory.path().join("compressible.hel.zip");
+    write_archive_atomic(&source, &archive_input).unwrap();
+    let before = verify_archive_streaming(&source).unwrap();
+    let uncompressed = uncompressed_untracked_excess(&before.manifest);
+    let removed = compressed_untracked_entries(&source);
+    assert!(uncompressed > 60_000);
+    assert!(removed < uncompressed);
+
+    let dry = purge_untracked_from_archive(&source, &directory.path().join("dry.hel.zip"), true)
+        .unwrap();
+    assert!(matches!(dry.kind, ArchiveUntrackedPurgeKind::DryRun));
+    assert!(dry.bytes_reclaimed > 0);
+    assert!(dry.bytes_reclaimed <= removed);
+    assert!(removed - dry.bytes_reclaimed < 2048);
+    assert!(dry.bytes_reclaimed < uncompressed);
+    assert!(!directory.path().join("dry.hel.zip").exists());
+
+    let old_len = fs::metadata(&source).unwrap().len();
+    let destination = directory.path().join("purged.hel.zip");
+    let report = purge_untracked_from_archive(&source, &destination, false).unwrap();
+    let new_len = fs::metadata(&destination).unwrap().len();
+    assert!(matches!(
+        report.kind,
+        ArchiveUntrackedPurgeKind::Rewritten { .. }
+    ));
+    assert_eq!(report.bytes_reclaimed, old_len.saturating_sub(new_len));
+    assert!(report.bytes_reclaimed > 0);
+    assert!(report.bytes_reclaimed < uncompressed);
+}
+
+#[test]
 fn purge_reports_origin_delta_and_still_rewrites_a_mixed_archive() {
     let directory = tempfile::tempdir().unwrap();
     let mut full = input();
@@ -3971,11 +4042,31 @@ fn purge_keeps_schema_3_when_only_the_untracked_tar_was_sharded() {
         matches!(payload.role, PayloadRole::GitUntrackedTar { .. }) && payload.parts.len() > 1
     }));
     let destination = directory.path().join("sharded-purged.hel.zip");
+    let old_len = fs::metadata(&source).unwrap().len();
+    let uncompressed = uncompressed_untracked_excess(&before.manifest);
+    let removed = compressed_untracked_entries(&source);
+    let dry = purge_untracked_from_archive(
+        &source,
+        &directory.path().join("sharded-dry.hel.zip"),
+        true,
+    )
+    .unwrap();
+    assert!(matches!(dry.kind, ArchiveUntrackedPurgeKind::DryRun));
+    assert!(dry.bytes_reclaimed > 0);
+    assert!(dry.bytes_reclaimed <= removed);
+    assert!(removed - dry.bytes_reclaimed < 2048);
+    assert!(dry.bytes_reclaimed < uncompressed);
     let report = purge_untracked_from_archive(&source, &destination, false).unwrap();
     assert!(matches!(
         report.kind,
         ArchiveUntrackedPurgeKind::Rewritten { .. }
     ));
+    assert_eq!(
+        report.bytes_reclaimed,
+        old_len.saturating_sub(fs::metadata(&destination).unwrap().len())
+    );
+    assert!(report.bytes_reclaimed > 0);
+    assert!(report.bytes_reclaimed < uncompressed);
     let after = verify_archive_streaming(&destination).unwrap();
     assert_eq!(
         after.manifest.schema_version,

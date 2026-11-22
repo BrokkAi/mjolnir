@@ -810,6 +810,93 @@ async fn restart_harness_in_place_response(
             ),
         };
     };
+    let mut launch_config = launch_config;
+    let persisted_launch_config = launch_config.clone();
+    // Apply the same target_environment merge, policy enforcement, staged-home
+    // env, and $MJ_KEEP_DIR setup as initial startup (`run_daemon_owned` /
+    // `prepare_managed_harness`) so managed harness discovery sees the target's
+    // XDG_CACHE_HOME/PATH and the restarted bridge keeps $MJ_KEEP_DIR.
+    let mut merged_environment = launch_config.target_environment.clone();
+    merged_environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
+    merged_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    merged_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
+    merged_environment.extend(launch_config.environment.clone());
+    merged_environment.remove(mj_core::worker_launch::SESSION_NITRO_MBX_ENV);
+    merged_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    merged_environment.remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
+    launch_config.environment = merged_environment;
+    if let Ok(startup_directory) = std::env::current_dir() {
+        super::resolve_relative_harness_home(&mut launch_config, &startup_directory);
+    }
+    if launch_config.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut launch_config.environment,
+        );
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut launch_config.target_environment,
+        );
+    }
+    if let Err(error) = super::enforce_execution_policy(&mut launch_config) {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                &format!("enforce execution policy for in-place harness restart: {error:#}"),
+            ),
+        };
+    }
+    if launch_config.harness == HarnessKind::OpenCode
+        && let Ok(endpoint) = super::credential_endpoint(&launch_config)
+    {
+        launch_config
+            .harness
+            .configure_staged_home_environment(&endpoint.home, &mut launch_config.environment);
+    }
+    let keep_cwd = launch_config.cwd.clone();
+    let keep_session_id = launch_config.session_id.clone();
+    let mut keep_environment = launch_config.environment.clone();
+    match tokio::time::timeout(
+        LOCAL_PREPARATION_STEP_TIMEOUT,
+        mj_core::runtime::spawn_blocking(move || {
+            let result = mj_core::session_keep::install_session_keep_dir(
+                &keep_cwd,
+                &keep_session_id,
+                &mut keep_environment,
+            );
+            (result, keep_environment)
+        }),
+    )
+    .await
+    {
+        Ok(Ok((Ok(_), updated_environment))) => {
+            launch_config.environment = updated_environment;
+        }
+        Ok(Ok((Err(error), _))) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                error = format!("{error:#}"),
+                "could not prepare the session keep directory during in-place harness restart"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                error = %error,
+                "session keep directory preparation task failed during in-place harness restart"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                timeout = ?LOCAL_PREPARATION_STEP_TIMEOUT,
+                "session keep directory preparation timed out during in-place harness restart"
+            );
+        }
+    }
     let supervisor_path = relay_root.join("acp-supervisor.json");
     let mut prepared = match super::prepare_harness_launch(
         launch_config.harness,
@@ -849,7 +936,21 @@ async fn restart_harness_in_place_response(
         &prepared.environment,
         &mut additional_directories,
     );
-    let persisted_launch_config = launch_config.clone();
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_RAW_LAUNCH_RECORD_ENV);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
+    prepared
+        .environment
+        .remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
@@ -2474,6 +2575,7 @@ async fn prepare_and_start_harness(
                             oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
+                            supervisors_enabled: false,
                         },
                         review_tools,
                         managed_subagent,
@@ -2719,6 +2821,40 @@ async fn prepare_and_start_harness(
         }
         None => (false, None),
     };
+
+    let keep_budget = preparation_step(
+        root,
+        status,
+        "session-keep",
+        LOCAL_PREPARATION_STEP_TIMEOUT,
+        cancel,
+    )
+    .await?;
+    let keep_cwd = config.cwd.clone();
+    let keep_session_id = config.session_id.clone();
+    let mut keep_environment = config.environment.clone();
+    config.environment =
+        bounded_blocking_preparation_step(&keep_budget, cancel, move |step_cancel| {
+            if step_cancel.is_cancelled() {
+                bail!("preparation cancelled before preparing the session keep directory");
+            }
+            if let Err(error) = mj_core::session_keep::install_session_keep_dir(
+                &keep_cwd,
+                &keep_session_id,
+                &mut keep_environment,
+            ) {
+                // A read-only checkout, or a symlinked `.mj` path, must not
+                // block the session. The harness then has no `MJ_KEEP_DIR`.
+                tracing::warn!(
+                    session_id = %keep_session_id,
+                    cwd = %keep_cwd.display(),
+                    error = format!("{error:#}"),
+                    "could not prepare the session keep directory; continuing without MJ_KEEP_DIR"
+                );
+            }
+            Ok(keep_environment)
+        })
+        .await?;
 
     let harness_budget = preparation_step(
         root,
@@ -4631,7 +4767,7 @@ mod preparation_tests {
         let response = restart_harness_in_place_response(
             RelayRequestEnvelope {
                 request_id: "r-restart-unheld".into(),
-                protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id.clone(),
@@ -4661,7 +4797,7 @@ mod preparation_tests {
         // Hold active, but ACP rejects the reload -> still does not overwrite acp-supervisor.json.
         let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
             request_id: "r-hold".into(),
-            protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
             request: RelayRequest::HoldInPlaceMoveDispatch {
                 operation_id: "move-op-1".into(),
                 expected_store_id: store_id.clone(),
@@ -4677,7 +4813,7 @@ mod preparation_tests {
         let response = restart_harness_in_place_response(
             RelayRequestEnvelope {
                 request_id: "r-restart-rejected".into(),
-                protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id.clone(),
@@ -4708,20 +4844,46 @@ mod preparation_tests {
             std::fs::read_to_string(&launch_path).unwrap(),
             "original-launch-json"
         );
-        // When ACP accepts the reload, launch.json IS updated and harness_restarted is marked.
+        // When ACP accepts the reload, launch.json IS updated and harness_restarted is marked,
+        // and the reloaded environment merges target_environment + MJ_KEEP_DIR while excluding
+        // disallowed keys and preserving the raw launch.json payload.
         let (ok_tx, mut ok_rx) = mpsc::channel(4);
         let acceptor = mj_core::runtime::spawn(async move {
-            if let Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) = ok_rx.recv().await {
-                let _ = resolved.send(Ok(()));
+            match ok_rx.recv().await {
+                Some(CommandRequest::ReloadLaunchConfig {
+                    environment,
+                    supervisor_spec,
+                    resolved,
+                    ..
+                }) => {
+                    let _ = resolved.send(Ok(()));
+                    Some((environment, supervisor_spec))
+                }
+                _ => None,
             }
         });
         let mut updated_launch =
             super::super::relay_tests::launch_config(root.path().to_str().unwrap());
+        updated_launch.session_id = "session-1".into();
+        updated_launch.cwd = root.path().to_path_buf();
         updated_launch.initial_model = Some("reloaded-model".into());
+        updated_launch
+            .target_environment
+            .insert("MJ_TARGET_MARKER".into(), "from-target".into());
+        updated_launch.target_environment.insert(
+            mj_core::jev::FASTINO_KEY_ENVIRONMENT.into(),
+            "secret-fastino".into(),
+        );
+        updated_launch
+            .excluded_environment
+            .push("EXCLUDED_SECRET".into());
+        updated_launch
+            .environment
+            .insert("EXCLUDED_SECRET".into(), "must-strip".into());
         let ok_response = restart_harness_in_place_response(
             RelayRequestEnvelope {
                 request_id: "r-restart-ok".into(),
-                protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::RestartHarnessInPlace {
                     operation_id: "move-op-1".into(),
                     expected_store_id: store_id,
@@ -4734,17 +4896,58 @@ mod preparation_tests {
         )
         .await;
         drop(ok_tx);
-        acceptor.await.unwrap();
+        let (reloaded_env, reloaded_supervisor) = acceptor
+            .await
+            .unwrap()
+            .expect("ReloadLaunchConfig delivered");
         assert!(matches!(
             ok_response.body,
             RelayResponseBody::Ok {
                 payload: RelayResponsePayload::HarnessRestartedInPlace
             }
         ));
-        let persisted = std::fs::read_to_string(&launch_path).unwrap();
+        assert_eq!(
+            reloaded_env.get("MJ_TARGET_MARKER").map(String::as_str),
+            Some("from-target")
+        );
         assert!(
-            persisted.contains("reloaded-model"),
-            "expected updated launch.json on disk, got: {persisted}"
+            !reloaded_env.contains_key(mj_core::jev::FASTINO_KEY_ENVIRONMENT),
+            "FASTINO_KEY must be stripped from reloaded environment"
+        );
+        let expected_keep = mj_core::session_keep::snapshot_keep_dir(
+            &std::fs::canonicalize(root.path()).unwrap(),
+            Some("session-1"),
+        )
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        assert_eq!(
+            reloaded_env
+                .get(mj_core::worker_launch::SESSION_KEEP_DIR_ENV)
+                .map(String::as_str),
+            Some(expected_keep.as_str())
+        );
+        let (_, spec) = *reloaded_supervisor.expect("supervisor spec sent");
+        assert_eq!(
+            spec.environment.get("MJ_TARGET_MARKER").map(String::as_str),
+            Some("from-target")
+        );
+        assert_eq!(
+            spec.environment
+                .get(mj_core::worker_launch::SESSION_KEEP_DIR_ENV)
+                .map(String::as_str),
+            Some(expected_keep.as_str())
+        );
+        assert!(
+            !spec.environment.contains_key("EXCLUDED_SECRET"),
+            "excluded environment variable must be stripped from supervisor spec"
+        );
+        let persisted: mj_core::worker_launch::WorkerLaunchConfig =
+            serde_json::from_str(&std::fs::read_to_string(&launch_path).unwrap()).unwrap();
+        assert_eq!(persisted.initial_model.as_deref(), Some("reloaded-model"));
+        assert!(
+            !persisted.environment.contains_key("MJ_TARGET_MARKER"),
+            "persisted launch.json must keep target_environment separate from environment"
         );
     }
 
@@ -4763,7 +4966,7 @@ mod preparation_tests {
             .expect("store_id");
         let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
             request_id: "r-hold".into(),
-            protocol_version: mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL,
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
             request: RelayRequest::HoldInPlaceMoveDispatch {
                 operation_id: "move-op-1".into(),
                 expected_store_id: store_id.clone(),

@@ -4,14 +4,14 @@
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
+│hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
+│› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             None ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
-│                     │ ☒ Use the same subagents on all targets                                                      │                     │
+│  │                  │   Primary and supervisor          0 entries  ›                                               │                     │
+│                     │   Straightforward                 0 entries  ›                                               │                     │
+│                     │   Subtle                          0 entries  ›                                               │                     │
+│                     │   Oracle                          0 entries  ›                                               │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -45,16 +45,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward › Item 1                                             │                     │
+│hel ───────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
-│                     │ ☒ Use the same subagents on all targets                                                      │                     │
+│  │ No messages yet  │ Model                             shared ▾                                          Remove   │                     │
+│  │                  │ Effort                            high ▾                                                     │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -87,17 +87,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Subtle › Item 1                                                      │                     │
+│hel ───────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
-│                     │ ☒ Use the same subagents on all targets                                                      │                     │
+│  │ No messages yet  │ Model                             smarter ▾                                         Remove   │                     │
+│  │                  │ Effort                            high ▾                                                     │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -129,191 +129,23 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Oracle › Item 1                                                      │                     │
+│hel ───────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☒ Use the same subagents on all targets                                                      │                     │
+│  │ No messages yet  │ Model                             smarter ▾                                         Remove   │                     │
+│  │                  │ Effort                            high ▾                                                     │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
-│                                                                                                                                          │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-
-=== yolo choices start empty (140x40) ===
-╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                                                                                                  │
-╰───────────────────                                                                                                                       │
-╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☐ Use the same subagents on all targets                                                      │                     │
-│                     │   YOLO Target Subagents                                                                      │                     │
-│                     │ Straightforward model             None ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
-│                                                                                                                                          │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-
-=== yolo straightforward (140x40) ===
-╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                                                                                                  │
-╰───────────────────                                                                                                                       │
-╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☐ Use the same subagents on all targets                                                      │                     │
-│                     │   YOLO Target Subagents                                                                      │                     │
-│                     │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
-│                                                                                                                                          │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-
-=== shared choices hide yolo settings (140x40) ===
-╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                                                                                                  │
-╰───────────────────                                                                                                                       │
-╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☒ Use the same subagents on all targets                                                      │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
-│                                                                                                                       ──────────── ▁   ▄ ╮
-│                                                                                                                                          │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-
-=== yolo choices restored (140x40) ===
-╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                                                                                                  │
-╰───────────────────                                                                                                                       │
-╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☐ Use the same subagents on all targets                                                      │                     │
-│                     │   YOLO Target Subagents                                                                      │                     │
-│                     │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -340,21 +172,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
+│hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
+│› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             None ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☐ Use the same subagents on all targets                                                      │                     │
-│                     │   YOLO Target Subagents                                                                      │                     │
-│                     │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
+│  │ No messages yet  │ Model                             smarter ▾                                                  │                     │
+│  │                  │ Effort                            high ▾                                                     │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
@@ -368,7 +200,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│                     │ Saving settings…                                                                             │                     │
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
 │                                                                                                                       ──────────── ▁   ▄ ╮
@@ -382,21 +214,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.            │                     │
-│› ■ ACP pretty name  │                                                                                              │                     │
+│hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
+│› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │ Straightforward model             None ▾                                                     │                     │
-│                     │ Subtle model                      smarter ▾                                                  │                     │
-│                     │ Subtle effort                     high ▾                                                     │                     │
-│                     │ Oracle model                      smarter ▾                                                  │                     │
-│                     │ Oracle effort                     high ▾                                                     │                     │
-│                     │ ☐ Use the same subagents on all targets                                                      │                     │
-│                     │   YOLO Target Subagents                                                                      │                     │
-│                     │ Straightforward model             shared ▾                                                   │                     │
-│                     │ Straightforward effort            high ▾                                                     │                     │
-│                     │ Subtle model                      None ▾                                                     │                     │
-│                     │ Oracle model                      None ▾                                                     │                     │
+│  │                  │   Primary and supervisor          0 entries  ›                                               │                     │
+│                     │   Straightforward                 0 entries  ›                                               │                     │
+│                     │   Subtle                          1 entry  ›                                                 │                     │
+│                     │   Oracle                          1 entry  ›                                                 │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮

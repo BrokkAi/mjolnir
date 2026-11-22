@@ -29,39 +29,33 @@ fn search_selects_a_switch_without_flipping_it() {
 fn global_subagent_search_targets_inline_controls_and_hides_unavailable_effort() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
-    search(&mut dashboard, "straightforward model");
+    search(&mut dashboard, "straightforward");
     let paths = result_paths(&mut dashboard);
-    let model = vec!["subagents", "straightforward", "model"];
+    let category = vec!["subagents", "straightforward"];
     assert!(
         paths
             .iter()
-            .any(|path| path.iter().map(String::as_str).eq(model.iter().copied()))
+            .any(|path| path.iter().map(String::as_str).eq(category.iter().copied()))
     );
     assert!(
         !paths
             .iter()
-            .any(|path| path == &["subagents", "straightforward"])
-    );
-    assert!(
-        !paths
-            .iter()
-            .any(|path| path == &["subagents", "straightforward", "effort"])
+            .any(|path| path == &["subagents", "straightforward", "0", "effort"])
     );
     dashboard.handle_key(key(KeyCode::Enter));
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(dialog.path, ["subagents"]);
-    assert_eq!(dialog.focused_path().unwrap(), model);
+    assert_eq!(dialog.path, category);
 
     let mut configured = dashboard_with_session(stopped_session());
     configured.begin_setup();
-    setup_dialog_mut(&mut configured.mode).unwrap().draft["subagents"]["straightforward"]["model"] =
-        json!("model-x");
-    search(&mut configured, "straightforward effort");
+    setup_dialog_mut(&mut configured.mode).unwrap().draft["subagents"]["straightforward"] =
+        json!([{ "model": "model-x", "effort": null }]);
+    search(&mut configured, "effort");
     let paths = result_paths(&mut configured);
     assert!(
         paths
             .iter()
-            .any(|path| path == &["subagents", "straightforward", "effort"])
+            .any(|path| path == &["subagents", "straightforward", "0", "effort"])
     );
 }
 
