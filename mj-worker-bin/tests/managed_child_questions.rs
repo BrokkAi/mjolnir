@@ -221,7 +221,7 @@ for line in sys.stdin:
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), root.join("hel")).unwrap();
     std::os::unix::fs::symlink(
         env!("CARGO_BIN_EXE_mj-worker"),
-        mj_controller::targets::control_worker_path(root.to_str().unwrap()),
+        mj_targets::targets::control_worker_path(root.to_str().unwrap()),
     )
     .unwrap();
     let mut command = CommandSpec::new(
@@ -279,7 +279,7 @@ for line in sys.stdin:
             std::thread::sleep(Duration::from_millis(25));
         }
     })();
-    let stop = mj_controller::targets::stop_worker_daemon_script(root.to_str().unwrap());
+    let stop = mj_targets::targets::stop_worker_daemon_script(root.to_str().unwrap());
     let stopped = BoundedProcessExecutor::new(IO_TIMEOUT)
         .execute(&CommandSpec::new("sh", ["-c", stop.unstaged_script()]));
     let owner = worker.join().expect("worker owner panicked");

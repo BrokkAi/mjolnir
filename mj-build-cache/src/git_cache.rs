@@ -364,7 +364,10 @@ fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathB
 }
 
 fn repository_cache_key(source: &str) -> String {
-    let identity = match crate::import::github_repository_from_origin(source) {
+    let identity = match mj_core::remote_git::parse_github_remote(
+        source,
+        mj_core::remote_git::Shorthand::Allowed,
+    ) {
         Some(repository) => format!(
             "github.com/{}/{}",
             repository.owner.to_ascii_lowercase(),

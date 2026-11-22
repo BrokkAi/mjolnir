@@ -426,7 +426,7 @@ fn install_binary_at(
     let store = mj_core::target_path::text(&store_root(locator, session_id)?);
     // Register before any pin can be created. Registration and sweeping share
     // one session owner, so no sweep can use a snapshot predating a live pin.
-    let name = format!("hel.store-{}", mj_client::session::new_command_id("link")?);
+    let name = format!("hel.store-{}", mj_core::relay::new_command_id("link")?);
     let _live = session_root
         .map(|root| {
             super::upgrade::LiveStaging::register_and_sweep(
@@ -565,7 +565,7 @@ fn ensure_published(
     collect_reporting(executor, locator, store, Some(digest));
     let upload = format!(
         "{store}/.upload-{}",
-        mj_client::session::new_command_id("worker-store")?
+        mj_core::relay::new_command_id("worker-store")?
     );
     let temporary = format!("{upload}/hel");
     crate::target_storage::ensure_room_for(
@@ -701,7 +701,7 @@ fn transfer_binary(
             &store_root(&host, session_id)?,
             Path::new(&format!(
                 ".transport-{}",
-                mj_client::session::new_command_id("container-upload")?
+                mj_core::relay::new_command_id("container-upload")?
             )),
         ));
         let pin = mj_core::target_path::text(&mj_core::target_path::join(
