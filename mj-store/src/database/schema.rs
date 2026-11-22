@@ -2859,6 +2859,16 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
                  VALUES (147, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version=147;",
         )?;
+        if !legacy_schema::table_has_column(&transaction, "session_contexts", "profile_id")? {
+            transaction
+                .execute_batch("ALTER TABLE session_contexts ADD COLUMN profile_id TEXT;")?;
+        }
+        transaction.execute_batch(
+            "UPDATE session_contexts
+                 SET profile_id = (SELECT last_profile FROM sessions
+                                   WHERE sessions.session_id = session_contexts.session_id)
+                 WHERE profile_id IS NULL;",
+        )?;
         transaction.commit()?;
     }
     let recorded: Option<i64> =
@@ -4895,7 +4905,7 @@ mod reader_tests {
                 .execute_batch(include_str!("legacy_v1.sql"))
                 .unwrap();
             connection.execute_batch(
-                "INSERT INTO session_contexts VALUES ('old-session', 'project', '2026-01-01T00:00:00Z');
+                "INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('old-session', 'project', '2026-01-01T00:00:00Z');
                  INSERT INTO sessions(session_id, title, harness_kind, last_profile,
                      target_template_id, state, updated_at, native_session_id)
                      VALUES ('old-session', 'Keep my work', 'codex', 'codex', 'local', 'error',
@@ -5085,7 +5095,7 @@ mod reader_tests {
         connection
             .execute_batch(include_str!("legacy_v1.sql"))
             .unwrap();
-        connection.execute_batch("INSERT INTO session_contexts VALUES ('old-session','project','2026-01-01T00:00:00Z');
+        connection.execute_batch("INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('old-session','project','2026-01-01T00:00:00Z');
             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
             VALUES ('old-session','Retain usage','codex','codex','local','error','2026-01-01T00:00:00Z');
             CREATE TRIGGER stop_before_accounting BEFORE INSERT ON schema_migrations WHEN NEW.version=67
@@ -5397,8 +5407,7 @@ mod reader_tests {
 
         let connection = open(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 146);
-        assert_eq!(state.minimum_compatible, Some(145));
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let migrated: i64 = connection
             .query_row(
@@ -5463,10 +5472,8 @@ mod reader_tests {
         super::super::usage::record_child_accounting(&connection, &relation, Some("oracle"))
             .unwrap();
         assert_eq!(
-            category(
-                "SELECT category FROM subagent_accounting WHERE child_session_id='new-child'"
-            )
-            .as_deref(),
+            category("SELECT category FROM subagent_accounting WHERE child_session_id='new-child'")
+                .as_deref(),
             Some("subtle"),
             "a replay does not replace the category already stored"
         );
@@ -5512,8 +5519,13 @@ mod reader_tests {
             ),
             None
         );
-        super::super::usage::record_turn_selection(&connection, "top", "turn-primary", &configuration)
-            .unwrap();
+        super::super::usage::record_turn_selection(
+            &connection,
+            "top",
+            "turn-primary",
+            &configuration,
+        )
+        .unwrap();
         assert_eq!(
             category(
                 "SELECT category FROM session_turn_selections
@@ -5545,10 +5557,8 @@ mod reader_tests {
             )
             .unwrap();
         assert_eq!(
-            category(
-                "SELECT category FROM subagent_accounting WHERE child_session_id='new-child'"
-            )
-            .as_deref(),
+            category("SELECT category FROM subagent_accounting WHERE child_session_id='new-child'")
+                .as_deref(),
             Some("subtle")
         );
         assert_eq!(

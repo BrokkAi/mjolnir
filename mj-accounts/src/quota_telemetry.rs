@@ -147,15 +147,16 @@ pub fn mean_burn_for_window_pct(
     plan_usd_per_month: Option<f64>,
     five_hour_to_weekly_ratio: Option<f64>,
 ) -> f64 {
-    let weekly_pct = mean_burn_weekly_pct(mean_api_usd, weekly_budget_usd, p_eff, plan_usd_per_month);
+    let weekly_pct =
+        mean_burn_weekly_pct(mean_api_usd, weekly_budget_usd, p_eff, plan_usd_per_month);
     match window_kind {
         WindowKind::Long => weekly_pct,
-        WindowKind::Short5h => match five_hour_to_weekly_ratio
-            .filter(|r| r.is_finite() && *r > 0.0)
-        {
-            Some(ratio) => weekly_pct * ratio,
-            None => 0.0,
-        },
+        WindowKind::Short5h => {
+            match five_hour_to_weekly_ratio.filter(|r| r.is_finite() && *r > 0.0) {
+                Some(ratio) => weekly_pct * ratio,
+                None => 0.0,
+            }
+        }
     }
 }
 
@@ -347,7 +348,9 @@ pub fn compute_window_telemetry(
             if let Some(d_long) = long_deltas.get(scope).or_else(|| long_deltas.get(&None))
                 && *d_long > 0.0
             {
-                let entry = ratio_num_by_scope.entry(scope.clone()).or_insert((0.0, 0.0));
+                let entry = ratio_num_by_scope
+                    .entry(scope.clone())
+                    .or_insert((0.0, 0.0));
                 entry.0 += *d_5h;
                 entry.1 += *d_long;
             }
@@ -491,22 +494,6 @@ impl std::fmt::Debug for PlacementReservation {
 }
 
 impl PlacementReservation {
-    /// Reassign this tentative reservation to `new_profile_id` when an earlier
-    /// candidate fails async validation and selection falls through to the next.
-    pub fn reassign(&self, new_profile_id: &str) {
-        if self.committed {
-            return;
-        }
-        let mut guard = self
-            .store
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((profile_id, _)) = guard.in_flight.get_mut(&self.reservation_id) {
-            *profile_id = new_profile_id.to_owned();
-        }
-    }
-
     /// Promote this tentative reservation to a committed placement. Passing
     /// `Some(session_id)` enables exact deduplication on `refresh_from_store`.
     pub fn commit(mut self, session_id: Option<String>) {
@@ -615,10 +602,7 @@ impl QuotaTelemetryStore {
         guard.windows = windows;
     }
 
-    pub fn replace_recent_placements(
-        &self,
-        placements: BTreeMap<String, Vec<RecentPlacement>>,
-    ) {
+    pub fn replace_recent_placements(&self, placements: BTreeMap<String, Vec<RecentPlacement>>) {
         let mut guard = self
             .inner
             .write()
@@ -626,7 +610,12 @@ impl QuotaTelemetryStore {
         guard.durable_placements = placements;
     }
 
-    pub fn record_placement(&self, profile_id: &str, category: &str, created_at_epoch_seconds: i64) {
+    pub fn record_placement(
+        &self,
+        profile_id: &str,
+        category: &str,
+        created_at_epoch_seconds: i64,
+    ) {
         let mut guard = self
             .inner
             .write()
@@ -693,8 +682,10 @@ impl QuotaTelemetryStore {
             .saturating_sub(HISTORY_LOOKBACK_SECONDS);
         let mut all_windows = BTreeMap::new();
         for (profile_id, cache_identity) in profiles {
-            let history = crate::database::load_quota_history_since(cache_identity, profile_id, since)?;
-            let computed = compute_window_telemetry(profile_id, cache_identity, &history, now_seconds);
+            let history =
+                crate::database::load_quota_history_since(cache_identity, profile_id, since)?;
+            let computed =
+                compute_window_telemetry(profile_id, cache_identity, &history, now_seconds);
             all_windows.extend(computed);
         }
         let placements_since = now_seconds.saturating_sub(HISTORY_LOOKBACK_SECONDS as i64);
@@ -725,10 +716,12 @@ impl QuotaTelemetryStore {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.committed_pending.retain(|session_id, (_, placement)| {
-            !seen_session_ids.contains(session_id)
-                && placement.created_at_epoch_seconds >= placements_since
-        });
+        guard
+            .committed_pending
+            .retain(|session_id, (_, placement)| {
+                !seen_session_ids.contains(session_id)
+                    && placement.created_at_epoch_seconds >= placements_since
+            });
         guard.windows = all_windows;
         guard.durable_placements = durable_placements;
     }

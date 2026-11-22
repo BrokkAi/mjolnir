@@ -1318,6 +1318,10 @@ pub(super) fn rename_profile_references_at(
         params![old_id, new_id],
     )?;
     tx.execute(
+        "UPDATE session_contexts SET profile_id = ?2 WHERE profile_id = ?1",
+        params![old_id, new_id],
+    )?;
+    tx.execute(
         "UPDATE session_turn_selections SET profile = ?2 WHERE profile = ?1",
         params![old_id, new_id],
     )?;
@@ -2123,7 +2127,8 @@ pub(super) fn rebind_session_bundle_to(
     )?;
     if changed == 0 {
         tx.execute(
-            "INSERT INTO session_contexts(session_id, bundle_id, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO session_contexts(session_id, bundle_id, created_at, profile_id)
+             VALUES (?1, ?2, ?3, (SELECT last_profile FROM sessions WHERE session_id = ?1))",
             params![session_id, canonical_bundle, Utc::now().to_rfc3339()],
         )?;
     }

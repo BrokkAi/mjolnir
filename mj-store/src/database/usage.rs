@@ -529,14 +529,15 @@ fn recent_placements_since(
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut stmt = connection.prepare(
         "SELECT
-            s.session_id,
-            s.last_profile,
+            sc.session_id,
+            COALESCE(s.last_profile, sc.profile_id),
             COALESCE(sa.category, 'primary'),
             sc.created_at
-         FROM sessions s
-         JOIN session_contexts sc ON sc.session_id = s.session_id
-         LEFT JOIN subagent_accounting sa ON sa.child_session_id = s.session_id
+         FROM session_contexts sc
+         LEFT JOIN sessions s ON s.session_id = sc.session_id
+         LEFT JOIN subagent_accounting sa ON sa.child_session_id = sc.session_id
          WHERE sc.created_at >= ?1
+           AND COALESCE(s.last_profile, sc.profile_id) IS NOT NULL
          ORDER BY sc.created_at ASC",
     )?;
     let rows = stmt
@@ -643,7 +644,8 @@ fn category_burn_observations(
             let mut session_ticks: u64 = 0;
             let mut has_cost = false;
             for (body, model) in turns {
-                let Ok(outcome) = serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body)
+                let Ok(outcome) =
+                    serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body)
                 else {
                     continue;
                 };
@@ -1210,15 +1212,18 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("placements.sqlite3");
         let conn = open(&path)?;
-        let ws: String = conn.query_row("SELECT workspace_id FROM workspaces LIMIT 1", [], |r| r.get(0))?;
+        let ws: String =
+            conn.query_row("SELECT workspace_id FROM workspaces LIMIT 1", [], |r| {
+                r.get(0)
+            })?;
         let base_ts = 1_795_000_000i64;
         let insert_session = |id: &str, profile: &str, ts: i64| -> Result<()> {
             let rfc = chrono::DateTime::from_timestamp(ts, 0)
                 .unwrap()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             conn.execute(
-                "INSERT INTO session_contexts(session_id, bundle_id, workspace_id, created_at) VALUES (?1, 'b1', ?2, ?3)",
-                params![id, ws, rfc],
+                "INSERT INTO session_contexts(session_id, bundle_id, workspace_id, created_at, profile_id) VALUES (?1, 'b1', ?2, ?3, ?4)",
+                params![id, ws, rfc, profile],
             )?;
             conn.execute(
                 "INSERT INTO sessions(session_id, title, harness_kind, last_profile, target_template_id, state, updated_at)
@@ -1253,6 +1258,26 @@ mod tests {
                     category: "subtle".into(),
                     created_at_epoch_seconds: base_ts + 20,
                 },
+            ]
+        );
+        let conn = open(&path)?;
+        conn.execute("DELETE FROM sessions WHERE session_id='new-child'", [])?;
+        drop(conn);
+        assert_eq!(
+            load_recent_placements_since_from(&path, base_ts)?,
+            vec![
+                RecentPlacementRow {
+                    session_id: "new-primary".into(),
+                    profile_id: "codex1".into(),
+                    category: "primary".into(),
+                    created_at_epoch_seconds: base_ts + 10,
+                },
+                RecentPlacementRow {
+                    session_id: "new-child".into(),
+                    profile_id: "codex1".into(),
+                    category: "subtle".into(),
+                    created_at_epoch_seconds: base_ts + 20,
+                }
             ]
         );
         Ok(())

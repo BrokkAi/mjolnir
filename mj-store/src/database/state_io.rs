@@ -771,6 +771,10 @@ pub(super) fn insert_session_with_parent(
         ],
     )?;
     tx.execute(
+        "UPDATE session_contexts SET profile_id = ?2 WHERE session_id = ?1",
+        params![session.id, session.last_profile],
+    )?;
+    tx.execute(
         "INSERT INTO materialized_sessions(session_id) VALUES (?1)
          ON CONFLICT(session_id) DO NOTHING",
         [session.id.as_str()],
@@ -906,6 +910,10 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     if changed != 1 {
         bail!("unknown session {id}");
     }
+    tx.execute(
+        "UPDATE session_contexts SET profile_id = ?2 WHERE session_id = ?1",
+        params![id, last_profile],
+    )?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
     super::session_create::settle_create_intent(tx, session)?;
     replace_targets(tx, session)

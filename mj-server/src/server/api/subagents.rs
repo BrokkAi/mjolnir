@@ -108,12 +108,6 @@ impl ReservationSlot {
         Self(std::sync::Arc::new(std::sync::Mutex::new(reservation)))
     }
 
-    pub fn reassign(&self, new_profile_id: &str) {
-        if let Some(reservation) = self.0.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
-            reservation.reassign(new_profile_id);
-        }
-    }
-
     pub fn commit(&self, session_id: Option<String>) {
         if let Some(reservation) = self.0.lock().unwrap_or_else(|p| p.into_inner()).take() {
             reservation.commit(session_id);
@@ -443,22 +437,22 @@ async fn resolve_choices_selection(
         }
     };
     let telemetry_store = backend.quota_telemetry_store();
-    let now_seconds = now_epoch_seconds();
-    let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
-        &mut eligible,
-        execution_policy,
-        placement,
-        category,
-        anchor,
-        &prefer,
-        &power_ranking,
-        now_seconds,
-    )?);
     let mut selection_errors = Vec::new();
-    for (idx, entry) in eligible.iter().enumerate() {
-        if idx > 0 {
-            reservation.reassign(&entry.candidate.profile_id);
+    while !eligible.is_empty() {
+        let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
+            &mut eligible,
+            execution_policy,
+            placement,
+            category,
+            anchor,
+            &prefer,
+            &power_ranking,
+            now_epoch_seconds(),
+        )?);
+        if eligible.is_empty() {
+            break;
         }
+        let entry = eligible.remove(0);
         let efforts = match model_efforts(backend, &entry.candidate, &entry.model.value).await {
             Ok(efforts) => efforts,
             Err(error) => {
@@ -783,7 +777,7 @@ async fn resolve_model_profile_selection_from(
         )));
     }
     let mut unhealthy = Vec::new();
-    let mut reservation_slot = ReservationSlot::default();
+    let mut draw_context = None;
     if profile_id.is_none() {
         // Load balancing offers only profiles that may still run the model
         // from their own allowance (or credits they may spend) and satisfy the
@@ -866,17 +860,7 @@ async fn resolve_model_profile_selection_from(
             | ModelProfileCandidateSource::ReviewersReady => (None, Placement::Child),
         };
         let telemetry_store = backend.quota_telemetry_store();
-        let now_seconds = now_epoch_seconds();
-        reservation_slot = ReservationSlot::new(telemetry_store.draw_and_reserve(
-            &mut offered,
-            execution_policy,
-            placement,
-            category,
-            anchor,
-            &prefer,
-            &power_ranking,
-            now_seconds,
-        )?);
+        draw_context = Some((telemetry_store, prefer, power_ranking, anchor, placement));
     }
     let reviewer_source = matches!(
         source,
@@ -884,10 +868,26 @@ async fn resolve_model_profile_selection_from(
     );
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
-    for (idx, candidate) in offered.iter().enumerate() {
-        if idx > 0 {
-            reservation_slot.reassign(&candidate.profile_id);
+    while !offered.is_empty() {
+        let reservation_slot =
+            if let Some((store, prefer, ranking, anchor, placement)) = &draw_context {
+                ReservationSlot::new(store.draw_and_reserve(
+                    &mut offered,
+                    execution_policy,
+                    *placement,
+                    category,
+                    *anchor,
+                    prefer,
+                    ranking,
+                    now_epoch_seconds(),
+                )?)
+            } else {
+                ReservationSlot::default()
+            };
+        if offered.is_empty() {
+            break;
         }
+        let candidate = offered.remove(0);
         // A reviewer's effort is configured, not chosen: start with it as
         // configured and let the harness report a value it rejects, rather
         // than launching every candidate harness to list its efforts first.
@@ -949,6 +949,8 @@ async fn resolve_model_profile_selection_from(
         let mut selected = selection(candidate.profile_id.clone(), &candidate.model.value, effort);
         selected.reservation = reservation_slot;
         return Ok(selected);
+        // Failed validation drops the tentative reservation before the next
+        // draw, so concurrent placements are included in its telemetry.
     }
     if !unhealthy.is_empty() {
         return Err(all_unhealthy(
@@ -1492,6 +1494,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![],
@@ -1794,6 +1797,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: candidates(),
         });
@@ -1864,6 +1868,7 @@ mod tests {
         /// seconds, for the cold-start fallback; none is ready before that.
         staged: Option<Vec<(u64, SubagentCandidates)>>,
         discovery_fails: bool,
+        telemetry_store: Option<mj_controller::quota_telemetry::QuotaTelemetryStore>,
         config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
     }
@@ -1895,6 +1900,10 @@ mod tests {
             }
         }
 
+        fn quota_telemetry_store(&self) -> mj_controller::quota_telemetry::QuotaTelemetryStore {
+            self.telemetry_store.clone().unwrap_or_default()
+        }
+
         fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
             Box::pin(async { Ok(self.config.clone()) })
         }
@@ -1911,6 +1920,20 @@ mod tests {
                 }
                 if profile.starts_with("delayed-") {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                if profile.starts_with("probe-fails-") {
+                    if let Some(store) = &self.telemetry_store {
+                        let now = now_epoch_seconds();
+                        for index in 0..30 {
+                            store.record_committed_placement(
+                                &format!("concurrent-{index}"),
+                                "runway-one",
+                                "subtle",
+                                now,
+                            );
+                        }
+                    }
+                    anyhow::bail!("model-specific probe failed for this profile");
                 }
                 if self.discovery_fails {
                     anyhow::bail!("model-specific probe failed: expired login");
@@ -2133,6 +2156,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: true,
+            telemetry_store: None,
             config: SubagentConfig {
                 straightforward: vec![choice.clone()],
                 subtle: vec![choice],
@@ -2171,11 +2195,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redraw_after_failed_discovery_rechecks_runway_against_concurrent_reservations() {
+        let now = now_epoch_seconds();
+        let reset = now + 3 * 86_400;
+        let mut offered = vec![
+            candidate("probe-fails-zero", Some(99), &["gpt-6.1-sol"]),
+            candidate("runway-one", Some(10), &["gpt-6.1-sol"]),
+            candidate("healthy-two", Some(60), &["gpt-6.1-sol"]),
+        ];
+        for (index, candidate) in offered.iter_mut().enumerate() {
+            let CandidateQuota::Subscription { windows, .. } = &mut candidate.quota else {
+                unreachable!("fixture has subscription quota");
+            };
+            windows[0].duration_seconds = Some(604_800);
+            windows[0].resets_at_epoch_seconds = Some(reset);
+            if index > 0 {
+                candidate.choices.efforts = efforts(&["high"]);
+            }
+        }
+        let telemetry_store = mj_controller::quota_telemetry::QuotaTelemetryStore::new();
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: None,
+            discovery_fails: false,
+            telemetry_store: Some(telemetry_store),
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: offered.clone(),
+                unavailable: Vec::new(),
+            },
+        });
+        let selected = resolve_model_profile_selection_from(
+            &backend,
+            SubagentCandidates {
+                offered,
+                unavailable: Vec::new(),
+            },
+            None,
+            "gpt-6.1-sol",
+            EffortRequirement::Exact("high"),
+            None,
+            ModelProfileCandidateSource::Subagents {
+                parent_profile: "probe-fails-zero",
+            },
+            ExecutionPolicy::Unconstrained,
+            Some("subtle"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile_id, "healthy-two");
+    }
+
+    #[tokio::test]
     async fn reviewer_uses_ready_profile_without_waiting_for_pending_discovery() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: true,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![candidate("ready", Some(70), &["fixed"])],
@@ -2204,6 +2281,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2236,6 +2314,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![paid, candidate("subscription", Some(80), &["fixed"])],
@@ -2264,6 +2343,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![candidate("stalled-default", Some(80), &["fixed"])],
@@ -2308,6 +2388,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2345,6 +2426,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2451,6 +2533,7 @@ mod tests {
                 ready_first: false,
                 staged: None,
                 discovery_fails: false,
+                telemetry_store: None,
                 config: SubagentConfig {
                     straightforward: vec![SubagentChoice {
                         model: "sonnet".into(),
@@ -2529,6 +2612,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config,
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2583,6 +2667,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: config.clone(),
             candidates: candidates.clone(),
         });
@@ -2634,6 +2719,7 @@ mod tests {
                 ready_first: false,
                 staged: None,
                 discovery_fails: false,
+                telemetry_store: None,
                 config: config.clone(),
                 candidates,
             })
@@ -2672,6 +2758,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: Default::default(),
             candidates,
         });
@@ -2725,6 +2812,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: SubagentConfig {
                 straightforward: vec![SubagentChoice {
                     model: "no-effort".into(),
@@ -2784,6 +2872,7 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
+            telemetry_store: None,
             config: mj_core::config::SubagentConfig {
                 straightforward: vec![
                     mj_core::config::SubagentChoice {
