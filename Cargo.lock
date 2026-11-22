@@ -629,6 +629,7 @@ dependencies = [
  "brokk-anvil-client",
  "brokk-mj-client",
  "brokk-mj-core",
+ "brokk-mj-harness-install",
  "brokk-mj-store",
  "brokk-mj-targets",
  "chrono",
@@ -821,23 +822,19 @@ dependencies = [
  "dirs 6.0.0",
  "flate2",
  "getrandom 0.3.4",
+ "http",
  "httpdate",
  "imbl",
  "jsonc-parser",
  "libc",
  "memchr",
  "regex",
- "reqwest",
- "rustls",
- "ruzstd",
  "serde",
  "serde_ignored",
  "serde_json",
  "sha2 0.11.0",
  "similar",
- "tar",
  "tempfile",
- "tiny_http",
  "tokio",
  "tokio-util",
  "toml",
@@ -855,7 +852,6 @@ version = "2.73.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "axum",
  "axum-server",
  "brokk-anvil-client",
  "brokk-mj-checkpoint",
@@ -863,6 +859,7 @@ dependencies = [
  "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-github-relevance",
+ "brokk-mj-github-watch",
  "brokk-mj-review",
  "brokk-mj-review-host",
  "brokk-mj-server",
@@ -924,6 +921,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-github-watch"
+version = "2.73.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "brokk-mj-core",
+ "brokk-mj-github-relevance",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "chrono",
+ "futures",
+ "reqwest",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-harness-install"
+version = "2.73.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "brokk-mj-core",
+ "flate2",
+ "getrandom 0.3.4",
+ "libc",
+ "reqwest",
+ "rustls",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "tiny_http",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "brokk-mj-import"
 version = "2.73.0"
 dependencies = [
@@ -944,6 +990,36 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-microvm"
+version = "2.73.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "brokk-mj-core",
+ "chrono",
+ "clap",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "libc",
+ "mbx-cache-core",
+ "mbx-cache-protocol",
+ "quick-xml",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "socket2",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1011,12 +1087,21 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "brokk-mj-accounts",
+ "brokk-mj-build-cache",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
- "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-github-relevance",
+ "brokk-mj-harness-install",
+ "brokk-mj-import",
+ "brokk-mj-profile-catalog",
  "brokk-mj-review",
+ "brokk-mj-session-runtime",
+ "brokk-mj-session-types",
+ "brokk-mj-sessionwiki",
+ "brokk-mj-store",
+ "brokk-mj-targets",
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",
  "chrono",
@@ -1052,6 +1137,7 @@ dependencies = [
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
+ "brokk-mj-harness-install",
  "brokk-mj-import",
  "brokk-mj-session-types",
  "brokk-mj-sessionwiki",
@@ -1084,6 +1170,7 @@ version = "2.73.0"
 dependencies = [
  "brokk-mj-core",
  "brokk-mj-targets",
+ "serde",
 ]
 
 [[package]]
@@ -1120,6 +1207,7 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-controller",
  "brokk-mj-core",
+ "brokk-mj-harness-install",
  "brokk-mj-import",
  "brokk-mj-store",
  "brokk-mj-targets",
@@ -1162,6 +1250,7 @@ version = "2.73.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
+ "brokk-mj-harness-install",
  "chrono",
  "getrandom 0.3.4",
  "hmac",
@@ -1243,7 +1332,10 @@ dependencies = [
  "brokk-mj-build-id",
  "brokk-mj-checkpoint",
  "brokk-mj-core",
+ "brokk-mj-harness-install",
+ "brokk-mj-microvm",
  "brokk-mj-targets",
+ "brokk-mj-worker-mcp",
  "brokk-mj-worker-runtime",
  "clap",
  "libc",
@@ -1275,38 +1367,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-worker-mcp"
+version = "2.73.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "brokk-mj-worker-review"
+version = "2.73.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-checkpoint",
+ "brokk-mj-core",
+ "brokk-mj-review",
+ "sha2 0.11.0",
+ "tempfile",
+]
+
+[[package]]
 name = "brokk-mj-worker-runtime"
 version = "2.73.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "axum",
  "base64 0.22.1",
  "brokk-mj-checkpoint",
  "brokk-mj-core",
- "brokk-mj-review",
+ "brokk-mj-harness-install",
  "brokk-mj-transcript",
+ "brokk-mj-worker-mcp",
+ "brokk-mj-worker-review",
  "chrono",
- "clap",
  "flate2",
  "getrandom 0.3.4",
- "hex",
- "hmac",
  "jsonc-parser",
  "libc",
  "mach2",
- "mbx-cache-core",
- "mbx-cache-protocol",
  "proptest",
- "quick-xml",
  "reqwest",
  "rusqlite",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "socket2",
- "tar",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1315,7 +1424,6 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-bash",
- "url",
 ]
 
 [[package]]
@@ -1362,6 +1470,7 @@ dependencies = [
  "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-daemon",
+ "brokk-mj-harness-install",
  "brokk-mj-setup",
  "brokk-mj-tui",
  "chrono",

@@ -256,7 +256,7 @@ impl ViewerSnapshot {
                 let resume_refusals = targets
                     .iter()
                     .filter_map(|target_id| {
-                        mj_controller::controller::resume_compatibility_with_checkout(
+                        mj_client::target::resume_compatibility_with_checkout(
                             session, &checkout, config, target_id,
                         )
                         .err()
@@ -304,7 +304,7 @@ impl ViewerSnapshot {
                 let review = state.effective_review_config(&config.review, &session.id);
                 let failed_launch_retry = failed_launch_retries.map_or_else(
                     || {
-                        mj_controller::database::failed_first_launch(
+                        mj_store::database::failed_first_launch(
                             session,
                             state.is_subagent_session(&session.id),
                             None,
@@ -912,7 +912,7 @@ fn oracle_default_enabled() -> bool {
 
 /// The Move recovery a session view carries; the controller derives it from
 /// the [`MoveOperation`] it owns.
-pub use mj_controller::controller::move_session::ViewerMoveRecovery;
+pub use mj_session_types::ViewerMoveRecovery;
 
 impl ViewerSession {
     /// Apply a resolved controller source while keeping paths and remotes out
@@ -924,7 +924,7 @@ impl ViewerSession {
 }
 
 // One wire representation for the UI and native API activity facts.
-pub use mj_controller::database::{
+pub use mj_store::database::{
     ApiActivityDetails as ViewerActivityDetails, ApiActivityKind as ViewerActivityKind,
 };
 

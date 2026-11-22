@@ -15,7 +15,7 @@ pub(super) struct ServerState {
     pub(super) client_state_tx: mpsc::Sender<ClientStateRequest>,
     pub(super) background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub(super) shutdown: CancellationToken,
-    pub(super) image_builds: mj_controller::session_images::ImageBuilds,
+    pub(super) image_builds: ImageBuilds,
     pub(super) viewer_code: Arc<str>,
     pub(super) login_token: Arc<str>,
     pub(super) cookie_key: Arc<[u8]>,
@@ -33,7 +33,7 @@ pub(super) struct ServerState {
     pub(super) worker_source_check: Option<WorkerSourceCheck>,
     /// Prompts held until startup or lifecycle work lets their session take them.
     pub(super) held_prompts: Arc<api::HeldPrompts>,
-    pub(super) upgrade_gate: Arc<mj_controller::upgrade::Gate>,
+    pub(super) upgrade_gate: Arc<mj_store::upgrade::Gate>,
 }
 
 impl ServerState {
@@ -236,7 +236,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
 /// unread response does not own the daemon; accepted operations hold their
 /// own upgrade permits in the server runtime.
 pub(super) async fn upgrade_admission(
-    State(gate): State<Arc<mj_controller::upgrade::Gate>>,
+    State(gate): State<Arc<mj_store::upgrade::Gate>>,
     request: Request,
     next: Next,
 ) -> Response<Body> {

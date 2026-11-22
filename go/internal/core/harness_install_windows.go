@@ -1,4 +1,4 @@
-// Port of mj-core/src/harness_install.rs: Rust's File::try_lock,
+// Port of mj-harness-install/src/harness_install.rs: Rust's File::try_lock,
 // try_lock_shared and lock_shared, which are LockFileEx on Windows.
 
 //go:build windows

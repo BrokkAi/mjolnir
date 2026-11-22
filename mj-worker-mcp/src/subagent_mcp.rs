@@ -43,7 +43,7 @@ fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
 /// worker sends it with an answer that has no result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DaemonContact {
+pub struct DaemonContact {
     /// Whether the daemon has read the worker's queue since this request
     /// joined it.
     pub picked_up: bool,
@@ -136,7 +136,7 @@ fn pending_reply(
 /// must notice the queued request, run the action (a spawn may provision a
 /// child session) and complete it back to the worker. The worker answers a
 /// little sooner by itself, so it can say whether the daemon picked it up.
-pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The answer to a `close` Mjolnir has not confirmed within the call's budget.
 ///

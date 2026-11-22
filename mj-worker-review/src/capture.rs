@@ -372,11 +372,7 @@ fn merge_base(
     }
 }
 
-pub(crate) fn checked_git(
-    runner: &dyn GitCommandRunner,
-    root: &Path,
-    args: &[&str],
-) -> Result<Vec<u8>> {
+pub fn checked_git(runner: &dyn GitCommandRunner, root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = run(runner, root, args)?;
     anyhow::ensure!(
         output.status == 0,
@@ -822,7 +818,7 @@ pub fn discover_repositories(git: &dyn GitCommandRunner, roots: &[PathBuf]) -> V
     discovered
 }
 
-pub(crate) fn repository_root(git: &dyn GitCommandRunner, directory: &Path) -> Option<PathBuf> {
+pub fn repository_root(git: &dyn GitCommandRunner, directory: &Path) -> Option<PathBuf> {
     if !directory.is_dir() {
         return None;
     }
@@ -911,7 +907,7 @@ impl GitCommandRunner for BoundedGit {
 #[cfg(test)]
 pub(super) mod push_tests {
     use super::*;
-    use crate::test_support::git;
+    use crate::tests::git;
     use mj_checkpoint::archive::{SystemGit, record_reviewed_tree};
 
     struct VersionGit(&'static str);
@@ -929,7 +925,7 @@ pub(super) mod push_tests {
         }
     }
 
-    pub(in crate::review) fn repository() -> tempfile::TempDir {
+    pub(crate) fn repository() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
         let origin = temp.path().join("origin.git");
         let root = temp.path().join("checkout");
@@ -952,7 +948,7 @@ pub(super) mod push_tests {
         temp
     }
 
-    pub(in crate::review) fn commit(root: &Path, text: &str) -> String {
+    pub(crate) fn commit(root: &Path, text: &str) -> String {
         std::fs::write(root.join("tracked.txt"), format!("{text}\n")).unwrap();
         git(root, &["add", "tracked.txt"]);
         git(root, &["commit", "-qm", text]);

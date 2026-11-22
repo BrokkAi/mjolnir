@@ -2382,7 +2382,7 @@ async fn prepare_and_start_harness(
     let base_environment = bounded_preparation_step(&login_budget, async {
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            mj_core::login_environment::resolve(),
+            mj_harness_install::login_environment::resolve(),
         )
         .await
         .context("login environment resolution exceeded its 10-second bound")?
@@ -2571,7 +2571,7 @@ async fn prepare_and_start_harness(
                         &mut environment,
                         role,
                         policy,
-                        crate::subagent_mcp::ParentTools {
+                        mj_worker_mcp::subagent_mcp::ParentTools {
                             oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
@@ -4813,7 +4813,7 @@ mod preparation_tests {
 
     #[tokio::test]
     async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
-        let _ = mj_core::login_environment::initialize_from_parent();
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
         let root = tempfile::tempdir().unwrap();
         let supervisor_path = root.path().join("acp-supervisor.json");
         let launch_path = root.path().join("launch.json");

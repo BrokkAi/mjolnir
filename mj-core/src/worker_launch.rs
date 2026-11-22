@@ -49,7 +49,7 @@ pub fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathB
 }
 
 /// Where a worker's ACP adapter and harness executable come from.
-/// [`crate::harness_install::locate`] turns a policy into a launch.
+/// `mj_harness_install::harness_install::locate` turns a policy into a launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessRuntimePolicy {

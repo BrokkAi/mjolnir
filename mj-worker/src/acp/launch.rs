@@ -469,7 +469,7 @@ pub(super) fn owned_acp_mcp_tools(spec: &LaunchSpec) -> Vec<(String, Vec<String>
                 .project_memory
                 .as_ref()
                 .is_some_and(|memory| memory.history_socket.is_some())
-                .then(crate::memory_mcp::tool_names)
+                .then(mj_worker_mcp::memory_mcp::tool_names)
                 .unwrap_or_default();
             owned.push((server.name, tools));
         }

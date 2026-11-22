@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use mj_core::config::ExecutionPolicy;
 use mj_core::config::HarnessKind;
 #[cfg(unix)]
-type Installation = mj_core::harness_install::Located;
+type Installation = mj_harness_install::harness_install::Located;
 #[cfg(not(unix))]
 type Installation = std::convert::Infallible;
 
@@ -66,15 +66,19 @@ async fn host_program(
     let path = environment_value(environment, "PATH");
     let home = environment_value(environment, "GROK_HOME");
     mj_core::runtime::spawn_blocking(move || -> Result<Option<String>> {
-        let selected = mj_core::program_path::find_executable_on_path(name, path.as_deref())
-            .or_else(|| {
-                if harness != HarnessKind::Grok {
-                    return None;
-                }
-                // The official installer also uses the inherited profile home.
-                let bin = PathBuf::from(home?).join("bin");
-                mj_core::program_path::find_executable_on_path(name, Some(bin.as_os_str()))
-            });
+        let selected =
+            mj_harness_install::program_path::find_executable_on_path(name, path.as_deref())
+                .or_else(|| {
+                    if harness != HarnessKind::Grok {
+                        return None;
+                    }
+                    // The official installer also uses the inherited profile home.
+                    let bin = PathBuf::from(home?).join("bin");
+                    mj_harness_install::program_path::find_executable_on_path(
+                        name,
+                        Some(bin.as_os_str()),
+                    )
+                });
         selected
             .map(|path| {
                 let absolute =
@@ -108,7 +112,7 @@ async fn managed_installation(
     let search = search_environment(environment);
     let policy = ExecutionPolicy::ConfiguredApprovals;
     let (command, args) = mj_core::harness_runtime::fallback_launch(harness, policy);
-    mj_core::harness_install::locate(
+    mj_harness_install::harness_install::locate(
         mj_core::placement::local_harness_runtime(),
         harness,
         policy,

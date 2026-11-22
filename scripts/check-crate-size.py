@@ -5,7 +5,8 @@ Cargo compiles a crate as one unit, and most of that work is serial, so the
 size of the largest crate sets the floor for every build that touches it
 (.agents/plans/fan-out-crates-under-size-budget.md has the measurements). The
 budget is counted in lines of Rust under a crate's `src/`, tests included,
-because a test build compiles the code and its tests together.
+because a test build compiles the code and its tests together. Cargo metadata
+includes new workspace members such as `brokk-mj-harness-install` automatically.
 
 A crate under the budget must stay under it. The crates that were over it when
 the budget was introduced are listed in OVER_BUDGET and are only reported:
@@ -23,7 +24,7 @@ BUDGET = 50_000
 OVER_BUDGET = {
     'brokk-mj-controller',
     'brokk-mj-daemon',
-    'brokk-mj-worker-runtime',
+    'brokk-mj-worker-runtime',  # Still over budget after the MicroVM, MCP and review split.
     'brokk-mj-tui',
     'brokk-mj-core',
     'brokk-mj-chat',

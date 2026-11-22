@@ -9,8 +9,7 @@ pub mod test_fixtures;
 #[cfg(test)]
 mod tests;
 pub mod transport;
-mod viewer_recovery;
-pub use viewer_recovery::ViewerMoveRecovery;
+pub use mj_session_types::ViewerMoveRecovery;
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;

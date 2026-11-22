@@ -44,7 +44,7 @@ impl ReviewCapture {
             mj_core::relay::ReviewerRequest::RecordReviewed { trees } => {
                 mj_core::runtime::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
-                        crate::review::capture::record_review_base(
+                        mj_worker_review::capture::record_review_base(
                             &mj_checkpoint::archive::SystemGit,
                             &root,
                             &tree,
@@ -101,7 +101,7 @@ impl ReviewCapture {
         let cwd = self.cwd.clone();
         let session_id = self.session_id.clone();
         let repositories = mj_core::runtime::spawn_blocking(move || {
-            let discovered = crate::review::capture::discover_repositories(
+            let discovered = mj_worker_review::capture::discover_repositories(
                 &mj_checkpoint::archive::SystemGit,
                 &roots,
             );
@@ -114,17 +114,19 @@ impl ReviewCapture {
                 .map(|root| {
                     let git = &mj_checkpoint::archive::SystemGit;
                     let start = match origins.get(root) {
-                        Some(origin) => crate::review::capture::linked_worktree_start(
+                        Some(origin) => mj_worker_review::capture::linked_worktree_start(
                             git,
                             root,
                             origin,
                             &session_id,
                         )?,
-                        None => crate::review::capture::review_start_head(git, root, &session_id)?,
+                        None => {
+                            mj_worker_review::capture::review_start_head(git, root, &session_id)?
+                        }
                     }
                     .ok_or_else(|| anyhow::anyhow!("the repository has no HEAD commit"))?;
                     let capture =
-                        crate::review::capture::capture_pushable_commits(git, root, &start)?;
+                        mj_worker_review::capture::capture_pushable_commits(git, root, &start)?;
                     let mut delta = capture.delta;
                     delta.base_commit = capture.base.commit().map(str::to_owned);
                     delta.head_commit = Some(capture.head_commit);
@@ -145,7 +147,7 @@ impl ReviewCapture {
         let roots = self.roots();
         let cwd = self.cwd.clone();
         let roots = mj_core::runtime::spawn_blocking(move || {
-            let discovered = crate::review::capture::discover_repositories(
+            let discovered = mj_worker_review::capture::discover_repositories(
                 &mj_checkpoint::archive::SystemGit,
                 &roots,
             );
@@ -168,7 +170,7 @@ impl ReviewCapture {
         let cwd = self.cwd.clone();
         let (root, commit, tree, changed) = mj_core::runtime::spawn_blocking(move || {
             let git = &mj_checkpoint::archive::SystemGit;
-            let discovered = crate::review::capture::discover_repositories(git, &roots);
+            let discovered = mj_worker_review::capture::discover_repositories(git, &roots);
             let (repositories, _) =
                 scoped_repositories(&cwd, &discovered, &[path.unwrap_or_else(|| cwd.clone())])?;
             let root = repositories
@@ -176,12 +178,12 @@ impl ReviewCapture {
                 .next()
                 .context("the path names no repository")?;
             if let Some((commit, tree)) =
-                crate::review::capture::later_review_base(git, &root, &commit)?
+                mj_worker_review::capture::later_review_base(git, &root, &commit)?
             {
-                crate::review::capture::set_review_base(git, &root, &commit)?;
+                mj_worker_review::capture::set_review_base(git, &root, &commit)?;
                 return Ok((root, commit, tree, false));
             }
-            let (commit, tree) = crate::review::capture::set_review_base(git, &root, &commit)?;
+            let (commit, tree) = mj_worker_review::capture::set_review_base(git, &root, &commit)?;
             Ok::<_, anyhow::Error>((root, commit, tree, true))
         })
         .await
@@ -206,7 +208,7 @@ fn scoped_repositories(
 ) -> Result<(Vec<PathBuf>, std::collections::BTreeMap<PathBuf, PathBuf>)> {
     let git = &mj_checkpoint::archive::SystemGit;
     let common = |root: &std::path::Path| -> Result<PathBuf> {
-        let output = crate::review::capture::checked_git(
+        let output = mj_worker_review::capture::checked_git(
             git,
             root,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -229,7 +231,7 @@ fn scoped_repositories(
         };
         // Resolved as discovery resolves a root, so an override's recapture
         // reports the same repository keys the verdict recorded.
-        let root = crate::review::capture::repository_root(git, &directory).ok_or_else(|| {
+        let root = mj_worker_review::capture::repository_root(git, &directory).ok_or_else(|| {
             let named = if path == std::path::Path::new(".") {
                 "the working directory".to_owned()
             } else {
@@ -414,8 +416,11 @@ mod tests {
             })
             .await
             .unwrap();
-        crate::review::hook::install_pre_push_hook(&mj_checkpoint::archive::SystemGit, &worktree)
-            .unwrap();
+        mj_worker_review::hook::install_pre_push_hook(
+            &mj_checkpoint::archive::SystemGit,
+            &worktree,
+        )
+        .unwrap();
         let remote = temp_root.join("remote.git");
         std::fs::create_dir(&remote).unwrap();
         git(&remote, &["init", "-q", "--bare"]);
@@ -478,7 +483,7 @@ mod tests {
         git(&root, &["add", "tracked.rs"]);
         git(&root, &["commit", "-qm", "base"]);
         let base = git(&root, &["rev-parse", "HEAD"]);
-        crate::review::capture::ensure_session_start_head(
+        mj_worker_review::capture::ensure_session_start_head(
             &mj_checkpoint::archive::SystemGit,
             &root,
             "fork-test",
@@ -553,7 +558,7 @@ mod tests {
         std::fs::write(root.join("tracked.rs"), "base\n").unwrap();
         git(&root, &["add", "tracked.rs"]);
         git(&root, &["commit", "-qm", "base"]);
-        crate::review::capture::ensure_session_start_head(
+        mj_worker_review::capture::ensure_session_start_head(
             &mj_checkpoint::archive::SystemGit,
             &root,
             "orphan-test",
@@ -946,7 +951,7 @@ mod tests {
         git(&repository, &["add", "tracked.rs"]);
         git(&repository, &["commit", "-qm", "base"]);
         let start = git(&repository, &["rev-parse", "HEAD"]);
-        crate::review::capture::ensure_session_start_head(&SystemGit, &repository, "push-test")
+        mj_worker_review::capture::ensure_session_start_head(&SystemGit, &repository, "push-test")
             .unwrap();
         git(&repository, &["checkout", "-qb", "feature"]);
         std::fs::write(repository.join("tracked.rs"), "after\n").unwrap();

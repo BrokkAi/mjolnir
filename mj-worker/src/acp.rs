@@ -513,7 +513,8 @@ async fn run_inner(
     shutdown: tokio_util::sync::CancellationToken,
     guardian_endpoint: Option<Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>>,
 ) -> Result<()> {
-    spec.environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    spec.environment =
+        mj_harness_install::login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
     let mut replacing_previous_bridge = false;
     let mut restart_notice = None;
@@ -671,7 +672,7 @@ async fn run_inner(
                 // `with_overrides` would re-introduce excluded shell variables.
                 Ok(environment)
             } else {
-                mj_core::login_environment::with_overrides(&environment).await
+                mj_harness_install::login_environment::with_overrides(&environment).await
             };
             if let Some(supervisor) = supervisor_spec {
                 let (supervisor_path, supervisor_spec) = *supervisor;

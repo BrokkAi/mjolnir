@@ -101,6 +101,9 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-core` (`mj-core/`, library `mj_core`) is the foundation. It holds
   configuration, persisted-state types, the relay protocol, and the
   shared transcript, diff, and target types.
+- `brokk-mj-harness-install` (`mj-harness-install/`, library `mj_harness_install`)
+  owns managed harness installation, executable discovery, login environment
+  probing, and session image recipes. Core owns shared harness pins.
 - `brokk-mj-review`, `brokk-mj-checkpoint`, and `brokk-mj-transcript` live in
   their matching directories. They build on core and share review logic,
   archive handling, and transcript projection across the runtime branches.
@@ -110,6 +113,12 @@ it or introduce a dependency between sibling branches.
   (`mj_core::worker_build::install`). It is rebuilt after every commit, so no
   library may depend on it: that would make a commit recompile the library
   and everything above it.
+- `brokk-mj-microvm` (`mj-microvm/`, library `mj_microvm`) provides the Linux
+  Nitro Sandbox host engine and its guest agent.
+- `brokk-mj-worker-mcp` (`mj-worker-mcp/`, library `mj_worker_mcp`) serves the
+  worker's project memory, delegation, and review MCP tools.
+- `brokk-mj-worker-review` (`mj-worker-review/`, library `mj_worker_review`)
+  captures review state in Git repositories and installs the pre-push hook.
 - `brokk-mj-worker-runtime` (`mj-worker/`, library `mj_worker`) is the target
   side. It runs locally, in a container, or on an SSH/EC2 host and owns the
   harness, durable command queue, and relay journal.
@@ -185,8 +194,10 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.
-  It needs only the foundation, and only the daemon uses it, so its inference
-  dependencies stay out of every other crate's build.
+  The GitHub watcher calls it to classify items for each session.
+- `brokk-mj-github-watch` (`mj-github-watch/`, library `mj_github_watch`) polls
+  GitHub, classifies items, and records progress and mailbox events in the
+  store. The daemon supplies live configuration, credentials, and public notices.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client
@@ -197,9 +208,9 @@ it or introduce a dependency between sibling branches.
   which it inspects and which does not use it.
 - `brokk-mj-server` (`mj-server/`, library `mj_server`) is the daemon's HTTP
   API and web viewer server: routes, request and response types,
-  authentication, and the embedded viewer assets. It builds on the controller
-  and knows nothing of the daemon's live state; the daemon implements its
-  backend traits.
+  authentication, image build endpoints, and the embedded viewer assets. It
+  uses the shared store, target, and session crates. The daemon implements
+  its backend traits over live state.
 - `brokk-mj-daemon` (`mj-daemon/`, library `mj_daemon`) is the daemon process
   (`mj daemon-run`): its runtime state, the implementation of the HTTP API
   over that state, and the daemon-owned services and pollers. It builds on the

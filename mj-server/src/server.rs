@@ -44,11 +44,13 @@ use mj_core::state::{
     State as AppState,
 };
 
-use mj_controller::targets::AdditionalMount;
+use mj_targets::targets::AdditionalMount;
 
-use mj_controller::image::optimize_image;
+use mj_client::image::optimize_image;
 
 pub mod api;
+mod session_images;
+pub use session_images::ImageBuilds;
 
 pub use api::{
     ApiFailure, ApiSession, PromptRequest, PromptResponse, SessionListResponse,
@@ -142,7 +144,7 @@ pub struct ServerOptions {
     /// task does not occupy the controller's action admission slot.
     background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
-    pub image_builds: mj_controller::session_images::ImageBuilds,
+    pub image_builds: ImageBuilds,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
     /// disabled only for an explicitly trusted HTTP development endpoint.
@@ -167,7 +169,7 @@ pub struct ServerOptions {
     /// The daemon's upgrade admission. A closed gate refuses new requests, and
     /// tells the long requests a shutdown ends that the daemon is being
     /// replaced, so their clients follow it. Tests give the server its own.
-    upgrade_gate: Arc<mj_controller::upgrade::Gate>,
+    upgrade_gate: Arc<mj_store::upgrade::Gate>,
 }
 
 /// The header, valued `pending`, that marks a 503 as "this daemon is being
@@ -213,7 +215,7 @@ impl ServerOptions {
             client_state_tx: requests.client_state_tx,
             background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
-            image_builds: mj_controller::session_images::ImageBuilds::default(),
+            image_builds: ImageBuilds::default(),
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
             tls_config: None,
@@ -228,12 +230,12 @@ impl ServerOptions {
             subagent: None,
             preferences_path: mj_core::go::GoPreferences::path(),
             worker_source_check: None,
-            upgrade_gate: mj_controller::upgrade::gate().clone(),
+            upgrade_gate: mj_store::upgrade::gate().clone(),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn set_upgrade_gate(&mut self, gate: Arc<mj_controller::upgrade::Gate>) {
+    pub(crate) fn set_upgrade_gate(&mut self, gate: Arc<mj_store::upgrade::Gate>) {
         self.upgrade_gate = gate;
     }
 
@@ -394,11 +396,11 @@ mod errors;
 use errors::*;
 mod auth;
 use auth::*;
-pub(crate) use mj_controller::signing_key::{COOKIE_KEY_BYTES, generate_cookie_key};
-pub use mj_controller::signing_key::{
+pub use mj_session_runtime::wait_policy::ViewerLifecycleCategory;
+pub(crate) use mj_targets::signing_key::{COOKIE_KEY_BYTES, generate_cookie_key};
+pub use mj_targets::signing_key::{
     cookie_key_path, install_rustls_crypto_provider, load_or_create_cookie_key,
 };
-pub use mj_controller::wait_policy::ViewerLifecycleCategory;
 mod assets;
 use assets::*;
 mod config_view;

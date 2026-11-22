@@ -24,7 +24,7 @@ pub(super) use feed::SubagentFeed;
 mod handback_tests;
 mod replies;
 
-use crate::subagent_mcp::DaemonContact;
+use mj_worker_mcp::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
@@ -832,7 +832,7 @@ pub(super) fn configure_codex_profile(
     environment: &mut BTreeMap<String, String>,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
-    options: crate::subagent_mcp::ParentTools,
+    options: mj_worker_mcp::subagent_mcp::ParentTools,
     review_tools: bool,
     managed_subagent: bool,
 ) -> Result<bool> {
@@ -1003,7 +1003,7 @@ impl Default for SocketAdmission {
 
 /// How much sooner than the MCP server gives up this worker answers a request.
 /// The MCP server waits
-/// [`crate::subagent_mcp::REPLY_TIMEOUT`]; answering first lets it tell the
+/// [`mj_worker_mcp::subagent_mcp::REPLY_TIMEOUT`]; answering first lets it tell the
 /// model what this worker knows (whether the daemon has picked the request up)
 /// instead of only that nothing came back (#1197).
 const WORKER_REPLY_MARGIN: Duration = Duration::from_secs(10);
@@ -3211,7 +3211,7 @@ enabled = false
                 .unwrap();
             served.await.unwrap();
             assert!(
-                started.elapsed() < crate::subagent_mcp::REPLY_TIMEOUT,
+                started.elapsed() < mj_worker_mcp::subagent_mcp::REPLY_TIMEOUT,
                 "the worker must answer before the MCP server gives up, took {:?}",
                 started.elapsed()
             );
@@ -3363,7 +3363,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         return write_reply(&mut write, body).await;
     };
     let request_id = request.request_id.clone();
-    let deadline_budget = crate::subagent_mcp::REPLY_TIMEOUT - WORKER_REPLY_MARGIN;
+    let deadline_budget = mj_worker_mcp::subagent_mcp::REPLY_TIMEOUT - WORKER_REPLY_MARGIN;
     let queued_input = match &request.action {
         mj_core::subagent::SubagentToolAction::SendInput { child_session_id, .. } => {
             Some(SubagentToolResult {

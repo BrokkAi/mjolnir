@@ -276,12 +276,12 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
     );
 }
 
-fn error_event(seq: u64) -> mj_controller::database::ApiEvent {
-    mj_controller::database::ApiEvent {
+fn error_event(seq: u64) -> mj_store::database::ApiEvent {
+    mj_store::database::ApiEvent {
         seq,
         session_id: "session-1".into(),
         recorded_at_ms: 10,
-        event: mj_controller::database::ApiEventData::SessionFault {
+        event: mj_store::database::ApiEventData::SessionFault {
             reason: mj_core::event_outcome::OutcomeReason::StartupFailed,
             message: "test failure".into(),
             command_id: None,
@@ -603,27 +603,22 @@ async fn a_message_without_a_sender_is_submitted_as_the_users_prompt() {
 async fn external_event_same_key_retries_ignore_creation_time() {
     if std::env::var_os(MAILBOX_EVENT_RETRY_CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(
-                module_path!(),
-                "external_event_same_key_retries_ignore_creation_time",
-            ),
-        )
+        mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+            module_path!(),
+            "external_event_same_key_retries_ignore_creation_time",
+        ))
         .env(MAILBOX_EVENT_RETRY_CHILD, "1")
         .isolated_store(root.path())
         .run();
         return;
     }
 
-    let writer = mj_controller::database::install_isolated_test_writer();
-    let mut target = mj_controller::database::test_session("session-1", "project");
+    let writer = mj_store::database::install_isolated_test_writer();
+    let mut target = mj_store::database::test_session("session-1", "project");
     target.no_github_events = true;
-    mj_controller::database::save_session(&target).unwrap();
-    mj_controller::database::save_session(&mj_controller::database::test_session(
-        "session-2",
-        "project",
-    ))
-    .unwrap();
+    mj_store::database::save_session(&target).unwrap();
+    mj_store::database::save_session(&mj_store::database::test_session("session-2", "project"))
+        .unwrap();
     let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let request = |text: &str, wake: bool| {
         bearer(Request::post("/api/v1/sessions/session-1/events"))
@@ -642,7 +637,7 @@ async fn external_event_same_key_retries_ignore_creation_time() {
     assert_eq!(first.status(), StatusCode::ACCEPTED);
     assert!(json_body(first).await["inserted"].as_bool().unwrap());
     let event_key = "api:session-1:retry";
-    let first_row = mj_controller::database::pending_mailbox_events(10)
+    let first_row = mj_store::database::pending_mailbox_events(10)
         .unwrap()
         .into_iter()
         .find(|row| row.event_key == event_key)
@@ -660,7 +655,7 @@ async fn external_event_same_key_retries_ignore_creation_time() {
         .unwrap();
     assert_eq!(retry.status(), StatusCode::ACCEPTED);
     assert!(!json_body(retry).await["inserted"].as_bool().unwrap());
-    let rows = mj_controller::database::pending_mailbox_events(10).unwrap();
+    let rows = mj_store::database::pending_mailbox_events(10).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&rows[0].event_json).unwrap()["created_at_ms"],
@@ -673,7 +668,7 @@ async fn external_event_same_key_retries_ignore_creation_time() {
     }
     let original = serde_json::from_str::<serde_json::Value>(&first_row.event_json).unwrap();
     assert!(
-        mj_controller::database::enqueue_mailbox_event(
+        mj_store::database::enqueue_mailbox_event(
             event_key,
             "session-2",
             &original.to_string(),
@@ -691,24 +686,19 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
     const CHILD: &str = "MJ_API_LEGACY_MAILBOX_ROW_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(
-                module_path!(),
-                "legacy_event_json_remains_readable_in_outbox_rows",
-            ),
-        )
+        mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+            module_path!(),
+            "legacy_event_json_remains_readable_in_outbox_rows",
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();
         return;
     }
 
-    let writer = mj_controller::database::install_isolated_test_writer();
-    mj_controller::database::save_session(&mj_controller::database::test_session(
-        "session-1",
-        "project",
-    ))
-    .unwrap();
+    let writer = mj_store::database::install_isolated_test_writer();
+    mj_store::database::save_session(&mj_store::database::test_session("session-1", "project"))
+        .unwrap();
     let legacy = serde_json::json!({
         "key":"github:acme/repo#12:comment:3",
         "source":"github",
@@ -717,7 +707,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
         "created_at_ms":42
     });
     assert!(
-        mj_controller::database::enqueue_mailbox_event(
+        mj_store::database::enqueue_mailbox_event(
             "github:acme/repo#12:comment:3",
             "session-1",
             &legacy.to_string(),
@@ -727,7 +717,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
         .unwrap()
         .inserted()
     );
-    let row = mj_controller::database::pending_mailbox_events(10)
+    let row = mj_store::database::pending_mailbox_events(10)
         .unwrap()
         .into_iter()
         .next()
@@ -740,7 +730,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
         }
     );
     assert!(
-        !mj_controller::database::enqueue_mailbox_event(
+        !mj_store::database::enqueue_mailbox_event(
             &event.key,
             &row.target_session_id,
             &serde_json::to_string(&event).unwrap(),
@@ -1050,11 +1040,11 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
         .events
         .lock()
         .unwrap()
-        .push(mj_controller::database::ApiEvent {
+        .push(mj_store::database::ApiEvent {
             seq: 4,
             session_id: "session-1".into(),
             recorded_at_ms: 10,
-            event: mj_controller::database::ApiEventData::InputRequired {
+            event: mj_store::database::ApiEventData::InputRequired {
                 request: Some(permission_request()),
                 turn_id: None,
             },
@@ -1105,7 +1095,7 @@ async fn event_stream_slow_readers_do_not_block_requests_or_shutdown() {
     let backend = Arc::new(FakeBackend::default());
     backend.events.lock().unwrap().extend((1..=200).map(|seq| {
         let mut event = error_event(seq);
-        event.event = mj_controller::database::ApiEventData::SessionFault {
+        event.event = mj_store::database::ApiEventData::SessionFault {
             reason: mj_core::event_outcome::OutcomeReason::StartupFailed,
             message: "x".repeat(8192),
             command_id: None,
@@ -1388,7 +1378,7 @@ struct FakeBackend {
     file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
     file_write_root: Option<PathBuf>,
     abort_upload_after_read_starts: bool,
-    events: Mutex<Vec<mj_controller::database::ApiEvent>>,
+    events: Mutex<Vec<mj_store::database::ApiEvent>>,
     /// What the live session actor reports, when this fake has one. The
     /// controller snapshot deliberately disagrees with it in the tests that
     /// set this, which is the lag a configuration change has to survive.
@@ -1396,8 +1386,8 @@ struct FakeBackend {
     shutdown: tokio_util::sync::CancellationToken,
     /// This server's own upgrade admission, so a test can close it without
     /// closing the process-wide gate every other test shares.
-    upgrade_gate: Arc<mj_controller::upgrade::Gate>,
-    event_queries: Mutex<Vec<(mj_controller::database::ApiEventFilter, Option<u64>)>>,
+    upgrade_gate: Arc<mj_store::upgrade::Gate>,
+    event_queries: Mutex<Vec<(mj_store::database::ApiEventFilter, Option<u64>)>>,
     /// Sub-agent children that have handed back their reports.
     handed_back: BTreeSet<String>,
     /// How often `turn_state` read the store.
@@ -1485,9 +1475,9 @@ impl SubagentBackend for FakeBackend {
     }
     fn events(
         &self,
-        filter: mj_controller::database::ApiEventFilter,
+        filter: mj_store::database::ApiEventFilter,
         after_seq: Option<u64>,
-    ) -> BoxFuture<'_, AnyResult<mj_controller::database::ApiEventPage>> {
+    ) -> BoxFuture<'_, AnyResult<mj_store::database::ApiEventPage>> {
         Box::pin(async move {
             self.event_queries
                 .lock()
@@ -1508,7 +1498,7 @@ impl SubagentBackend for FakeBackend {
                 .take(200)
                 .cloned()
                 .collect();
-            Ok(mj_controller::database::ApiEventPage {
+            Ok(mj_store::database::ApiEventPage {
                 next_after_seq: page.last().map_or(latest_seq.max(cursor), |e| e.seq),
                 latest_seq,
                 events: page,
@@ -1670,7 +1660,7 @@ impl SubagentBackend for FakeBackend {
     }
     fn start_subagent(
         &self,
-        request: mj_controller::controller::RegisterSubagentRequest,
+        request: mj_session_types::RegisterSubagentRequest,
     ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move {
             Ok(mj_core::subagent::SubagentRecord {
@@ -2807,7 +2797,7 @@ fn model_candidate_with_efforts(
             monthly_price_usd: None,
             refreshed_at_epoch_seconds: 0,
             paid_credits: None,
-            windows: vec![mj_controller::quota::QuotaWindow {
+            windows: vec![mj_accounts::quota::QuotaWindow {
                 label: "Week".into(),
                 remaining_percent: Some(remaining_percent),
                 duration_seconds: None,
@@ -5809,6 +5799,22 @@ async fn streaming_file_upload_handles_200_mib_bounded_rss_and_truncation_safety
     use std::io::Read as _;
 
     let workspace = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        // VmRSS measures the whole process, including any other tests running in it.
+        const CHILD: &str = "MJ_TEST_STREAMING_UPLOAD_RSS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            use mj_targets::test_isolation::{IsolatedTest, test_name};
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "streaming_file_upload_handles_200_mib_bounded_rss_and_truncation_safety",
+            ))
+            .env(CHILD, "1")
+            .isolated_store(workspace.path())
+            .run();
+            return;
+        }
+    }
     let backend = Arc::new(FakeBackend {
         file_write_root: Some(workspace.path().to_path_buf()),
         ..FakeBackend::default()
@@ -7309,7 +7315,7 @@ async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_m
 }
 
 fn missing_target_access_error() -> ExportError {
-    let record = mj_controller::controller::test_support::checkpoint_test_session("session-1");
+    let record = mj_store::database::test_fixtures::checkpoint_test_session("session-1");
     ExportError::Failed(
         record
             .target_runtime_settings(&mj_core::config::Config::default())
@@ -7963,21 +7969,19 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
     const MARKER: &str = "MJ_TEST_REVIEWER_LIST_API";
     if std::env::var_os(MARKER).is_none() {
         let root = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(
-                module_path!(),
-                "the_subagent_list_api_excludes_reviewer_children",
-            ),
-        )
+        mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+            module_path!(),
+            "the_subagent_list_api_excludes_reviewer_children",
+        ))
         .env(MARKER, "1")
         .isolated_store(root.path())
         .run();
         return;
     }
-    let _writer = mj_controller::database::install_isolated_test_writer();
-    let parent = mj_controller::controller::test_support::checkpoint_test_session("session-1");
-    let child = mj_controller::controller::test_support::checkpoint_test_session("review-child");
-    mj_controller::database::save_session(&parent).unwrap();
+    let _writer = mj_store::database::install_isolated_test_writer();
+    let parent = mj_store::database::test_fixtures::checkpoint_test_session("session-1");
+    let child = mj_store::database::test_fixtures::checkpoint_test_session("review-child");
+    mj_store::database::save_session(&parent).unwrap();
     let relation = mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: None,
@@ -7996,7 +8000,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         handback_tool: true,
         supervisor: false,
     };
-    mj_controller::database::save_subagent_session(&child, &relation).unwrap();
+    mj_store::database::save_subagent_session(&child, &relation).unwrap();
     let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
         .oneshot(
@@ -8018,24 +8022,22 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
     const MARKER: &str = "MJ_TEST_FINISHED_REVIEW_API";
     if std::env::var_os(MARKER).is_none() {
         let root = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(
-                module_path!(),
-                "finished_review_api_returns_reviewer_output_after_the_child_is_gone",
-            ),
-        )
+        mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+            module_path!(),
+            "finished_review_api_returns_reviewer_output_after_the_child_is_gone",
+        ))
         .env(MARKER, "1")
         .isolated_store(root.path())
         .run();
         return;
     }
-    let _writer = mj_controller::database::install_isolated_test_writer();
-    let parent = mj_controller::controller::test_support::checkpoint_test_session("session-1");
-    let child = mj_controller::controller::test_support::checkpoint_test_session("review-child-1");
-    mj_controller::database::save_session(&parent).unwrap();
-    mj_controller::database::save_session(&child).unwrap();
-    let database = mj_controller::database::database_path();
-    mj_controller::database::record_subagent_handback(
+    let _writer = mj_store::database::install_isolated_test_writer();
+    let parent = mj_store::database::test_fixtures::checkpoint_test_session("session-1");
+    let child = mj_store::database::test_fixtures::checkpoint_test_session("review-child-1");
+    mj_store::database::save_session(&parent).unwrap();
+    mj_store::database::save_session(&child).unwrap();
+    let database = mj_store::database::database_path();
+    mj_store::database::record_subagent_handback(
         &child.id,
         &mj_core::subagent::SubagentHandback {
             command_id: "review-prompt".into(),
@@ -8089,17 +8091,17 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
         }],
         ..Default::default()
     };
-    mj_controller::database::save_reviewer_outcome(
+    mj_store::database::save_reviewer_outcome(
         &parent.id,
         &state,
-        vec![mj_controller::database::AcceptedReport {
+        vec![mj_store::database::AcceptedReport {
             review_id: "api-review".into(),
             role: "reviewer-1".into(),
             text: "The parser drops queued input.".into(),
         }],
     )
     .unwrap();
-    mj_controller::database::close_turn_review_state(
+    mj_store::database::close_turn_review_state(
         &parent.id,
         "api-review",
         &mj_core::storage::TurnReviewState {
@@ -8109,7 +8111,7 @@ async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
         mj_core::storage::FinishedReviewResolution::Completed,
     )
     .unwrap();
-    mj_controller::database::delete_session(&child.id).unwrap();
+    mj_store::database::delete_session(&child.id).unwrap();
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection
         .execute("DELETE FROM subagent_sessions", [])

@@ -170,8 +170,8 @@ fn canonical_hooks_directory(directory: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::capture::push_tests::{commit, repository};
-    use crate::test_support::git;
+    use crate::capture::push_tests::{commit, repository};
+    use crate::tests::git;
     use mj_checkpoint::archive::{
         GitCommand, GitOutput, SystemGit, record_overridden_tree, record_reviewed_tree,
     };

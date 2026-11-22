@@ -23,9 +23,11 @@ workspace = true
 
 [dependencies]
 mj-core.workspace = true
+mj-harness-install.workspace = true
 mj-build-id.workspace = true
 mj-checkpoint.workspace = true
 mj-worker.workspace = true
+mj-worker-mcp.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 libc.workspace = true
@@ -34,6 +36,9 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mj-microvm.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 mimalloc = "0.1"

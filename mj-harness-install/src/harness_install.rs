@@ -8,16 +8,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::config::{ExecutionPolicy, HarnessKind};
-use crate::file_lock::FileLock;
-use crate::harness_runtime::{
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use mj_core::config::{ExecutionPolicy, HarnessKind};
+use mj_core::file_lock::FileLock;
+use mj_core::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
     NODE_VERSION, harness_uses_node_runtime, managed_harness_cache_root,
     managed_harness_install_dir, managed_harness_manifest_matches, managed_node_cache_root,
     npm_bridge, pin,
 };
-use crate::worker_launch::HarnessRuntimePolicy;
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use mj_core::worker_launch::HarnessRuntimePolicy;
 
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -99,7 +99,7 @@ pub fn spawn_gc_on(
         loop {
             interval.tick().await;
             let root = root.clone();
-            let result = crate::runtime::spawn_blocking(move || {
+            let result = mj_core::runtime::spawn_blocking(move || {
                 collect_obsolete_installs(&root.join(harness.id()), pin(harness).install_id)
             })
             .await;
@@ -168,7 +168,7 @@ impl Located {
 /// login environment, while interactive login callers pass their terminal
 /// environment. This function never starts a login shell. `command` and `args`
 /// are the launch the controller described. A command
-/// that is not Mjolnir's built-in launch ([`crate::harness_runtime::fallback_launch`]
+/// that is not Mjolnir's built-in launch ([`mj_core::harness_runtime::fallback_launch`]
 /// or a bare npm bridge name) is the profile's own and is kept as given.
 ///
 /// - [`HarnessRuntimePolicy::Managed`] runs the managed installation.
@@ -187,7 +187,7 @@ pub async fn locate(
 ) -> Result<Located> {
     let bridge = npm_bridge(harness).filter(|bridge| bridge.matches_launcher(command, args));
     let built_in = bridge.is_some()
-        || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
+        || mj_core::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
     if harness == HarnessKind::Antigravity && !built_in {
         return Ok(Located::unchosen(command, args));
     }
@@ -238,7 +238,7 @@ pub async fn locate(
                 );
             } else {
                 let search = environment.clone();
-                let available = crate::runtime::spawn_blocking(move || {
+                let available = mj_core::runtime::spawn_blocking(move || {
                     target_native_harness_is_available(harness, &search)
                 })
                 .await
@@ -282,12 +282,12 @@ async fn antigravity_matches_pin(
         .env_clear()
         .envs(environment)
         .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
-    let output = crate::subprocess::capture(&mut command)
+    let output = mj_core::subprocess::capture(&mut command)
         .await
         .context("check target agy version")?;
     Ok(output.status.success()
         && String::from_utf8_lossy(&output.stdout).trim()
-            == crate::harness_runtime::ANTIGRAVITY_VERSION)
+            == mj_core::harness_runtime::ANTIGRAVITY_VERSION)
 }
 
 /// The image's own programs for `harness`, by the names the agent-dev image
@@ -320,7 +320,7 @@ async fn locate_in_image(
     };
     let search = environment.clone();
     let names = [bridge_name, entry_name, cli_name];
-    let found = crate::runtime::spawn_blocking(move || {
+    let found = mj_core::runtime::spawn_blocking(move || {
         names
             .iter()
             .map(|name| find_command(Path::new(name), &search))
@@ -356,7 +356,7 @@ async fn locate_in_image(
                 "-c".to_owned(),
                 format!(
                     "opencode=\"$1\"; {}",
-                    crate::harness_runtime::opencode_acp_script()
+                    mj_core::harness_runtime::opencode_acp_script()
                 ),
                 "mj-opencode".to_owned(),
                 bridge.to_string_lossy().into_owned(),
@@ -365,24 +365,25 @@ async fn locate_in_image(
         HarnessKind::Dsh => {
             let mut probe = tokio::process::Command::new(&bridge);
             probe.arg("--version").env_clear().envs(environment);
-            let output = crate::subprocess::run_bounded(&mut probe, 4096, HARNESS_COMMAND_TIMEOUT)
-                .await
-                .context("check the image's dsh-acp version")?;
+            let output =
+                mj_core::subprocess::run_bounded(&mut probe, 4096, HARNESS_COMMAND_TIMEOUT)
+                    .await
+                    .context("check the image's dsh-acp version")?;
             let reported = String::from_utf8_lossy(&output.stdout);
             ensure!(
                 output.status.success()
-                    && crate::harness_runtime::dsh_acp_version_supports_native_instructions(
+                    && mj_core::harness_runtime::dsh_acp_version_supports_native_instructions(
                         &reported
                     ),
                 "the daemon's image carries {}, which cannot load AGENTS.md; it needs dsh-acp {} or newer",
                 reported.trim(),
-                crate::harness_runtime::DSH_ACP_VERSION
+                mj_core::harness_runtime::DSH_ACP_VERSION
             );
             (
                 PathBuf::from("sh"),
                 vec![
                     "-c".to_owned(),
-                    crate::harness_runtime::dsh_acp_script(),
+                    mj_core::harness_runtime::dsh_acp_script(),
                     "mj-dsh".to_owned(),
                     bridge.to_string_lossy().into_owned(),
                 ],
@@ -392,7 +393,7 @@ async fn locate_in_image(
             ensure!(
                 antigravity_matches_pin(&bridge, environment).await?,
                 "the daemon's image must provide agy {}; use an agent-dev image of this release",
-                crate::harness_runtime::ANTIGRAVITY_VERSION
+                mj_core::harness_runtime::ANTIGRAVITY_VERSION
             );
             (
                 bridge,
@@ -422,12 +423,12 @@ async fn locate_in_image(
 /// and Claude, the pinned version their worker-side protocol handling requires.
 async fn compatible_bridge(
     harness: HarnessKind,
-    bridge: crate::harness_runtime::NpmBridge,
+    bridge: mj_core::harness_runtime::NpmBridge,
     environment: &BTreeMap<String, String>,
 ) -> Result<Option<PathBuf>> {
     let search = environment.clone();
     let selected =
-        crate::runtime::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
+        mj_core::runtime::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
             .await
             .context("find target bridge task failed")??;
     let Some(selected) = selected else {
@@ -441,7 +442,7 @@ async fn compatible_bridge(
     if let Some(home) = environment.get("HOME") {
         probe.current_dir(home);
     }
-    let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
+    let output = mj_core::subprocess::run_bounded(&mut probe, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .with_context(|| format!("check installed {} bridge version", harness.display_name()))?;
     let expected = if harness == HarnessKind::Claude {
@@ -699,7 +700,7 @@ async fn resolve_at_async(
                 "-c".to_owned(),
                 format!(
                     "opencode=\"$1\"; {}",
-                    crate::harness_runtime::opencode_acp_script()
+                    mj_core::harness_runtime::opencode_acp_script()
                 ),
                 "mj-opencode".to_owned(),
                 install
@@ -729,10 +730,10 @@ async fn resolve_at_async(
 
 async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> {
     let started = Instant::now();
-    let cancellation = crate::subprocess::preparation_cancellation();
+    let cancellation = mj_core::subprocess::preparation_cancellation();
     loop {
         if cancellation.is_cancelled() {
-            return Err(crate::subprocess::PreparationCancelled.into());
+            return Err(mj_core::subprocess::PreparationCancelled.into());
         }
         let result = if shared {
             file.try_lock_shared()
@@ -754,7 +755,7 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(25)) => {},
-            _ = cancellation.cancelled() => return Err(crate::subprocess::PreparationCancelled.into()),
+            _ = cancellation.cancelled() => return Err(mj_core::subprocess::PreparationCancelled.into()),
         }
     }
 }
@@ -857,7 +858,7 @@ async fn install_into(
     let body = serde_json::to_vec_pretty(&manifest)?;
     // The receipt goes in before the rename: a published directory is always
     // complete, so nothing can observe or collect a half-installed tree.
-    crate::config::atomic_write(&staging.path().join(MANIFEST_FILE), &body)?;
+    mj_core::config::atomic_write(&staging.path().join(MANIFEST_FILE), &body)?;
     let staging_path = staging.keep();
     match std::fs::rename(&staging_path, final_path) {
         Ok(()) => validate_entrypoint(final_path, selected, harness)
@@ -950,9 +951,10 @@ async fn verify_install_scripts_ran(
         .current_dir(staging)
         .env_clear()
         .envs(environment);
-    let output = crate::subprocess::run_bounded(&mut command, 1024 * 1024, HARNESS_COMMAND_TIMEOUT)
-        .await
-        .context("read managed harness install-script status")?;
+    let output =
+        mj_core::subprocess::run_bounded(&mut command, 1024 * 1024, HARNESS_COMMAND_TIMEOUT)
+            .await
+            .context("read managed harness install-script status")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -973,7 +975,7 @@ async fn verify_install_scripts_ran(
     bail!(
         "managed {} harness install skipped install scripts for {}. npm gates dependency install \
          scripts, so add each package to allowScripts in \
-         mj-core/assets/harnesses/{}/package.json and reinstall.",
+         mj-harness-install/assets/harnesses/{}/package.json and reinstall.",
         harness.display_name(),
         pending.join(", "),
         harness.id()
@@ -1022,7 +1024,7 @@ async fn install_antigravity_from_metadata(
     metadata: &serde_json::Value,
 ) -> Result<()> {
     ensure!(
-        metadata["version"] == crate::harness_runtime::ANTIGRAVITY_VERSION,
+        metadata["version"] == mj_core::harness_runtime::ANTIGRAVITY_VERSION,
         "Antigravity download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
@@ -1041,8 +1043,8 @@ async fn install_antigravity_from_metadata(
     let executable = bin.join("agy");
     let archive_for_extract = archive.clone();
     let output = executable.clone();
-    let cancellation = crate::subprocess::preparation_cancellation();
-    crate::runtime::spawn_blocking(move || {
+    let cancellation = mj_core::subprocess::preparation_cancellation();
+    mj_core::runtime::spawn_blocking(move || {
         extract_archive_file(
             &archive_for_extract,
             Path::new("antigravity"),
@@ -1064,7 +1066,7 @@ async fn install_antigravity_from_metadata(
 /// carries the adapter only; the `muse` executable it drives keeps its own
 /// verified download.
 async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use crate::harness_runtime::MUSE_VERSION;
+    use mj_core::harness_runtime::MUSE_VERSION;
     let metadata: serde_json::Value =
         serde_json::from_str(include_str!("../assets/muse/runtime.json"))?;
     anyhow::ensure!(
@@ -1098,7 +1100,7 @@ async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, Stri
 /// `@opencode/cli-<target>` tarball holds the executable at
 /// `package/bin/opencode`.
 async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use crate::harness_runtime::OPENCODE_VERSION;
+    use mj_core::harness_runtime::OPENCODE_VERSION;
     let metadata: serde_json::Value =
         serde_json::from_str(include_str!("../assets/opencode/runtime.json"))?;
     anyhow::ensure!(
@@ -1122,8 +1124,8 @@ async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>
     let entrypoint = staging.join("opencode");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
-    let cancellation = crate::subprocess::preparation_cancellation();
-    crate::runtime::spawn_blocking(move || {
+    let cancellation = mj_core::subprocess::preparation_cancellation();
+    mj_core::runtime::spawn_blocking(move || {
         extract_archive_file(
             &archive_for_extract,
             Path::new("package/bin/opencode"),
@@ -1159,8 +1161,10 @@ fn extract_archive_file(
         .with_context(|| format!("read archive {}", archive_name.display()))?
     {
         if cancellation.is_cancelled() {
-            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
-                .context("while extracting"));
+            return Err(
+                anyhow::Error::from(mj_core::subprocess::PreparationCancelled)
+                    .context("while extracting"),
+            );
         }
         let mut entry =
             entry.with_context(|| format!("read archive {}", archive_name.display()))?;
@@ -1193,9 +1197,9 @@ async fn download_verified_async(
     expected: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let cancellation = crate::subprocess::preparation_cancellation();
+    let cancellation = mj_core::subprocess::preparation_cancellation();
     if cancellation.is_cancelled() {
-        return Err(crate::subprocess::PreparationCancelled.into());
+        return Err(mj_core::subprocess::PreparationCancelled.into());
     }
     let work = async {
         download_verified_inner(url, destination, environment).await?;
@@ -1203,7 +1207,7 @@ async fn download_verified_async(
         // which also serve the daemon's clients. It only reads, so a
         // cancellation that abandons it is safe.
         let path = destination.to_owned();
-        let actual = crate::runtime::spawn_blocking(move || crate::hex::file_sha256(&path))
+        let actual = mj_core::runtime::spawn_blocking(move || mj_core::hex::file_sha256(&path))
             .await
             .context("hash downloaded artifact task failed")??;
         anyhow::ensure!(
@@ -1215,7 +1219,7 @@ async fn download_verified_async(
     };
     let result = tokio::select! {
         result = work => result,
-        _ = cancellation.cancelled() => Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)),
+        _ = cancellation.cancelled() => Err(anyhow::Error::from(mj_core::subprocess::PreparationCancelled)),
     };
     if result.is_err() {
         let _ = std::fs::remove_file(destination);
@@ -1359,7 +1363,7 @@ pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Resu
         "managed mise installer",
     )
     .await?;
-    let install = root.join(crate::harness_runtime::MISE_VERSION);
+    let install = root.join(mj_core::harness_runtime::MISE_VERSION);
     let executable = install.join("mise");
     if entrypoint_is_executable(&executable) {
         return Ok(executable);
@@ -1466,8 +1470,8 @@ async fn install_managed_node(
         download_verified_async(&url, &archive, field("sha256")?, environment).await?;
         let staging_root = staging.path().to_path_buf();
         let folder_for_extract = folder.clone();
-        let cancellation = crate::subprocess::preparation_cancellation();
-        crate::runtime::spawn_blocking(move || {
+        let cancellation = mj_core::subprocess::preparation_cancellation();
+        mj_core::runtime::spawn_blocking(move || {
             extract_node_archive(&archive, &staging_root, &folder_for_extract, &cancellation)
         })
         .await
@@ -1700,7 +1704,7 @@ async fn managed_node_health(
         Err(error) => {
             // A probe cut short by cancellation says nothing about the
             // install, which the caller would otherwise remove.
-            if crate::subprocess::is_preparation_cancelled(&error) {
+            if mj_core::subprocess::is_preparation_cancelled(&error) {
                 return Err(error);
             }
             return Ok(ManagedNodeHealth::Unusable(format!(
@@ -1727,7 +1731,7 @@ async fn managed_node_health(
         let output = match bounded_env_output(&mut command, &probe_environment).await {
             Ok(output) => output,
             Err(error) => {
-                if crate::subprocess::is_preparation_cancelled(&error) {
+                if mj_core::subprocess::is_preparation_cancelled(&error) {
                     return Err(error);
                 }
                 return Ok(ManagedNodeHealth::Unusable(format!(
@@ -1750,7 +1754,7 @@ async fn bounded_env_output(
     environment: &BTreeMap<String, String>,
 ) -> Result<std::process::Output> {
     command.env_clear().envs(environment);
-    crate::subprocess::run_bounded(command, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
+    mj_core::subprocess::run_bounded(command, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .context("probe Node.js runtime")
 }
@@ -1840,8 +1844,10 @@ fn extract_node_archive(
         #[cfg(not(test))]
         let _ = index;
         if cancellation.is_cancelled() {
-            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
-                .context("while extracting"));
+            return Err(
+                anyhow::Error::from(mj_core::subprocess::PreparationCancelled)
+                    .context("while extracting"),
+            );
         }
         let mut entry = entry.context("read Node.js archive entry")?;
         if entry.header().entry_type() == tar::EntryType::Directory {
@@ -1949,8 +1955,8 @@ async fn install_grok_from_metadata(
     let entrypoint = bin.join("grok");
     let archive_for_extract = archive.clone();
     let entrypoint_for_extract = entrypoint.clone();
-    let cancellation = crate::subprocess::preparation_cancellation();
-    crate::runtime::spawn_blocking(move || {
+    let cancellation = mj_core::subprocess::preparation_cancellation();
+    mj_core::runtime::spawn_blocking(move || {
         extract_zstd_file(&archive_for_extract, &entrypoint_for_extract, &cancellation)
     })
     .await
@@ -1979,8 +1985,10 @@ fn extract_zstd_file(
     let mut chunk = vec![0_u8; 1 << 20];
     loop {
         if cancellation.is_cancelled() {
-            return Err(anyhow::Error::from(crate::subprocess::PreparationCancelled)
-                .context("while extracting"));
+            return Err(
+                anyhow::Error::from(mj_core::subprocess::PreparationCancelled)
+                    .context("while extracting"),
+            );
         }
         let count = std::io::Read::read(&mut decoder, &mut chunk)
             .with_context(|| format!("read Grok archive {}", archive.display()))?;
@@ -2036,7 +2044,7 @@ async fn run_bounded_checked(
     operation: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let output = crate::subprocess::run_bounded(command, 4 * 1024 * 1024, timeout)
+    let output = mj_core::subprocess::run_bounded(command, 4 * 1024 * 1024, timeout)
         .await
         .with_context(|| operation.to_owned())?;
     if output.status.success() {
@@ -2092,7 +2100,7 @@ fn apply_environment(command: &mut Command, environment: &BTreeMap<String, Strin
 #[cfg(test)]
 fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
     let output =
-        crate::subprocess::run_with_input(command, &[]).with_context(|| operation.to_owned())?;
+        mj_core::subprocess::run_with_input(command, &[]).with_context(|| operation.to_owned())?;
     if output.status.success() {
         Ok(())
     } else {
@@ -2268,7 +2276,7 @@ mod tests {
         let mut metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/kimi/runtime.json")).unwrap();
         metadata["platforms"][current_node_platform()]["sha256"] =
-            serde_json::Value::String(crate::hex::file_sha256(&fixture).unwrap());
+            serde_json::Value::String(mj_core::hex::file_sha256(&fixture).unwrap());
         let environment =
             BTreeMap::from([("MJ_TEST_KIMI_ARTIFACT_BASE".to_owned(), server.url.clone())]);
         let staging = temp.path().join("staging");
@@ -2287,7 +2295,8 @@ mod tests {
         let launcher = staging.join("bin/kimi");
         assert!(entrypoint_is_executable(&launcher));
         let output =
-            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&launcher), &[]).unwrap();
+            mj_core::subprocess::run_with_input(Command::new("/bin/sh").arg(&launcher), &[])
+                .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"kimi-fixture\n");
     }
@@ -2306,7 +2315,7 @@ mod tests {
         let mut metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/grok/runtime.json")).unwrap();
         metadata["platforms"][current_node_platform()]["sha256"] =
-            serde_json::Value::String(crate::hex::file_sha256(&fixture).unwrap());
+            serde_json::Value::String(mj_core::hex::file_sha256(&fixture).unwrap());
         let environment =
             BTreeMap::from([("MJ_TEST_GROK_ARTIFACT_BASE".to_owned(), server.url.clone())]);
         let staging = temp.path().join("staging");
@@ -2333,7 +2342,8 @@ mod tests {
             }
             assert!(entrypoint_is_executable(&path));
             let output =
-                crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&path), &[]).unwrap();
+                mj_core::subprocess::run_with_input(Command::new("/bin/sh").arg(&path), &[])
+                    .unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, b"grok-fixture\n");
         }
@@ -2362,7 +2372,7 @@ mod tests {
             serde_json::from_str(include_str!("../assets/antigravity/runtime.json")).unwrap();
         metadata["platforms"][current_node_platform()]["url"] = server.url.clone().into();
         metadata["platforms"][current_node_platform()]["sha256"] =
-            crate::hex::file_sha256(&archive).unwrap().into();
+            mj_core::hex::file_sha256(&archive).unwrap().into();
         let staging = temp.path().join("install");
         std::fs::create_dir(&staging).unwrap();
         run_async(install_antigravity_from_metadata(
@@ -2376,7 +2386,7 @@ mod tests {
         let entrypoint = staging.join("bin/agy");
         assert!(entrypoint_is_executable(&entrypoint));
         let output =
-            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&entrypoint), &[])
+            mj_core::subprocess::run_with_input(Command::new("/bin/sh").arg(&entrypoint), &[])
                 .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"agy-fixture\n");
@@ -2426,7 +2436,7 @@ mod tests {
         ]);
         let policy = ExecutionPolicy::Unconstrained;
         let (command, args) =
-            crate::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+            mj_core::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
         let resolve = |runtime| {
             run_async(locate(
                 runtime,
@@ -2460,7 +2470,7 @@ mod tests {
             &ambient,
             format!(
                 "#!/bin/sh\n[ \"$AGY_CLI_DISABLE_AUTO_UPDATE\" = true ] || exit 23\necho {}\n",
-                crate::harness_runtime::ANTIGRAVITY_VERSION
+                mj_core::harness_runtime::ANTIGRAVITY_VERSION
             ),
         )
         .unwrap();
@@ -2517,7 +2527,7 @@ mod tests {
         ]);
         let policy = ExecutionPolicy::ConfiguredApprovals;
         let (command, args) =
-            crate::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+            mj_core::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
         let resolve = || {
             locate(
                 HarnessRuntimePolicy::Managed,
@@ -2534,11 +2544,11 @@ mod tests {
         assert_eq!(first.command, second.command);
         let mut probe = tokio::process::Command::new(&first.command);
         probe.arg("--version").envs(&first.environment);
-        let output = crate::subprocess::capture(&mut probe).await.unwrap();
+        let output = mj_core::subprocess::capture(&mut probe).await.unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
-            crate::harness_runtime::ANTIGRAVITY_VERSION
+            mj_core::harness_runtime::ANTIGRAVITY_VERSION
         );
         let managed = first.managed.as_ref().unwrap();
         let root = managed.cache_root.join("antigravity");
@@ -2669,7 +2679,7 @@ mod tests {
 
     #[test]
     fn kimi_pin_matches_runtime_metadata() {
-        use crate::harness_runtime::KIMI_VERSION;
+        use mj_core::harness_runtime::KIMI_VERSION;
 
         let metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/kimi/runtime.json"))
@@ -2680,7 +2690,7 @@ mod tests {
 
     #[test]
     fn grok_pin_matches_runtime_metadata() {
-        use crate::harness_runtime::GROK_VERSION;
+        use mj_core::harness_runtime::GROK_VERSION;
 
         let metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/grok/runtime.json"))
@@ -2771,12 +2781,12 @@ mod tests {
 
     #[test]
     fn muse_pin_matches_runtime_metadata() {
-        use crate::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
+        use mj_core::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
         let metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/muse/runtime.json"))
                 .expect("parse Muse runtime metadata");
         assert_eq!(metadata["muse_version"], MUSE_VERSION);
-        let bridge = crate::harness_runtime::npm_bridge(HarnessKind::Muse)
+        let bridge = mj_core::harness_runtime::npm_bridge(HarnessKind::Muse)
             .expect("Muse installs its adapter from npm");
         assert_eq!(bridge.package, MUSE_ACP_PACKAGE);
         assert_eq!(bridge.version, MUSE_ACP_VERSION);
@@ -2860,7 +2870,7 @@ mod tests {
     fn executable(path: &Path, body: &str) {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
-        crate::test_hooks::install_fake_command(
+        mj_core::test_hooks::install_fake_command(
             parent,
             path.file_name().unwrap().to_str().unwrap(),
             body,
@@ -2875,7 +2885,7 @@ mod tests {
         let body =
             serde_json::to_vec_pretty(&ManagedHarnessManifest::for_install(harness, install_id))
                 .unwrap();
-        crate::config::atomic_write(&install.join(MANIFEST_FILE), &body).unwrap();
+        mj_core::config::atomic_write(&install.join(MANIFEST_FILE), &body).unwrap();
     }
 
     fn fake_node_tools(root: &Path, installs: &Path) -> BTreeMap<String, String> {
@@ -2963,7 +2973,7 @@ mod tests {
                 .unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
-        let digest = crate::hex::file_sha256(&archive).unwrap();
+        let digest = mj_core::hex::file_sha256(&archive).unwrap();
         let mut metadata: serde_json::Value =
             serde_json::from_str(include_str!("../assets/node/runtime.json")).unwrap();
         metadata["platforms"][key]["sha256"] = serde_json::Value::String(digest);
@@ -3028,7 +3038,7 @@ mod tests {
     fn ambient_native_launches_use_target_tools_and_keep_custom_commands() {
         let tools = tempfile::tempdir().unwrap();
         for command in ["kimi", "grok", "opencode"] {
-            crate::test_hooks::install_fake_command(tools.path(), command, "#!/bin/sh\nexit 0\n");
+            mj_core::test_hooks::install_fake_command(tools.path(), command, "#!/bin/sh\nexit 0\n");
         }
         let environment = BTreeMap::from([(
             "PATH".to_owned(),
@@ -3046,7 +3056,7 @@ mod tests {
                 harness.display_name()
             );
             let (command, args) =
-                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+                mj_core::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
             let located = run_async(locate(
                 HarnessRuntimePolicy::Ambient,
                 harness,
@@ -3066,7 +3076,7 @@ mod tests {
                 Vec::new(),
             ),
             {
-                let (command, args) = crate::harness_runtime::fallback_launch(
+                let (command, args) = mj_core::harness_runtime::fallback_launch(
                     HarnessKind::Dsh,
                     ExecutionPolicy::Unconstrained,
                 );
@@ -3119,7 +3129,7 @@ mod tests {
         let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bridge-version.sh");
         std::os::unix::fs::symlink(&probe, &image_bridge).unwrap();
         environment.insert("MJ_TEST_BRIDGE_VERSION".into(), "0.99.0".into());
-        let (command, args) = crate::harness_runtime::fallback_launch(
+        let (command, args) = mj_core::harness_runtime::fallback_launch(
             HarnessKind::Claude,
             ExecutionPolicy::ConfiguredApprovals,
         );
@@ -3181,7 +3191,7 @@ mod tests {
         };
         for harness in HarnessKind::ALL {
             let (command, args) =
-                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+                mj_core::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
             let error = run_async(locate(
                 HarnessRuntimePolicy::Image,
                 harness,
@@ -3201,16 +3211,16 @@ mod tests {
         let versions = [
             (
                 "agy",
-                crate::harness_runtime::ANTIGRAVITY_VERSION.to_owned(),
+                mj_core::harness_runtime::ANTIGRAVITY_VERSION.to_owned(),
             ),
             ("codex-acp", format!("{} {}", codex.package, codex.version)),
             (
                 "claude-agent-acp",
-                crate::harness_runtime::CLAUDE_ACP_VERSION.to_owned(),
+                mj_core::harness_runtime::CLAUDE_ACP_VERSION.to_owned(),
             ),
             (
                 "dsh-acp",
-                format!("dsh-acp {}", crate::harness_runtime::DSH_ACP_VERSION),
+                format!("dsh-acp {}", mj_core::harness_runtime::DSH_ACP_VERSION),
             ),
         ];
         for harness in HarnessKind::ALL {
@@ -3229,7 +3239,7 @@ mod tests {
         }
         for harness in HarnessKind::ALL {
             let (command, args) =
-                crate::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
+                mj_core::harness_runtime::fallback_launch(harness, ExecutionPolicy::Unconstrained);
             let located = run_async(locate(
                 HarnessRuntimePolicy::Image,
                 harness,
@@ -3384,7 +3394,7 @@ mod tests {
         let mut cancelled_environment = environment.clone();
         let error = run_async(async {
             let token = tokio_util::sync::CancellationToken::new();
-            let install = crate::subprocess::with_preparation_cancellation(
+            let install = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
                 install_managed_node(&root, &mut cancelled_environment, &metadata),
             );
@@ -3437,7 +3447,7 @@ mod tests {
 
         let error = run_async(async {
             let token = tokio_util::sync::CancellationToken::new();
-            let call = crate::subprocess::with_preparation_cancellation(
+            let call = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
                 install_managed_node(&root, &mut environment, &metadata),
             );
@@ -3458,7 +3468,7 @@ mod tests {
             }
         });
         assert!(
-            crate::subprocess::is_preparation_cancelled(&error),
+            mj_core::subprocess::is_preparation_cancelled(&error),
             "not a cancellation: {error:#}"
         );
         assert!(
@@ -3523,7 +3533,7 @@ mod tests {
 
         assert_eq!(runtime.path(), install);
         let output =
-            crate::subprocess::run_with_input(&mut Command::new(install.join("bin/node")), &[])
+            mj_core::subprocess::run_with_input(&mut Command::new(install.join("bin/node")), &[])
                 .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, format!("v{NODE_VERSION}\n").as_bytes());
@@ -3691,7 +3701,7 @@ mod tests {
 
         let error = run_async(async {
             let token = tokio_util::sync::CancellationToken::new();
-            let install = crate::subprocess::with_preparation_cancellation(
+            let install = mj_core::subprocess::with_preparation_cancellation(
                 token.clone(),
                 resolve_at_async(
                     &cache,
@@ -3937,7 +3947,7 @@ mod tests {
                     Ok(())
                 });
             }
-            crate::subprocess::run_capturing_stdout(&mut command)
+            mj_core::subprocess::run_capturing_stdout(&mut command)
                 .unwrap()
                 .status
         });

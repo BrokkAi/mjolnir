@@ -127,7 +127,7 @@ pub fn claude_keychain_account() -> String {
     let user = std::env::var("USER")
         .ok()
         .filter(|user| !user.is_empty())
-        .or_else(|| mj_core::login_environment::account_name().ok());
+        .or_else(|| mj_harness_install::login_environment::account_name().ok());
     mj_core::config::claude_keychain_account(user.as_deref())
 }
 

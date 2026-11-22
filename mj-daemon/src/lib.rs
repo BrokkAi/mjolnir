@@ -5,7 +5,6 @@
 mj_core::enable_test_fixtures_on_startup!();
 
 pub mod daemon;
-mod github_watch;
 pub mod pollers;
 pub mod review_host;
 pub use mj_server::server;

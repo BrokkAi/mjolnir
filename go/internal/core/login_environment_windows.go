@@ -1,4 +1,4 @@
-// Port of mj-core/src/login_environment.rs (the Windows discover).
+// Port of mj-harness-install/src/login_environment.rs (the Windows discover).
 
 //go:build windows
 

@@ -436,7 +436,7 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-pub use mj_controller::profile_scheduler::{CandidateQuota, SubagentCandidate, SubagentCandidates};
+pub use mj_accounts::profile_scheduler::{CandidateQuota, SubagentCandidate, SubagentCandidates};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubagentView {
@@ -734,12 +734,12 @@ pub struct TurnState {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
 }
 
-pub use mj_controller::database::TurnSummary;
+pub use mj_store::database::TurnSummary;
 
-pub use mj_controller::database::StartFollowup;
+pub use mj_store::database::StartFollowup;
 
 /// A page of transcript items, read from the durable projection.
-pub use mj_controller::database::TranscriptPage;
+pub use mj_store::database::TranscriptPage;
 
 /// A branch the daemon pushed on the caller's behalf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,7 +838,7 @@ pub struct FinishedReviewQuery {
 pub struct FinishedReviewResponse {
     pub session_id: String,
     #[serde(default)]
-    pub review: Option<mj_controller::database::FinishedReview>,
+    pub review: Option<mj_store::database::FinishedReview>,
 }
 
 // ---------------------------------------------------------------------------

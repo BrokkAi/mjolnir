@@ -31,7 +31,7 @@ reach a real endpoint. Opt-in, like the other tests/e2e scripts:
 The bundle defaults to the managed harness cache entry for the pin in
 mj-core/src/harness_runtime.rs; install it first (any mj session or doctor run
 with the Claude harness does that). The script refuses a bundle whose package
-versions differ from mj-core/assets/harnesses/claude/package.json.
+versions differ from mj-harness-install/assets/harnesses/claude/package.json.
 """
 
 import argparse
@@ -97,7 +97,7 @@ def enter_private_network():
 
 
 def pinned_bundle(explicit):
-    expected = json.loads((REPO / "mj-core/assets/harnesses/claude/package.json").read_text())["dependencies"]
+    expected = json.loads((REPO / "mj-harness-install/assets/harnesses/claude/package.json").read_text())["dependencies"]
     if explicit:
         root = Path(explicit).resolve()
     else:
@@ -311,7 +311,7 @@ class ClaudeCode(Jsonl):
 class Acp(Jsonl):
     def __init__(self, acp, claude, lab, home):
         # Managed launches select the separately pinned Claude Code over the SDK's bundled one
-        # (mj-core/src/harness_install.rs, CLAUDE_CODE_EXECUTABLE).
+        # (mj-harness-install/src/harness_install.rs, CLAUDE_CODE_EXECUTABLE).
         env = {**lab.environment(home), "CLAUDE_CODE_EXECUTABLE": str(claude)}
         super().__init__(["node", str(acp.resolve())], home, env)
         self.ids = 0

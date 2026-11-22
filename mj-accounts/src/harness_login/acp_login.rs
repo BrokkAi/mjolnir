@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mj_core::config::{AuthScheme, HarnessHost, HarnessKind, HarnessProfile};
-use mj_core::harness_install::Located;
 use mj_core::worker_launch::HarnessRuntimePolicy;
+use mj_harness_install::harness_install::Located;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -174,7 +174,7 @@ async fn located_login(profile: &HarnessProfile) -> Result<(Located, BTreeMap<St
     launch_environment.extend(environment.clone());
     let execution_policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
     let (command, args) = mj_core::harness_runtime::fallback_launch(profile.kind, execution_policy);
-    let located = mj_core::harness_install::locate(
+    let located = mj_harness_install::harness_install::locate(
         mj_core::placement::local_harness_runtime(),
         profile.kind,
         execution_policy,
