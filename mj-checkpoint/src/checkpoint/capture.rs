@@ -969,10 +969,18 @@ fn verify_origin_delta_quiescence(
     Ok(())
 }
 
-/// Canonical `.mj/keep/<session-id>` directory under a repository checkout,
-/// shared by worker launch (`MJ_KEEP_DIR`), suspend preflight, snapshot
-/// capture, and Move transfer so `Shown` consent paths and `--skip` paths
-/// always match.
+/// Entire `.mj/keep` directory under a managed checkout, scanned by suspend
+/// preflight and snapshot capture before a managed checkout is deleted so
+/// current per-session files (`.mj/keep/<session-id>/...`), legacy direct
+/// files (`.mj/keep/...`), and sibling subdirectories hidden by `/.mj/keep/`
+/// in `.git/info/exclude` are all listed and require discard consent.
+pub fn checkout_keep_dir(checkout: &Path) -> PathBuf {
+    mj_core::session_keep::snapshot_keep_dir(checkout, None)
+        .expect("checkout_keep_dir has no session_id to reject")
+}
+
+/// Per-session `.mj/keep/<session-id>` directory under a repository checkout,
+/// shared by worker launch (`MJ_KEEP_DIR`) and Move transfer / `--skip`.
 pub fn session_keep_dir(checkout: &Path, session_id: &str) -> Result<PathBuf> {
     mj_core::session_keep::snapshot_keep_dir(checkout, Some(session_id))
 }
@@ -980,7 +988,7 @@ pub fn session_keep_dir(checkout: &Path, session_id: &str) -> Result<PathBuf> {
 pub fn managed_clone_snapshot_input(
     id: &str,
     path: &Path,
-    session_id: Option<&str>,
+    _session_id: Option<&str>,
     pack_path: PathBuf,
     origin_override: Option<String>,
 ) -> Result<crate::snapshot::RepositoryInput> {
@@ -993,7 +1001,7 @@ pub fn managed_clone_snapshot_input(
         origin_override,
         pack_path,
         exclusions: ExclusionSource::Origin,
-        keep_dir: Some(mj_core::session_keep::snapshot_keep_dir(path, session_id)?),
+        keep_dir: Some(checkout_keep_dir(path)),
     })
 }
 
@@ -1146,7 +1154,7 @@ fn collect_origin_delta_raw(
 pub fn cutoff_snapshot_input(
     id: &str,
     path: &Path,
-    session_id: Option<&str>,
+    _session_id: Option<&str>,
     exclude_commits: Vec<String>,
     pack_path: PathBuf,
 ) -> Result<crate::snapshot::RepositoryInput> {
@@ -1159,7 +1167,7 @@ pub fn cutoff_snapshot_input(
         origin_override: None,
         pack_path,
         exclusions: ExclusionSource::Commits(exclude_commits),
-        keep_dir: Some(mj_core::session_keep::snapshot_keep_dir(path, session_id)?),
+        keep_dir: Some(checkout_keep_dir(path)),
     })
 }
 

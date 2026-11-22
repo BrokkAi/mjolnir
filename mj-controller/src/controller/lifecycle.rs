@@ -256,10 +256,9 @@ impl Controller {
                         path: worktree.worktree_root.clone(),
                         raw: false,
                         exclude_commits: None,
-                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
+                        keep_dir: Some(mj_checkpoint::checkpoint::checkout_keep_dir(
                             &worktree.worktree_root,
-                            session_id,
-                        )?),
+                        )),
                         origin_override: origin_delta::managed_origin_override(worktree),
                     }]
                 }
@@ -279,10 +278,7 @@ impl Controller {
                             let path = workspace_root.join(&repository.destination);
                             Ok(mj_core::suspend_consent::WorkerPreflightRepo {
                                 id: repository.id.clone(),
-                                keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                    &path,
-                                    session_id,
-                                )?),
+                                keep_dir: Some(mj_checkpoint::checkpoint::checkout_keep_dir(&path)),
                                 path,
                                 raw: false,
                                 exclude_commits: None,
@@ -309,9 +305,7 @@ impl Controller {
                         let path = worktree.worktree_root.clone();
                         vec![mj_core::suspend_consent::WorkerPreflightRepo {
                             id: super::checkpoint::HOST_CHECKOUT_REPOSITORY.to_owned(),
-                            keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                &path, session_id,
-                            )?),
+                            keep_dir: Some(mj_checkpoint::checkpoint::checkout_keep_dir(&path)),
                             path,
                             raw: false,
                             exclude_commits: Some(exclude_commits),
@@ -322,9 +316,7 @@ impl Controller {
                         let path = path.to_path_buf();
                         vec![mj_core::suspend_consent::WorkerPreflightRepo {
                             id: super::checkpoint::HOST_CHECKOUT_REPOSITORY.to_owned(),
-                            keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                &path, session_id,
-                            )?),
+                            keep_dir: Some(mj_checkpoint::checkpoint::checkout_keep_dir(&path)),
                             path,
                             raw: false,
                             exclude_commits: Some(exclude_commits),
@@ -346,10 +338,9 @@ impl Controller {
                                     let path = workspace_root.join(&repository.destination);
                                     Ok(mj_core::suspend_consent::WorkerPreflightRepo {
                                         id: repository.id.clone(),
-                                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                            &path,
-                                            session_id,
-                                        )?),
+                                        keep_dir: Some(
+                                            mj_checkpoint::checkpoint::checkout_keep_dir(&path),
+                                        ),
                                         path,
                                         raw: false,
                                         exclude_commits: Some(exclude_commits.clone()),
@@ -377,9 +368,9 @@ impl Controller {
                                 .map(|path| -> Result<_> {
                                     Ok(mj_core::suspend_consent::WorkerPreflightRepo {
                                         id: fallback_id.clone(),
-                                        keep_dir: Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                            &path, session_id,
-                                        )?),
+                                        keep_dir: Some(
+                                            mj_checkpoint::checkpoint::checkout_keep_dir(&path),
+                                        ),
                                         path,
                                         raw: false,
                                         exclude_commits: Some(exclude_commits.clone()),

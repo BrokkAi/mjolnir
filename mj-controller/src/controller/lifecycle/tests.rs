@@ -3242,7 +3242,7 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     assert_eq!(preflight.keep_dir_entries.len(), 1);
     assert_eq!(
         preflight.keep_dir_entries[0].path,
-        std::path::PathBuf::from("note.txt")
+        std::path::PathBuf::from(session_id).join("note.txt")
     );
     assert_eq!(preflight.untracked_count(), 2);
     assert!(preflight.keep_dir_bytes > 0);
@@ -3675,6 +3675,16 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     std::fs::create_dir_all(keep_dir.join("sub")).unwrap();
     std::fs::write(keep_dir.join("sub").join("notes.txt"), "keep note\n").unwrap();
     std::fs::write(keep_dir.join("ignored.txt"), "direct keep file\n").unwrap();
+    // Legacy direct file under `.mj/keep/` and another subdirectory must also
+    // be surfaced and require consent before deleting a managed checkout.
+    let checkout_keep = mj_checkpoint::checkpoint::checkout_keep_dir(&repo);
+    std::fs::write(checkout_keep.join("legacy.txt"), "legacy keep file\n").unwrap();
+    std::fs::create_dir_all(checkout_keep.join("other-session")).unwrap();
+    std::fs::write(
+        checkout_keep.join("other-session").join("sibling.txt"),
+        "sibling keep file\n",
+    )
+    .unwrap();
 
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Running;
@@ -3713,9 +3723,20 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         .iter()
         .map(|entry| entry.path.as_path())
         .collect();
-    assert_eq!(keep_paths.len(), 2, "expected both top-level and nested keep files: {keep_paths:?}");
-    assert!(keep_paths.contains(&std::path::Path::new("ignored.txt")));
-    assert!(keep_paths.contains(&std::path::Path::new("sub/notes.txt")));
+    assert_eq!(
+        keep_paths.len(),
+        4,
+        "expected legacy, sibling, and session keep files: {keep_paths:?}"
+    );
+    assert!(keep_paths.contains(&std::path::Path::new("legacy.txt")));
+    assert!(keep_paths.contains(&std::path::Path::new("other-session/sibling.txt")));
+    assert!(keep_paths.contains(&std::path::PathBuf::from(session_id).join("ignored.txt").as_path()));
+    assert!(keep_paths.contains(&std::path::PathBuf::from(session_id).join("sub/notes.txt").as_path()));
+    assert!(
+        preflight.untracked.is_empty(),
+        "keep files must not be duplicated in untracked: {:?}",
+        preflight.untracked
+    );
 
     let consent = preflight.shown_consent().capture_consent();
     let input = mj_checkpoint::checkpoint::cutoff_snapshot_input(
@@ -3736,6 +3757,16 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         &consent.untracked,
     )
     .expect("capture check_keep_dir_consent must accept Shown consent built from preflight");
+    let refused = mj_checkpoint::snapshot::capture_session_snapshot(
+        &mj_checkpoint::archive::SystemGit,
+        std::slice::from_ref(&input),
+        &mj_checkpoint::snapshot::SessionCaptureConsent::default(),
+    )
+    .expect_err("capture_session_snapshot must refuse unconsented keep_dir contents");
+    assert!(
+        format!("{refused:#}").contains("legacy.txt"),
+        "expected legacy.txt in refusal: {refused:#}"
+    );
     let session_consent = mj_checkpoint::snapshot::SessionCaptureConsent {
         repositories: [("workspace".into(), consent)].into_iter().collect(),
     };

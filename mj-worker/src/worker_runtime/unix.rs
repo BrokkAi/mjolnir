@@ -848,17 +848,49 @@ async fn restart_harness_in_place_response(
             .harness
             .configure_staged_home_environment(&endpoint.home, &mut launch_config.environment);
     }
-    if let Err(error) = mj_core::session_keep::install_session_keep_dir(
-        &launch_config.cwd,
-        &launch_config.session_id,
-        &mut launch_config.environment,
-    ) {
-        tracing::warn!(
-            session_id = %launch_config.session_id,
-            cwd = %launch_config.cwd.display(),
-            error = format!("{error:#}"),
-            "could not prepare the session keep directory during in-place harness restart"
-        );
+    let keep_cwd = launch_config.cwd.clone();
+    let keep_session_id = launch_config.session_id.clone();
+    let mut keep_environment = launch_config.environment.clone();
+    match tokio::time::timeout(
+        LOCAL_PREPARATION_STEP_TIMEOUT,
+        mj_core::runtime::spawn_blocking(move || {
+            let result = mj_core::session_keep::install_session_keep_dir(
+                &keep_cwd,
+                &keep_session_id,
+                &mut keep_environment,
+            );
+            (result, keep_environment)
+        }),
+    )
+    .await
+    {
+        Ok(Ok((Ok(_), updated_environment))) => {
+            launch_config.environment = updated_environment;
+        }
+        Ok(Ok((Err(error), _))) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                error = format!("{error:#}"),
+                "could not prepare the session keep directory during in-place harness restart"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                error = %error,
+                "session keep directory preparation task failed during in-place harness restart"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %launch_config.session_id,
+                cwd = %launch_config.cwd.display(),
+                timeout = ?LOCAL_PREPARATION_STEP_TIMEOUT,
+                "session keep directory preparation timed out during in-place harness restart"
+            );
+        }
     }
     let supervisor_path = relay_root.join("acp-supervisor.json");
     let mut prepared = match super::prepare_harness_launch(
