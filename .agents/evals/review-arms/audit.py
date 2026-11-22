@@ -1718,7 +1718,7 @@ class ScriptEvidence(dict):
 
     def __init__(self, checkout=None, tracked=None, symlinks=None):
         super().__init__()
-        self.checkout = recorded_path(checkout, None) if isinstance(checkout, str) and posixpath.isabs(checkout) else None
+        self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
         self.tracked = set(tracked) if isinstance(tracked, list) else None
         self.symlinks = None
         if isinstance(symlinks, list) and all(
