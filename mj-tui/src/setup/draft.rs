@@ -2,6 +2,14 @@ use super::*;
 
 pub(super) use mj_client::settings::draft::{config_from_draft, pointer, storage_path};
 
+fn incomplete_subagent_notice(task: &str, index: usize) -> String {
+    format!(
+        "Choose a model for {} entry {}, or remove it.",
+        schema::label(task),
+        index + 1
+    )
+}
+
 impl SetupDialog {
     pub(super) fn current(&self) -> &Value {
         self.draft
@@ -116,6 +124,22 @@ impl SetupDialog {
         if path == ["review"] {
             return Jump::OpenReview;
         }
+        if path.len() >= 3 && is_subagent_category_page(&path[..2]) {
+            self.open_page(path[..2].to_vec());
+            let model_path = vec![
+                "subagents".to_owned(),
+                path[1].clone(),
+                path[2].clone(),
+                "model".to_owned(),
+            ];
+            self.prepare();
+            if path.len() == 4 && self.descriptors.iter().any(|control| control.path == path) {
+                self.focus_path(path);
+            } else {
+                self.focus_path(&model_path);
+            }
+            return Jump::Done;
+        }
         let target_is_page = self
             .draft
             .pointer(&pointer(path))
@@ -127,16 +151,68 @@ impl SetupDialog {
         if target_is_page || target_is_collection_item {
             self.open_page(path.to_vec());
         } else {
-            self.open_page(row_page(path).to_vec());
+            self.open_page(setup_page_for_path(path));
             self.focus_path(path);
         }
         Jump::Done
+    }
+
+    pub(super) fn incomplete_subagent_row(&self, task: Option<&str>) -> Option<(String, usize)> {
+        let single = task.map(|task| [task]);
+        let categories: &[&str] = match &single {
+            Some(single) => single,
+            None => &SUBAGENT_CATEGORIES,
+        };
+        for &category in categories {
+            if let Some(entries) = self.draft["subagents"][category].as_array() {
+                for (index, entry) in entries.iter().enumerate() {
+                    if entry["model"]
+                        .as_str()
+                        .is_none_or(|model| model.trim().is_empty())
+                    {
+                        return Some((category.to_owned(), index));
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub(super) fn back(&mut self) -> bool {
         if self.editor.take().is_some() {
             self.form = RefCell::new(Dialog::default());
             return false;
+        }
+        if is_subagent_category_page(&self.path) {
+            let pending = self
+                .fields
+                .iter()
+                .filter(|(path, field)| {
+                    path.starts_with(&self.path) && field.input.value() != field.applied
+                })
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            let mut first_invalid = None;
+            for path in pending {
+                if self.apply_pending(&path).is_err() {
+                    first_invalid.get_or_insert(path);
+                }
+            }
+            if let Some(path) = first_invalid {
+                self.focus_path(&path);
+                return false;
+            }
+            if let Some((task, index)) = self.incomplete_subagent_row(Some(&self.path[1])) {
+                let model_path = vec![
+                    "subagents".to_owned(),
+                    task.clone(),
+                    index.to_string(),
+                    "model".to_owned(),
+                ];
+                self.focus_path(&model_path);
+                self.notice = Some(incomplete_subagent_notice(&task, index));
+                return false;
+            }
         }
         let child = self.path.clone();
         if self.path.pop().is_none() {
@@ -148,9 +224,17 @@ impl SetupDialog {
         false
     }
 
-    pub(super) fn add(&mut self) {
+    pub(super) fn add(&mut self) -> Option<Vec<String>> {
         if !self.collection() {
-            return;
+            return None;
+        }
+        if is_subagent_category_page(&self.path) {
+            let mut path = mj_client::settings::edit::add_entry(&mut self.draft, &self.path, None)
+                .expect("a list accepts a new entry");
+            path.push("model".to_owned());
+            self.combo = ComboBoxState::default();
+            self.notice = None;
+            return Some(path);
         }
         if self.current().is_array() {
             let path = mj_client::settings::edit::add_entry(&mut self.draft, &self.path, None)
@@ -163,6 +247,67 @@ impl SetupDialog {
                 adding: true,
             });
             self.form = RefCell::new(Dialog::default());
+        }
+        None
+    }
+
+    pub(super) fn rebind_fields_after_removal(
+        &mut self,
+        parent: &[String],
+        removal: &mj_client::settings::edit::Removal,
+    ) {
+        self.fields = std::mem::take(&mut self.fields)
+            .into_iter()
+            .filter_map(|(mut path, field)| {
+                if removal
+                    .removed
+                    .iter()
+                    .any(|removed| path.starts_with(removed))
+                {
+                    return None;
+                }
+                if let Some(removed) = removal.list_index
+                    && path.starts_with(parent)
+                    && let Some(index) = path
+                        .get(parent.len())
+                        .and_then(|part| part.parse::<usize>().ok())
+                    && index > removed
+                {
+                    path[parent.len()] = (index - 1).to_string();
+                }
+                Some((path, field))
+            })
+            .collect();
+    }
+
+    /// Remove row `index` from the open subagent category page and return the
+    /// next row's model path to focus, or `None` when the list is now empty.
+    pub(super) fn remove_subagent_entry(&mut self, index: usize) -> Option<Vec<String>> {
+        if !is_subagent_category_page(&self.path) {
+            return None;
+        }
+        let parent = self.path.clone();
+        let entry_path = vec![parent[0].clone(), parent[1].clone(), index.to_string()];
+        match mj_client::settings::edit::remove_entry(&mut self.draft, &entry_path) {
+            Err(refusal) => {
+                self.notice = Some(refusal);
+                None
+            }
+            Ok(removal) => {
+                self.notice = removal.notice.clone();
+                self.rebind_fields_after_removal(&parent, &removal);
+                self.combo = ComboBoxState::default();
+                self.descriptors.clear();
+                let remaining = self.current().as_array().map_or(0, Vec::len);
+                (remaining > 0).then(|| {
+                    vec![
+                        parent[0].clone(),
+                        parent[1].clone(),
+                        index.min(remaining - 1).to_string(),
+                        "model".to_owned(),
+                    ]
+                })
+            }
         }
     }
 }
@@ -321,8 +466,23 @@ impl SetupDialog {
             }
         }
         if let Some(path) = first_invalid {
-            self.open_page(path[..path.len() - 1].to_vec());
+            self.open_page(setup_page_for_path(&path));
             self.focus_path(&path);
+            return DashboardAction::None;
+        }
+        if let Some((task, index)) = self.incomplete_subagent_row(None) {
+            let category = vec!["subagents".to_owned(), task.clone()];
+            let model_path = vec![
+                "subagents".to_owned(),
+                task.clone(),
+                index.to_string(),
+                "model".to_owned(),
+            ];
+            if self.path != category {
+                self.open_page(category);
+            }
+            self.focus_path(&model_path);
+            self.notice = Some(incomplete_subagent_notice(&task, index));
             return DashboardAction::None;
         }
         let result = config_from_draft(self.draft.clone())
@@ -376,6 +536,7 @@ impl SetupDialog {
                 .editor
                 .as_ref()
                 .is_some_and(|editor| !editor.input.is_empty())
+            || self.incomplete_subagent_row(None).is_some()
         {
             return true;
         }
