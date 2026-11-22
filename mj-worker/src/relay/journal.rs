@@ -869,6 +869,7 @@ impl DurableRelay {
         {
             self.persist_snapshot()?;
         }
+        self.settle_local_quota()?;
         self.suppress_child_assessment()?;
         self.service_live_baselines();
         Ok(ordinal)
