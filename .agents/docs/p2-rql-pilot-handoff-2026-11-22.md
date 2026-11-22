@@ -18,8 +18,10 @@ Priority order now:
    before any writer runs. It is running (section 2).
 2. On a passing gate: **run the pilot** (writers then reviewers per diff, on codex3 then codex4),
    then judges and the readout (`pilot_run.py`, `pilot_review.py`, `pilot_judge.py`, `pilot_readout.py`).
-3. If the gate fails a step: re-freeze the manifest with `--served-steps` minus that step
-   (`brief/rql-census/pilot/select_pilot.py`), as the plan says.
+3. If pooled prescience passes but an added step misses its own fidelity bar: re-freeze the manifest
+   with `--served-steps` minus that step (`brief/rql-census/pilot/select_pilot.py`), as the plan says.
+   If **pooled prescience fails, the pilot stops**: the live runner refuses every new run while that
+   report exists, for any manifest (study plan, fidelity gate section). Bring it to the user.
 4. Bifrost follow-ups from the census are filed; none is assigned (#15167 needs a cross-target design).
 
 ## 2. Pilot state and how to operate it (all on host hel)
@@ -28,7 +30,8 @@ Priority order now:
 - Gate **full phase running** on commit `d7de33a91` from worktree
   `/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.mj/worktrees/rql-gate-d7de33a91`,
   in systemd user unit `rql-gate-full-d7de33a91-1795364697.service`.
-- Engine answers saved: 55 of 92 (receipts). Full measurements (engine + Terra + adjudication): 3.
+- Engine receipts saved: 55 of 92, all accepted (`status: ok`; no recorded failures yet). Full
+  measurements (engine + Terra + adjudication): 3.
   Query 4 (`8d4255915b2d…`, the ~250-candidate panic query) was in its Terra enumeration.
 - Quota at last check: claude5 5-hour 99%, week 29% (week resets 2026-11-26 ~07Z); codex3 week 99%
   (resets 2026-11-29).
@@ -78,7 +81,10 @@ Priority order now:
   session and intent but no completion. If `<dir>/destroy-receipt.json` exists and no `completed.json`,
   rename the dir to `<name>-failed-<first 8 of session_id>` and restart. If no destroy receipt, the session
   may be live: inspect with `./mjx --instance rql-census-pilot sessions --json` before touching anything.
-- Monitoring: count `measurement.json` and `*engine.json` under the fidelity dir; watch
+- Monitoring: in the active checkpoint directory only (the `88095b…/896aec04…` path above; another
+  engine identity gets its own directory), count `measurement.json`, and count `engine.json` and
+  `fresh-engine.json` by their `status`: `ok` receipts are accepted answers, `engine_error` receipts
+  with `failure: "repair_stalled"` are recorded engine failures. Watch
   `engine-cache/*/retired/*/void.json` for voids; read `gate-full/<sha>/live.log` and `exit.json`.
 
 ### What is fixed (all reviewed and pushed) and what to expect
