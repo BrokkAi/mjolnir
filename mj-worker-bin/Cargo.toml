@@ -23,6 +23,7 @@ workspace = true
 
 [dependencies]
 mj-core.workspace = true
+mj-harness-install.workspace = true
 mj-build-id.workspace = true
 mj-checkpoint.workspace = true
 mj-worker.workspace = true

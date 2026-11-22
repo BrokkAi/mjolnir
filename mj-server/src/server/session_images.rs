@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail, ensure};
 use futures::FutureExt;
 use mj_client::session_image::{ImageFollow, ImageRequest, ImageResult, ImageStarted, ImageStatus};
 use mj_core::config::{Config, TargetTemplate};
-use mj_core::session_image::{ImageBase, MiseArtifact, containerfile, image_tag};
 use mj_core::targets::{CommandExecutor, CommandSpec, ImageHost};
+use mj_harness_install::session_image::{ImageBase, MiseArtifact, containerfile, image_tag};
 use tokio::sync::Notify;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -254,7 +254,7 @@ fn mise_artifact(platform: &str) -> Result<MiseArtifact> {
         "linux/arm64" => "aarch64",
         _ => bail!("no pinned mise artifact for {platform}"),
     };
-    mj_core::session_image::pinned_mise(arch)
+    mj_harness_install::session_image::pinned_mise(arch)
 }
 
 async fn platform(config: &Config, target: &str, cancel: &CancellationToken) -> Result<String> {

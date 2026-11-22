@@ -560,7 +560,7 @@ mod tests {
     // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
-        let _ = mj_core::login_environment::initialize_from_parent();
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
         for (asking, running, answer, expected_resumes, status, decision, timed_out, reject_code) in [
             (false, false, None, 1, "active", false, false, None),
             (false, true, None, 0, "active", false, false, None),
@@ -946,7 +946,7 @@ for line in sys.stdin:
     }
     #[tokio::test]
     async fn goal_controls_work_during_prompts_and_pending_resume_with_large_output() {
-        let _ = mj_core::login_environment::initialize_from_parent();
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
         use mj_core::goal::GoalControlAction;
         for harness in [HarnessKind::Codex, HarnessKind::Claude] {
             for foreground in [false, true] {

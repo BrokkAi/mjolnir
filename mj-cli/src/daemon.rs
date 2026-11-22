@@ -577,11 +577,12 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
 /// A session is an overlay on the account's login environment. Reconstruct that
 /// base instead of maintaining a second list of target, profile, harness and
 /// shell overrides here. The existing identity also covers older workers.
-fn host_daemon_login_environment() -> Result<Option<mj_core::login_environment::Environment>> {
+fn host_daemon_login_environment()
+-> Result<Option<mj_harness_install::login_environment::Environment>> {
     if std::env::var_os("MJ_SESSION_ID").is_some()
         || std::env::var_os("MJ_SESSION_BASH_ENV").is_some()
     {
-        return mj_core::login_environment::discover()
+        return mj_harness_install::login_environment::discover()
             .map(Some)
             .context("restore account login environment for the daemon");
     }
@@ -590,7 +591,7 @@ fn host_daemon_login_environment() -> Result<Option<mj_core::login_environment::
 
 fn configure_host_daemon_environment(
     command: &mut std::process::Command,
-    login_environment: Option<mj_core::login_environment::Environment>,
+    login_environment: Option<mj_harness_install::login_environment::Environment>,
 ) -> Result<()> {
     if let Some(mut environment) = login_environment {
         for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
@@ -711,7 +712,7 @@ fn host_daemon_command() -> Result<std::process::Command> {
 
 #[cfg(target_os = "linux")]
 fn daemon_scope_launcher(
-    login_environment: Option<&mj_core::login_environment::Environment>,
+    login_environment: Option<&mj_harness_install::login_environment::Environment>,
 ) -> Option<(PathBuf, PathBuf)> {
     // Check the environment systemd-run will receive, including when a session
     // client restores the account's login environment.
@@ -743,11 +744,13 @@ fn daemon_scope_launcher(
     }
     // #1584: cgroup v2 checks write access at the common ancestor, so
     // rootless Podman execs need to start inside the delegated user subtree.
-    let systemd_run =
-        mj_core::program_path::find_executable_on_path("systemd-run", variable("PATH").as_deref())?;
+    let systemd_run = mj_harness_install::program_path::find_executable_on_path(
+        "systemd-run",
+        variable("PATH").as_deref(),
+    )?;
     // logind stops the user manager at logout without lingering. Keep the
     // detached daemon and its bare workers in their original cgroup then.
-    let user = mj_core::login_environment::account_name().ok()?;
+    let user = mj_harness_install::login_environment::account_name().ok()?;
     // logind C-escapes account names for linger filenames. Check names that
     // appear verbatim there so an escaped filename cannot match another user.
     if !user

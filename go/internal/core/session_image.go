@@ -1,4 +1,4 @@
-// Port of mj-core/src/session_image.rs.
+// Port of mj-harness-install/src/session_image.rs.
 
 // Deterministic project-image recipes shared by the daemon and CLI output.
 

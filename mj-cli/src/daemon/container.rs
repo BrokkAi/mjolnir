@@ -70,8 +70,11 @@ pub(super) async fn placement(config: &DaemonConfig) -> Result<Placement> {
         .runtime
         .engine()
         .context("the daemon container launch needs a container runtime")?;
-    if mj_core::program_path::find_program_on_path(program, std::env::var_os("PATH").as_deref())
-        .is_none()
+    if mj_harness_install::program_path::find_program_on_path(
+        program,
+        std::env::var_os("PATH").as_deref(),
+    )
+    .is_none()
     {
         return Ok(Placement::Host {
             reason: format!("{program} is not installed on this computer"),

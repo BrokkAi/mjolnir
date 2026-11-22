@@ -27,7 +27,8 @@ pub async fn prepare_harness_launch(
 ) -> Result<PreparedHarnessLaunch> {
     spec.environment
         .remove(mj_core::jev::FASTINO_KEY_ENVIRONMENT);
-    let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    let mut environment =
+        mj_harness_install::login_environment::with_overrides(&spec.environment).await?;
     link_build_cache_configuration(&environment).await?;
     super::exclude_from_harness_environment(
         harness,

@@ -11,7 +11,7 @@ readme.workspace = true
 include = [
     "build.rs",
     "src/**/*.rs",
-    "tests/fixtures/*.sh",
+    "tests/fixtures/fake-command.sh",
     "tests/fixtures/claude-antigravity-models.json",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/question_locator.json",
@@ -36,15 +36,6 @@ include = [
     # OpenCode provider environment embedded with `include_str!` by the
     # harness runtime config.
     "assets/opencode-provider-environment.txt",
-    # Pinned managed harness packages and verified runtime manifests.
-    "assets/harnesses/**",
-    "assets/antigravity/runtime.json",
-    "assets/grok/runtime.json",
-    "assets/kimi/runtime.json",
-    "assets/mise/runtime.json",
-    "assets/muse/runtime.json",
-    "assets/node/runtime.json",
-    "assets/opencode/runtime.json",
     "Cargo.toml",
     "Cargo.lock",
     "/README.md",
@@ -78,14 +69,11 @@ memchr.workspace = true
 regex = "1"
 reqwest.workspace = true
 httpdate = "1"
-ruzstd.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 similar = "2.7"
-tar.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -101,7 +89,6 @@ yaml-rust2 = { version = "0.13", default-features = false }
 windows-sys = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
-    "Win32_System_Environment",
     "Win32_System_Threading",
     "Win32_System_JobObjects",
     "Win32_Security",
@@ -109,5 +96,4 @@ windows-sys = { workspace = true, features = [
 
 
 [dev-dependencies]
-tiny_http = "0.12"
 tempfile.workspace = true

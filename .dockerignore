@@ -12,6 +12,7 @@
 !Cargo.lock
 !rust-toolchain.toml
 !mj-core/
+!mj-harness-install/
 !mj-review/
 !mj-checkpoint/
 !mj-transcript/

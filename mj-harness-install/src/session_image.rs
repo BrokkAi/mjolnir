@@ -49,7 +49,7 @@ pub fn pinned_mise(arch: &str) -> Result<MiseArtifact> {
         serde_json::from_str(include_str!("../assets/mise/runtime.json"))?;
     let version = manifest["version"].as_str().unwrap_or_default();
     ensure!(
-        version == crate::harness_runtime::MISE_VERSION,
+        version == mj_core::harness_runtime::MISE_VERSION,
         "mise download metadata does not match the managed runtime pin"
     );
     let platform = &manifest["platforms"][format!("linux-{arch}")];
@@ -75,7 +75,7 @@ pub struct ImageBase {
 }
 
 pub fn recipe_hash(files: &BTreeMap<String, String>) -> Result<String> {
-    Ok(crate::hex::lower_hex(Sha256::digest(serde_json::to_vec(
+    Ok(mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(
         files,
     )?)))
 }
@@ -181,5 +181,5 @@ pub fn containerfile(
 }
 
 pub fn image_tag(containerfile: &str) -> String {
-    crate::hex::lower_hex(Sha256::digest(containerfile.as_bytes()))[..16].to_owned()
+    mj_core::hex::lower_hex(Sha256::digest(containerfile.as_bytes()))[..16].to_owned()
 }

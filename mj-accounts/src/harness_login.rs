@@ -201,7 +201,7 @@ fn resolve_harness_program(
         .map(|(_, value)| std::ffi::OsStr::new(value));
     let inherited_path = std::env::var_os("PATH");
     let path = configured_path.or(inherited_path.as_deref());
-    if let Some(program) = mj_core::program_path::find_program_on_path(program, path) {
+    if let Some(program) = mj_harness_install::program_path::find_program_on_path(program, path) {
         return program;
     }
     std::path::PathBuf::from(program)

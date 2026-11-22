@@ -435,7 +435,7 @@ pub fn runtime_missing_on_host(
 /// value, under the platform's executable extensions (`docker.exe` on
 /// Windows). A missing PATH finds nothing.
 pub fn program_on_path(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
-    mj_core::program_path::find_program_on_path(program, path).is_some()
+    mj_harness_install::program_path::find_program_on_path(program, path).is_some()
 }
 
 /// Why local Docker cannot run sessions: one sentence per case, where the

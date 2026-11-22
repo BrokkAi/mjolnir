@@ -25,6 +25,7 @@ getrandom.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 mj-core.workspace = true
+mj-harness-install.workspace = true
 mj-worker-mcp.workspace = true
 mj-checkpoint.workspace = true
 mj-transcript.workspace = true

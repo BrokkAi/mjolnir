@@ -194,7 +194,7 @@ fn find_binary() -> Option<PathBuf> {
 }
 
 fn find_binary_in_path(path: &OsStr) -> Option<PathBuf> {
-    mj_core::program_path::find_program_on_path("tailscale", Some(path))
+    mj_harness_install::program_path::find_program_on_path("tailscale", Some(path))
 }
 
 #[cfg(target_os = "macos")]

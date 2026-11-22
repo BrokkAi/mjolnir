@@ -101,6 +101,9 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-core` (`mj-core/`, library `mj_core`) is the foundation. It holds
   configuration, persisted-state types, the relay protocol, and the
   shared transcript, diff, and target types.
+- `brokk-mj-harness-install` (`mj-harness-install/`, library `mj_harness_install`)
+  owns managed harness installation, executable discovery, login environment
+  probing, and session image recipes. Core owns shared harness pins.
 - `brokk-mj-review`, `brokk-mj-checkpoint`, and `brokk-mj-transcript` live in
   their matching directories. They build on core and share review logic,
   archive handling, and transcript projection across the runtime branches.

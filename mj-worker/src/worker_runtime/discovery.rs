@@ -19,7 +19,8 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     // the account's login environment first so nvm/Homebrew Node installations
     // and the cache root (`HOME` or `XDG_CACHE_HOME`) are visible to the
     // system-or-managed Node decision.
-    let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    let mut environment =
+        mj_harness_install::login_environment::with_overrides(&spec.environment).await?;
     let managed_node = if spec.harness_runtime.may_install()
         && super::harness_launch::needs_node_runtime(spec.harness, &environment).await?
     {

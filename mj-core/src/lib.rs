@@ -29,8 +29,6 @@ pub mod goal;
 #[doc(hidden)]
 pub mod golden;
 pub mod guardian;
-#[cfg(unix)]
-pub mod harness_install;
 pub mod harness_runtime;
 pub mod hex;
 pub mod history;
@@ -39,7 +37,6 @@ pub mod local_git;
 pub mod local_sockets;
 pub mod lock_wait;
 pub mod logging;
-pub mod login_environment;
 pub mod mailbox;
 pub mod model_catalog;
 pub mod move_workspace;
@@ -48,7 +45,6 @@ pub mod path_completion;
 pub mod path_input;
 pub mod placement;
 pub mod profile_capabilities;
-pub mod program_path;
 pub mod project_catalog;
 pub mod project_memory;
 pub mod project_picker;
@@ -92,5 +88,3 @@ pub mod attention;
 pub mod notification_message;
 
 pub mod packed_text;
-
-pub mod session_image;

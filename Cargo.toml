@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-microvm", "mj-worker-mcp", "mj-worker-review", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-github-watch", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-microvm", "mj-worker-mcp", "mj-worker-review", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-github-watch", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-harness-install", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-microvm", "mj-worker-mcp", "mj-worker-review", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-github-watch", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-harness-install", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-microvm", "mj-worker-mcp", "mj-worker-review", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-worker-staging", "mj-worker-launch", "mj-profile-catalog", "mj-session-runtime", "mj-review-host", "mj-github-relevance", "mj-github-watch", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -35,6 +35,7 @@ mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", versi
 mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.73.0" }
 anvil-client = { package = "brokk-anvil-client", version = "0.28.6" }
 mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.73.0", default-features = false }
+mj-harness-install = { path = "mj-harness-install", package = "brokk-mj-harness-install", version = "2.73.0" }
 mj-build-id = { path = "mj-build-id", package = "brokk-mj-build-id", version = "2.73.0" }
 mj-microvm = { path = "mj-microvm", package = "brokk-mj-microvm", version = "2.73.0" }
 mj-worker-mcp = { path = "mj-worker-mcp", package = "brokk-mj-worker-mcp", version = "2.73.0" }
@@ -110,6 +111,7 @@ hmac = "0.13"
 # Without `multithread`: a single-PID refresh would wake a rayon thread per CPU.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tar = "0.4"
+tiny_http = "0.12"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = "0.1"

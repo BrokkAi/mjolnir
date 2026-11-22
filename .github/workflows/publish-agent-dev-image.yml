@@ -18,6 +18,7 @@ on:
       - 'mj-build-id/**'
       - 'mj-checkpoint/**'
       - 'mj-core/**'
+      - 'mj-harness-install/**'
       - 'mj-review/**'
       - 'mj-transcript/**'
       - 'mj-microvm/**'

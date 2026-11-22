@@ -64,6 +64,7 @@ exceptions = [
     { crate = "brokk-mj-server", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-daemon", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-core", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-harness-install", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-review", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-transcript", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-tui", allow = ["GPL-3.0-only"] },
