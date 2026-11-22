@@ -5,6 +5,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mmap
 from pathlib import Path
 import re
 import socket
@@ -58,6 +59,18 @@ def main():
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
+    if args.top_level_quota_only:
+        # The worker consumes this endpoint variable only in test-hooks builds.
+        # Check the executable before starting anything that could call GLiDE.
+        try:
+            with args.worker.open("rb") as executable, mmap.mmap(
+                executable.fileno(), 0, access=mmap.ACCESS_READ
+            ) as binary:
+                supports_glide_override = binary.find(b"MJ_TEST_GLIDE_ENDPOINT") != -1
+        except (OSError, ValueError) as error:
+            parser.error(f"cannot inspect the worker executable: {error}")
+        if not supports_glide_override:
+            parser.error("--top-level-quota-only requires mj-worker built with --features test-hooks")
     lab = reliability_lab.Lab(args.mj, "delegation", 1171)
     quota_only = args.child_quota_only or args.top_level_quota_only
     catalog_proxy = None

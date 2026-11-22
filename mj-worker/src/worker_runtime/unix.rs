@@ -4743,6 +4743,75 @@ mod preparation_tests {
     }
 
     #[tokio::test]
+    async fn releasing_in_place_move_hold_wakes_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = test_relay(temp.path());
+        let store_id = relay.lock().unwrap().operational_state().store_id.unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        let (wake, mut wakes) = mpsc::channel(1);
+        let (fatal, _fatal_reports) = mpsc::channel(1);
+        let handler = mj_core::runtime::spawn(serve_client_with_memory(
+            server,
+            relay,
+            wake,
+            Err("fixture has no credentials".into()),
+            ConnectionRuntime::default(),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read);
+        request(
+            &mut reader,
+            &mut writer,
+            "hello",
+            RelayRequest::Hello {
+                controller_version: "test".into(),
+                supported: RelayVersionRange::CURRENT,
+            },
+        )
+        .await;
+        let held = request(
+            &mut reader,
+            &mut writer,
+            "hold",
+            RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store_id.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            held.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::InPlaceMoveDispatchHeld { .. }
+            }
+        ));
+        assert_eq!(wakes.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+        let released = request(
+            &mut reader,
+            &mut writer,
+            "release",
+            RelayRequest::ReleaseInPlaceMoveDispatch {
+                operation_id: "move".into(),
+                expected_store_id: store_id,
+            },
+        )
+        .await;
+        assert!(matches!(
+            released.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::InPlaceMoveDispatchReleased
+            }
+        ));
+        // A continuation can already be pending when the worker releases the
+        // hold. The successful reply must wake dispatch before it is written.
+        assert_eq!(wakes.try_recv(), Ok(()));
+        writer.shutdown().await.unwrap();
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
         let _ = mj_core::login_environment::initialize_from_parent();
         let root = tempfile::tempdir().unwrap();
