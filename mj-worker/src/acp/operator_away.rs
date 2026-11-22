@@ -119,7 +119,6 @@ pub(super) enum AwayRequest {
 }
 
 impl OperatorAway {
-    #[cfg(feature = "test-hooks")]
     pub(crate) fn keep_fixture_question_live(&self, question: ElicitationRequest) -> Box<dyn Send> {
         let bridge = self.pending_for_bridge_with_source(Some(VerdictSource::Disabled), None);
         let answer = bridge.register(question, String::new(), AwayRequest::Question);

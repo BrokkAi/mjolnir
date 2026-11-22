@@ -892,7 +892,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: true,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.clone(),
             task_name: "without credentials".into(),
@@ -1285,7 +1285,7 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit",
             SessionLaunchOptions {
                 oracle: None,
-        supervisors: None,
+                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.to_uppercase()),
                 branch: Some("town/run-1".into()),
@@ -1323,7 +1323,7 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit with base",
             SessionLaunchOptions {
                 oracle: None,
-        supervisors: None,
+                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 base: Some("v1.0".into()),
@@ -1378,7 +1378,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
-        supervisors: None,
+            supervisors: None,
             oracle_choice: None,
             no_later_history: true,
             ..launch_options(Vec::new())
@@ -1389,7 +1389,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
-        supervisors: None,
+            supervisors: None,
             oracle_choice: None,
             at: Some(at.into()),
             base: Some("origin/main".into()),
@@ -1445,7 +1445,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             "without later history",
             SessionLaunchOptions {
                 oracle: None,
-        supervisors: None,
+                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 no_later_history: true,
@@ -2168,7 +2168,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2328,7 +2328,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2699,7 +2699,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2922,7 +2922,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             "durable target",
             SessionLaunchOptions {
                 oracle: None,
-        supervisors: None,
+                supervisors: None,
                 oracle_choice: None,
                 // Set at creation, since a lifecycle transition does not own
                 // this column (see `update_lifecycle_fields`); this test
@@ -2991,7 +2991,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: id.clone(),
             task_name: "child".into(),
@@ -3521,7 +3521,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "oracle".into(),
@@ -3593,7 +3593,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: muse_parent_id.into(),
             task_name: "oracle".into(),
@@ -3644,7 +3644,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "ordinary child".into(),
@@ -3719,7 +3719,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+            supervisor: false,
             reviewer_launch: None,
             ..request
         })
@@ -3727,7 +3727,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert!(
         error
             .to_string()
-            .contains("sub-agents cannot spawn other sub-agents")
+            .contains("sub-agent sessions cannot spawn their own sub-agents"),
+        "{error:#}"
     );
     controller
         .state
@@ -3795,7 +3796,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
             .register_subagent(RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
-        supervisor: false,
+                supervisor: false,
                 reviewer_launch: None,
                 parent_session_id: parent_id.into(),
                 task_name: request_key.into(),
@@ -3969,6 +3970,7 @@ mod profile_homes {
 // Hard-won: 7a9a7ec: rename released the config lock before migrating session rows.
 #[test]
 fn profile_rename_holds_configuration_through_reference_migration() {
+    mj_core::test_hooks::enable_test_hooks();
     const NAME: &str = "profile_rename_holds_configuration_through_reference_migration";
     const CHILD: &str = "MJ_PROFILE_RENAME_LOCK_CHILD";
     if std::env::var_os(CHILD).is_none() {

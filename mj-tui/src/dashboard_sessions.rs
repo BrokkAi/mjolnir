@@ -1282,27 +1282,155 @@ impl DashboardState {
     /// the harness, and the two quota percentages remaining. The picker pads
     /// the cells into aligned columns.
     pub(crate) fn profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
-        self.profile_choice_with_label(id, id, harness)
-    }
-
-    pub(crate) fn indented_profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
-        self.profile_choice_with_label(id, &format!("  {id}"), harness)
-    }
-
-    fn profile_choice_with_label(
-        &self,
-        id: &str,
-        label: &str,
-        harness: HarnessKind,
-    ) -> PickerChoice {
         let (weekly, five_hour) = self.profile_quota_cells(id);
         PickerChoice::table(vec![
             PickerCell::blank(),
-            PickerCell::text(label),
+            PickerCell::text(id),
             PickerCell::text(harness.display_name()),
             weekly,
             five_hour,
         ])
+    }
+
+    /// One expanded profile row in the new-session picker: blank PROVIDER
+    /// column, individual profile name in the PROFILE column, and quota cells.
+    pub(crate) fn new_wizard_profile_choice(&self, id: &str) -> PickerChoice {
+        let (weekly, five_hour) = self.profile_quota_cells(id);
+        PickerChoice::table(vec![
+            PickerCell::blank(),
+            PickerCell::blank(),
+            PickerCell::text(id),
+            weekly,
+            five_hour,
+        ])
+    }
+
+    /// Best-effort preview of which offered profile in `candidates` would be
+    /// selected by quota load balancing, using the same preference and
+    /// remaining-headroom signals already cached on the dashboard.
+    pub(crate) fn predicted_profile_for_candidates(&self, candidates: &[&str]) -> Option<String> {
+        candidates
+            .iter()
+            .copied()
+            .filter_map(|id| self.profile_prediction_key(id).map(|key| (key, id)))
+            .min_by_key(|(key, _)| *key)
+            .map(|(_, id)| id.to_owned())
+    }
+
+    /// Preview of which profile in `provider` would be used when launching with
+    /// that provider row selected.
+    pub(crate) fn predicted_provider_profile(
+        &self,
+        provider: &mj_core::config::QuotaProvider,
+    ) -> Option<String> {
+        let candidates: Vec<&str> = self
+            .offered_profiles()
+            .filter(|(id, profile)| {
+                &crate::render::quota_pools::profile_provider(id, profile, &self.quota_providers)
+                    == provider
+            })
+            .map(|(id, _)| id)
+            .collect();
+        self.predicted_profile_for_candidates(&candidates)
+    }
+
+    /// Preview of which profile `Auto (Primary)` would select among offered
+    /// profiles whose discovered capabilities offer a configured primary model.
+    pub(crate) fn predicted_auto_primary_profile(&self) -> Option<String> {
+        let choices = self.config.subagents.primary_choices();
+        if choices.is_empty() {
+            return None;
+        }
+        let resolved_choices: Vec<(&mj_core::config::SubagentChoice, String)> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice,
+                    self.profile_capabilities
+                        .model_id(&self.config, &choice.model),
+                )
+            })
+            .collect();
+        let mut candidates = Vec::new();
+        for (id, profile) in self.offered_profiles() {
+            let Some(entry) = self
+                .profile_capabilities
+                .profiles
+                .get(&profile.capabilities_key(id))
+            else {
+                continue;
+            };
+            let mj_core::profile_capabilities::CapabilityState::Ready(profile_choices) =
+                &entry.choices
+            else {
+                continue;
+            };
+            let matches_primary = resolved_choices.iter().any(|(choice, identity)| {
+                let Some(offer) =
+                    mj_core::model_catalog::offer(&profile_choices.models, identity, &choice.model)
+                else {
+                    return false;
+                };
+                match choice.effort.as_deref() {
+                    None => true,
+                    Some(requested) => matches!(
+                        entry.efforts.get(&offer.value),
+                        Some(mj_core::profile_capabilities::CapabilityState::Ready(efforts))
+                            if efforts.iter().any(|effort| effort.value == requested)
+                    ),
+                }
+            });
+            if matches_primary {
+                candidates.push(id);
+            }
+        }
+        self.predicted_profile_for_candidates(&candidates)
+    }
+
+    fn profile_prediction_key<'a>(&self, id: &'a str) -> Option<(u8, usize, u8, u8, &'a str)> {
+        let prefer_rank = self
+            .config
+            .quota
+            .prefer
+            .iter()
+            .position(|preferred| preferred == id)
+            .unwrap_or(usize::MAX);
+        if self.quota_refreshing.contains(id) {
+            return Some((1, prefer_rank, u8::MAX, u8::MAX, id));
+        }
+        let Some(quota) = self.quotas.get(id) else {
+            return Some((1, prefer_rank, u8::MAX, u8::MAX, id));
+        };
+        if quota.error.is_some() {
+            return Some((4, prefer_rank, u8::MAX, u8::MAX, id));
+        }
+        if quota.is_usage_priced() {
+            return Some((3, prefer_rank, u8::MAX, u8::MAX, id));
+        }
+        let primary = quota.summary_window().and_then(quota_remaining_percent);
+        let five_hour = quota.five_hour_window().and_then(quota_remaining_percent);
+        if weekly_quota_exhausted(quota) || primary == Some(0) || five_hour == Some(0) {
+            return None;
+        }
+        Some(match primary {
+            // Subscriptions at the 1% reserve floor rank behind unknown quota,
+            // matching `profile_scheduler`'s reserve-floor tiering.
+            Some(primary) if primary <= 1 || five_hour.is_some_and(|v| v <= 1) => (
+                2,
+                prefer_rank,
+                100u8.saturating_sub(primary),
+                100u8.saturating_sub(five_hour.unwrap_or(100)),
+                id,
+            ),
+            Some(primary) => (
+                0,
+                prefer_rank,
+                100u8.saturating_sub(primary),
+                100u8.saturating_sub(five_hour.unwrap_or(100)),
+                id,
+            ),
+            None => (1, prefer_rank, u8::MAX, u8::MAX, id),
+        })
     }
 
     /// The WEEKLY and 5H cells of a profile picker row, as percentages
@@ -1310,7 +1438,7 @@ impl DashboardState {
     /// stays blank whenever there is no five-hour figure worth reading: a
     /// profile that is refreshing, failing, usage-priced, or out of weekly
     /// quota altogether.
-    fn profile_quota_cells(&self, id: &str) -> (PickerCell, PickerCell) {
+    pub(crate) fn profile_quota_cells(&self, id: &str) -> (PickerCell, PickerCell) {
         let plain = |text: &str| (PickerCell::text(text), PickerCell::blank());
         if self.quota_refreshing.contains(id) {
             return plain("refreshing");
@@ -1403,25 +1531,31 @@ impl DashboardState {
         preflight: mj_core::suspend_consent::SuspendPreflight,
     ) -> DashboardAction {
         let should_quick_suspend = match &mut self.mode {
-            Mode::Confirm(dialog) => match &mut dialog.confirmation {
-                Confirmation::SuspendSession {
-                    session_id,
-                    children_not_handed_back,
-                    interrupting,
-                    preflight: slot,
-                    checking,
-                    ..
-                } if *session_id == preflight.session_id => {
-                    let quick = !preflight.has_blockers()
-                        && !preflight.has_warnings()
-                        && !*interrupting
-                        && children_not_handed_back.is_empty();
-                    *slot = Some(preflight.clone());
-                    *checking = false;
-                    quick
+            Mode::Confirm(dialog) => {
+                let (matched, quick) = match &mut dialog.confirmation {
+                    Confirmation::SuspendSession {
+                        session_id,
+                        children_not_handed_back,
+                        interrupting,
+                        preflight: slot,
+                        checking,
+                        ..
+                    } if *session_id == preflight.session_id => {
+                        let quick = !preflight.has_blockers()
+                            && !preflight.has_warnings()
+                            && !*interrupting
+                            && children_not_handed_back.is_empty();
+                        *slot = Some(preflight.clone());
+                        *checking = false;
+                        (true, quick)
+                    }
+                    _ => (false, false),
+                };
+                if matched && !quick {
+                    dialog.refresh_form();
                 }
-                _ => false,
-            },
+                quick
+            }
             _ => false,
         };
         if should_quick_suspend {

@@ -1,5 +1,8 @@
 //! Portable target-side entry point for Mjolnir session workers.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 #[cfg(all(target_os = "linux", target_env = "musl"))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -590,6 +593,15 @@ fn main() -> Result<()> {
     // First, before any thread or child: the harness and its tools inherit it.
     mj_core::subprocess::raise_open_file_limit();
     mj_core::worker_build::install(mj_build_id::identity());
+    #[cfg(feature = "test-hooks")]
+    {
+        mj_core::test_hooks::enable_test_hooks();
+        if std::env::var("MJ_CHAOS_ISOLATED").as_deref() == Ok("1")
+            && let Ok(endpoint) = std::env::var("MJ_TEST_GLIDE_ENDPOINT")
+        {
+            mj_core::test_hooks::set_test_glide_endpoint(endpoint);
+        }
+    }
     std::hint::black_box(mj_build_id::WORKER_BUILD_STAMP);
     if std::env::args_os()
         .nth(1)

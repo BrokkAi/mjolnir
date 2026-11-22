@@ -786,9 +786,11 @@ mod tests {
                 ..
             }
         ));
-        assert!(serde_json::to_value(older_client)
-            .unwrap()
-            .get("resource_allocation")
-            .is_none());
+        assert!(
+            serde_json::to_value(older_client)
+                .unwrap()
+                .get("resource_allocation")
+                .is_none()
+        );
     }
 }

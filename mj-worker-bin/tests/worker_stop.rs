@@ -2,6 +2,8 @@
 //! stand-ins that hold the real root lock the way a worker does.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -275,7 +277,7 @@ fn a_root_without_a_worker_is_dead_and_stops_at_once() {
 // so they are exercised here against the real current binary and, when one is
 // supplied, a real released one.
 
-use mj_controller::targets::{
+use mj_targets::targets::{
     WORKER_CONTROL_UNSTAGED_STATUS, kill_worker_daemon_script, stop_worker_daemon_script,
     worker_daemon_holder_script, worker_daemon_liveness_script,
 };

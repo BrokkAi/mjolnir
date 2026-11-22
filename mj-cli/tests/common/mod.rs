@@ -1,3 +1,5 @@
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::{
     fs::{OpenOptions, TryLockError},
     io::{Read, Seek, SeekFrom},

@@ -27,8 +27,7 @@ use mj_core::state::{
     SessionBuildCache,
 };
 
-/// Release installed by Mjolnir for host setup and Nitro guests.
-pub const MBX_VERSION: &str = "1.30.0";
+pub use mj_core::config::MBX_VERSION;
 
 const NITRO_CACHE_DIRECTORY: &str = "/var/lib/hel/mbx";
 

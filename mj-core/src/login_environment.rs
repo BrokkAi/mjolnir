@@ -346,10 +346,13 @@ impl Account {
                 std::path::PathBuf::from(shell)
             };
             // Let a subprocess fixture substitute a deliberately slow shell.
-            #[cfg(feature = "test-hooks")]
-            let shell = std::env::var_os("MJ_TEST_ACCOUNT_SHELL")
-                .map(std::path::PathBuf::from)
-                .unwrap_or(shell);
+            let shell = if crate::test_hooks::test_hooks_enabled()
+                && let Some(shell) = std::env::var_os("MJ_TEST_ACCOUNT_SHELL")
+            {
+                std::path::PathBuf::from(shell)
+            } else {
+                shell
+            };
             return Ok(Self {
                 user,
                 home: home.into(),

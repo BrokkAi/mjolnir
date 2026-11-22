@@ -103,7 +103,6 @@ mod subagent_queue;
 pub use standalone::*;
 
 // The stand-in relay; the `test-support` feature lends it to mj-daemon's tests.
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod stand_in;
 #[cfg(test)]
@@ -112,7 +111,6 @@ pub mod tests;
 mod model_policy;
 
 /// Internals that the tests of the crates above drive directly.
-#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_internals {
     pub use super::actor::{publish_view, run_session_actor, sync_actor_connection};
@@ -125,5 +123,5 @@ use model_policy::SessionModelPolicy;
 
 mod pollable;
 pub use pollable::session_target_is_pollable;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub use pollable::take_pollability_visits;

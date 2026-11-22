@@ -52,7 +52,8 @@ impl CandidateQuota {
         now_seconds: i64,
     ) -> Self {
         use mj_client::quota::QuotaBilling;
-        let report = publication.and_then(|publication| scheduling_report(publication, now_seconds));
+        let report =
+            publication.and_then(|publication| scheduling_report(publication, now_seconds));
         let quota = Self::from_report(report);
         if matches!(quota, Self::Unknown) && quota.billing(harness) == QuotaBilling::Usage {
             Self::UsagePriced
@@ -354,7 +355,11 @@ pub fn order_scheduled_candidates_by_draw<T: AsRef<ScheduledCandidate>>(
         .into_iter()
         .enumerate()
         .map(|(idx, pool)| {
-            let unit = units.get(idx).copied().unwrap_or(0.5).clamp(f64::MIN_POSITIVE, 1.0);
+            let unit = units
+                .get(idx)
+                .copied()
+                .unwrap_or(0.5)
+                .clamp(f64::MIN_POSITIVE, 1.0);
             let key = if matches!(pool.tier, 0 | 1 | 3 | 4 | 5) && pool.weight > 0.0 {
                 unit.ln() / pool.weight
             } else {
@@ -563,9 +568,9 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
             monthly_price_usd, ..
         } = &cand.quota
         {
-            let lookup = ctx
-                .power_ranking
-                .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
+            let lookup =
+                ctx.power_ranking
+                    .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
             let p_eff = monthly_price_usd
                 .filter(|p| *p > 0)
                 .map(f64::from)
@@ -689,9 +694,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             }
                             (tp200 * (p_eff / 200.0), p_eff)
                         }
-                        (Some(p_eff), None) => {
-                            (peer_geom_mean_capacity * (p_eff / 200.0), p_eff)
-                        }
+                        (Some(p_eff), None) => (peer_geom_mean_capacity * (p_eff / 200.0), p_eff),
                         (None, _) => {
                             tracing::debug!(
                                 profile_id = %cand.profile_id,
@@ -748,9 +751,10 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                                 plan_price,
                                 ratio,
                             );
-                            let rem_eff = ev.remaining_pct - RESERVE_FLOOR_PCT - reserved - new_burn;
-                            let safe =
-                                rem_eff >= v_60m * cat_stats.runway_duration_hours.min(ev.t_left_hours);
+                            let rem_eff =
+                                ev.remaining_pct - RESERVE_FLOOR_PCT - reserved - new_burn;
+                            let safe = rem_eff
+                                >= v_60m * cat_stats.runway_duration_hours.min(ev.t_left_hours);
                             match ev.kind {
                                 crate::quota_telemetry::WindowKind::Short5h => {
                                     if !safe {
@@ -874,7 +878,11 @@ mod tests {
         assert_eq!(ask(subscription(0, credits), true), None);
     }
 
-    fn claude_window(remaining: u8, resets_at: Option<i64>, error: Option<&str>) -> crate::quota::ProfileQuota {
+    fn claude_window(
+        remaining: u8,
+        resets_at: Option<i64>,
+        error: Option<&str>,
+    ) -> crate::quota::ProfileQuota {
         crate::quota::ProfileQuota {
             profile_id: "claude".into(),
             harness: mj_core::config::HarnessKind::Claude,
@@ -958,10 +966,7 @@ mod tests {
         );
         let mut candidate = candidate(quota, false);
         candidate.harness = mj_core::config::HarnessKind::Claude;
-        assert_eq!(
-            ineligibility(&candidate, "claude-opus-5-5", reset_at),
-            None
-        );
+        assert_eq!(ineligibility(&candidate, "claude-opus-5-5", reset_at), None);
     }
 
     /// Usage-priced harnesses stay on the API tier when the probe never landed.
@@ -1190,7 +1195,9 @@ mod tests {
                 created_at_epoch_seconds: now - 500 + i,
             })
             .collect();
-        telemetry.recent_placements.insert("codex-hot".into(), burst);
+        telemetry
+            .recent_placements
+            .insert("codex-hot".into(), burst);
 
         let ctx = SchedulingContext {
             execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
@@ -1293,7 +1300,10 @@ mod tests {
         };
         rank_scheduled_candidates(&mut guarded, &guarded_ctx);
         assert_eq!(
-            guarded.iter().map(|c| c.profile_id.as_str()).collect::<Vec<_>>(),
+            guarded
+                .iter()
+                .map(|c| c.profile_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["claude1"]
         );
 
@@ -1395,7 +1405,10 @@ mod tests {
         ];
         rank_scheduled_candidates(&mut candidates, &ctx);
         assert_eq!(
-            candidates.iter().map(|c| c.profile_id.as_str()).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|c| c.profile_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["paid-large", "paid-small", "api-cheap", "api-expensive"]
         );
     }

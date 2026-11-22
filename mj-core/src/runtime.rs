@@ -79,26 +79,101 @@ impl ShutdownState {
         notified.await;
     }
 
-    /// Await `future` on the current runtime from a blocking thread, treating
-    /// runtime shutdown as a cancellation.
-    pub fn block_on_with<F: Future>(&self, future: F) -> Result<F::Output> {
+    /// Register an in-flight guarded `block_on` before handing work to another
+    /// thread. Returns `None` once shutdown has begun so callers never launch a
+    /// thread after the drain wait has passed.
+    fn try_register(&self) -> Option<InFlightGuard<'_>> {
         if self.signalled.load(Ordering::SeqCst) {
-            bail!("runtime is shutting down");
+            return None;
         }
-        let _guard = InFlightGuard::register(self);
+        let guard = InFlightGuard::register(self);
         // Re-check after registering: a shutdown that started in between has
         // already passed the drain wait, so it must not be given work to wait
         // for.
         if self.signalled.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(guard)
+    }
+
+    /// Drive `future` with `handle.block_on` under an already-registered
+    /// shutdown guard, dropping `handle` before releasing the guard.
+    fn block_on_registered<F: Future>(
+        &self,
+        guard: InFlightGuard<'_>,
+        handle: tokio::runtime::Handle,
+        future: F,
+    ) -> Result<F::Output> {
+        let _guard = guard;
+        if self.signalled.load(Ordering::SeqCst) {
+            drop(handle);
             bail!("runtime is shutting down");
         }
-        tokio::runtime::Handle::current().block_on(async {
+        let result = handle.block_on(async {
             tokio::select! {
                 biased;
                 () = self.signalled() => bail!("runtime is shutting down"),
                 output = future => Ok(output),
             }
-        })
+        });
+        drop(handle);
+        result
+    }
+
+    /// Await `future` on the current runtime from a blocking thread, treating
+    /// runtime shutdown as a cancellation.
+    pub fn block_on_with<F: Future>(&self, future: F) -> Result<F::Output> {
+        let Some(guard) = self.try_register() else {
+            bail!("runtime is shutting down");
+        };
+        self.block_on_registered(guard, tokio::runtime::Handle::current(), future)
+    }
+
+    /// Drive `future` on a dedicated OS thread outside Tokio's `spawn_blocking`
+    /// pool so composite async operations that await `spawn_blocking` (or nest
+    /// `spawn_off_async_workers`) can never starve the bounded blocking pool.
+    fn spawn_off_async_workers_with<F>(
+        &'static self,
+        future: F,
+    ) -> tokio::task::JoinHandle<Result<F::Output>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let handle = tokio::runtime::Handle::current();
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return spawn(async move { Ok(future.await) });
+        }
+        let Some(guard) = self.try_register() else {
+            return spawn(async { bail!("runtime is shutting down") });
+        };
+        let owner = BLOCKING_OWNER
+            .try_with(tokio_util::task::TaskTracker::token)
+            .ok();
+        let (tx, rx) = tokio::sync::oneshot::channel::<std::thread::Result<Result<F::Output>>>();
+        let spawned = std::thread::Builder::new()
+            .name("mj-off-worker".into())
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let _owner = owner;
+                    self.block_on_registered(guard, handle, Box::pin(future))
+                }));
+                let _ = tx.send(outcome);
+            });
+        match spawned {
+            Ok(_) => spawn(async move {
+                match rx.await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(payload)) => std::panic::resume_unwind(payload),
+                    Err(_) => bail!("off-worker thread exited without returning a result"),
+                }
+            }),
+            Err(error) => {
+                spawn(
+                    async move { Err(anyhow::Error::new(error).context("spawn off-worker thread")) },
+                )
+            }
+        }
     }
 
     /// Signal shutdown, wait up to `grace` for guarded `block_on` calls to
@@ -212,15 +287,18 @@ pub fn off_async_worker<R>(work: impl FnOnce() -> R) -> R {
 }
 
 /// Spawn `future`, whose synchronous waits must not hold an async worker
-/// thread, onto its own blocking-pool thread.
+/// thread, onto its own dedicated thread outside Tokio's blocking pool.
 ///
 /// This is [`off_async_worker`] for a whole future: work that mixes `.await`s
 /// with long synchronous waits (a session lifecycle runs target commands,
 /// copies archives and polls locks between its awaits) runs through
-/// [`block_on`] on a blocking-pool thread. The future is boxed first, as
-/// `tokio::spawn` would box it, because `block_on` keeps its future on the
-/// calling thread's stack. The result is an error when the runtime begins
-/// shutting down before the future finishes.
+/// [`block_on`] on a dedicated `mj-off-worker` OS thread. Running outside
+/// Tokio's bounded `spawn_blocking` pool makes pool-starvation deadlocks
+/// structurally impossible when many lifecycle futures await inner
+/// `spawn_blocking` work or nested lifecycles (#1640). The future is boxed
+/// first, as `tokio::spawn` would box it, because `block_on` keeps its future
+/// on the calling thread's stack. The result is an error when the runtime
+/// begins shutting down before the future finishes.
 ///
 /// On a current-thread runtime there is no worker thread to free, and
 /// `Handle::block_on` on another thread cannot drive that runtime's timers or
@@ -230,13 +308,7 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    if tokio::runtime::Handle::current().runtime_flavor()
-        == tokio::runtime::RuntimeFlavor::MultiThread
-    {
-        spawn_blocking(move || block_on(Box::pin(future)))
-    } else {
-        spawn(async move { Ok(future.await) })
-    }
+    SHUTDOWN.spawn_off_async_workers_with(future)
 }
 
 /// Start a task, as `tokio::spawn` does, with the future boxed first.
@@ -496,5 +568,95 @@ mod tests {
             Duration::from_secs(1),
         );
         assert_eq!(report, ShutdownReport::default());
+    }
+
+    /// More concurrent `spawn_off_async_workers` futures than Tokio's
+    /// `max_blocking_threads` must still complete when every one of them
+    /// awaits `spawn_blocking` and nested `spawn_off_async_workers`.
+    // Hard-won: #1640: Running `spawn_off_async_workers` on Tokio's blocking pool deadlocked when 512+ lifecycles awaited `spawn_blocking`.
+    #[test]
+    fn off_async_workers_do_not_starve_the_blocking_pool() {
+        static STATE: ShutdownState = ShutdownState::new();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let started = Instant::now();
+        let results: Vec<usize> = runtime.block_on(async move {
+            let tasks = (0..8)
+                .map(|index| {
+                    let barrier = barrier.clone();
+                    STATE.spawn_off_async_workers_with(async move {
+                        // Hold every outer task in flight before any inner
+                        // `spawn_blocking` runs so a shared blocking pool of
+                        // size 2 would deadlock immediately.
+                        barrier.wait().await;
+                        let leaf = spawn_blocking(move || index + 1).await.expect("leaf");
+                        let inline = off_async_worker(|| leaf * 2);
+                        STATE
+                            .spawn_off_async_workers_with(async move {
+                                spawn_blocking(move || inline + 10).await.expect("nested")
+                            })
+                            .await
+                            .expect("nested join")
+                            .expect("nested shutdown")
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut outputs = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                let output = tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .expect("off-worker tasks deadlocked the blocking pool")
+                    .expect("task join")
+                    .expect("not shutting down");
+                outputs.push(output);
+            }
+            outputs
+        });
+        assert_eq!(
+            results,
+            (0..8).map(|i| (i + 1) * 2 + 10).collect::<Vec<_>>()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "off-worker tasks took {:?}",
+            started.elapsed()
+        );
+        // Shutdown must still cancel and drop an in-flight off-worker future promptly.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let drop_flag = DropFlag(dropped.clone());
+        runtime.spawn(async move {
+            let _ = STATE
+                .spawn_off_async_workers_with(async move {
+                    let _drop_flag = drop_flag;
+                    entered_tx.send(()).ok();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                })
+                .await;
+        });
+        entered_rx.recv().expect("off-worker entered");
+        let shutdown_started = Instant::now();
+        let report = STATE.shutdown_with(runtime, BlockingWork::Await, Duration::from_secs(5));
+        assert_eq!(report, ShutdownReport::default());
+        assert!(
+            shutdown_started.elapsed() < Duration::from_secs(2),
+            "shutdown waited {:?} for off-worker await",
+            shutdown_started.elapsed()
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "shutdown should cancel and drop the in-flight off-worker future"
+        );
     }
 }

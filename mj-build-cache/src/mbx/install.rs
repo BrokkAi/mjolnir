@@ -252,7 +252,7 @@ pub fn install_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result
     prepared.publish(executor)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn install_mbx_with(
     machine: &Machine,
     executor: &impl CommandExecutor,
@@ -805,7 +805,6 @@ fn checked(output: CommandOutput, command: &CommandSpec) -> Result<CommandOutput
 }
 
 fn release_url(triple: &str) -> String {
-    #[cfg(any(test, feature = "test-support"))]
     if let Some(url) = MBX_TEST_RELEASE_URL.get() {
         return url.clone();
     }
@@ -907,7 +906,7 @@ async fn fetch_archive(url: &str) -> Result<Vec<u8>> {
         .to_vec())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub static MBX_TEST_RELEASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Extract the archive's single binary; its licence texts are not installed.

@@ -524,8 +524,7 @@ impl LegacyMoveOperation {
 
     /// Whether startup recovery must actively roll back or finish forward this legacy Move.
     pub fn needs_recovery(&self) -> bool {
-        self.phase.is_active()
-            || (self.queue_admission_started && !self.queue_admission_finished)
+        self.phase.is_active() || (self.queue_admission_started && !self.queue_admission_finished)
     }
 
     /// Convert a retryable inactive (`Failed` / `Cancelled`) legacy Move into a

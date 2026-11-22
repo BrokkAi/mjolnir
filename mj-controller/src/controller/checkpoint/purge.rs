@@ -229,16 +229,12 @@ fn purge_loaded(
     } else {
         unique_managed_archive_path(session_id, checkpoint.event_frontier, &directory)?
     };
-    let prepared = match prepare_untracked_purge(
-        &checkpoint.archive_path,
-        &destination,
-        dry_run,
-        cancelled,
-    ) {
-        Ok(prepared) => prepared,
-        Err(_error) if cancelled() => return Ok(PurgeSessionOutcome::Aborted),
-        Err(error) => return Err(error),
-    };
+    let prepared =
+        match prepare_untracked_purge(&checkpoint.archive_path, &destination, dry_run, cancelled) {
+            Ok(prepared) => prepared,
+            Err(_error) if cancelled() => return Ok(PurgeSessionOutcome::Aborted),
+            Err(error) => return Err(error),
+        };
     match prepared {
         PreparedUntrackedPurge::Cancelled => Ok(PurgeSessionOutcome::Aborted),
         PreparedUntrackedPurge::Finished(report) => match report.kind {
@@ -346,13 +342,7 @@ fn commit_staged(
             anyhow::anyhow!("purged archive install did not report a rewritten archive"),
         ));
     };
-    commit_replacement(
-        session_id,
-        previous,
-        destination,
-        archive_sha256,
-        report,
-    )
+    commit_replacement(session_id, previous, destination, archive_sha256, report)
 }
 
 fn commit_replacement(
@@ -408,11 +398,11 @@ fn commit_replacement(
 }
 
 fn pause_before_purge_commit() {
-    #[cfg(any(test, feature = "test-support"))]
-    commit_pause::wait_if_armed();
+    if cfg!(test) || mj_core::test_hooks::test_fixtures_enabled() {
+        commit_pause::wait_if_armed();
+    }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 mod commit_pause {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
@@ -494,7 +484,7 @@ mod commit_pause {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub use commit_pause::{PurgeCommitPause, arm as arm_purge_untracked_commit_pause};
 
 fn discard_unreferenced(path: &std::path::Path, error: anyhow::Error) -> anyhow::Error {
@@ -746,9 +736,7 @@ mod tests {
     #[test]
     fn purge_rejects_an_admission_for_a_different_session() {
         let admission = session_admission("11111111111111111111111111111111");
-        let error =
-            purge_one(&admission, "22222222222222222222222222222222", true)
-                .unwrap_err();
+        let error = purge_one(&admission, "22222222222222222222222222222222", true).unwrap_err();
         assert!(
             error.to_string().contains("session admission is for"),
             "{error:#}"
@@ -1019,9 +1007,7 @@ mod tests {
             .map(|payload| payload.size - 1024)
             .sum();
         save(session_id, SessionState::Stopped, Some(previous.clone()));
-        let outcome =
-            purge_one(&session_admission(session_id), session_id, false)
-                .unwrap();
+        let outcome = purge_one(&session_admission(session_id), session_id, false).unwrap();
         let PurgeSessionOutcome::Purged {
             bytes_reclaimed, ..
         } = outcome
@@ -1159,12 +1145,7 @@ mod tests {
         save(session_id, SessionState::Stopped, Some(recorded.clone()));
         let names_before = directory_names();
         for dry_run in [false, true] {
-            let error = purge_one(
-                &session_admission(session_id),
-                session_id,
-                dry_run,
-            )
-            .unwrap_err();
+            let error = purge_one(&session_admission(session_id), session_id, dry_run).unwrap_err();
             let message = format!("{error:#}");
             assert!(
                 message.contains(&recorded.sha256),
@@ -1197,7 +1178,12 @@ mod tests {
         let verified_before =
             mj_checkpoint::archive::verify_archive_streaming(&fixture_path).unwrap();
         assert_eq!(verified_before.manifest.schema_version, 12);
-        assert!(verified_before.manifest.repositories[0].metadata.origin_delta.is_none());
+        assert!(
+            verified_before.manifest.repositories[0]
+                .metadata
+                .origin_delta
+                .is_none()
+        );
 
         fs::create_dir_all(sessions_dir()).unwrap();
         let managed_path = sessions_dir().join(format!("{session_id}-1-{NONCE}.hel.zip"));
@@ -1219,7 +1205,10 @@ mod tests {
             panic!("expected Purged outcome for checked-in legacy fixture, got {outcome:?}");
         };
         assert!(bytes_reclaimed > 0, "expected reclaimed on-disk bytes");
-        assert!(!managed_path.exists(), "old fixture copy should be unlinked");
+        assert!(
+            !managed_path.exists(),
+            "old fixture copy should be unlinked"
+        );
 
         let loaded = crate::database::load_state().unwrap();
         let updated = loaded.sessions[session_id]
@@ -1277,10 +1266,7 @@ mod tests {
             fs::read_to_string(dest_repo.join("feature.txt")).unwrap(),
             "committed legacy feature\n"
         );
-        assert_eq!(
-            run_git_dest(&["show", ":tracked.txt"]),
-            "staged change"
-        );
+        assert_eq!(run_git_dest(&["show", ":tracked.txt"]), "staged change");
         assert_eq!(
             fs::read_to_string(dest_repo.join("tracked.txt")).unwrap(),
             "unstaged change\n"

@@ -138,7 +138,7 @@ pub enum ClaudeLauncher {
     /// same resolver as bare workers.
     Managed,
     /// A program chosen by the caller (tests).
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     Program(PathBuf),
 }
 
@@ -153,7 +153,6 @@ impl ClaudeLauncher {
         environment: &HashMap<String, String>,
     ) -> Result<ClaudeProgram, ClaudeUsageError> {
         match self {
-            #[cfg(any(test, feature = "test-support"))]
             Self::Program(command) => Ok(ClaudeProgram {
                 command: crate::quota_harness::command_text(command)
                     .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?,
@@ -217,7 +216,7 @@ async fn query_cli_with(
     Err(ClaudeUsageError::Parse)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 async fn query_with(
     home: PathBuf,
     environment: HashMap<String, String>,

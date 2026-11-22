@@ -23,6 +23,8 @@ local
 Daemon
 Host
 SESSIONS
+Guardian
+On · local classifier
 Code Review
 Off
 Sub-agents
@@ -87,6 +89,10 @@ Load balancing may consume credits
 
 When this subscription profile has used up its quota for a model, let load balancing still pick it and spend its paid credits. Off: it is skipped until the quota resets. Does not affect a session you pin to this profile.
 
+Mjolnir guardian
+
+On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. The top-level Guardian setting must also be enabled. Off: pending requests go to your permission form. Applies to new sessions.
+
 Claude permission mode
 Default (Auto)
 Auto
@@ -106,6 +112,7 @@ control Type: Claude Code
 control Account directory: "<home>" (text, placeholder "Not set")
 control Context budget (bytes): "" (text, placeholder "262144 (256 KiB)")
 control Load balancing may consume credits: unchecked
+control Mjolnir guardian: checked
 control Claude permission mode: Default (Auto)
 layout: {"overflowsSideways":false,"savebar":false,"saveEnabled":false,"menu":"Settings","hash":"#settings/profiles/claude"}
 === an accepted edit leaves the draft unsaved (390x844) ===

@@ -879,12 +879,12 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 }
 
 mod close;
-mod purge;
 mod close_workspace;
 pub(crate) mod create;
 mod lifecycle;
 pub(crate) mod mailbox_delivery;
 pub(crate) mod mbx_service;
+mod purge;
 pub(crate) mod push_delivery;
 mod resume;
 mod snapshot;

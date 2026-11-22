@@ -161,22 +161,28 @@ where
         let model = model.as_deref();
         async move {
             let result = async {
-                let mut choices = result?;
-                if let Some(offer) = identity.and_then(|identity| {
+                let choices = result?;
+                let efforts = if let Some(offer) = identity.and_then(|identity| {
                     mj_core::model_catalog::offer(
                         &choices.models,
                         identity,
                         model.unwrap_or(identity),
                     )
                 }) {
-                    let default = choices.model.clone();
-                    let mut specific = probe(id.clone(), Some(offer.value)).await?;
-                    let selected = std::mem::replace(&mut specific.model, default);
-                    specific = specific.restricted_to(&config.profiles[&id].model_offer());
-                    specific.model = selected;
-                    choices = specific;
-                }
-                Ok::<_, anyhow::Error>(choices)
+                    if choices.model.as_deref() == Some(&offer.value) && !choices.efforts.is_empty()
+                    {
+                        Ok(choices.efforts)
+                    } else {
+                        probe(id.clone(), Some(offer.value))
+                            .await
+                            .map(|specific| specific.efforts)
+                    }
+                } else {
+                    Ok(Vec::new())
+                };
+                // Spawn gets model availability from the default catalogue.
+                // A probe after selecting a model describes its efforts only.
+                Ok::<_, anyhow::Error>((choices.models, efforts))
             }
             .await;
             (id, result)
@@ -185,26 +191,22 @@ where
     .await;
     for (id, result) in results {
         match result {
-            Ok(choices) => {
-                if identity.as_deref().is_some_and(|identity| {
-                    mj_core::model_catalog::offer(
-                        &choices.models,
-                        identity,
-                        model.as_deref().unwrap_or(identity),
-                    )
-                    .is_some()
-                }) {
-                    for choice in choices.efforts {
-                        if !options
-                            .efforts
-                            .iter()
-                            .any(|existing| existing.value == choice.value)
-                        {
-                            options.efforts.push(choice);
+            Ok((models, efforts)) => {
+                options.models.extend(models);
+                match efforts {
+                    Ok(efforts) => {
+                        for choice in efforts {
+                            if !options
+                                .efforts
+                                .iter()
+                                .any(|existing| existing.value == choice.value)
+                            {
+                                options.efforts.push(choice);
+                            }
                         }
                     }
+                    Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
                 }
-                options.models.extend(choices.models);
             }
             Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
         }
@@ -517,7 +519,7 @@ fn is_current_at(choices: &ProfileConfig, now: i64) -> bool {
 /// its last known choices instead of losing them. Production discovery uses
 /// [`resolve_cached_discovery`], which also reports whether the harness ran;
 /// this wrapper remains for its unit tests.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn resolve_cached(
     refresh: bool,
     current: impl FnOnce(&ProfileConfig) -> bool,
@@ -735,6 +737,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     // Hard-won: #1534 review: a first-listed older alias hid the newer profile during admission.
+    // Hard-won: a35beec20: Move hid an offered model after probing its effort.
     #[tokio::test]
     async fn subagent_options_preserve_versions_sharing_the_same_launch_alias() {
         let config = crate::profile_catalog::test_config(&[
@@ -766,6 +769,9 @@ mod tests {
                 let selected = model.is_some();
                 if let Some(model) = &model {
                     assert_eq!((id.as_str(), model.as_str()), ("newer", "sonnet"));
+                    // A selected-model probe may return just the settings it
+                    // discovered after selection, without the default list.
+                    models.clear();
                 }
                 Ok(ProfileConfig {
                     model: model.or_else(|| Some("opus".into())),

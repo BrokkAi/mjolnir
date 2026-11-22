@@ -243,6 +243,7 @@ impl Controller {
                 executor,
                 github_token.as_deref(),
                 ProvisioningFailureDisposition::Discard,
+                None,
                 remember_launch_choices,
                 interrupted,
             )
@@ -745,6 +746,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
+        move_manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
     ) -> Result<()> {
         let repositories = self
             .provision_session_target_with_failure_disposition(
@@ -752,6 +754,7 @@ impl Controller {
                 executor,
                 github_token,
                 failure_disposition,
+                move_manifest,
                 // Resume is the only production caller; it reopens a
                 // directory the user already chose, so it keeps the history.
                 true,
@@ -768,12 +771,14 @@ impl Controller {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn provision_session_target_with_failure_disposition(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
+        move_manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
         remember_launch_choices: bool,
         interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<RepositorySetup> {
@@ -802,9 +807,6 @@ impl Controller {
                 .get(&session.last_profile)
                 .context("harness profile disappeared before provisioning")?
                 .ensure_ready(&session.last_profile)?;
-            // A recovered Move may already have sealed its handoff. Check
-            // the recorded source before running any destination preflight.
-            let move_bundle = None;
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
@@ -838,9 +840,9 @@ impl Controller {
             }
             let _timing = LaunchPhaseTimer::new(session_id, "plan managed checkout");
             let managed_checkout = self.plan_managed_raw_worktree(session_id, executor)?;
-            Ok((managed_checkout, move_bundle))
+            Ok(managed_checkout)
         })();
-        let (managed_checkout, move_bundle) = match preparation {
+        let managed_checkout = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
@@ -882,16 +884,21 @@ impl Controller {
             }
             let mut bundle = if project_directory.is_some() {
                 None
-            } else if let Some(bundle) = move_bundle {
-                Some(bundle)
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
+                // Move's verified snapshot owns the checkout being restored.
+                // The session's ordinary checkpoint may predate this checkout.
                 let history_cutoff_origin_delta =
                     super::backend::session_history_cutoff(&session)?.is_some()
-                        && super::network_git::checkpoint_has_history_cutoff_origin_delta(
-                            &session,
-                        )?;
+                        && match move_manifest {
+                            Some(manifest) => super::network_git::manifest_has_history_cutoff_origin_delta(manifest),
+                            None => super::network_git::checkpoint_has_history_cutoff_origin_delta(&session)?,
+                        };
                 if history_cutoff_origin_delta {
                     Some(backend_session_bundle(&session, &self.config, executor)?)
+                } else if let Some(manifest) = move_manifest {
+                    Some(super::network_git::bundle_from_manifest_for_session(
+                        manifest, Some(&session), Some(&self.config),
+                    )?)
                 } else {
                     Some(super::network_git::checkpoint_bundle(&session, &self.config)?)
                 }
@@ -1124,8 +1131,8 @@ impl Controller {
                 // Holds a create after its target exists, so a test can restart
                 // the daemon in the middle of it.
                 mj_core::test_hooks::reach_test_hook("create_after_target_provisioned")?;
-                #[cfg(feature = "test-hooks")]
-                if std::env::var("MJ_TEST_HOOK").as_deref() == Ok("create_after_target_provisioned")
+                if mj_core::test_hooks::test_hooks_enabled()
+                    && std::env::var("MJ_TEST_HOOK").as_deref() == Ok("create_after_target_provisioned")
                     && let Some(directory) = std::env::var_os("MJ_TEST_HOOK_DIR")
                 {
                     let marker = PathBuf::from(directory).join("create_after_target_provisioned.fail");
@@ -1691,7 +1698,7 @@ fn execute_repository_setup(
 /// Creation is the boundary that matters. A step that fails before the target
 /// exists has left nothing behind; every failure after it — a later plan step
 /// or locator discovery — owns a target no session record will point at.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn provision_target(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
@@ -1722,7 +1729,7 @@ fn provision_target(
 /// Bring the target into existence and return the commands that populate its
 /// repositories. The caller may overlap that remainder with worker/profile
 /// installation once it has persisted the discovered locator.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn provision_target_creation(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
@@ -1782,7 +1789,7 @@ fn provision_target_creation_plan(
 ///
 /// The teardown is the session's own close plan, so a failed launch and an
 /// ordinary close can never disagree about what removing a target means.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn cleanup_failed_provision(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -1798,7 +1805,7 @@ fn cleanup_failed_provision(
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn cleanup_failed_provision_named(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -1863,7 +1870,7 @@ fn cleanup_failed_provision_named(
 ///
 /// Every target but AWS is named before its plan runs; an EC2 instance
 /// reports its own ID in the launch response.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn provisioned_locator_named(
     target: &targets::TargetTemplate,
     session_id: &str,

@@ -13,18 +13,11 @@ name = "mj_worker_staging"
 # The crate has no doc tests; looking for them makes rustdoc compile it again.
 doctest = false
 
-[features]
-default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks"]
-# Exposes the shared test fixtures to the tests of the crates above.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support"]
-
 [lints]
 workspace = true
 
 [dependencies]
 mj-core.workspace = true
-mj-client.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true
 mj-session-types.workspace = true
@@ -34,24 +27,19 @@ chrono.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
 rayon.workspace = true
-reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
+reqwest.workspace = true
 rusqlite.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
-tokio = { workspace = true, features = ["full"] }
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["test-hooks", "golden"] }
-mj-targets = { workspace = true, features = ["test-support"] }
-mj-store = { workspace = true, features = ["test-support"] }
-mj-accounts = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }

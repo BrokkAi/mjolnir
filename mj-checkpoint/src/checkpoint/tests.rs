@@ -5105,7 +5105,8 @@ fn origin_delta_raw_export_captures_post_launch_work_without_quiescence_receipt(
     fs::write(checkout.join("untracked.txt"), "untracked file\n").unwrap();
 
     spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaRaw;
-    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
     assert_eq!(
         spec.protocol_version,
         CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION
@@ -5140,7 +5141,8 @@ fn origin_delta_raw_export_handles_originless_repository() {
     git(&checkout, &["remote", "remove", "origin"]);
 
     spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaRaw;
-    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
 
     export_checkpoint(&spec).unwrap();
     let archive = read_archive_verified(&spec.output_path).unwrap();
@@ -5197,7 +5199,8 @@ fn origin_delta_cutoff_export_and_restore_round_trips_without_origin() {
         exclude_commits: vec![cutoff.clone()],
     };
     spec.repositories[0].origin_override = None;
-    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
     assert_eq!(
         spec.protocol_version,
         CHECKPOINT_ORIGIN_DELTA_EXPORT_PROTOCOL_VERSION
@@ -5217,7 +5220,10 @@ fn origin_delta_cutoff_export_and_restore_round_trips_without_origin() {
     assert!(delta.origin_url.is_none());
 
     restore_repositories(&spec.output_path, &restore_root, &SystemGit).unwrap();
-    assert_eq!(git(&restore_checkout, &["rev-parse", "HEAD"]), expected_head);
+    assert_eq!(
+        git(&restore_checkout, &["rev-parse", "HEAD"]),
+        expected_head
+    );
     assert_eq!(
         git(&restore_checkout, &["branch", "--show-current"]),
         "cutoff-branch"
@@ -5230,7 +5236,10 @@ fn origin_delta_cutoff_export_and_restore_round_trips_without_origin() {
         git(&restore_checkout, &["show", ":README.md"]),
         "staged cutoff edit"
     );
-    assert_eq!(git(&restore_checkout, &["stash", "list"]).lines().count(), 1);
+    assert_eq!(
+        git(&restore_checkout, &["stash", "list"]).lines().count(),
+        1
+    );
     let origin = SystemGit
         .run(
             &restore_checkout,
@@ -5257,7 +5266,8 @@ fn origin_delta_cutoff_export_allows_empty_pack_at_cutoff() {
         exclude_commits: vec![cutoff],
     };
     spec.repositories[0].origin_override = None;
-    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
 
     export_checkpoint(&spec).unwrap();
     let archive = read_archive_verified(&spec.output_path).unwrap();
@@ -5301,7 +5311,8 @@ fn restore_checkpoint_with_notices_uses_primary_repository_root_for_origin_delta
     spec.bundle.primary_repository = "project".into();
     spec.repositories[0].id = "project".into();
     spec.repositories[0].capture = CheckpointRepositoryCapture::OriginDeltaRaw;
-    spec.protocol_version = CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
+    spec.protocol_version =
+        CheckpointRepositoryCapture::export_protocol_version(&spec.repositories);
     export_checkpoint(&spec).unwrap();
 
     // Provision a fresh container-style workspace where the primary repo sits at

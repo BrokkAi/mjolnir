@@ -22,7 +22,7 @@ pub use availability::{
     AvailabilityReport, ProfilePresenceFailure, check_availability, profile_presence,
 };
 mod machines;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub use machines::machine_probe_fixture;
 pub use machines::{
     MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,

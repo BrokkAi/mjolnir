@@ -4,6 +4,8 @@
 //! test binary because it blocks SIGCHLD process-wide and collects the exit
 //! status of every child of the process.
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use std::process::Command;
 use std::time::Duration;
 

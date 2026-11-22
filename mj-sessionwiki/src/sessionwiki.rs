@@ -869,14 +869,14 @@ impl WikiIndexer {
         target
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn inert() -> Self {
         Self {
             inner: Arc::new(Indexer::default()),
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn sync_requested(&self) -> bool {
         let state = self.inner.lock();
         state.view.requested > state.view.started
@@ -2597,7 +2597,7 @@ fn archive_space_over_state(
 }
 
 /// The sizing itself, over given records and a sessions directory.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn archive_space_over(
     sessions_root: &Path,
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
@@ -4224,27 +4224,28 @@ mod tests {
                 origin_delta: None,
             };
             if origin_delta {
-                metadata.origin_delta = Some(Box::new(mj_core::archive::WorkspaceSnapshotMetadata {
-                    origin_url: Some("https://example.test/repository.git".into()),
-                    object_format: "sha1".into(),
-                    notices: Vec::new(),
-                    head: mj_core::archive::SnapshotHead::Branch {
-                        name: "mj/test".into(),
-                        commit: "2".repeat(40),
-                    },
-                    refs: BTreeMap::new(),
-                    branch_tracking: BTreeMap::new(),
-                    stash: Vec::new(),
-                    working_state: None,
-                    working_state_skipped: false,
-                    has_uncommitted_state: false,
-                    worktrees: Vec::new(),
-                    initialized_submodules: Vec::new(),
-                    index_gitlinks: Vec::new(),
-                    remote_refs_stale: false,
-                    prerequisites: Vec::new(),
-                    history_cutoff: false,
-                }));
+                metadata.origin_delta =
+                    Some(Box::new(mj_core::archive::WorkspaceSnapshotMetadata {
+                        origin_url: Some("https://example.test/repository.git".into()),
+                        object_format: "sha1".into(),
+                        notices: Vec::new(),
+                        head: mj_core::archive::SnapshotHead::Branch {
+                            name: "mj/test".into(),
+                            commit: "2".repeat(40),
+                        },
+                        refs: BTreeMap::new(),
+                        branch_tracking: BTreeMap::new(),
+                        stash: Vec::new(),
+                        working_state: None,
+                        working_state_skipped: false,
+                        has_uncommitted_state: false,
+                        worktrees: Vec::new(),
+                        initialized_submodules: Vec::new(),
+                        index_gitlinks: Vec::new(),
+                        remote_refs_stale: false,
+                        prerequisites: Vec::new(),
+                        history_cutoff: false,
+                    }));
             }
             let input = ArchiveInput {
                 session: SessionManifest {

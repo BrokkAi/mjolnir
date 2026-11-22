@@ -21,6 +21,9 @@
 //!   last completed review. It advances only after complete review coverage;
 //!   cancellation or an incomplete group leaves the changes for the next review.
 
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
+
 pub mod delta;
 pub mod driver;
 pub mod lanes;

@@ -544,7 +544,7 @@ impl Reclamation {
 
 /// Roll back a checkout created during preparation, before any worker could
 /// receive it. This explicit authority is only for that construction path.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn cleanup_unstarted_checkout(
     executor: &impl CommandExecutor,
     checkout: &ManagedWorktree,
@@ -855,7 +855,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-        supervisor: false,
+            supervisor: false,
         };
         database::save_subagent_session(&child, &relation).unwrap();
         let mut grandchild = child.clone();

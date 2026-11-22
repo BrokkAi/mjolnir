@@ -1,12 +1,8 @@
 //! Mjolnir's controller: provisioning, session management, storage, and the
 //! host-side services that the daemon in `mj-daemon` drives.
 
-// `test-support` compiles the test-only items for mj-daemon's tests, which use
-// only some of them. The dead-code lints still run on normal and test builds.
-#![cfg_attr(
-    all(feature = "test-support", not(test)),
-    allow(dead_code, unused_imports)
-)]
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
 
 pub use mj_accounts::claude_usage;
 pub use mj_accounts::login_terminal;
@@ -20,12 +16,12 @@ pub use mj_accounts::harness_login;
 pub use mj_import::handoff;
 pub mod image;
 pub use mj_accounts::opencode_logins;
+pub use mj_accounts::power_ranking;
 pub use mj_accounts::profile_health;
 pub use mj_accounts::profile_login;
-pub use mj_accounts::power_ranking;
-pub use mj_accounts::quota_telemetry;
 pub use mj_accounts::profile_scheduler;
 pub use mj_accounts::quota;
+pub use mj_accounts::quota_telemetry;
 pub use mj_import::import;
 pub use mj_import::project_catalog;
 pub use mj_import::project_picker;
@@ -60,9 +56,9 @@ pub mod github_rate_limit;
 pub use mj_store::mailbox_outbox;
 pub use mj_store::upgrade;
 pub use mj_store::web_push;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub use mj_targets::test_isolation;
-#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub use mj_targets::test_log;
 
 pub use mj_session_runtime::wait_policy;

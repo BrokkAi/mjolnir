@@ -174,16 +174,13 @@ fn main() {
         "cargo:rustc-env=MJ_RELEASE_IMAGE_CARRIES_WORKER={}",
         u8::from(carries_worker)
     );
-    if std::env::var_os("CARGO_FEATURE_TEST_HOOKS").is_some() {
-        // The stand-in is mj-core's checked-in dispatcher with this build's
-        // stamp appended. Generate it at build time: writing an executable
-        // during parallel tests can leave inherited writable descriptors
-        // (ETXTBSY).
-        let fixture = root
-            .parent()
-            .expect("workspace root")
-            .join("mj-core/tests/fixtures/fake-command.sh");
-        let script = tracked_read(&fixture).expect("fake command fixture");
+    // Build the stamped stand-in from the workspace fixture when available.
+    // A registry package does not include the sibling crate's fixture.
+    let fixture = root
+        .parent()
+        .expect("workspace root")
+        .join("mj-core/tests/fixtures/fake-command.sh");
+    if let Some(script) = tracked_read(&fixture) {
         let stamped = format!(
             "{script}\n#MJ-BUILD-ID:{version}+{worker_inputs_id}\n#\0MJ-WORKER-BUILD:{version}+{worker_inputs_id}\0\n",
         );

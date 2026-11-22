@@ -1,6 +1,8 @@
 //! Real worker entrypoints must clean inherited state before invoking Git.
 #![cfg(unix)]
 
+mj_core::enable_test_fixtures_on_startup!();
+
 use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
 use std::time::Duration;
@@ -603,7 +605,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), &executable).unwrap();
     std::os::unix::fs::symlink(
         env!("CARGO_BIN_EXE_mj-worker"),
-        mj_controller::targets::control_worker_path(worker_root.to_str().unwrap()),
+        mj_targets::targets::control_worker_path(worker_root.to_str().unwrap()),
     )
     .unwrap();
     let config = root.path().join("launch.json");
@@ -647,7 +649,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
             std::thread::sleep(Duration::from_millis(25));
         }
         let script =
-            mj_controller::targets::worker_daemon_liveness_script(worker_root.to_str().unwrap());
+            mj_targets::targets::worker_daemon_liveness_script(worker_root.to_str().unwrap());
         let output = executor.execute(&CommandSpec::new("sh", ["-c", script.unstaged_script()]))?;
         ensure!(
             output.status == 0 && output.stdout == b"alive\n",
@@ -671,7 +673,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     })();
     // Always stop/join before dropping the worker's files, even if observation
     // failed. The bounded owner also cleans up if the identity check regresses.
-    let script = mj_controller::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
+    let script = mj_targets::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
     let stopped = executor.execute(&CommandSpec::new("sh", ["-c", script.unstaged_script()]));
     let output = worker.join().expect("worker owner panicked");
     observation.unwrap();
@@ -715,7 +717,7 @@ fn container_worker_token_after_start(
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), worker_root.join("hel")).unwrap();
     std::os::unix::fs::symlink(
         env!("CARGO_BIN_EXE_mj-worker"),
-        mj_controller::targets::control_worker_path(worker_root.to_str().unwrap()),
+        mj_targets::targets::control_worker_path(worker_root.to_str().unwrap()),
     )
     .unwrap();
     let mut command = CommandSpec::new(
@@ -746,7 +748,7 @@ fn container_worker_token_after_start(
     }
     let prepared =
         std::fs::read_to_string(&startup).is_ok_and(|steps| steps.contains("harness-resolve"));
-    let script = mj_controller::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
+    let script = mj_targets::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
     let _ = BoundedProcessExecutor::new(Duration::from_secs(8))
         .execute(&CommandSpec::new("sh", ["-c", script.unstaged_script()]));
     if let Ok(output) = worker.join().expect("worker owner panicked") {
