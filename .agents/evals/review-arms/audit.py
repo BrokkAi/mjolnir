@@ -1647,7 +1647,7 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written,
                                     edit_paths=edit_paths)
         if scripts is not None:
-            interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]])
+            yield from interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]], own_workspace)
     elif program in SEARCH:
         files, operands, trailing = search_operands(program, args)
         for path in files + operands + trailing:
@@ -1916,7 +1916,16 @@ def record_script_write(scripts, written, words, redirections, source, cwd, stag
     return visible
 
 
-def interpreter_writes(scripts, program, source, cwd, argv):
+NAMED_BINDING_NODES = tuple(
+    cls for name in (
+        "FunctionDef", "AsyncFunctionDef", "ClassDef", "ExceptHandler",
+        "MatchAs", "MatchStar", "TypeVar", "ParamSpec", "TypeVarTuple",
+    ) if (cls := getattr(ast, name, None)) is not None
+)
+MATCH_MAPPING_NODES = tuple(cls for cls in (getattr(ast, "MatchMapping", None),) if cls is not None)
+
+
+def interpreter_writes(scripts, program, source, cwd, argv, own_workspace):
     # Preserve only the empty-at-start history when the interpreter's
     # possible mutations can be assigned to specific paths.
     if scripts.tracked is None or program not in PYTHON:
@@ -1935,11 +1944,10 @@ def interpreter_writes(scripts, program, source, cwd, argv):
             stores[node.id] += 1
         elif isinstance(node, ast.arg):
             stores[node.arg] += 1
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
-                               ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+        elif isinstance(node, NAMED_BINDING_NODES):
             if node.name is not None:
                 stores[node.name] += 1
-        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        elif isinstance(node, MATCH_MAPPING_NODES) and node.rest is not None:
             stores[node.rest] += 1
     bindings = {target.id: node.value for node in nodes if isinstance(node, ast.Assign)
                 for target in node.targets if isinstance(target, ast.Name) and stores[target.id] == 1}
@@ -2043,7 +2051,12 @@ def interpreter_writes(scripts, program, source, cwd, argv):
         if resolved is None:
             scripts.clear()
             return
-        scripts.opaque_write(resolved[1], cwd)
+        hits = list(path_hits(resolved[1], own_workspace, cwd))
+        yield from hits
+        if hits:
+            scripts.clear()
+        else:
+            scripts.opaque_write(resolved[1], cwd)
 
 
 def screen_script_writes(scripts, visible, own_workspace, commits, single_commit, cwd):
@@ -2172,7 +2185,8 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                             for script_source in script_sources:
                                 yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit,
                                                             start_dir, written, edit_paths=edit_paths)
-                                interpreter_writes(scripts, program, script_source, start_dir, [path, *arguments])
+                                yield from interpreter_writes(scripts, program, script_source, start_dir,
+                                                              [path, *arguments], own_workspace)
                 else:
                     visible = record_script_write(scripts, written, words, redirections, source, start_dir, new_writes)
                     yield from screen_script_writes(scripts, visible, own_workspace, commits, single_commit, start_dir)
@@ -2191,7 +2205,8 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                         yield from source_literal_hits(arg, own_workspace, start_dir)
                     yield from interpreter_hits(program, source, own_workspace, commits, single_commit,
                                                         start_dir, written, edit_paths=edit_paths)
-                    interpreter_writes(scripts, program, source, start_dir, ["-", *arguments[1:]])
+                    yield from interpreter_writes(scripts, program, source, start_dir,
+                                                  ["-", *arguments[1:]], own_workspace)
             except InspectionRequired as error:
                 scripts.clear()
                 yield "needs-inspection", f"{error}: {shlex.join(words)[:400]}"

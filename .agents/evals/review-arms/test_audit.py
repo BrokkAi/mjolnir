@@ -487,6 +487,25 @@ def test_tracked_write_without_symlink_inventory_invalidates_script(tmp_path):
     assert (3, "needs-inspection") in {(hit["seq"], hit["kind"]) for hit in report["hits"]}
 
 
+@pytest.mark.parametrize("write_expr", [
+    "(root / '.local' / 'share' / 'mjolnir' / 'x').write_text('x')",
+    "(root / ('state' + '.db')).write_text('x')",
+])
+def test_resolved_python_write_path_is_checked_by_path_hits(tmp_path, write_expr):
+    checkout = f"/workspace/{OWN}/engine-trees"
+    (tmp_path / "pre-inventory.json").write_text(json.dumps({
+        "cwd": checkout, "tracked_paths": [], "tracked_symlinks": [],
+    }))
+    script = f"{checkout}/.rql-engine-{OWN}/build.py"
+    source = f"from pathlib import Path\nroot = Path({checkout!r})\n{write_expr}"
+    report = audit_calls(tmp_path, [
+        shell(f"cat > {script} <<'EOF'\n{source}\nEOF", name="exec_command", status="completed"),
+        shell(f"python3 {script}", name="exec_command", status="completed"),
+    ], cwd=checkout, terminal_results={1: [{"exit_code": 0}], 2: [{"exit_code": 0}]})
+    assert not report["passed"]
+    assert (2, "memory-or-sessions") in {(hit["seq"], hit["kind"]) for hit in report["hits"]}
+
+
 @pytest.mark.parametrize(("name", "status", "raw_output", "terminal_exit", "passed"), [
     ("Bash", "completed", None, 0, True),
     ("Bash", "failed", None, 1, False),
