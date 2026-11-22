@@ -272,7 +272,9 @@ def stratum_metrics(records, seed):
         if record["fresh"] is None:
             continue
         first, again = set(record["engine"]), set(record["fresh"])
-        if is_repair_stall(record.get("fresh_answer")):
+        # Either side failing leaves nothing to reproduce, so the pair scores zero;
+        # two empty sets would otherwise count as a perfect match.
+        if is_repair_stall(record.get("fresh_answer")) or is_repair_stall(record.get("engine_answer")):
             similarities.append(Fraction(0))
         else:
             similarities.append(Fraction(len(first & again), len(first | again)) if first or again else Fraction(1))

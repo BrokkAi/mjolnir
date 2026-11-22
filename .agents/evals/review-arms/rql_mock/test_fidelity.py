@@ -123,6 +123,16 @@ class Arithmetic(unittest.TestCase):
         self.assertEqual(report["stability_n"], 2)
         self.assertEqual(accuracy([], 0)["recall"], None)
 
+    # Hard-won: 770af03f3: a failed first answer with an empty re-ask scored as perfectly stable
+    def test_a_failed_first_answer_scores_zero_stability_even_against_an_empty_reask(self):
+        stall = {"status": "engine_error", "failure": "repair_stalled", "rows": []}
+        empty = {"status": "ok", "rows": []}
+        records = [{"engine": [], "gold": [], "fresh": [], "engine_answer": stall, "fresh_answer": empty},
+                   {"engine": [], "gold": [], "fresh": [], "engine_answer": empty, "fresh_answer": empty}]
+        report = stratum_metrics(records, "fixed")
+        self.assertEqual(report["stability_n"], 2)
+        self.assertEqual(report["stability_jaccard"], 0.5)
+
     def test_each_bar_is_inclusive_and_independently_enforced(self):
         self.assertFalse(bar_failures("random", BARS))
         for name, bound in BARS.items():
