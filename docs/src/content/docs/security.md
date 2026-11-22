@@ -192,9 +192,10 @@ Kimi Code and DSH report the refusal to the agent, which carries on; OpenCode
 ends the agent's turn on a refusal. To let the agent proceed, tell it so in the
 conversation: a later review sees your message.
 
-If a review fails or reaches its 90-second deadline, Mjolnir returns an
-error to the harness and records the reason in the transcript. The ACP
-reviewer can make up to three attempts within its deadline.
+If a review fails or reaches its 90-second deadline, the ordinary permission
+form opens and explains why the guardian could not decide. The relay review's
+deadline includes collecting project instructions. The ACP reviewer can make
+up to three attempts within its review deadline.
 
 When the guardian denies three actions in a row, or ten of its last fifty
 in the current turn, the rest of that turn's requests open the ordinary

@@ -99,13 +99,13 @@ impl Guardian {
             Ok(Ok(instructions)) => instructions,
             Ok(Err(error)) => {
                 tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "could not collect project instructions");
-                return GuardianDecision::Failed {
-                    reason: format!("it could not collect project instructions: {error}"),
+                return GuardianDecision::AskPerson {
+                    reason: "it could not collect project instructions".into(),
                 };
             }
             Err(_) => {
                 tracing::warn!(target: "mj_guardian", %tool_call_id, "collecting project instructions timed out");
-                return GuardianDecision::Failed {
+                return GuardianDecision::AskPerson {
                     reason: "collecting project instructions timed out".into(),
                 };
             }
@@ -134,14 +134,14 @@ impl Guardian {
                 Ok(GuardianReviewOutcome::AskPerson { reason }) => {
                     let reason = safe_daemon_guardian_failure_reason(&reason);
                     tracing::warn!(target: "mj_guardian", %tool_call_id, %reason, "daemon guardian review failed");
-                    return GuardianDecision::Failed {
-                        reason: reason.into(),
+                    return GuardianDecision::AskPerson {
+                        reason: format!("its review failed: {reason}"),
                     };
                 }
                 Err(error) => {
                     tracing::warn!(target: "mj_guardian", %tool_call_id, %error, "guardian relay failed");
-                    return GuardianDecision::Failed {
-                        reason: error.to_string(),
+                    return GuardianDecision::AskPerson {
+                        reason: format!("its review failed: {error}"),
                     };
                 }
             }
@@ -201,8 +201,9 @@ impl Guardian {
                     error = %format!("{error:#}"),
                     "ACP guardian review failed"
                 );
-                return GuardianDecision::Failed {
-                    reason: "the ACP reviewer failed".into(),
+                return GuardianDecision::AskPerson {
+                    reason: "its review failed: the ACP reviewer could not complete the review"
+                        .into(),
                 };
             }
             Err(_) => {
@@ -212,7 +213,7 @@ impl Guardian {
                     %tool_call_id,
                     "ACP guardian review timed out"
                 );
-                return GuardianDecision::Failed {
+                return GuardianDecision::AskPerson {
                     reason: format!(
                         "the ACP review did not finish within {} seconds",
                         GUARDIAN_REVIEW_TIMEOUT.as_secs()

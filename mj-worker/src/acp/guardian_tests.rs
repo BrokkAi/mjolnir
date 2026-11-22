@@ -42,7 +42,7 @@ def ask(ident, session, call, title, kind, raw_input):
         if message is None: sys.exit(0)
         if message.get('id') == ident and 'method' not in message:
             buffered[:0] = deferred
-            return message.get('result', {}).get('outcome', message.get('error'))
+            return message.get('result', {}).get('outcome')
         if 'method' in message and 'id' in message:
             send({'jsonrpc':'2.0','id':message['id'],'result':{}})
         else:
@@ -597,9 +597,8 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
     runtime.abort();
 }
 
-// Hard-won: a35beec20: a daemon guardian timeout left Antigravity waiting for manual approval.
 #[tokio::test]
-async fn guardian_relay_timeout_answers_antigravity_without_an_operator_form() {
+async fn guardian_relay_timeout_uses_the_away_answer_for_antigravity() {
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
 
     let temp = tempfile::tempdir().unwrap();
@@ -616,6 +615,10 @@ async fn guardian_relay_timeout_answers_antigravity_without_an_operator_form() {
             spec.approval_choices = Default::default();
             spec.harness
                 .configure_staged_home_environment(temp.path(), &mut spec.environment);
+            spec.operator_away.set(mj_core::state::OperatorPresence {
+                away: true,
+                revision: 1,
+            });
         },
     );
     wait_for_guardian_request(&endpoint).await;
@@ -623,26 +626,35 @@ async fn guardian_relay_timeout_answers_antigravity_without_an_operator_form() {
     tokio::time::advance(GUARDIAN_REVIEW_TIMEOUT).await;
     tokio::time::resume();
 
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+            break request;
+        }
+    };
+    assert!(
+        request
+            .message
+            .contains("the daemon guardian did not return a verdict before the relay deadline"),
+        "{}",
+        request.message
+    );
     loop {
-        match next_event(&mut events).await {
-            RuntimeEvent::ElicitationRequested { request } => {
-                panic!(
-                    "review failure opened an operator form: {}",
-                    request.message
-                );
-            }
-            RuntimeEvent::Notice { message } if message.contains("relay deadline") => break,
-            _ => {}
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            ..
+        } = next_event(&mut events).await
+        {
+            assert_eq!(elicitation_id, request.id);
+            assert_eq!(action, mj_core::elicitation::OPERATOR_AWAY_ACTION);
+            break;
         }
     }
-    let replies = await_recorded(temp.path(), "session_outcomes", 1).await;
-    assert_eq!(replies[0]["outcome"]["code"], -32603);
-    assert!(
-        replies[0]["outcome"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("the daemon guardian did not return a verdict before the relay deadline"),
-        "{replies:?}"
+    assert_eq!(
+        await_recorded(temp.path(), "session_outcomes", 1).await,
+        [
+            json!({"command": "touch marker", "outcome": {"outcome": "selected", "optionId": "reject"}})
+        ]
     );
     assert!(endpoint.requests().is_empty());
     assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
@@ -656,7 +668,7 @@ async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_detail
 
     let temp = tempfile::tempdir().unwrap();
     let endpoint = Arc::new(GuardianEndpoint::default());
-    let (_requests, mut events, runtime, _) = start_scripted_harness(
+    let (requests, mut events, runtime, _) = start_scripted_harness(
         temp.path(),
         &["touch first", "touch second", "touch third"],
         &[],
@@ -690,28 +702,42 @@ async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_detail
                 reason: reason.into(),
             },
         });
-        loop {
-            match next_event(&mut events).await {
-                RuntimeEvent::ElicitationRequested { request } => {
-                    panic!(
-                        "review failure opened an operator form: {}",
-                        request.message
-                    );
-                }
-                RuntimeEvent::Notice { message } if message.starts_with("Mjolnir guardian") => {
-                    assert!(message.ends_with(expected), "{message}");
-                    break;
-                }
-                _ => {}
+        let form = loop {
+            if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+                break request;
             }
-        }
+        };
+        assert!(
+            form.message.starts_with(&ask_person_preface(&format!(
+                "its review failed: {expected}"
+            ))),
+            "{}",
+            form.message
+        );
+        assert!(!form.message.contains("SECRET_DATA"), "{}", form.message);
+        let (resolved, confirmation) = oneshot::channel();
+        requests
+            .send(CommandRequest::ResolveElicitation {
+                elicitation_id: form.id,
+                response: ElicitationResponse::Accept {
+                    content: BTreeMap::from([(
+                        "choice".into(),
+                        ElicitationValue::String("approve".into()),
+                    )]),
+                },
+                resolved,
+            })
+            .await
+            .unwrap();
+        confirmation.await.unwrap().unwrap();
     }
     let replies = await_recorded(temp.path(), "session_outcomes", failures.len()).await;
-    for (reply, (_, expected)) in replies.iter().zip(failures) {
-        assert_eq!(reply["outcome"]["code"], -32603);
-        let message = reply["outcome"]["message"].as_str().unwrap();
-        assert!(message.ends_with(expected), "{message}");
-    }
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply["outcome"]["optionId"] == "approve"),
+        "{replies:?}"
+    );
     runtime.abort();
 }
 
