@@ -1296,6 +1296,13 @@ def test_engine_can_read_its_own_previously_audited_tool_result(tmp_path, saved_
     assert report["passed"], report["hits"]
 
 
+# Hard-won: be94a25c6: reading the whole of a saved result with allow_large voided a live adjudication
+def test_engine_can_read_all_of_its_own_saved_tool_result(tmp_path, saved_engine_result):
+    saved_engine_result[1]["rawInput"]["allow_large"] = True
+    report = audit_engine_result(tmp_path, saved_engine_result)
+    assert report["passed"], report["hits"]
+
+
 @pytest.mark.parametrize(("original", "replacement"), [
     ("toolu_01SavedGrep.txt", "toolu_unmatched.txt"),
     ("tool-results", "memory"),
