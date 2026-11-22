@@ -2648,40 +2648,66 @@ impl Controller {
                     {
                         operation.recovery_session = None;
                         operation.source_snapshot = None;
-                        bail!("Move source capture was interrupted; source agent restarted in place. Retry Move when ready");
+                        if operation.is_active()
+                            && operation.phase == MovePhase::Capturing
+                            && !operation.cancellation_requested
+                        {
+                            session = self.state.sessions[&id].clone();
+                        } else {
+                            bail!("Move source capture was interrupted; source agent restarted in place. Retry Move when ready");
+                        }
+                    } else {
+                        let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
+                        return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
                     }
-                    let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
-                    return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
+                } else {
+                    if !operation.retains_source_environment()
+                        && self.state.sessions[&id].state == SessionState::Stopped
+                        && self.state.sessions[&id].target.is_some()
+                    {
+                        self.cleanup_stopped_target(&id, &cleanup)?;
+                    }
+                    let reopened = matches!(
+                        self.state.sessions[&id].state,
+                        SessionState::Running | SessionState::Disconnected
+                    );
+                    let can_continue_capturing = operation.is_active()
+                        && operation.phase == MovePhase::Capturing
+                        && !operation.cancellation_requested
+                        && (reopened
+                            || (!operation.in_place
+                                && self.state.sessions[&id].state == SessionState::Stopped
+                                && operation.checkpoint_retained()));
+                    if !can_continue_capturing {
+                        bail!(
+                            "{}",
+                            interrupted_source_stop_message(
+                                "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
+                                operation.in_place,
+                            )
+                        );
+                    }
+                    // The stop was interrupted before the seal (or finished sealing
+                    // a cross-target Move): resume the Move in the arm below.
+                    session = self.state.sessions[&id].clone();
                 }
-                if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
-                    self.cleanup_stopped_target(&id, &cleanup)?;
-                }
-                let reopened = matches!(
-                    self.state.sessions[&id].state,
-                    SessionState::Running | SessionState::Disconnected
-                );
-                if !(reopened && operation.in_place && operation.phase == MovePhase::Capturing && !operation.cancellation_requested) {
-                    bail!("{}", interrupted_source_stop_message(
-                        "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
-                        operation.in_place,
-                    ));
-                }
-                // The stop was interrupted before the seal and the source is
-                // running again: resume the Move as the arm below does when
-                // startup first finds the source running.
-                session = self.state.sessions[&id].clone();
             }
             match operation.phase {
                 MovePhase::Capturing
-                    if operation.in_place
+                    if operation.is_active()
                         && matches!(
                             session.state,
                             SessionState::Running | SessionState::Disconnected
                         )
                         && !operation.cancellation_requested =>
                 {
-                    let relay = MoveSourceRelay::lease(admission, manager, &id).await?;
-                    return Box::pin(self.execute_move(admission,
+                    let relay = if operation.in_place {
+                        MoveSourceRelay::lease(admission, manager, &id).await?
+                    } else {
+                        MoveSourceRelay::default()
+                    };
+                    return Box::pin(self.execute_move(
+                        admission,
                         &mut operation,
                         None,
                         executor,
@@ -2777,6 +2803,32 @@ impl Controller {
                                 record.state != SessionState::Error
                                     && record.target.as_deref() == previous.target.as_deref()
                             });
+                        if destination_teardown_confirmed
+                            && !operation.cancellation_requested
+                            && operation.is_active()
+                            && operation.checkpoint_retained()
+                        {
+                            if let Some(record) = self.state.sessions.get_mut(&id) {
+                                record.last_error = previous.last_error.clone();
+                                record.updated_at = now();
+                                let _ = self.persist_session_state(&id);
+                            }
+                            tracing::info!(
+                                session_id = %id,
+                                reference = %operation.operation_id,
+                                phase = ?operation.phase,
+                                "continuing interrupted cross-target Move after daemon restart"
+                            );
+                            return Box::pin(self.execute_move(
+                                admission,
+                                &mut operation,
+                                None,
+                                executor,
+                                manager,
+                                MoveSourceRelay::default(),
+                            ))
+                            .await;
+                        }
                         if destination_teardown_confirmed {
                             match self
                                 .restart_retained_move_source(
@@ -2816,6 +2868,21 @@ impl Controller {
                     operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
                     if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                         self.cleanup_stopped_target(&id, executor)?;
+                    }
+                    if !operation.in_place
+                        && operation.is_active()
+                        && !operation.cancellation_requested
+                        && operation.checkpoint_retained()
+                    {
+                        return Box::pin(self.execute_move(
+                            admission,
+                            &mut operation,
+                            None,
+                            executor,
+                            manager,
+                            MoveSourceRelay::default(),
+                        ))
+                        .await;
                     }
                     bail!("{}", interrupted_source_stop_message(
                         "source stop was recovered; verified checkpoint retained. Retry move or Resume with previous settings",

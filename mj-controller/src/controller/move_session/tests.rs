@@ -815,6 +815,100 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
             "interrupted cross-target Move must remain active for recovery: {stored:?}"
         );
 
+        // Next daemon's startup recovery resumes the interrupted Capturing Move
+        // by re-entering execute_move (running before_move_source_stop again)
+        // instead of failing and demanding an explicit retry.
+        let gate2 = std::sync::Arc::new(crate::upgrade::Gate::default());
+        let work2 = gate2.enter("session lifecycle").unwrap();
+        let recovery_executor = HandoffObservingExecutor {
+            gate: gate2,
+            work: std::sync::Mutex::new(Some(work2)),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
+            observed_labels: std::sync::Mutex::new(Vec::new()),
+            close_on_stop_children: true,
+        };
+        let recovered = controller
+            .recover_move_managed_controlled(
+                &admission,
+                stored,
+                &recovery_executor,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.outcome, "interrupted", "{recovered:?}");
+        assert_eq!(
+            recovery_executor.observed_labels.lock().unwrap().as_slice(),
+            &[Vec::<String>::new()],
+            "recovery must resume execute_move through before_move_source_stop"
+        );
+
+        // An interrupted Transferring cross-target Move (with Stopped source
+        // and retained snapshot) also resumes transfer on recovery instead of
+        // rolling back to Failed, while a user-cancelled one still rolls back.
+        let mut stopped = session.clone();
+        stopped.state = SessionState::Stopped;
+        stopped.target = None;
+        crate::database::save_session(&stopped).unwrap();
+        controller
+            .state
+            .sessions
+            .insert(stopped.id.clone(), stopped.clone());
+        let mut transferring = super::test_fixtures::source_recovery_operation(&stopped);
+        transferring.in_place = false;
+        transferring.phase = MovePhase::Transferring;
+        transferring.recovery_session = Some(stopped.clone());
+        transferring.source_snapshot = Some(Box::new(mj_core::state::MoveSourceSnapshot {
+            archive_path: dir.path().join("missing-snapshot.hel.zip"),
+            sha256: "a".repeat(64),
+            manifest: None,
+            queued_prompts: Vec::new(),
+            mailbox: None,
+        }));
+        crate::database::save_move_operation(&transferring).unwrap();
+        let gate3 = std::sync::Arc::new(crate::upgrade::Gate::default());
+        let work3 = gate3.enter("session lifecycle").unwrap();
+        let transfer_executor = HandoffObservingExecutor {
+            gate: gate3,
+            work: std::sync::Mutex::new(Some(work3)),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
+            observed_labels: std::sync::Mutex::new(Vec::new()),
+            close_on_stop_children: false,
+        };
+        let resumed_transfer = controller
+            .recover_move_managed_controlled(
+                &admission,
+                transferring.clone(),
+                &transfer_executor,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !resumed_transfer
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("destination restoration was interrupted"),
+            "non-cancelled Transferring recovery must continue into execute_move rather than rolling back: {resumed_transfer:?}"
+        );
+
+        transferring.cancellation_requested = true;
+        crate::database::save_move_operation(&transferring).unwrap();
+        let cancelled_transfer = controller
+            .recover_move_managed_controlled(
+                &admission,
+                transferring,
+                &transfer_executor,
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cancelled_transfer.outcome, "cancelled",
+            "{cancelled_transfer:?}"
+        );
+
         channels.shutdown.shutdown().await.unwrap();
     });
 }
