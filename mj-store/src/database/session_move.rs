@@ -147,7 +147,12 @@ pub fn save_move_outcome(
     let operation = operation.clone();
     let last_error = last_error.map(str::to_owned);
     submit_database_write("save_move_outcome", move |connection| {
-        save_move_outcome_with(connection, &operation, last_error.as_deref(), fail_closing_source)
+        save_move_outcome_with(
+            connection,
+            &operation,
+            last_error.as_deref(),
+            fail_closing_source,
+        )
     })
 }
 
