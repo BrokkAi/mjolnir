@@ -1938,20 +1938,26 @@ def interpreter_writes(scripts, program, source, cwd, argv):
 
     def value(node, seen=frozenset()):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            return "str", node.value
         if isinstance(node, ast.Name) and node.id in bindings and node.id not in seen:
             return value(bindings[node.id], seen | {node.id})
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left, right = value(node.left, seen), value(node.right, seen)
-            if left is not None and right is not None:
-                return left + right
+            if left is not None and right is not None and left[0] == right[0] == "str":
+                return "str", left[1] + right[1]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left, right = value(node.left, seen), value(node.right, seen)
+            if left is not None and right is not None and "path" in (left[0], right[0]):
+                return "path", posixpath.join(left[1], right[1])
         if (isinstance(node, ast.Subscript) and python_name(node.value, imports) == "sys.argv"
                 and isinstance(node.slice, ast.Constant) and type(node.slice.value) is int
                 and 0 <= node.slice.value < len(argv)):
-            return argv[node.slice.value]
+            return "str", argv[node.slice.value]
         if (isinstance(node, ast.Call) and python_name(node.func, imports) == "pathlib.Path"
-                and len(node.args) == 1 and not node.keywords):
-            return value(node.args[0], seen)
+                and node.args and not node.keywords):
+            parts = [value(arg, seen) for arg in node.args]
+            if all(part is not None for part in parts):
+                return "path", posixpath.join(*(part[1] for part in parts))
         return None
 
     def argument(node, index, keyword):
@@ -1970,7 +1976,9 @@ def interpreter_writes(scripts, program, source, cwd, argv):
                 scripts.clear()
                 return
             mode = argument(node, 0 if bound else 1, "mode")
-            if mode is None or value(mode) in {"r", "rb", "rt", "U", "rU"}:
+            resolved_mode = None if mode is None else value(mode)
+            if (mode is None or resolved_mode is not None and resolved_mode[0] == "str"
+                    and resolved_mode[1] in {"r", "rb", "rt", "U", "rU"}):
                 continue
             target = node.func.value if bound else argument(node, 0, "file")
         elif name in {"os.open", "os.remove", "os.unlink", "os.rmdir", "sqlite3.connect"}:
@@ -1985,11 +1993,11 @@ def interpreter_writes(scripts, program, source, cwd, argv):
             return
         else:
             continue
-        path = value(target)
-        if path is None:
+        resolved = value(target)
+        if resolved is None:
             scripts.clear()
             return
-        scripts.opaque_write(path, cwd)
+        scripts.opaque_write(resolved[1], cwd)
 
 
 def screen_script_writes(scripts, visible, own_workspace, commits, single_commit, cwd):
