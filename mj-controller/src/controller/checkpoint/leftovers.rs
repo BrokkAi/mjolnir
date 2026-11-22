@@ -1,8 +1,9 @@
 //! The files a checkpoint writes in its worker root, and the sweep that
 //! removes them once no checkpoint can own them.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -107,10 +108,35 @@ pub fn sweep_local_checkpoint_leftovers(
         tracing::warn!("left checkpoint files in local worker roots in place");
         return CheckpointLeftovers::default();
     };
+    // A Move owns its exported archive across daemon and worker restarts.
+    // This inventory protects captures older than the sweep's cutoff; any
+    // new capture after startup is already protected by its modification time.
+    let retained_move_snapshots = match crate::database::load_move_operations() {
+        Ok(operations) => operations
+            .into_iter()
+            .filter(|operation| {
+                operation.checkpoint_retained()
+                    && matches!(
+                        operation.source_target,
+                        Some(mj_core::state::TargetLocator::LocalBare { .. })
+                    )
+            })
+            .filter_map(|operation| {
+                operation
+                    .source_snapshot
+                    .map(|snapshot| snapshot.archive_path)
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "could not check Move snapshot ownership; leaving checkpoint files in place");
+            return CheckpointLeftovers::default();
+        }
+    };
     let swept = sweep_checkpoint_leftovers_in(
         &mj_core::config::data_dir().join("workers"),
         started,
         &running,
+        &retained_move_snapshots,
         stop,
     );
     if swept.count > 0 {
@@ -127,6 +153,7 @@ pub(super) fn sweep_checkpoint_leftovers_in(
     workers: &Path,
     started: SystemTime,
     running: &[String],
+    retained_move_snapshots: &BTreeSet<PathBuf>,
     stop: &dyn Fn() -> bool,
 ) -> CheckpointLeftovers {
     let mut swept = CheckpointLeftovers::default();
@@ -167,6 +194,9 @@ pub(super) fn sweep_checkpoint_leftovers_in(
                 continue;
             }
             let path = entry.path();
+            if retained_move_snapshots.contains(&path) {
+                continue;
+            }
             // A checkpoint never writes a link, so one with a checkpoint's
             // name is not followed or removed.
             let Ok(metadata) = std::fs::symlink_metadata(&path) else {
@@ -390,6 +420,7 @@ mod tests {
     /// running checkpoint can own them: older than this daemon's start, and
     /// in a worker root with no checkpoint command running. Everything else a
     /// worker root holds stays.
+    // Hard-won: 8de4dde8d: startup garbage collection deleted an archive retained for a Move retry.
     #[test]
     fn the_sweep_removes_only_checkpoint_files_nothing_can_still_own() {
         let directory = tempfile::tempdir().unwrap();
@@ -406,6 +437,8 @@ mod tests {
         write(&capture.join("native/00000000"), 500);
         let archive = root.join(format!("checkpoint-{ID}.hel.zip"));
         write(&archive, 300);
+        let move_snapshot = root.join(format!("checkpoint-{OTHER_ID}.hel.zip"));
+        write(&move_snapshot, 400);
         // Started by this daemon, after the sweep's cut.
         let current = root.join(format!("checkpoint-{OTHER_ID}-stage"));
         write(&current.join("stage.json"), 2);
@@ -443,7 +476,7 @@ mod tests {
         let pinned = workers.join("pinned/hel");
         write(&pinned, 10);
 
-        for path in [&stage, &capture, &archive, &busy_stage] {
+        for path in [&stage, &capture, &archive, &busy_stage, &move_snapshot] {
             set_modified(path, before);
         }
         for path in &kept {
@@ -451,7 +484,13 @@ mod tests {
         }
         set_modified(&current, after);
 
-        let swept = sweep_checkpoint_leftovers_in(&workers, started, &running, &|| false);
+        let swept = sweep_checkpoint_leftovers_in(
+            &workers,
+            started,
+            &running,
+            &BTreeSet::from([move_snapshot.clone()]),
+            &|| false,
+        );
 
         assert_eq!(
             swept,
@@ -466,7 +505,13 @@ mod tests {
         let expected_kept: Vec<PathBuf> = kept
             .iter()
             .cloned()
-            .chain([current, busy_stage, pinned, outside.join("keep")])
+            .chain([
+                current,
+                busy_stage,
+                pinned,
+                outside.join("keep"),
+                move_snapshot,
+            ])
             .collect();
         for path in &expected_kept {
             assert!(path.exists(), "{} was removed", path.display());

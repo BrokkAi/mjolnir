@@ -1668,29 +1668,35 @@ fn new_session_profile_step_aligns_its_columns() {
             .unwrap_or_else(|| panic!("missing row {needle:?} in {lines:?}"))
     };
 
-    let headings = row("PROFILE");
-    let claude = row("claude-1");
-    let kimi = row("kimi-1");
+    let headings = row("PROVIDER");
+    let anthropic = row("▾ ANTHROPIC");
+    let moonshot = row("▾ MOONSHOT");
+    let claude = lines
+        .iter()
+        .find(|line| line.contains("claude-1") && !line.contains("ANTHROPIC"))
+        .unwrap_or_else(|| panic!("missing expanded claude-1 row in {lines:?}"));
+    let kimi = lines
+        .iter()
+        .find(|line| line.contains("kimi-1") && !line.contains("MOONSHOT"))
+        .unwrap_or_else(|| panic!("missing expanded kimi-1 row in {lines:?}"));
+    assert!(!headings.contains("HARNESS"), "{headings:?}");
+    let provider_column = cell_column(headings, "PROVIDER");
     let profile_column = cell_column(headings, "PROFILE");
+    assert_eq!(cell_column(anthropic, "▾ ANTHROPIC"), provider_column);
+    assert_eq!(cell_column(moonshot, "▾ MOONSHOT"), provider_column);
+    assert_eq!(cell_column(anthropic, "claude-1"), profile_column);
+    assert_eq!(cell_column(moonshot, "kimi-1"), profile_column);
     for (line, profile) in [(claude, "claude-1"), (kimi, "kimi-1")] {
-        assert_eq!(cell_column(line, profile), profile_column + 2);
+        assert_eq!(cell_column(line, profile), profile_column);
         assert_eq!(
             cell_column(line, "refreshing"),
             cell_column(headings, "WEEKLY")
         );
     }
-    assert_eq!(
-        cell_column(claude, "Claude Code"),
-        cell_column(headings, "HARNESS")
-    );
-    assert_eq!(
-        cell_column(kimi, "Kimi Code"),
-        cell_column(headings, "HARNESS")
-    );
 }
 
 #[test]
-fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
+fn new_session_profile_step_groups_by_provider_with_predicted_profiles() {
     let mut config = config();
     config
         .subagents
@@ -1703,7 +1709,30 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
         "kimi-1".into(),
         HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi")),
     );
+    let claude_key = config.profiles["claude-1"].capabilities_key("claude-1");
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    dashboard.set_profile_capabilities(
+        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
+            profiles: BTreeMap::from([(
+                claude_key,
+                mj_core::profile_capabilities::ProfileCapabilities {
+                    choices: mj_core::profile_capabilities::CapabilityState::Ready(
+                        mj_core::worker_launch::ProfileConfig {
+                            model: Some("claude-sonnet".into()),
+                            models: vec![mj_core::acp::SessionConfigChoice {
+                                value: "claude-sonnet".into(),
+                                name: "Claude Sonnet".into(),
+                                description: None,
+                            }],
+                            efforts: Vec::new(),
+                            observed_at: 0,
+                        },
+                    ),
+                    efforts: BTreeMap::new(),
+                },
+            )]),
+        },
+    );
     dashboard.quota_providers.settle();
     ready_open_new_wizard(&mut dashboard);
 
@@ -1713,47 +1742,39 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
         buffer_lines(terminal.backend().buffer())
     };
 
-    // With Auto (Primary) selected, Auto is bracketed by blank lines and every
-    // provider starts collapsed with its disclosure arrow in Profiles-pane order.
+    // Auto sits directly in the list without blank bracketing, showing the
+    // predicted profile in the 2nd column; providers start collapsed with
+    // their predicted profiles in the 2nd column in Profiles-pane order.
     let lines = draw_lines(&mut dashboard, &mut terminal);
-    fn modal_inner(line: &str) -> &str {
-        let start = line.find('│').unwrap() + '│'.len_utf8();
-        let rest = &line[start..];
-        let inner_start = rest.find('│').unwrap() + '│'.len_utf8();
-        let inner = &rest[inner_start..];
-        let inner_end = inner.find('│').unwrap();
-        inner[..inner_end].trim()
-    }
     let heading_idx = lines
         .iter()
-        .position(|line| line.contains("PROFILE") && line.contains("HARNESS"))
+        .position(|line| line.contains("PROVIDER") && line.contains("PROFILE"))
         .expect("profile heading row");
-    let auto_idx = lines
-        .iter()
-        .position(|line| line.contains("Auto (Primary)"))
-        .expect("Auto row");
-    assert_eq!(auto_idx, heading_idx + 2, "blank line above Auto");
-    assert!(
-        modal_inner(&lines[heading_idx + 1]).is_empty(),
-        "expected blank line above Auto, got {:?}",
-        lines[heading_idx + 1]
-    );
-    assert!(
-        modal_inner(&lines[auto_idx + 1]).is_empty(),
-        "expected blank line below Auto, got {:?}",
-        lines[auto_idx + 1]
-    );
-    assert!(lines[auto_idx + 2].contains("▸ ANTHROPIC"));
-    assert!(lines[auto_idx + 3].contains("▸ OPENAI"));
-    assert!(lines[auto_idx + 4].contains("▸ MOONSHOT"));
-    let joined = lines.join("\n");
-    assert!(!joined.contains("claude-1"));
-    assert!(!joined.contains("codex-1"));
-    assert!(!joined.contains("kimi-1"));
+    assert!(!lines[heading_idx].contains("HARNESS"));
+    assert!(lines[heading_idx + 1].contains("Auto"));
+    assert!(lines[heading_idx + 1].contains("claude-1"));
+    assert!(lines[heading_idx + 2].contains("▸ ANTHROPIC"));
+    assert!(lines[heading_idx + 2].contains("claude-1"));
+    assert!(lines[heading_idx + 3].contains("▸ OPENAI"));
+    assert!(lines[heading_idx + 3].contains("codex-1"));
+    assert!(lines[heading_idx + 4].contains("▸ MOONSHOT"));
+    assert!(lines[heading_idx + 4].contains("kimi-1"));
+    let has_expanded_claude = |lines: &[String]| {
+        lines.iter().any(|line| {
+            line.contains("claude-1") && !line.contains("Auto") && !line.contains("ANTHROPIC")
+        })
+    };
+    let has_expanded_codex = |lines: &[String]| {
+        lines
+            .iter()
+            .any(|line| line.contains("codex-1") && !line.contains("OPENAI"))
+    };
+    assert!(!has_expanded_claude(&lines));
+    assert!(!has_expanded_codex(&lines));
 
-    // Down moves past the blank spacer onto ANTHROPIC: Next is enabled because
-    // a provider is selectable to load-balance across its profiles; Space and
-    // Right/Left toggle expansion without advancing.
+    // Down moves onto ANTHROPIC: Next is enabled because a provider is
+    // selectable to load-balance across its profiles; Space and Right/Left
+    // toggle expansion without advancing.
     ready_key(&mut dashboard, key(KeyCode::Down));
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
     assert_eq!(
@@ -1766,24 +1787,22 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
     );
     ready_key(&mut dashboard, key(KeyCode::Char(' ')));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
-    let expanded = draw_lines(&mut dashboard, &mut terminal).join("\n");
-    assert!(expanded.contains("▾ ANTHROPIC"));
-    assert!(expanded.contains("claude-1"));
+    let expanded = draw_lines(&mut dashboard, &mut terminal);
+    assert!(expanded.iter().any(|line| line.contains("▾ ANTHROPIC")));
+    assert!(has_expanded_claude(&expanded));
 
     // Space collapses ANTHROPIC; Right expands it and a second Right enters its
     // first profile; Left collapses back to the provider row.
     ready_key(&mut dashboard, key(KeyCode::Char(' ')));
-    assert!(
-        !draw_lines(&mut dashboard, &mut terminal)
-            .join("\n")
-            .contains("claude-1")
-    );
+    assert!(!has_expanded_claude(&draw_lines(
+        &mut dashboard,
+        &mut terminal
+    )));
     ready_key(&mut dashboard, key(KeyCode::Right));
-    assert!(
-        draw_lines(&mut dashboard, &mut terminal)
-            .join("\n")
-            .contains("claude-1")
-    );
+    assert!(has_expanded_claude(&draw_lines(
+        &mut dashboard,
+        &mut terminal
+    )));
     ready_key(&mut dashboard, key(KeyCode::Right));
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
     assert_eq!(new_wizard(&dashboard).selected_provider(&dashboard), None);
@@ -1798,27 +1817,24 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
         new_wizard(&dashboard).selected_provider(&dashboard),
         Some(mj_core::config::QuotaProvider::Anthropic)
     );
-    assert!(
-        !draw_lines(&mut dashboard, &mut terminal)
-            .join("\n")
-            .contains("claude-1")
-    );
+    assert!(!has_expanded_claude(&draw_lines(
+        &mut dashboard,
+        &mut terminal
+    )));
 
     // Clicking the arrow on a collapsed provider expands it; clicking the
     // provider name selects it without collapsing, and Enter advances with that
     // provider selected for load-balancing.
     click_project_text(&mut dashboard, &mut terminal, "▸ OPENAI");
-    assert!(
-        draw_lines(&mut dashboard, &mut terminal)
-            .join("\n")
-            .contains("codex-1")
-    );
+    assert!(has_expanded_codex(&draw_lines(
+        &mut dashboard,
+        &mut terminal
+    )));
     click_project_text(&mut dashboard, &mut terminal, "OPENAI");
-    assert!(
-        draw_lines(&mut dashboard, &mut terminal)
-            .join("\n")
-            .contains("codex-1")
-    );
+    assert!(has_expanded_codex(&draw_lines(
+        &mut dashboard,
+        &mut terminal
+    )));
     assert_eq!(
         new_wizard(&dashboard).selected_provider(&dashboard),
         Some(mj_core::config::QuotaProvider::OpenAI)
