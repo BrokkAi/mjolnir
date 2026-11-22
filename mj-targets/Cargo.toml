@@ -24,7 +24,6 @@ workspace = true
 
 [dependencies]
 mj-core.workspace = true
-mj-client.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 getrandom.workspace = true

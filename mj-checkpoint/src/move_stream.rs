@@ -151,9 +151,13 @@ pub fn receive_move_stream<R: Read>(
     let mut archive_temp = NamedTempFile::new_in(archive_parent)
         .with_context(|| format!("create temp archive in {}", archive_parent.display()))?;
     let mut hasher = Sha256::new();
-    let archive_bytes =
-        copy_exact_with_hash(reader, archive_temp.as_file_mut(), archive_len, Some(&mut hasher))
-            .context("receive archive payload")?;
+    let archive_bytes = copy_exact_with_hash(
+        reader,
+        archive_temp.as_file_mut(),
+        archive_len,
+        Some(&mut hasher),
+    )
+    .context("receive archive payload")?;
     archive_temp
         .as_file()
         .sync_all()
@@ -196,7 +200,9 @@ pub fn receive_move_stream<R: Read>(
     // Ensure there are no unexpected trailing bytes before committing either
     // the archive or the staged keep directory.
     let mut trailing = [0u8; 1];
-    let extra = reader.read(&mut trailing).context("check move stream EOF")?;
+    let extra = reader
+        .read(&mut trailing)
+        .context("check move stream EOF")?;
     ensure!(extra == 0, "unexpected trailing bytes after move stream");
 
     // Swap the staged keep directory into place with a rollback guard so that
@@ -322,7 +328,9 @@ fn copy_with_hash<R: Read, W: Write>(
             h.update(&buf[..n]);
         }
         writer.write_all(&buf[..n])?;
-        total = total.checked_add(n as u64).context("stream byte count overflow")?;
+        total = total
+            .checked_add(n as u64)
+            .context("stream byte count overflow")?;
     }
     Ok(total)
 }
@@ -381,7 +389,9 @@ fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn is_skipped(rel: &Path, skips: &BTreeSet<PathBuf>) -> bool {
-    skips.iter().any(|skip| rel == skip || rel.starts_with(skip))
+    skips
+        .iter()
+        .any(|skip| rel == skip || rel.starts_with(skip))
 }
 
 /// Verify that neither `keep_dir` nor its checkout-owned ancestors (its
@@ -543,7 +553,10 @@ pub fn extract_keep_tar_strict(tar_path: &Path, dest: &Path) -> Result<()> {
         );
         let mode = entry.header().mode().ok().map(|m| m & 0o777);
 
-        let raw_path = entry.path().context("read keep tar entry path")?.into_owned();
+        let raw_path = entry
+            .path()
+            .context("read keep tar entry path")?
+            .into_owned();
         let rel = normalize_relative_path(&raw_path)?;
         let target = dest.join(&rel);
 
@@ -573,8 +586,9 @@ pub fn extract_keep_tar_strict(tar_path: &Path, dest: &Path) -> Result<()> {
                             })?;
                         }
                         Err(err) => {
-                            return Err(err)
-                                .with_context(|| format!("lstat keep subdir {}", cursor.display()));
+                            return Err(err).with_context(|| {
+                                format!("lstat keep subdir {}", cursor.display())
+                            });
                         }
                     }
                 }
@@ -755,13 +769,9 @@ mod tests {
             report
         });
 
-        let receipt = receive_move_stream(
-            &mut read_end,
-            &dst_archive,
-            &expected_sha,
-            Some(&dst_keep),
-        )
-        .expect("receive_move_stream");
+        let receipt =
+            receive_move_stream(&mut read_end, &dst_archive, &expected_sha, Some(&dst_keep))
+                .expect("receive_move_stream");
         let export = writer_handle.join().expect("writer thread");
 
         assert_eq!(export.archive_bytes, archive_payload.len() as u64);
@@ -770,7 +780,10 @@ mod tests {
         assert_eq!(receipt.keep_tar_bytes, export.keep_tar_bytes);
         assert!(receipt.keep_tar_bytes > 128 * 1024);
 
-        assert_eq!(fs::read(&dst_archive).expect("read dst archive"), archive_payload);
+        assert_eq!(
+            fs::read(&dst_archive).expect("read dst archive"),
+            archive_payload
+        );
         assert_eq!(
             fs::read(dst_keep.join("nested/big.bin")).expect("read keep big"),
             keep_big
@@ -789,8 +802,7 @@ mod tests {
         fs::write(&src_archive, b"archive-content").expect("write src");
 
         let mut framed = Vec::new();
-        let report =
-            write_move_stream(&mut framed, &src_archive, None, &[]).expect("write framed");
+        let report = write_move_stream(&mut framed, &src_archive, None, &[]).expect("write framed");
 
         // 1. SHA-256 mismatch must fail and leave dst_archive absent.
         let bad_sha = "0".repeat(64);
@@ -951,7 +963,10 @@ mod tests {
         )
         .expect_err("trailing bytes must fail receive");
         assert!(err.to_string().contains("unexpected trailing bytes"));
-        assert!(!dst_archive.exists(), "archive must not be persisted on failure");
+        assert!(
+            !dst_archive.exists(),
+            "archive must not be persisted on failure"
+        );
         assert_eq!(
             fs::read(dst_keep.join("existing.txt")).expect("existing keep file must remain"),
             b"original"

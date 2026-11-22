@@ -132,10 +132,7 @@ impl Controller {
     }
 
     #[cfg(test)]
-    fn explicit_suspend_export_policy(
-        &self,
-        session_id: &str,
-    ) -> Result<CheckpointExportPolicy> {
+    fn explicit_suspend_export_policy(&self, session_id: &str) -> Result<CheckpointExportPolicy> {
         self.explicit_suspend_export_policy_with_executor(session_id, &ProcessExecutor)
     }
 
@@ -241,12 +238,12 @@ impl Controller {
         }
 
         let checkout = self.state.checkout(session_id)?;
-        let export_policy = self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
+        let export_policy =
+            self.explicit_suspend_export_policy_with_executor(session_id, executor)?;
 
-        let is_remote_target = session
-            .target
-            .as_deref()
-            .is_some_and(|locator| !matches!(locator, mj_core::state::TargetLocator::LocalBare { .. }));
+        let is_remote_target = session.target.as_deref().is_some_and(|locator| {
+            !matches!(locator, mj_core::state::TargetLocator::LocalBare { .. })
+        });
 
         let repo_specs: Vec<mj_core::suspend_consent::WorkerPreflightRepo> = match export_policy {
             CheckpointExportPolicy::OriginDelta => match checkout {
@@ -267,10 +264,11 @@ impl Controller {
                         .project_bundle(&self.config)
                         .context("session bundle is missing")?;
                     let (backend, _) = self.worker_placement(session_id)?;
-                    let workspace_root = PathBuf::from(crate::controller::network_git::workspace_root(
-                        &backend,
-                        session.container_workspace.as_deref(),
-                    ));
+                    let workspace_root =
+                        PathBuf::from(crate::controller::network_git::workspace_root(
+                            &backend,
+                            session.container_workspace.as_deref(),
+                        ));
                     bundle
                         .repositories
                         .iter()
@@ -414,8 +412,7 @@ impl Controller {
                 let worker_result: mj_core::suspend_consent::WorkerSuspendPreflightResult =
                     mj_core::runtime::off_async_worker(|| -> Result<_> {
                         let command = crate::checkpoint_transfer::suspend_preflight_stdin_command(
-                            &backend,
-                            session_id,
+                            &backend, session_id,
                         )?;
                         let mut reader = std::io::Cursor::new(&spec_bytes);
                         let mut output = executor.execute_with_stdin(&command, &mut reader)?;
@@ -434,14 +431,9 @@ impl Controller {
                                 .context("resolve current worker binary for suspend preflight")?;
                                 let staging =
                                     super::worker_binary::stage_worker_binary_for_upgrade(
-                                        executor,
-                                        &backend,
-                                        session_id,
-                                        &worker,
+                                        executor, &backend, session_id, &worker,
                                     )
-                                    .context(
-                                        "stage current worker binary for suspend preflight",
-                                    )?;
+                                    .context("stage current worker binary for suspend preflight")?;
                                 let staged_command = crate::checkpoint_transfer::suspend_preflight_stdin_command_with_binary(
                                     &backend,
                                     session_id,
@@ -545,16 +537,17 @@ impl Controller {
                                     }
                                     Err(err) => {
                                         git_delta_total = None;
-                                        git_delta_unavailable = Some(format!(
-                                            "Git size estimate unavailable: {err}"
-                                        ));
+                                        git_delta_unavailable =
+                                            Some(format!("Git size estimate unavailable: {err}"));
                                     }
                                 }
                             }
                         }
 
                         preflight.untracked.extend(inventory.untracked);
-                        preflight.nested_repositories.extend(inventory.nested_repositories);
+                        preflight
+                            .nested_repositories
+                            .extend(inventory.nested_repositories);
                         preflight.untracked_stashes.extend(
                             inventory.untracked_stashes.into_iter().map(|s| {
                                 mj_core::suspend_consent::SuspendUntrackedStash {
@@ -568,17 +561,19 @@ impl Controller {
                             preflight.operations.push(op);
                         }
                         preflight.raw |= inventory.raw;
-                        preflight.blockers.extend(inventory.blockers.into_iter().map(|b| {
-                            mj_core::suspend_consent::SuspendBlocker {
-                                kind: format!("{:?}", b.kind),
-                                paths: b
-                                    .paths
-                                    .into_iter()
-                                    .map(|p| p.value.display().to_string())
-                                    .collect(),
-                                remedy: b.remedy,
-                            }
-                        }));
+                        preflight
+                            .blockers
+                            .extend(inventory.blockers.into_iter().map(|b| {
+                                mj_core::suspend_consent::SuspendBlocker {
+                                    kind: format!("{:?}", b.kind),
+                                    paths: b
+                                        .paths
+                                        .into_iter()
+                                        .map(|p| p.value.display().to_string())
+                                        .collect(),
+                                    remedy: b.remedy,
+                                }
+                            }));
                     }
                     Ok(())
                 })?;
@@ -655,7 +650,9 @@ impl Controller {
                     mj_core::suspend_consent::UntrackedItem::KeepDirFile { path, .. } => {
                         format!(".mj/keep/{}", path.display())
                     }
-                    mj_core::suspend_consent::UntrackedItem::Stash { commit, message, .. } => {
+                    mj_core::suspend_consent::UntrackedItem::Stash {
+                        commit, message, ..
+                    } => {
                         format!("stash {} ({message})", &commit[..commit.len().min(8)])
                     }
                 };
@@ -987,6 +984,7 @@ impl Controller {
                 if attempt.request_recorded() {
                     attempt.wait_for_stop(executor).await?;
                 }
+                drop(held_relay.take());
                 return Err(self.restart_after_refused_origin_delta(
                     admission, session_id, executor, manager, attempt, &previous, anyhow::anyhow!(reason),
                 ).await);
@@ -1002,6 +1000,10 @@ impl Controller {
                 }
             }
             if !attempt.request_recorded() && !attempt.worker_capable(executor)? {
+                // The upgrade takes its own idle lease to replace the worker.
+                if let Some(relay) = held_relay.take() {
+                    relay.release();
+                }
                 let mut already_recovered_worker = false;
                 let recovery_result: Result<()> = if let Some(pending) =
                     crate::database::load_worker_restart(session_id)?
@@ -1131,11 +1133,21 @@ impl Controller {
                     ));
                 }
             }
-            if !attempt.request_recorded() && let Some(manager) = manager {
-                let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
-                let mut lease = handle.lease_connection(admission).await?;
-                if lease.connection_mut().sync().await?.operational.execution == RelayExecutionState::Running {
-                    lease.connection_mut().submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
+            if !attempt.request_recorded() {
+                // Move hands us its exclusive source lease. Keep that same
+                // connection through interruption and worker quiescence.
+                if held_relay.is_none() && let Some(manager) = manager {
+                    let handle = manager.wait_for_session(session_id, Duration::from_secs(5)).await?;
+                    let lease = handle.lease_connection(admission).await?;
+                    held_relay = Some(ControllerRelayLease::Managed {
+                        handle,
+                        lease: Some(lease),
+                    });
+                }
+                if let Some(relay) = held_relay.as_mut()
+                    && relay.sync_snapshot().await?.operational.execution == RelayExecutionState::Running
+                {
+                    relay.submit(new_command_id("suspend-interrupt")?, RelayCommand::CancelTurn).await?;
                 }
             }
             if let Err(error) = attempt.request_stop(executor) {
@@ -1149,6 +1161,9 @@ impl Controller {
                 tracing::warn!(session_id, %error, "waiting for the worker's durable suspend request");
             }
             let receipt = attempt.wait_for_stop(executor).await?;
+            // The receipt proves this worker stopped. Drop its stale proxy
+            // before adopting the checkpoint-only or recovery connection.
+            drop(held_relay.take());
             let post_stop_restart_reason =
                 if executor.cancellation_requested() && !executor.shutdown_interrupted() {
                     attempt.restart_reason(&ProcessExecutor)?
@@ -1646,7 +1661,6 @@ impl Controller {
         session_id: &str,
         previous: &SessionRecord,
         executor: &(impl CommandExecutor + Sync),
-        manager: &SessionManagerControl,
     ) -> Result<bool> {
         let Some(record) = self.state.sessions.get(session_id) else {
             return Ok(false);
@@ -1656,17 +1670,19 @@ impl Controller {
         }
         let attempt = OriginDeltaSuspend::load(self, session_id, executor)?;
         executor.notify_notice("Restarting the source agent in place after failed Move");
-        attempt
+        // The Move owns the source placement until rollback is published.
+        // The session manager intentionally excludes that placement while
+        // Move owns it. Prove worker readiness on the owner's connection.
+        let relay = attempt
             .start_worker(
                 self,
                 admission,
                 session_id,
                 executor,
-                Some(manager),
+                None,
                 mj_core::worker_launch::WorkerRunMode::Harness,
             )
-            .await?
-            .release();
+            .await?;
         let record = self
             .state
             .sessions
@@ -1675,6 +1691,7 @@ impl Controller {
         record.state = state_after_unsealed_close(previous);
         record.updated_at = now();
         self.persist_session_state(session_id)?;
+        relay.release();
         if let Err(cleanup) = attempt.clear_after_restart(executor) {
             tracing::warn!(
                 session_id,
@@ -2477,7 +2494,12 @@ impl Controller {
                 } else {
                     let clone_prerequisite =
                         super::worktree::clone_retirement_prerequisite_for_checkpoint(verified);
-                    execute_target_cleanup(&destroying, &self.config, executor, clone_prerequisite)?;
+                    execute_target_cleanup(
+                        &destroying,
+                        &self.config,
+                        executor,
+                        clone_prerequisite,
+                    )?;
                     false
                 };
                 let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -2614,7 +2636,12 @@ impl Controller {
                         )?;
                         deferred = true;
                     } else {
-                        execute_target_cleanup(session, &self.config, executor, clone_prerequisite)?;
+                        execute_target_cleanup(
+                            session,
+                            &self.config,
+                            executor,
+                            clone_prerequisite,
+                        )?;
                     }
                 }
                 let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -2877,7 +2904,9 @@ impl Controller {
                         cleanup,
                         executor,
                     )?;
-                    super::move_session::recovery::cleanup_local_move_key_files(&operation.granted_keys);
+                    super::move_session::recovery::cleanup_local_move_key_files(
+                        &operation.granted_keys,
+                    );
                 }
                 outcome.cleanup(
                     if self.state.subagents.contains_key(session_id) {

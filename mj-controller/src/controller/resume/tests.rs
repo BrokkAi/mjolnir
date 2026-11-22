@@ -1948,7 +1948,12 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
     assert_eq!(converted.archive_path, output);
     assert_eq!(converted.sha256, verified.archive_sha256);
     assert_eq!(converted.event_frontier, previous.event_frontier);
-    assert!(verified.manifest.repositories[0].metadata.origin_delta.is_some());
+    assert!(
+        verified.manifest.repositories[0]
+            .metadata
+            .origin_delta
+            .is_some()
+    );
     let bundle = crate::controller::network_git::bundle_from_manifest(&verified.manifest).unwrap();
     assert_eq!(verified.manifest.bundle.primary_repository, repository_id);
     assert_eq!(bundle.primary, destination.to_string_lossy());
@@ -3138,17 +3143,19 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
                 mbx_namespace: None,
             }],
         };
-        session.project = Some(std::sync::Arc::new(mj_core::repository::ProjectBundleSnapshot {
-            bundle: bundle.clone(),
-            identities: [(
-                "repo".into(),
-                mj_core::repository::RepositoryIdentity::Local(repo.clone()),
-            )]
-            .into_iter()
-            .collect(),
-            network_sources: Default::default(),
-            plain_directories: Default::default(),
-        }));
+        session.project = Some(std::sync::Arc::new(
+            mj_core::repository::ProjectBundleSnapshot {
+                bundle: bundle.clone(),
+                identities: [(
+                    "repo".into(),
+                    mj_core::repository::RepositoryIdentity::Local(repo.clone()),
+                )]
+                .into_iter()
+                .collect(),
+                network_sources: Default::default(),
+                plain_directories: Default::default(),
+            },
+        ));
         let canonical = mj_core::archive::CanonicalSessionSnapshot {
             command_ledger: None,
             assessment_state: None,
@@ -3344,27 +3351,29 @@ fn workspace_to_raw_origin_delta_creates_managed_clone_instead_of_reusing_linked
     run_git(&source, &["branch", &format!("mj/{session_id}")]);
 
     let mut session = checkpoint_test_session(session_id);
-    session.project = Some(std::sync::Arc::new(mj_core::repository::ProjectBundleSnapshot {
-        bundle: mj_core::config::ProjectBundle {
-            primary_repo: "repo".into(),
-            repositories: vec![mj_core::config::ProjectRepository {
-                id: "repo".into(),
-                github: None,
-                local: Some(source.clone()),
-                destination: std::path::PathBuf::from("repo"),
-                git_ref: None,
-                mbx_namespace: None,
-            }],
+    session.project = Some(std::sync::Arc::new(
+        mj_core::repository::ProjectBundleSnapshot {
+            bundle: mj_core::config::ProjectBundle {
+                primary_repo: "repo".into(),
+                repositories: vec![mj_core::config::ProjectRepository {
+                    id: "repo".into(),
+                    github: None,
+                    local: Some(source.clone()),
+                    destination: std::path::PathBuf::from("repo"),
+                    git_ref: None,
+                    mbx_namespace: None,
+                }],
+            },
+            identities: [(
+                "repo".into(),
+                mj_core::repository::RepositoryIdentity::Local(source.clone()),
+            )]
+            .into_iter()
+            .collect(),
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
         },
-        identities: [(
-            "repo".into(),
-            mj_core::repository::RepositoryIdentity::Local(source.clone()),
-        )]
-        .into_iter()
-        .collect(),
-        network_sources: Default::default(),
-        plain_directories: Default::default(),
-    }));
+    ));
 
     let config = resume_compatibility_config();
     let controller = Controller {
@@ -3821,8 +3830,7 @@ fn resolve_move_keep_dir_matches_worker_startup_for_subdirs_nested_repos_and_pla
         let mut env = std::collections::BTreeMap::new();
         let startup_keep =
             mj_core::session_keep::install_session_keep_dir(cwd, session_id, &mut env).unwrap();
-        let move_keep =
-            resolve_move_keep_dir(&ProcessExecutor, &backend, session_id, cwd).unwrap();
+        let move_keep = resolve_move_keep_dir(&ProcessExecutor, &backend, session_id, cwd).unwrap();
         assert_eq!(
             std::fs::canonicalize(&move_keep).unwrap(),
             startup_keep,

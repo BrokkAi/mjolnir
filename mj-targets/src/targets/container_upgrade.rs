@@ -616,7 +616,7 @@ impl RetainedContainer {
         let next = format!(
             "{}/state.tar.{}",
             state.staging_directory,
-            mj_client::session::new_command_id("capture")?
+            mj_core::relay::new_command_id("capture")?
         );
         let mut args = vec![
             "sh".into(),

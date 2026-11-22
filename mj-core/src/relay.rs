@@ -498,3 +498,12 @@ pub fn clear_native_session_identity(root: &Path) -> Result<()> {
 
 mod live_baseline;
 pub use live_baseline::*;
+
+/// Generates a command identifier with a caller supplied namespace.
+pub fn new_command_id(prefix: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(!prefix.trim().is_empty(), "command ID prefix is required");
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| anyhow::anyhow!("generate command ID: {error}"))?;
+    Ok(format!("{prefix}-{}", crate::hex::lower_hex(random)))
+}

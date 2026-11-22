@@ -170,9 +170,9 @@ impl PowerRankingStore {
         harness: mj_core::config::HarnessKind,
     ) -> Option<PowerRankingLookup> {
         let state = self.lock();
-        let entries = model_aliases(model_identity).into_iter().find_map(|alias| {
-            state.ranked.by_model.get(&alias)
-        })?;
+        let entries = model_aliases(model_identity)
+            .into_iter()
+            .find_map(|alias| state.ranked.by_model.get(&alias))?;
         let matched = entries_for_harness(entries, harness);
         if matched.is_empty() {
             return None;
@@ -307,15 +307,12 @@ fn read_cache(path: &Path) -> Option<PowerRankingCacheFile> {
 
 fn write_cache(path: &Path, cache: &PowerRankingCacheFile) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let body = serde_json::to_vec(cache).context("encode power-ranking cache")?;
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, body)
-        .with_context(|| format!("write {}", temporary.display()))?;
-    std::fs::rename(&temporary, path)
-        .with_context(|| format!("replace {}", path.display()))?;
+    std::fs::write(&temporary, body).with_context(|| format!("write {}", temporary.display()))?;
+    std::fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
 }
 
@@ -334,10 +331,8 @@ async fn fetch_snapshot(url: &str) -> Result<PowerRankingSnapshot> {
     if !status.is_success() {
         bail!("power-ranking fetch returned {status}");
     }
-    let snapshot: PowerRankingSnapshot = response
-        .json()
-        .await
-        .context("decode power-ranking JSON")?;
+    let snapshot: PowerRankingSnapshot =
+        response.json().await.context("decode power-ranking JSON")?;
     if snapshot.schema_version != 1 {
         bail!(
             "power-ranking schema_version {} is not supported",
@@ -367,9 +362,14 @@ fn entries_for_harness(
         .collect()
 }
 
-fn pick_effort(entries: &[PowerRankingEntry], effort: Option<String>) -> Option<PowerRankingLookup> {
+fn pick_effort(
+    entries: &[PowerRankingEntry],
+    effort: Option<String>,
+) -> Option<PowerRankingLookup> {
     if let Some(effort) = effort.as_deref()
-        && let Some(found) = entries.iter().find(|entry| entry.effort.as_deref() == Some(effort))
+        && let Some(found) = entries
+            .iter()
+            .find(|entry| entry.effort.as_deref() == Some(effort))
     {
         return Some(lookup_from(found, false));
     }
@@ -567,8 +567,15 @@ mod tests {
             .lookup("sentinel-model", Some("high"), HarnessKind::Codex)
             .expect("fresh cache");
         assert!(close_enough(hit.tasks_per_200_sub, 42.0));
-        fresh.refresh(now).await.expect("fresh cache skips the network");
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "a fresh cache is not fetched");
+        fresh
+            .refresh(now)
+            .await
+            .expect("fresh cache skips the network");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a fresh cache is not fetched"
+        );
 
         let stale_dir = tempfile::tempdir().unwrap();
         write_cache_file(
@@ -617,7 +624,10 @@ mod tests {
             548.0
         ));
         let before = hits.load(Ordering::SeqCst);
-        invalidated.refresh(now).await.expect("version mismatch refreshes");
+        invalidated
+            .refresh(now)
+            .await
+            .expect("version mismatch refreshes");
         assert!(hits.load(Ordering::SeqCst) > before);
         assert!(close_enough(
             invalidated
@@ -686,9 +696,7 @@ mod tests {
             .unwrap();
         assert_eq!(bare.model, "claude-opus-5");
         assert!(close_enough(bare.tasks_per_200_sub, 190.09));
-        let high = store
-            .lookup("opus-5.5", None, HarnessKind::Claude)
-            .unwrap();
+        let high = store.lookup("opus-5.5", None, HarnessKind::Claude).unwrap();
         assert_eq!(high.effort.as_deref(), Some("high"));
         assert!(close_enough(high.tasks_per_200_sub, 899.59));
 
@@ -732,9 +740,7 @@ mod tests {
             "a dsh-only row is not a Claude row"
         );
 
-        let mean = store
-            .lookup("kimi-k3", None, HarnessKind::Kimi)
-            .unwrap();
+        let mean = store.lookup("kimi-k3", None, HarnessKind::Kimi).unwrap();
         assert!(mean.geometric_mean, "kimi-k3 is ranked only at max");
         assert_eq!(mean.basis, "geometric-mean");
         assert!(close_enough(mean.tasks_per_200_sub, 53.22));
@@ -765,7 +771,12 @@ mod tests {
         serde_json::to_string(&sentinel_snapshot(tasks)).unwrap()
     }
 
-    fn write_cache_file(dir: &Path, version: &str, fetched_at: u64, snapshot: PowerRankingSnapshot) {
+    fn write_cache_file(
+        dir: &Path,
+        version: &str,
+        fetched_at: u64,
+        snapshot: PowerRankingSnapshot,
+    ) {
         let cache = PowerRankingCacheFile {
             mj_version: version.to_owned(),
             fetched_at_epoch_seconds: fetched_at,
@@ -778,10 +789,7 @@ mod tests {
         .unwrap();
     }
 
-    fn spawn_ranking_server(
-        hits: Arc<AtomicUsize>,
-        body: Arc<Mutex<(u16, String)>>,
-    ) -> String {
+    fn spawn_ranking_server(hits: Arc<AtomicUsize>, body: Arc<Mutex<(u16, String)>>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {

@@ -3138,27 +3138,27 @@ impl State {
                 subagent.parent_session_id
             );
         }
-        let parent_subagent =
-            self.subagents
-                .get(&subagent.parent_session_id)
-                .map(|parent| crate::subagent::SubagentRecord {
-                    kind: parent.kind,
-                    reviewer_launch: None,
-                    child_session_id: parent.child_session_id.clone(),
-                    parent_session_id: parent.parent_session_id.clone(),
-                    task_name: parent.task_name.clone(),
-                    profile_id: parent.profile_id.clone(),
-                    model: parent.model.clone(),
-                    effort: parent.effort.clone(),
-                    working_directory: parent.working_directory.clone(),
-                    initial_prompt: String::new(),
-                    request_key: parent.request_key.clone(),
-                    created_at: parent.created_at.clone(),
-                    noticed_turn: parent.noticed_turn,
-                    reported_finish: parent.reported_finish.clone(),
-                    handback_tool: parent.handback_tool,
-                    supervisor: parent.supervisor,
-                });
+        let parent_subagent = self
+            .subagents
+            .get(&subagent.parent_session_id)
+            .map(|parent| crate::subagent::SubagentRecord {
+                kind: parent.kind,
+                reviewer_launch: None,
+                child_session_id: parent.child_session_id.clone(),
+                parent_session_id: parent.parent_session_id.clone(),
+                task_name: parent.task_name.clone(),
+                profile_id: parent.profile_id.clone(),
+                model: parent.model.clone(),
+                effort: parent.effort.clone(),
+                working_directory: parent.working_directory.clone(),
+                initial_prompt: String::new(),
+                request_key: parent.request_key.clone(),
+                created_at: parent.created_at.clone(),
+                noticed_turn: parent.noticed_turn,
+                reported_finish: parent.reported_finish.clone(),
+                handback_tool: parent.handback_tool,
+                supervisor: parent.supervisor,
+            });
         crate::subagent::validate_subagent_parent(
             parent_subagent.as_ref(),
             subagent.kind,

@@ -2130,10 +2130,7 @@ mod tests {
         destroyed.sort();
         assert_eq!(
             destroyed,
-            [
-                r#"destroy session-1 {}"#,
-                r#"destroy session-2 {}"#,
-            ]
+            [r#"destroy session-1 {}"#, r#"destroy session-2 {}"#,]
         );
     }
 
@@ -2165,10 +2162,7 @@ mod tests {
             .await
             .expect("the failed session is destroyed");
 
-        assert_eq!(
-            daemon.lifecycle_calls(),
-            [r#"destroy session-1 {}"#]
-        );
+        assert_eq!(daemon.lifecycle_calls(), [r#"destroy session-1 {}"#]);
     }
 
     #[tokio::test]
@@ -2194,10 +2188,7 @@ mod tests {
 
         exit(&adapter).await.expect("the session is destroyed");
 
-        assert_eq!(
-            daemon.lifecycle_calls(),
-            [r#"destroy session-1 {}"#]
-        );
+        assert_eq!(daemon.lifecycle_calls(), [r#"destroy session-1 {}"#]);
     }
 
     // Hard-won: 5dafd135: the adapter reported cancelled even after the turn had already completed.

@@ -671,9 +671,7 @@ impl RuntimeState {
                         acceptance: acceptance.clone(),
                     },
                 );
-                if mode == AdmissionMode::FreshRequest
-                    && matches!(kind, LifecycleKind::Suspend)
-                {
+                if mode == AdmissionMode::FreshRequest && matches!(kind, LifecycleKind::Suspend) {
                     lifecycle_owner.close_requested.insert(session_id.clone());
                 }
                 self.publish_revision();

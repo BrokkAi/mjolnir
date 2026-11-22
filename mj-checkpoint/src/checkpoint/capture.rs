@@ -962,7 +962,10 @@ fn verify_origin_delta_quiescence(
             &workspace_root.join(&repository.relative_destination),
         )?;
         ensure!(
-            location.top_level.canonicalize()?.starts_with(&quiesced_checkout),
+            location
+                .top_level
+                .canonicalize()?
+                .starts_with(&quiesced_checkout),
             "quiescence receipt belongs to a different checkout"
         );
     }

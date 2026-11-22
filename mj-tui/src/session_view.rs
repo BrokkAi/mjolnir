@@ -366,6 +366,7 @@ pub(crate) struct SessionOrder {
     rows: Vec<SessionsRow>,
     /// How many sessions the Sessions filter holds back.
     hidden: usize,
+    other_workspace_matches: usize,
     /// Each ordered session's target label.
     targets: Vec<String>,
     /// How many times the order was derived, for tests to count.
@@ -411,6 +412,7 @@ impl SessionOrder {
             project_keys,
             rows,
             hidden,
+            other_workspace_matches: dashboard.derive_other_workspace_matches(),
             targets,
             #[cfg(test)]
             derivations: 0,
@@ -439,6 +441,10 @@ impl SessionOrder {
 
     pub(crate) fn hidden(&self) -> usize {
         self.hidden
+    }
+
+    pub(crate) fn other_workspace_matches(&self) -> usize {
+        self.other_workspace_matches
     }
 
     pub(crate) fn targets(&self) -> &[String] {

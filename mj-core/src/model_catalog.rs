@@ -207,17 +207,11 @@ pub fn model_provider(model: &str) -> Option<crate::config::QuotaProvider> {
         || starts_with_token("o4")
     {
         Some(QuotaProvider::OpenAI)
-    } else if base.starts_with("gemini")
-        || base.starts_with("argon")
-        || base.starts_with("g1-")
-    {
+    } else if base.starts_with("gemini") || base.starts_with("argon") || base.starts_with("g1-") {
         Some(QuotaProvider::Google)
     } else if base.starts_with("grok") {
         Some(QuotaProvider::XAI)
-    } else if base.starts_with("kimi")
-        || starts_with_token("k2")
-        || starts_with_token("k3")
-    {
+    } else if base.starts_with("kimi") || starts_with_token("k2") || starts_with_token("k3") {
         Some(QuotaProvider::Moonshot)
     } else if base.starts_with("deepseek") {
         Some(QuotaProvider::DeepSeek)

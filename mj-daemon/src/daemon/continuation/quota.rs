@@ -7,6 +7,7 @@ use mj_core::state::{MoveSessionRequest, QuotaMoveContinuation};
 
 #[derive(Debug)]
 pub(super) enum Plan {
+    Obsolete,
     Pending(QuotaWait),
     Wait(QuotaRecovery),
     ChildSwitch {
@@ -236,6 +237,21 @@ pub(super) async fn prepare(
                 .is_some_and(|handback| handback.answers(turn.key)),
         )
     };
+    if !child {
+        let session_id = id.to_owned();
+        let command = turn.key.to_owned();
+        let provenance = mj_core::runtime::spawn_blocking(move || {
+            mj_controller::database::load_session_turn_profile_current(&session_id, &command)
+        })
+        .await
+        .context("load quota turn profile")??;
+        if let Some((turn_profile, current_profile)) = provenance
+            && turn_profile != current_profile
+        {
+            tracing::info!(session=%id, %turn_profile, %current_profile, "quota recovery assessment is obsolete after profile change");
+            return Ok(Plan::Obsolete);
+        }
+    }
     let harness = profile.kind;
     let profile_name = profile_id.clone();
     let request = mj_core::runtime::spawn_blocking(move || {
@@ -818,6 +834,7 @@ pub(super) async fn schedule(
         previous
     } else {
         let recovery = match plan.as_ref() {
+            Plan::Obsolete => bail!("obsolete quota assessment"),
             Plan::Pending(_) => bail!("quota report has not been published yet"),
             Plan::ChildSwitch { .. } => {
                 unreachable!("child switches are handled before scheduling")
@@ -969,7 +986,7 @@ pub(super) async fn schedule(
         return Ok(Box::new(current));
     }
     match schedule.plan.as_ref() {
-        Plan::Pending(_) | Plan::ChildSwitch { .. } => {
+        Plan::Obsolete | Plan::Pending(_) | Plan::ChildSwitch { .. } => {
             unreachable!("quota scheduling only records waits and Moves")
         }
         Plan::Wait(_) => {

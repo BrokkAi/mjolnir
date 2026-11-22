@@ -396,8 +396,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         assert!(moved.transfer_route.is_none());
         assert!(moved.restore_artifact().is_none());
         assert!(moved.in_place_harness_restarted);
-        let live_relay =
-            DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+        let live_relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
         let live_state = live_relay.operational_state();
         assert!(live_state.in_place_move_hold.is_none());
         assert!(live_state.goal.active());
@@ -745,6 +744,161 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             "{queue}"
         );
     }
+}
+
+#[test]
+fn in_place_move_releases_dispatch_after_post_hold_error() {
+    if !isolate_in_place_move_dispatch_test("in_place_move_releases_dispatch_after_post_hold_error")
+    {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    // An incomplete quota Move record reaches the queue step after taking
+    // the hold. Its missing continuation action makes that step fail.
+    operation.in_place_harness_restarted = true;
+    operation.quota_stop_reason = Some("weekly quota exhausted".into());
+    operation.queue = ResumeQueueDisposition::Start;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            let error = fixture
+                .controller
+                .execute_move(
+                    &mj_controller::controller::test_support::session_admission(
+                        LATCH_RELAY_SESSION,
+                    ),
+                    &mut operation,
+                    None,
+                    &recording_executor(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("quota Move has no saved continuation action"),
+                "{error:#}"
+            );
+            channels.shutdown.shutdown().await.unwrap();
+        });
+    assert_eq!(
+        fs::read_to_string(source_relay.join("in-place-move-requests.log")).unwrap(),
+        "hold_in_place_move_dispatch\nrelease_in_place_move_dispatch\n"
+    );
+    let relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    assert!(relay.operational_state().in_place_move_hold.is_none());
+}
+
+#[test]
+fn in_place_move_recovery_at_dispatch_released_only_releases() {
+    if !isolate_in_place_move_dispatch_test(
+        "in_place_move_recovery_at_dispatch_released_only_releases",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.quota_stop_reason = Some("weekly quota exhausted".into());
+    operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+    operation.in_place_harness_restarted = true;
+    operation.queue = ResumeQueueDisposition::Start;
+    let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    let store_id = relay.operational_state().store_id.unwrap();
+    let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "seed-dispatch-hold".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::HoldInPlaceMoveDispatch {
+            operation_id: operation.operation_id.clone(),
+            expected_store_id: store_id.clone(),
+        },
+    });
+    assert!(
+        matches!(response.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+        "{response:?}"
+    );
+    assert!(relay.operational_state().in_place_move_hold.is_some());
+    drop(relay);
+    operation.in_place_expected_store_id = Some(store_id);
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            // Attach while the Capturing operation owns the hold, so reconnect
+            // cleanup cannot release it before the recovery branch is exercised.
+            mj_controller::database::save_move_operation(&operation).unwrap();
+            let channels = start_source_relay_manager(&source_relay);
+            channels
+                .control
+                .wait_for_session(LATCH_RELAY_SESSION, std::time::Duration::from_secs(5))
+                .await
+                .unwrap()
+                .sync_now()
+                .await
+                .unwrap();
+            operation.phase = MovePhase::DispatchReleased;
+            operation.queue_admission_started = true;
+            // Recreate the same durable operation for both sides of the crash
+            // boundary: before release and after release but before completion.
+            for _ in 0..2 {
+                mj_controller::database::save_move_operation(&operation).unwrap();
+                let stored = mj_controller::database::load_move_operation(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .unwrap();
+                let outcome = fixture
+                    .controller
+                    .recover_move_managed_controlled(
+                        &mj_controller::controller::test_support::session_admission(
+                            LATCH_RELAY_SESSION,
+                        ),
+                        stored,
+                        &recording_executor(),
+                        &channels.control,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+                let settled = mj_controller::database::load_move_operation(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(settled.phase, MovePhase::Completed);
+                assert!(settled.queue_admission_finished);
+            }
+            channels.shutdown.shutdown().await.unwrap();
+        });
+    assert_eq!(
+        fs::read_to_string(source_relay.join("in-place-move-requests.log")).unwrap(),
+        "release_in_place_move_dispatch\nrelease_in_place_move_dispatch\n"
+    );
+    let relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    assert!(relay.operational_state().in_place_move_hold.is_none());
+}
+
+fn isolate_in_place_move_dispatch_test(name: &str) -> bool {
+    if std::env::var_os("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS").is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    IsolatedTest::new(test_name(name))
+        .env("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS", "1")
+        .env(
+            LATCH_RELAY_MAX_PROTOCOL,
+            mj_core::relay::RELAY_IN_PLACE_MOVE_PROTOCOL.to_string(),
+        )
+        .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+        .isolated_store(directory.path())
+        .run();
+    false
 }
 
 fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {

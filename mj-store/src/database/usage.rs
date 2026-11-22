@@ -176,6 +176,23 @@ pub fn load_session_turn_profile_model(
         .optional()?)
 }
 
+/// The recorded turn profile and the session's current profile from one snapshot.
+pub fn load_session_turn_profile_current(
+    session: &str,
+    command: &str,
+) -> Result<Option<(String, String)>> {
+    let connection = open_reader(&database_path())?;
+    Ok(connection
+        .query_row(
+            "SELECT COALESCE(t.profile, s.last_profile), s.last_profile FROM sessions s
+         LEFT JOIN session_turn_selections t ON t.session_id=s.session_id AND t.command_id=?2
+         WHERE s.session_id=?1",
+            params![session, command],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
 fn counters(usage: &TokenUsage) -> BTreeMap<String, u64> {
     let mut values = BTreeMap::from([
         ("total_tokens".into(), usage.total_tokens),

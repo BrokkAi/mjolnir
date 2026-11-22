@@ -96,6 +96,15 @@
             "rows": [
               {
                 "path": [
+                  "guardian"
+                ],
+                "label": "Guardian",
+                "help": "Review permission requests using the local classifier and utility/ACP review path.",
+                "control": "page",
+                "summary": "On · local classifier"
+              },
+              {
+                "path": [
                   "review"
                 ],
                 "label": "Code Review",
@@ -330,6 +339,17 @@
                 "path": [
                   "profiles",
                   "claude",
+                  "mjolnir_guardian"
+                ],
+                "label": "Mjolnir guardian",
+                "help": "On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. The top-level Guardian setting must also be enabled. Off: pending requests go to your permission form. Applies to new sessions.",
+                "control": "checkbox",
+                "checked": true
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
                   "claude_permission_mode"
                 ],
                 "label": "Claude permission mode",
@@ -449,6 +469,15 @@
           {
             "heading": "Sessions",
             "rows": [
+              {
+                "path": [
+                  "guardian"
+                ],
+                "label": "Guardian",
+                "help": "Review permission requests using the local classifier and utility/ACP review path.",
+                "control": "page",
+                "summary": "On · local classifier"
+              },
               {
                 "path": [
                   "review"
@@ -819,6 +848,15 @@
           {
             "heading": "Sessions",
             "rows": [
+              {
+                "path": [
+                  "guardian"
+                ],
+                "label": "Guardian",
+                "help": "Review permission requests using the local classifier and utility/ACP review path.",
+                "control": "page",
+                "summary": "On · local classifier"
+              },
               {
                 "path": [
                   "review"
@@ -1220,6 +1258,10 @@
                 "value": "",
                 "choices": [
                   {
+                    "value": "",
+                    "label": "Select a model"
+                  },
+                  {
                     "value": "opus",
                     "label": "opus"
                   },
@@ -1608,6 +1650,10 @@
                 "control": "choice",
                 "value": "",
                 "choices": [
+                  {
+                    "value": "",
+                    "label": "Select a model"
+                  },
                   {
                     "value": "opus",
                     "label": "opus"
@@ -2018,6 +2064,10 @@
                 "control": "choice",
                 "value": "",
                 "choices": [
+                  {
+                    "value": "",
+                    "label": "Select a model"
+                  },
                   {
                     "value": "opus",
                     "label": "opus"

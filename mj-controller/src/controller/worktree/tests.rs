@@ -2000,9 +2000,10 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
         ]
     );
     assert!(
-        commands
+        commands.iter().all(|command| !command
+            .args
             .iter()
-            .all(|command| !command.args.iter().any(|arg| arg.contains("worktree prune"))),
+            .any(|arg| arg.contains("worktree prune"))),
         "scoped removal must never invoke repository-wide git worktree prune: {commands:#?}"
     );
 }
@@ -2821,7 +2822,10 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
 
     // Create an unpushed branch, stash, staged edit, and unstaged edit in the managed clone.
     test_git(&worktree_root, &["config", "user.name", "Test"]);
-    test_git(&worktree_root, &["config", "user.email", "test@example.com"]);
+    test_git(
+        &worktree_root,
+        &["config", "user.email", "test@example.com"],
+    );
     test_git(&worktree_root, &["checkout", "-b", "feature/origin-seed"]);
     std::fs::write(worktree_root.join("feature.txt"), "committed\n").unwrap();
     test_git(&worktree_root, &["add", "feature.txt"]);
@@ -2956,8 +2960,13 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     assert!(!source.exists());
 
     // Restore must seed directly from origin_url and recover all state.
-    restore_managed_clone_origin_delta(&ProcessExecutor, &worktree, &archive_path, &verified.manifest)
-        .unwrap();
+    restore_managed_clone_origin_delta(
+        &ProcessExecutor,
+        &worktree,
+        &archive_path,
+        &verified.manifest,
+    )
+    .unwrap();
     assert_eq!(
         test_git(&worktree_root, &["symbolic-ref", "--short", "HEAD"]),
         "feature/origin-seed"
@@ -3128,6 +3137,49 @@ fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     )
     .unwrap();
     assert!(!worktree_root.exists());
+}
+
+// Hard-won: 90fc17a2b: managed clone removal left files in owner-read-only directories.
+#[cfg(unix)]
+#[test]
+fn clone_retirement_removes_read_only_directories_without_following_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let temp = tempfile::tempdir().unwrap();
+    let clone = temp.path().join("managed clone");
+    let read_only = clone.join("nested").join("read only");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&read_only).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(read_only.join("file"), "remove me").unwrap();
+    std::fs::write(outside.join("file"), "keep me").unwrap();
+    symlink(&outside, read_only.join("link")).unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let worktree = ManagedWorktree {
+        source_repository: temp.path().join("source"),
+        source_project_directory: temp.path().join("source"),
+        worktree_root: clone.clone(),
+        branch: "main".into(),
+        base_commit: None,
+        target: ManagedWorktreeTarget::Local,
+        kind: ManagedCheckoutKind::Clone,
+    };
+
+    let retired = super::super::environment::retire_checkout_for_test(
+        &ProcessExecutor,
+        &worktree,
+        CloneRetirementPrerequisite::None,
+    );
+    let outside_mode = std::fs::metadata(&outside).unwrap().permissions().mode();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+    retired.unwrap();
+    assert!(!clone.exists());
+    assert_eq!(outside_mode & 0o777, 0o500);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("file")).unwrap(),
+        "keep me"
+    );
 }
 
 #[test]
@@ -3551,7 +3603,9 @@ fn plan_workspace_to_raw_origin_delta_skips_source_origin_refresh_and_launch_bra
     session.bundle_id = "project".into();
     session.launch_branch = Some("deleted-launch-branch".into());
     let mut config = resume_compatibility_config();
-    config.bundles.insert("project".into(), local_bundle(&source));
+    config
+        .bundles
+        .insert("project".into(), local_bundle(&source));
     let controller = Controller {
         config,
         state: State {
@@ -3575,7 +3629,7 @@ fn plan_workspace_to_raw_origin_delta_skips_source_origin_refresh_and_launch_bra
 
 #[test]
 fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_base_and_detaching_on_branch_collision()
-{
+ {
     let temp = tempfile::tempdir().unwrap();
     let origin = temp.path().join("origin.git");
     let source = temp.path().join("source");
@@ -3586,7 +3640,11 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
     assert!(status.success());
 
     let status = Command::new("git")
-        .args(["clone", &origin.to_string_lossy(), &source.to_string_lossy()])
+        .args([
+            "clone",
+            &origin.to_string_lossy(),
+            &source.to_string_lossy(),
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -3737,14 +3795,14 @@ fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_bas
     // Detached HEAD on branch collision with a clear resume notice, and the
     // clone's existing `main` branch must NOT be overwritten by saved_refs.
     assert_eq!(
-        test_git(
-            &upgraded_clone.worktree_root,
-            &["branch", "--show-current"]
-        ),
+        test_git(&upgraded_clone.worktree_root, &["branch", "--show-current"]),
         ""
     );
     assert_eq!(
-        test_git(&upgraded_clone.worktree_root, &["rev-parse", "refs/heads/main"]),
+        test_git(
+            &upgraded_clone.worktree_root,
+            &["rev-parse", "refs/heads/main"]
+        ),
         origin_main
     );
     assert!(
@@ -3834,7 +3892,11 @@ fn legacy_clone_restore_repairs_nested_linked_worktree_after_publish_and_preserv
     assert!(status.success());
 
     let status = Command::new("git")
-        .args(["clone", &origin.to_string_lossy(), &source.to_string_lossy()])
+        .args([
+            "clone",
+            &origin.to_string_lossy(),
+            &source.to_string_lossy(),
+        ])
         .status()
         .unwrap();
     assert!(status.success());
@@ -3984,7 +4046,11 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
     );
     assert!(
         Command::new("git")
-            .args(["clone", &origin.to_string_lossy(), &checkout.to_string_lossy()])
+            .args([
+                "clone",
+                &origin.to_string_lossy(),
+                &checkout.to_string_lossy()
+            ])
             .status()
             .unwrap()
             .success()
@@ -4025,7 +4091,11 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
     let restored = temp.path().join("restored");
     assert!(
         Command::new("git")
-            .args(["clone", &upstream.to_string_lossy(), &restored.to_string_lossy()])
+            .args([
+                "clone",
+                &upstream.to_string_lossy(),
+                &restored.to_string_lossy()
+            ])
             .status()
             .unwrap()
             .success()

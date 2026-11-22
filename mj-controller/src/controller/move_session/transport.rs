@@ -27,15 +27,14 @@ use mj_core::targets::{
 };
 use sha2::{Digest, Sha256};
 
-use self::ec2_grant::{AcquireOutcome, Ec2GrantKey, Ec2GrantManager, Ec2GrantStore, Ec2SecurityGroupClient};
+use self::ec2_grant::{
+    AcquireOutcome, Ec2GrantKey, Ec2GrantManager, Ec2GrantStore, Ec2SecurityGroupClient,
+};
 
 pub use mj_core::state::{RoutePreview, TransferRoute};
 
 /// Preview the transfer route without mutating any host, key, or AWS resource.
-pub fn preview_transfer_route(
-    source: &TargetLocator,
-    destination: &TargetLocator,
-) -> RoutePreview {
+pub fn preview_transfer_route(source: &TargetLocator, destination: &TargetLocator) -> RoutePreview {
     if targets_share_host(source, destination) {
         RoutePreview::SameHost
     } else {
@@ -103,7 +102,11 @@ pub struct TransferReceipt {
 
 fn parse_keep_tar_bytes(stdout: &[u8]) -> u64 {
     let trimmed = String::from_utf8_lossy(stdout);
-    let last_line = trimmed.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let last_line = trimmed
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
     serde_json::from_str::<mj_checkpoint::move_stream::MoveStreamReceipt>(last_line.trim())
         .map(|receipt| receipt.keep_tar_bytes)
         .unwrap_or(0)
@@ -542,7 +545,8 @@ impl StreamPipe for ProcessStreamPipe {
         // raw archive or framed Move stream bytes) and keep both lease guards
         // alive until after both child processes have been reaped.
         let mut src_walk = SshWalk::default();
-        let src_session = source.open_ssh_session_without_marker(&ProcessExecutor, &mut src_walk)?;
+        let src_session =
+            source.open_ssh_session_without_marker(&ProcessExecutor, &mut src_walk)?;
         let mut dst_walk = SshWalk::default();
         let dst_session =
             destination.open_ssh_session_without_marker(&ProcessExecutor, &mut dst_walk)?;
@@ -827,7 +831,8 @@ fn generate_ephemeral_ed25519_keypair() -> Result<EphemeralKeypair> {
     let dir = tempfile::tempdir().context("create temp dir for ephemeral ed25519 key")?;
     let key_path = dir.path().join("id_ed25519");
     let mut cmd = Command::new("ssh-keygen");
-    cmd.args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key_path);
+    cmd.args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key_path);
     let output = run_with_input(&mut cmd, &[]).context("run ssh-keygen for transfer keypair")?;
     ensure!(
         output.status.success(),
@@ -921,12 +926,9 @@ where
             for file in &self.stage_files {
                 argv.push(file.to_string_lossy().into_owned());
             }
-            let rm_spec = targets::locator_command(
-                SshTrafficClass::Control,
-                &self.initiator_host,
-                argv,
-            )
-            .purpose("remove temporary Move SSH key and known_hosts");
+            let rm_spec =
+                targets::locator_command(SshTrafficClass::Control, &self.initiator_host, argv)
+                    .purpose("remove temporary Move SSH key and known_hosts");
             match self.executor.execute_cleanup(&rm_spec) {
                 Ok(out) if out.status != 0 => {
                     tracing::warn!(
@@ -1010,7 +1012,9 @@ where
             "authorized-keys".into(),
             "install".into(),
             "--path".into(),
-            peer.destination_authorized_keys.to_string_lossy().into_owned(),
+            peer.destination_authorized_keys
+                .to_string_lossy()
+                .into_owned(),
             "--operation-id".into(),
             peer.operation_id.clone(),
             "--from".into(),
@@ -1063,12 +1067,7 @@ where
     let push_spec = targets::locator_command(
         SshTrafficClass::Bulk,
         &source_host,
-        vec![
-            "bash".into(),
-            "-c".into(),
-            script,
-            "mj-direct-push".into(),
-        ],
+        vec!["bash".into(), "-c".into(), script, "mj-direct-push".into()],
     )
     .purpose("direct push Move stream");
     let push_out = executor.execute_without_deadline(&push_spec)?;
@@ -1173,12 +1172,8 @@ where
         }
     }
 
-    let ssh_cmd = format_direct_ssh_command(
-        &priv_path,
-        &kh_path,
-        &alias,
-        &peer.source_ssh_destination,
-    );
+    let ssh_cmd =
+        format_direct_ssh_command(&priv_path, &kh_path, &alias, &peer.source_ssh_destination);
     let receive_cmd = format_forced_receive_command(
         destination,
         &peer.destination_worker_bin,
@@ -1190,12 +1185,7 @@ where
     let pull_spec = targets::locator_command(
         SshTrafficClass::Bulk,
         &dest_host,
-        vec![
-            "bash".into(),
-            "-c".into(),
-            script,
-            "mj-direct-pull".into(),
-        ],
+        vec!["bash".into(), "-c".into(), script, "mj-direct-pull".into()],
     )
     .purpose("direct pull Move stream");
     let pull_out = executor.execute_without_deadline(&pull_spec)?;
@@ -1282,9 +1272,10 @@ pub(crate) fn cleanup_interrupted_move_credentials(
             .filter(|id| !id.is_empty())
             .unwrap_or(operation_id);
         let mut ok = true;
-        if let (Some(worker_bin), Some(auth_keys_path)) =
-            (key.worker_bin.as_deref(), key.authorized_keys_path.as_deref())
-        {
+        if let (Some(worker_bin), Some(auth_keys_path)) = (
+            key.worker_bin.as_deref(),
+            key.authorized_keys_path.as_deref(),
+        ) {
             let remove_spec = targets::locator_command(
                 SshTrafficClass::Control,
                 &host,
@@ -1423,15 +1414,24 @@ fn host_side_read_command(locator: &TargetLocator, path: &Path) -> String {
         | TargetLocator::AwsEc2 { .. } => format!("cat -- {quoted_path}"),
         TargetLocator::LocalPodman { container_id, .. }
         | TargetLocator::SshPodman { container_id, .. } => {
-            format!("podman exec {} cat -- {quoted_path}", shell_quote(container_id))
+            format!(
+                "podman exec {} cat -- {quoted_path}",
+                shell_quote(container_id)
+            )
         }
         TargetLocator::LocalDocker { container_id, .. }
         | TargetLocator::SshDocker { container_id, .. } => {
-            format!("docker exec {} cat -- {quoted_path}", shell_quote(container_id))
+            format!(
+                "docker exec {} cat -- {quoted_path}",
+                shell_quote(container_id)
+            )
         }
         TargetLocator::AppleContainer { container_id, .. }
         | TargetLocator::SshAppleContainer { container_id, .. } => {
-            format!("container exec {} cat -- {quoted_path}", shell_quote(container_id))
+            format!(
+                "container exec {} cat -- {quoted_path}",
+                shell_quote(container_id)
+            )
         }
         TargetLocator::SshNitro { container_id, .. } => {
             format!(
@@ -1617,7 +1617,10 @@ fn validate_authorized_keys_command_arg(label: &str, value: &str) -> Result<()> 
     Ok(())
 }
 
-fn container_exec_prefix(locator: &TargetLocator, for_authorized_keys: bool) -> Option<(String, &str)> {
+fn container_exec_prefix(
+    locator: &TargetLocator,
+    for_authorized_keys: bool,
+) -> Option<(String, &str)> {
     match locator {
         TargetLocator::LocalBare { .. }
         | TargetLocator::SshBare { .. }
@@ -1735,9 +1738,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use ec2_grant::{
-        Ec2ApiError, Ec2GrantConfig, Ec2IngressRule, InMemoryGrantStore,
-    };
+    use ec2_grant::{Ec2ApiError, Ec2GrantConfig, Ec2IngressRule, InMemoryGrantStore};
     use mj_core::targets::{CommandOutput, CommandSpec, DeadlinePause, ProcessExecutor};
 
     #[test]
@@ -1799,9 +1800,8 @@ mod tests {
         };
         let executor = ProcessExecutor;
 
-        let route =
-            transfer_archive(&src, &src_archive, &dst, &dst_archive, &sha, &executor)
-                .expect("same-host transfer");
+        let route = transfer_archive(&src, &src_archive, &dst, &dst_archive, &sha, &executor)
+            .expect("same-host transfer");
         assert_eq!(route, TransferRoute::SameHost);
         assert_eq!(fs::read(&dst_archive).expect("read dst"), payload);
     }
@@ -1957,8 +1957,14 @@ mod tests {
         assert!(docker_receive.starts_with("docker exec -i 'ctr-doc-2' "));
 
         assert!(
-            format_forced_export_command(&bare, "mj-worker", Path::new("/tmp/bad\"path"), None, &[])
-                .is_err()
+            format_forced_export_command(
+                &bare,
+                "mj-worker",
+                Path::new("/tmp/bad\"path"),
+                None,
+                &[]
+            )
+            .is_err()
         );
         assert!(
             format_forced_receive_command(
@@ -2095,7 +2101,10 @@ fi
         )
         .expect("same-host stream with keep");
         assert_eq!(fs::read(&same_dst_archive).unwrap(), b"archive-payload");
-        assert_eq!(fs::read(same_dst_keep.join("keep.txt")).unwrap(), b"must-arrive");
+        assert_eq!(
+            fs::read(same_dst_keep.join("keep.txt")).unwrap(),
+            b"must-arrive"
+        );
         assert!(!same_dst_keep.join("skip.txt").exists());
 
         // 2. DaemonStream route carries archive + keep_dir (excluding skip.txt).
@@ -2128,7 +2137,10 @@ fi
         )
         .expect("daemon-stream with keep");
         assert_eq!(fs::read(&daemon_dst_archive).unwrap(), b"archive-payload");
-        assert_eq!(fs::read(daemon_dst_keep.join("keep.txt")).unwrap(), b"must-arrive");
+        assert_eq!(
+            fs::read(daemon_dst_keep.join("keep.txt")).unwrap(),
+            b"must-arrive"
+        );
         assert!(!daemon_dst_keep.join("skip.txt").exists());
 
         // 3. Non-SSH SameHost route safely handles paths containing apostrophes.
@@ -2147,7 +2159,10 @@ fi
         )
         .expect("same-host stream with apostrophe path");
         assert_eq!(fs::read(&apo_dst).unwrap(), b"archive-payload");
-        assert_eq!(fs::read(apo_keep_dst.join("keep.txt")).unwrap(), b"must-arrive");
+        assert_eq!(
+            fs::read(apo_keep_dst.join("keep.txt")).unwrap(),
+            b"must-arrive"
+        );
     }
 
     #[test]
@@ -2209,8 +2224,11 @@ fi
         let dir = tempfile::tempdir().expect("tempdir");
         let dst_file = dir.path().join("env-out.txt");
 
-        let mut src_spec = CommandSpec::new("bash", ["-c", "printf '%s:%s' \"$MJ_TEST_VAR\" \"$(pwd)\""]);
-        src_spec.env.insert("MJ_TEST_VAR".into(), "hello-pipe".into());
+        let mut src_spec =
+            CommandSpec::new("bash", ["-c", "printf '%s:%s' \"$MJ_TEST_VAR\" \"$(pwd)\""]);
+        src_spec
+            .env
+            .insert("MJ_TEST_VAR".into(), "hello-pipe".into());
         src_spec.cwd = Some(dir.path().to_path_buf());
 
         let dst_spec = CommandSpec::new(
@@ -2429,15 +2447,26 @@ fi
 
         // EC2 grant must have been revoked and removed from store.
         assert!(
-            fake_ec2.describe_ingress_rules("sg-dst").unwrap().is_empty(),
+            fake_ec2
+                .describe_ingress_rules("sg-dst")
+                .unwrap()
+                .is_empty(),
             "EC2 ingress rule must be revoked on mid-transfer failure"
         );
         assert!(mgr.store().snapshot().is_empty());
 
         // Cleanup commands for authorized_keys and stage files must have run.
         let purposes = executor.recorded_purposes.lock().unwrap().clone();
-        assert!(purposes.iter().any(|p| p == "remove temporary Move authorized_keys entry"));
-        assert!(purposes.iter().any(|p| p == "remove temporary Move SSH key and known_hosts"));
+        assert!(
+            purposes
+                .iter()
+                .any(|p| p == "remove temporary Move authorized_keys entry")
+        );
+        assert!(
+            purposes
+                .iter()
+                .any(|p| p == "remove temporary Move SSH key and known_hosts")
+        );
     }
 
     #[test]
@@ -2502,8 +2531,12 @@ fi
             mj_core::state::GrantedMoveKey {
                 host: "src.example.com".into(),
                 comment: "mj-move-op-crash".into(),
-                private_key_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.key")),
-                known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.known_hosts")),
+                private_key_path: Some(PathBuf::from(
+                    "/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.key",
+                )),
+                known_hosts_path: Some(PathBuf::from(
+                    "/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.known_hosts",
+                )),
                 authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
                 worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
                 ssh_target: None,
@@ -2511,8 +2544,12 @@ fi
             mj_core::state::GrantedMoveKey {
                 host: "dst.example.com".into(),
                 comment: "mj-move-op-crash".into(),
-                private_key_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.key")),
-                known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.known_hosts")),
+                private_key_path: Some(PathBuf::from(
+                    "/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.key",
+                )),
+                known_hosts_path: Some(PathBuf::from(
+                    "/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.known_hosts",
+                )),
                 authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
                 worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
                 ssh_target: Some(mj_core::targets::SshTarget {
@@ -2522,15 +2559,18 @@ fi
             },
         ];
         let executor = RecordingCleanupExecutor::default();
-        let remaining = cleanup_interrupted_move_credentials(
-            "op-different",
-            &keys,
-            &[&src, &dst],
-            &executor,
+        let remaining =
+            cleanup_interrupted_move_credentials("op-different", &keys, &[&src, &dst], &executor);
+        assert!(
+            remaining.is_empty(),
+            "all remote credentials should be revoked"
         );
-        assert!(remaining.is_empty(), "all remote credentials should be revoked");
         let commands = executor.commands.lock().unwrap();
-        assert_eq!(commands.len(), 4, "expected 2 authorized-keys remove + 2 rm -f: {commands:?}");
+        assert_eq!(
+            commands.len(),
+            4,
+            "expected 2 authorized-keys remove + 2 rm -f: {commands:?}"
+        );
         assert!(commands.iter().any(|(p, args)| {
             p == "remove temporary Move authorized_keys entry"
                 && args.iter().any(|a| a.contains("src.example.com"))

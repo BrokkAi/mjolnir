@@ -329,7 +329,10 @@ pub(crate) enum Confirmation {
     /// A session import that stopped with an error. The person was waiting
     /// on the import dialog, so the reason stays on screen until dismissed
     /// rather than going only to the footer.
-    ImportFailed { error: String, previous: Box<Mode> },
+    ImportFailed {
+        error: String,
+        previous: Box<Mode>,
+    },
     /// A standard modal dismissal that may need to protect an in-memory draft
     /// or a running operation. The boxed mode is restored by the safe answer.
     Dismiss {
@@ -365,7 +368,10 @@ pub(crate) enum Confirmation {
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
-    InterruptWork { session_id: String, restart: bool },
+    InterruptWork {
+        session_id: String,
+        restart: bool,
+    },
     RestartAgent {
         session_id: String,
         interrupting: bool,
@@ -413,7 +419,9 @@ pub(crate) enum Confirmation {
     /// A Move left a verified checkpoint or a ready destination that needs an
     /// explicit same-destination retry. Resume with the source settings is
     /// deliberately hidden while queue admission may already have run.
-    RecoverMove { operation: Box<MoveOperation> },
+    RecoverMove {
+        operation: Box<MoveOperation>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +458,12 @@ impl ConfirmDialog {
     pub(crate) fn naming_session(mut self, name: &str) -> Self {
         self.session_name = Some(name.to_owned());
         self
+    }
+
+    /// Rebuilds the dialog's button focus state after `confirmation` changes
+    /// its buttons (for example when suspend preflight arrives).
+    pub(crate) fn refresh_form(&mut self) {
+        self.form = confirmation_form(&self.confirmation);
     }
 }
 
@@ -1135,12 +1149,10 @@ impl DashboardState {
 
     /// Show the recovery choices after a checkpointed close could not finish.
     pub fn show_close_failure(&mut self, session_id: String, error: impl Into<String>) {
-        self.mode = Mode::Confirm(
-            self.confirm_dialog(Confirmation::CloseFailed {
-                session_id,
-                error: error.into(),
-            }),
-        );
+        self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::CloseFailed {
+            session_id,
+            error: error.into(),
+        }));
     }
 
     pub fn show_import_progress(&mut self, session_title: String) {
@@ -1809,13 +1821,7 @@ impl DashboardState {
                 self.cancel_modal();
                 DashboardAction::ForceDestroy { session_id }
             }
-            (
-                Confirmation::DestroyStopped {
-                    session_id,
-                    reopen,
-                },
-                1,
-            ) => {
+            (Confirmation::DestroyStopped { session_id, reopen }, 1) => {
                 self.restore_after_confirmation(reopen);
                 DashboardAction::DestroyStopped { session_id }
             }

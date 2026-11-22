@@ -5,11 +5,11 @@ pub(in crate::controller) use destination::destroy_prepared_environment;
 #[cfg(test)]
 mod tests;
 // Shared with mj-daemon's move tests through the `test-support` feature.
+pub mod in_place;
+pub mod recovery;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_fixtures;
-pub mod in_place;
-pub mod recovery;
 pub mod transport;
 mod viewer_recovery;
 pub use viewer_recovery::ViewerMoveRecovery;
@@ -332,9 +332,104 @@ pub fn record_finished_move_recovery(
             &failed_move_recovery(operation, state),
             &operation.operation_id,
         );
-        crate::database::save_move_outcome(operation, Some(&message))
+        crate::database::save_move_outcome(operation, Some(&message), false)
     } else {
         crate::database::save_move_operation(operation)
+    }
+}
+
+/// Before a destination owns any work, its delegation policy can be changed
+/// independently of the captured files and the agreed placement.
+fn matches_move_retry_selection(operation: &MoveOperation, requested: &MoveSelection) -> bool {
+    if operation.selection == *requested {
+        return true;
+    }
+    failed_move_has_only_its_source(operation)
+        && operation.selection
+            == (MoveSelection {
+                subagents: operation.selection.subagents.clone(),
+                ..requested.clone()
+            })
+}
+
+fn failed_move_has_only_its_source(operation: &MoveOperation) -> bool {
+    !operation.in_place
+        && operation.holds_source_environment()
+        && matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
+        && operation.destination_target.is_none()
+        && operation
+            .prepared_destination
+            .as_ref()
+            .is_none_or(|destination| !destination.owns_resource())
+}
+
+/// A reopened source can have newer files, prompts and journal entries.
+/// Confirm a fresh Move from that source even if the old snapshot still exists.
+fn move_needs_fresh_capture(
+    operation: &MoveOperation,
+    source: &mj_core::state::SessionRecord,
+) -> bool {
+    operation.source_snapshot.is_some()
+        && failed_move_has_only_its_source(operation)
+        && source.state == SessionState::Running
+        && source.last_profile == operation.source_profile_id
+        && source
+            .target
+            .as_deref()
+            .zip(operation.source_target.as_ref())
+            .is_some_and(|(current, original)| current.same_resource(original))
+}
+
+fn retained_move_snapshot_is_missing(
+    operation: &MoveOperation,
+    config: &mj_core::config::Config,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<bool> {
+    if !failed_move_has_only_its_source(operation) {
+        return Ok(false);
+    }
+    let Some(snapshot) = &operation.source_snapshot else {
+        return Ok(false);
+    };
+    let source = operation
+        .recovery_session
+        .as_ref()
+        .expect("retained source");
+    let target = source
+        .target
+        .as_deref()
+        .context("Move source has no target")?;
+    if matches!(target, mj_core::state::TargetLocator::LocalBare { .. }) {
+        return match std::fs::metadata(&snapshot.archive_path) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error).context("check the retained Move snapshot"),
+        };
+    }
+    let backend = super::backend_locator(target, source, config)?;
+    // The marker comes from the target shell; a transport or engine
+    // failure cannot be interpreted as proof that an archive is gone.
+    let command = crate::targets::command_on_locator(
+        crate::targets::SshTrafficClass::Control,
+        &backend,
+        &source.id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -f \"$1\" ]; then printf 'present\\n'; else printf 'missing\\n'; fi".into(),
+            "mj-move-snapshot".into(),
+            snapshot.archive_path.to_string_lossy().into_owned(),
+        ],
+        "check the retained Move snapshot",
+    )?;
+    let output = executor.execute(&command)?;
+    match (output.status, output.stdout.as_slice()) {
+        (0, b"present\n") => Ok(false),
+        (0, b"missing\n") => Ok(true),
+        _ => bail!(
+            "could not check the retained Move snapshot: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
     }
 }
 
@@ -917,7 +1012,7 @@ impl Controller {
         {
             return Ok(false);
         }
-        let retained_source = operation.retains_source_environment();
+        let retained_source = operation.retains_source_environment() && source.target.is_some();
         let clone_prerequisite = if !retained_source {
             let verified = operation
                 .checkpoint
@@ -936,38 +1031,179 @@ impl Controller {
         self.cleanup_prepared_move_destination(&mut operation, executor)
             .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
         if retained_source {
-            let reason =
-                anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
-            let persist = |record: &mj_core::state::SessionRecord, environment: Option<&str>| {
-                crate::database::settle_superseded_move_source(
-                    record,
-                    environment,
-                    &operation.operation_id,
+            if operation.in_place {
+                let reason = anyhow::Error::new(
+                    super::lifecycle::LifecycleFailureReason::RetainedMoveSource,
+                );
+                self.retain_failed_in_place_move_with_persist(
+                    session_id,
+                    &source,
+                    reason,
+                    |record| {
+                        crate::database::settle_superseded_move_source(
+                            record,
+                            None,
+                            &operation.operation_id,
+                        )
+                    },
+                )?;
+            } else {
+                let source_environment =
+                    crate::database::move_source_environment(&operation.operation_id)?
+                        .context("superseded Move has no durable source environment")?;
+                let source_target = source
+                    .target
+                    .as_deref()
+                    .context("Move source has no target")?;
+                ensure!(
+                    source_environment.owner_session_id == session_id
+                        && source_environment.phase == crate::database::EnvironmentPhase::Active
+                        && source_environment
+                            .placement
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target.same_resource(source_target)),
+                    "superseded Move no longer owns its retained source"
+                );
+                let current = &self.state.sessions[session_id];
+                let current_destination = current
+                    .target
+                    .as_deref()
+                    .filter(|target| !target.same_resource(source_target));
+                // A crash after creating a destination checkout (even before
+                // runtime provisioning sets `current.target`) leaves the
+                // session bound to a distinct provisional environment in the
+                // ledger. Retire it before rebinding the session to the
+                // retained source.
+                let provisional_destination =
+                    match crate::database::session_environment(session_id)? {
+                        Some(destination) if destination.id != source_environment.id => {
+                            ensure!(
+                                destination.owner_session_id == session_id,
+                                "superseded Move no longer owns its provisional destination"
+                            );
+                            if let Some(current_target) = current_destination {
+                                ensure!(
+                                    destination
+                                        .placement
+                                        .target
+                                        .as_ref()
+                                        .is_some_and(|target| target.same_resource(current_target)),
+                                    "superseded Move no longer owns its provisional destination"
+                                );
+                            } else {
+                                ensure!(
+                                    destination
+                                        .placement
+                                        .target
+                                        .as_ref()
+                                        .is_none_or(|target| !target.same_resource(source_target)),
+                                    "provisional Move destination still names the retained source"
+                                );
+                            }
+                            Some(destination)
+                        }
+                        _ => {
+                            ensure!(
+                                current_destination.is_none(),
+                                "superseded Move has no durable destination environment"
+                            );
+                            None
+                        }
+                    };
+                if let Some(destination) = provisional_destination {
+                    if let (Some(source), Some(destination)) = (
+                        &source_environment.placement.managed_worktree,
+                        &destination.placement.managed_worktree,
+                    ) {
+                        ensure!(
+                            source.worktree_root != destination.worktree_root
+                                || !source.target.same_location(&destination.target),
+                            "provisional Move destination still names the source checkout"
+                        );
+                    }
+                    super::environment::retire_owned_environment(
+                        destination,
+                        &self.config,
+                        executor,
+                        super::BranchDisposition::Keep,
+                        super::CheckoutDisposition::Remove,
+                    )
+                    .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+                }
+                let backend = super::backend_locator(source_target, &source, &self.config)?;
+                // Stop any surviving or sealed source worker before resolving
+                // the Move so a failed stop keeps the operation retryable and
+                // Resume cannot reattach to a sealed relay.
+                crate::targets::stop_worker_plan(
+                    &backend,
+                    session_id,
+                    "stop retained Move source worker before retry",
                 )
-            };
-            self.retain_failed_in_place_move_with_persist(
-                session_id,
-                &source,
-                reason,
-                |record| persist(record, None),
-            )?;
+                .and_then(|plan| {
+                    plan.execute(
+                        &crate::targets::CancellableProcessExecutor::with_timeout(
+                            std::time::Duration::from_secs(15),
+                        ),
+                        &super::ControlWorker,
+                    )
+                })
+                .context("stop retained worker before retry")?;
+                // Clear any OriginDelta quiescence wire files left by the
+                // abandoned Move so a later Suspend on the resumed source
+                // cannot adopt the Move's old request or receipt.
+                super::lifecycle::origin_delta::clear_suspend_records_at_target(
+                    &backend, session_id, executor,
+                )
+                .context("clear retained Move source suspend records before retry")?;
+                let mut retained = source;
+                retained
+                    .resource_allocation
+                    .clone_from(&current.resource_allocation);
+                retained
+                    .additional_mounts
+                    .clone_from(&current.additional_mounts);
+                retained.state = SessionState::Error;
+                retained.last_error =
+                    Some(super::lifecycle::LifecycleFailureReason::RetainedMoveSource.to_string());
+                retained.updated_at = now();
+                crate::database::settle_superseded_move_source(
+                    &retained,
+                    Some(&source_environment.id),
+                    &operation.operation_id,
+                )?;
+                self.state.sessions.insert(session_id.to_owned(), retained);
+            }
         } else {
             // The environment ledger owns both identities, even when the
             // failed provisioning left only a partial destination checkout.
             let source_environment =
                 crate::database::move_source_environment(&operation.operation_id)?;
             let current = self.state.sessions[session_id].clone();
-            if current.target.is_some() {
+            let has_provisional_destination = crate::database::session_environment(session_id)?
+                .is_some_and(|environment| {
+                    source_environment
+                        .as_ref()
+                        .is_none_or(|source_env| environment.id != source_env.id)
+                });
+            if current.target.is_some() || has_provisional_destination {
+                let prerequisite = if has_provisional_destination {
+                    super::worktree::CloneRetirementPrerequisite::None
+                } else {
+                    clone_prerequisite
+                };
                 super::environment::retire_session_environment_with_clone_prerequisite(
                     &current,
                     &self.config,
                     executor,
                     super::BranchDisposition::Keep,
-                    clone_prerequisite,
+                    prerequisite,
                 )
                 .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
             }
-            if let Some(environment) = &source_environment {
+            if source.target.is_some()
+                && let Some(environment) = &source_environment
+            {
                 super::environment::retire_owned_environment_with_clone_prerequisite(
                     environment.clone(),
                     &self.config,
@@ -1258,6 +1494,7 @@ impl Controller {
                 selection.subagents = None;
             }
         }
+        let previous = previous.filter(|operation| !move_needs_fresh_capture(operation, source));
         // A Move must change something about the environment. A size alone is
         // a change: it resizes the destination container on the target the
         // session already names.
@@ -1318,7 +1555,8 @@ impl Controller {
             // A field the request omits means the one the Move was sealed
             // with, so a surface that cannot express it (the CLI has no flag
             // for attached directories) can still retry a Move another
-            // surface sealed. An explicit value that differs still refuses.
+            // surface sealed. Only the destination's delegation policy can
+            // change on a failed pre-destination retry.
             let sealed = &retained.selection;
             if selection.additional_mounts.is_none() {
                 selection.additional_mounts = sealed.additional_mounts.clone();
@@ -1345,7 +1583,7 @@ impl Controller {
                 selection.supervisors = sealed.supervisors;
             }
             ensure!(
-                retained.selection == selection,
+                matches_move_retry_selection(retained, &selection),
                 "{}",
                 sealed_selection_difference(&retained.selection, &selection)
             );
@@ -1400,6 +1638,10 @@ impl Controller {
         if profile.kind != source.harness_kind
             || policy != source.subagents.clone().unwrap_or_default()
             || yolo_target != source_yolo
+            || previous.as_ref().is_some_and(|operation| {
+                operation.holds_source_environment()
+                    && operation.selection.subagents != selection.subagents
+            })
         {
             super::profile_config::validate_session_subagent_policy(
                 catalog,
@@ -1557,7 +1799,7 @@ impl Controller {
         let operation_id = previous
             .as_ref()
             .filter(|operation| {
-                operation.selection == selection
+                matches_move_retry_selection(operation, &selection)
                     && !operation.is_resolved()
                     && operation.checkpoint_retained()
             })
@@ -1578,15 +1820,19 @@ impl Controller {
             source.target.as_deref().and_then(|src| {
                 let target_id = selection.target_template_id.as_deref()?;
                 self.config.targets.get(target_id).map(|dest| {
-                    if matches!(src, mj_core::state::TargetLocator::LocalBare { .. } | mj_core::state::TargetLocator::LocalPodman { .. } | mj_core::state::TargetLocator::LocalDocker { .. } | mj_core::state::TargetLocator::AppleContainer { .. })
-                        && matches!(
-                            dest,
-                            mj_core::config::TargetTemplate::LocalBare
-                                | mj_core::config::TargetTemplate::LocalPodman { .. }
-                                | mj_core::config::TargetTemplate::LocalDocker { .. }
-                                | mj_core::config::TargetTemplate::AppleContainer { .. }
-                        )
-                    {
+                    if matches!(
+                        src,
+                        mj_core::state::TargetLocator::LocalBare { .. }
+                            | mj_core::state::TargetLocator::LocalPodman { .. }
+                            | mj_core::state::TargetLocator::LocalDocker { .. }
+                            | mj_core::state::TargetLocator::AppleContainer { .. }
+                    ) && matches!(
+                        dest,
+                        mj_core::config::TargetTemplate::LocalBare
+                            | mj_core::config::TargetTemplate::LocalPodman { .. }
+                            | mj_core::config::TargetTemplate::LocalDocker { .. }
+                            | mj_core::config::TargetTemplate::AppleContainer { .. }
+                    ) {
                         mj_core::state::RoutePreview::SameHost
                     } else {
                         mj_core::state::RoutePreview::DirectOrDaemonStream
@@ -1768,10 +2014,14 @@ impl Controller {
         checked.stops_subagents = prepared.stops_subagents;
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
-        let old_operation = crate::database::load_move_operation(&id)?;
-        let retry = old_operation.clone().filter(|op| {
-            op.selection == prepared.selection && op.checkpoint_retained()
+        let retry = crate::database::load_move_operation(&id)?.filter(|op| {
+            !move_needs_fresh_capture(op, &source)
+                && matches_move_retry_selection(op, &checked.selection)
+                && op.checkpoint_retained()
         });
+        let updates_retry_policy = retry
+            .as_ref()
+            .is_some_and(|op| op.selection.subagents != checked.selection.subagents);
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
             crate::database::accept_unchanged_move(&checked.selection)?;
             let latest = crate::database::load_session_record(&id)?.context("Move session disappeared")?;
@@ -1811,6 +2061,7 @@ impl Controller {
                 crate::database::clear_move_cancellation_for_retry(&id)?;
                 op.configuration_fingerprint =
                     self.move_configuration_fingerprint(&checked.selection)?;
+                op.selection.subagents = checked.selection.subagents.clone();
                 op.queue = queue;
                 op.cancellation_requested = false;
                 op.error = None;
@@ -1880,6 +2131,9 @@ impl Controller {
         operation.acknowledge_interruption = request.acknowledge_interruption;
         crate::database::accept_move_operation(&operation)?;
         on_accepted();
+        if updates_retry_policy {
+            executor.notify_notice("Retrying the sealed Move with the updated destination sub-agent policy.");
+        }
         tracing::info!(
             session_id = id,
             in_place = operation.in_place,
@@ -1974,6 +2228,10 @@ impl Controller {
             result => result,
         };
         let session_id = operation.selection.session_id.clone();
+        let fail_closing_source = result.is_err()
+            && !operation.in_place
+            && operation.holds_source_environment()
+            && self.state.sessions[&session_id].state == SessionState::Closing;
         let mut last_error = self
             .state
             .sessions
@@ -2057,7 +2315,7 @@ impl Controller {
             }
         };
         operation.updated_at = now();
-        crate::database::save_move_outcome(operation, last_error.as_deref())?;
+        crate::database::save_move_outcome(operation, last_error.as_deref(), fail_closing_source)?;
         if !operation.is_active() && !operation.granted_keys.is_empty() {
             recovery::spawn_move_key_cleanup_background();
         }
@@ -2081,6 +2339,9 @@ impl Controller {
             .expect("Move outcome session");
         record.last_error = last_error;
         record.updated_at = operation.updated_at.clone();
+        if fail_closing_source {
+            record.state = SessionState::Error;
+        }
         Ok(outcome(
             &operation.operation_id,
             &operation.selection,
@@ -2187,7 +2448,11 @@ impl Controller {
             return;
         }
         let id = &operation.selection.session_id;
-        let session_target = self.state.sessions.get(id).and_then(|s| s.target.as_deref());
+        let session_target = self
+            .state
+            .sessions
+            .get(id)
+            .and_then(|s| s.target.as_deref());
         let mut candidates: Vec<&mj_core::state::TargetLocator> = Vec::new();
         if let Some(target) = operation.source_target.as_ref() {
             candidates.push(target);
@@ -2331,7 +2596,7 @@ impl Controller {
                     if !operation.in_place
                         && matches!(
                             self.restart_retained_move_source(
-                                admission, &id, &previous, executor, manager,
+                                admission, &id, &previous, executor,
                             )
                             .await,
                             Ok(true)
@@ -2469,7 +2734,7 @@ impl Controller {
                         if destination_teardown_confirmed {
                             match self
                                 .restart_retained_move_source(
-                                    admission, &id, &previous, executor, manager,
+                                    admission, &id, &previous, executor,
                                 )
                                 .await
                             {
@@ -2704,11 +2969,13 @@ impl Controller {
             "move cancelled before source interruption"
         );
         if !operation.queue_admission_started {
+            let source_snapshot_missing =
+                retained_move_snapshot_is_missing(operation, &self.config, executor)?;
             // A retry restores from the archive this record names. When the
             // file is gone, record that before touching the session, so the
             // failure publishes what is really retained and the session stays
             // in the state Destroy can act on.
-            if forget_missing_move_archives(operation) {
+            if !source_snapshot_missing && forget_missing_move_archives(operation) {
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
                 bail!("the Move's checkpoint archive is missing; nothing is left to restore");
@@ -2737,10 +3004,23 @@ impl Controller {
                     let failure =
                         self.rollback_failed_resume(&id, previous, crate::database::move_source_environment(&operation.operation_id)?.as_ref(), false, cause, executor)?;
                     ensure!(
-                        self.state.sessions[&id].state == SessionState::Stopped,
+                        matches!(self.state.sessions[&id].state, SessionState::Stopped | SessionState::Closing),
                         "{failure:#}"
                     );
                 }
+            }
+            if source_snapshot_missing {
+                operation.source_snapshot = None;
+                operation.checkpoint = None;
+                let previous = operation.recovery_session.clone().expect("retained source");
+                if self.state.sessions[&id].state == SessionState::Closing
+                    && self.state.sessions[&id].target == previous.target
+                    && self.restart_retained_move_source(admission, &id, &previous, executor).await?
+                {
+                    operation.recovery_session = None;
+                    bail!("The Move snapshot is missing. The source is running again; prepare a fresh Move to capture it.");
+                }
+                bail!("The Move snapshot is missing; the source environment was retained.");
             }
             let state = self.state.sessions[&id].state;
             if matches!(state, SessionState::Closing | SessionState::Destroying)
@@ -3203,13 +3483,13 @@ impl Controller {
                 operation.checkpoint_retained(),
                 "move has no verified snapshot"
             );
+            if operation.recovery_session.is_none() {
+                operation.recovery_session = Some(self.state.sessions[&id].clone());
+            }
             ensure!(
                 !executor.cancellation_requested(),
                 "move cancelled after source capture; snapshot and source environment retained"
             );
-            if operation.recovery_session.is_none() {
-                operation.recovery_session = Some(self.state.sessions[&id].clone());
-            }
             operation.phase = MovePhase::Transferring;
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
@@ -3285,7 +3565,7 @@ impl Controller {
                     if destination_teardown_confirmed {
                         match self
                             .restart_retained_move_source(
-                                admission, &id, &previous, executor, manager,
+                                admission, &id, &previous, executor,
                             )
                             .await
                         {
@@ -3349,7 +3629,8 @@ impl Controller {
             return Ok(());
         }
         let id = &operation.selection.session_id;
-        if let Some(source_env) = crate::database::move_source_environment(&operation.operation_id)? {
+        if let Some(source_env) = crate::database::move_source_environment(&operation.operation_id)?
+        {
             executor.notify_notice("Retiring source environment");
             let _timing = MovePhaseTimer::new(id, "source environment retirement");
             super::environment::retire_owned_environment(
@@ -3390,7 +3671,10 @@ impl Controller {
                     self.cleanup_prepared_move_destination(&mut shim, executor)?;
                 }
                 if let Some(record) = self.state.sessions.get(session_id).cloned()
-                    && matches!(record.state, SessionState::Closing | SessionState::Destroying)
+                    && matches!(
+                        record.state,
+                        SessionState::Closing | SessionState::Destroying
+                    )
                 {
                     let worker_alive = record.target.as_deref().is_some_and(|locator| {
                         super::backend_locator(locator, &record, &self.config)
@@ -3424,7 +3708,9 @@ impl Controller {
                     crate::database::save_resumed_session(&updated, None)?;
                     self.state.sessions.insert(session_id.to_owned(), updated);
                 }
-                Ok(recovery::legacy_source_rollback_notice(&legacy.operation_id))
+                Ok(recovery::legacy_source_rollback_notice(
+                    &legacy.operation_id,
+                ))
             }
             recovery::MoveOwnership::Destination => {
                 if let Some(source_env) =
@@ -3746,9 +4032,7 @@ impl Controller {
         let mut skip_daemon_checkpoint_preflight = false;
         if bundle_move || preparation.is_some() {
             if let Some(snapshot) = operation.source_snapshot.as_deref() {
-                if bundle_move
-                    && let Some(manifest) = snapshot.manifest.as_ref()
-                {
+                if bundle_move && let Some(manifest) = snapshot.manifest.as_ref() {
                     current.validate_move_bundle_sources(operation, manifest, executor)?;
                     skip_daemon_checkpoint_preflight = manifest.repositories.iter().all(|repo| {
                         repo.metadata.origin_delta.is_some() || repo.metadata.remote_workspace
@@ -3779,7 +4063,11 @@ impl Controller {
                     .context("no move checkpoint")?;
                 let verified = verify_archive_streaming(&checkpoint.archive_path)?;
                 if bundle_move {
-                    current.validate_move_bundle_sources(operation, &verified.manifest, executor)?;
+                    current.validate_move_bundle_sources(
+                        operation,
+                        &verified.manifest,
+                        executor,
+                    )?;
                 }
                 if let Some(prepared) = preparation {
                     let actual: Vec<_> = verified
@@ -4028,14 +4316,12 @@ fn try_build_direct_peer_config(
         source_ssh_destination: src_ssh.destination.clone(),
         destination_host_key: dst_host_key,
         source_host_key: src_host_key,
-        source_stage_dir: std::path::PathBuf::from(&src_home)
-            .join(".cache/mjolnir/move-stage"),
+        source_stage_dir: std::path::PathBuf::from(&src_home).join(".cache/mjolnir/move-stage"),
         destination_stage_dir: std::path::PathBuf::from(&dst_home)
             .join(".cache/mjolnir/move-stage"),
         destination_authorized_keys: std::path::PathBuf::from(&dst_home)
             .join(".ssh/authorized_keys"),
-        source_authorized_keys: std::path::PathBuf::from(&src_home)
-            .join(".ssh/authorized_keys"),
+        source_authorized_keys: std::path::PathBuf::from(&src_home).join(".ssh/authorized_keys"),
         source_worker_bin: src_host_worker_bin,
         destination_worker_bin: dst_host_worker_bin,
         destination_ec2_grant: None,
