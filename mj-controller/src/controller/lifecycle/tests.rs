@@ -3737,6 +3737,20 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         "keep files must not be duplicated in untracked: {:?}",
         preflight.untracked
     );
+    let preflight_refused = controller
+        .preflight_origin_delta_suspension(
+            session_id,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            &ProcessExecutor,
+        )
+        .expect_err("preflight_origin_delta_suspension must refuse unconsented keep files");
+    let preflight_refused_text = format!("{preflight_refused:#}");
+    assert!(
+        preflight_refused_text.contains(".mj/keep/legacy.txt")
+            && preflight_refused_text.contains(&format!(".mj/keep/{session_id}/ignored.txt"))
+            && !preflight_refused_text.contains(&format!(".mj/keep/{session_id}/{session_id}/")),
+        "refusal must show actual keep paths without doubling session_id: {preflight_refused_text}"
+    );
 
     let consent = preflight.shown_consent().capture_consent();
     let input = mj_checkpoint::checkpoint::cutoff_snapshot_input(

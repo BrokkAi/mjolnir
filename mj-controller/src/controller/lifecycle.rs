@@ -653,7 +653,7 @@ impl Controller {
                         path.display().to_string()
                     }
                     mj_core::suspend_consent::UntrackedItem::KeepDirFile { path, .. } => {
-                        format!(".mj/keep/{session_id}/{}", path.display())
+                        format!(".mj/keep/{}", path.display())
                     }
                     mj_core::suspend_consent::UntrackedItem::Stash { commit, message, .. } => {
                         format!("stash {} ({message})", &commit[..commit.len().min(8)])
