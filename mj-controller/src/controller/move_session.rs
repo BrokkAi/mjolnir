@@ -344,6 +344,15 @@ fn matches_move_retry_selection(operation: &MoveOperation, requested: &MoveSelec
     if operation.selection == *requested {
         return true;
     }
+    failed_move_has_only_its_source(operation)
+        && operation.selection
+            == (MoveSelection {
+                subagents: operation.selection.subagents.clone(),
+                ..requested.clone()
+            })
+}
+
+fn failed_move_has_only_its_source(operation: &MoveOperation) -> bool {
     !operation.in_place
         && operation.holds_source_environment()
         && matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
@@ -352,11 +361,76 @@ fn matches_move_retry_selection(operation: &MoveOperation, requested: &MoveSelec
             .prepared_destination
             .as_ref()
             .is_none_or(|destination| !destination.owns_resource())
-        && operation.selection
-            == (MoveSelection {
-                subagents: operation.selection.subagents.clone(),
-                ..requested.clone()
-            })
+}
+
+/// A reopened source can have newer files, prompts and journal entries.
+/// Confirm a fresh Move from that source even if the old snapshot still exists.
+fn move_needs_fresh_capture(
+    operation: &MoveOperation,
+    source: &mj_core::state::SessionRecord,
+) -> bool {
+    operation.source_snapshot.is_some()
+        && failed_move_has_only_its_source(operation)
+        && source.state == SessionState::Running
+        && source.last_profile == operation.source_profile_id
+        && source
+            .target
+            .as_deref()
+            .zip(operation.source_target.as_ref())
+            .is_some_and(|(current, original)| current.same_resource(original))
+}
+
+fn retained_move_snapshot_is_missing(
+    operation: &MoveOperation,
+    config: &mj_core::config::Config,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<bool> {
+    if !failed_move_has_only_its_source(operation) {
+        return Ok(false);
+    }
+    let Some(snapshot) = &operation.source_snapshot else {
+        return Ok(false);
+    };
+    let source = operation
+        .recovery_session
+        .as_ref()
+        .expect("retained source");
+    let target = source
+        .target
+        .as_deref()
+        .context("Move source has no target")?;
+    if matches!(target, mj_core::state::TargetLocator::LocalBare { .. }) {
+        return match std::fs::metadata(&snapshot.archive_path) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error).context("check the retained Move snapshot"),
+        };
+    }
+    let backend = super::backend_locator(target, source, config)?;
+    // The marker comes from the target shell; a transport or engine
+    // failure cannot be interpreted as proof that an archive is gone.
+    let command = crate::targets::command_on_locator(
+        crate::targets::SshTrafficClass::Control,
+        &backend,
+        &source.id,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -f \"$1\" ]; then printf 'present\\n'; else printf 'missing\\n'; fi".into(),
+            "mj-move-snapshot".into(),
+            snapshot.archive_path.to_string_lossy().into_owned(),
+        ],
+        "check the retained Move snapshot",
+    )?;
+    let output = executor.execute(&command)?;
+    match (output.status, output.stdout.as_slice()) {
+        (0, b"present\n") => Ok(false),
+        (0, b"missing\n") => Ok(true),
+        _ => bail!(
+            "could not check the retained Move snapshot: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
 }
 
 /// Why a retried sealed Move's selection is refused: each part that differs
@@ -1420,6 +1494,7 @@ impl Controller {
                 selection.subagents = None;
             }
         }
+        let previous = previous.filter(|operation| !move_needs_fresh_capture(operation, source));
         // A Move must change something about the environment. A size alone is
         // a change: it resizes the destination container on the target the
         // session already names.
@@ -1940,7 +2015,9 @@ impl Controller {
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
         let retry = crate::database::load_move_operation(&id)?.filter(|op| {
-            matches_move_retry_selection(op, &checked.selection) && op.checkpoint_retained()
+            !move_needs_fresh_capture(op, &source)
+                && matches_move_retry_selection(op, &checked.selection)
+                && op.checkpoint_retained()
         });
         let updates_retry_policy = retry
             .as_ref()
@@ -2892,11 +2969,13 @@ impl Controller {
             "move cancelled before source interruption"
         );
         if !operation.queue_admission_started {
+            let source_snapshot_missing =
+                retained_move_snapshot_is_missing(operation, &self.config, executor)?;
             // A retry restores from the archive this record names. When the
             // file is gone, record that before touching the session, so the
             // failure publishes what is really retained and the session stays
             // in the state Destroy can act on.
-            if forget_missing_move_archives(operation) {
+            if !source_snapshot_missing && forget_missing_move_archives(operation) {
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
                 bail!("the Move's checkpoint archive is missing; nothing is left to restore");
@@ -2929,6 +3008,19 @@ impl Controller {
                         "{failure:#}"
                     );
                 }
+            }
+            if source_snapshot_missing {
+                operation.source_snapshot = None;
+                operation.checkpoint = None;
+                let previous = operation.recovery_session.clone().expect("retained source");
+                if self.state.sessions[&id].state == SessionState::Closing
+                    && self.state.sessions[&id].target == previous.target
+                    && self.restart_retained_move_source(admission, &id, &previous, executor).await?
+                {
+                    operation.recovery_session = None;
+                    bail!("The Move snapshot is missing. The source is running again; prepare a fresh Move to capture it.");
+                }
+                bail!("The Move snapshot is missing; the source environment was retained.");
             }
             let state = self.state.sessions[&id].state;
             if matches!(state, SessionState::Closing | SessionState::Destroying)

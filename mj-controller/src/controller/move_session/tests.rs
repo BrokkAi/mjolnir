@@ -204,6 +204,28 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
         SessionState::Closing,
         failed.source_target.clone().unwrap(),
     ));
+    let archives = tempfile::tempdir().unwrap();
+    failed.source_snapshot = Some(Box::new(mj_core::state::MoveSourceSnapshot {
+        archive_path: archives.path().join("lost.hel.zip"),
+        sha256: "old-digest".into(),
+        manifest: None,
+        queued_prompts: Vec::new(),
+        mailbox: None,
+    }));
+    let sealed = failed.recovery_session.as_ref().unwrap();
+    let mut reopened = sealed.clone();
+    reopened.state = SessionState::Running;
+    reopened.last_profile = failed.source_profile_id.clone();
+    assert!(
+        super::retained_move_snapshot_is_missing(
+            &failed,
+            &mj_core::config::Config::default(),
+            &crate::targets::ProcessExecutor,
+        )
+        .unwrap()
+    );
+    assert!(!super::move_needs_fresh_capture(&failed, sealed));
+    assert!(super::move_needs_fresh_capture(&failed, &reopened));
     let mut retry = failed.selection.clone();
     retry.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
@@ -224,6 +246,7 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
     failed.destination_target = None;
     failed.queue_admission_started = true;
     assert!(!super::matches_move_retry_selection(&failed, &retry));
+    assert!(!super::move_needs_fresh_capture(&failed, &reopened));
     // Crash right after DestinationOwns: destination owns, finish forward.
     op.phase = MovePhase::DestinationOwns;
     assert_eq!(classify_move_ownership(&op), MoveOwnership::Destination);
