@@ -129,7 +129,8 @@ fn missing_profile_help(dashboard: &DashboardState) -> Vec<Line<'static>> {
 }
 
 fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Vec<PickerChoice> {
-    let items = new_wizard_profile_items(dashboard, &wizard.expanded_providers);
+    let expanded_providers = wizard.effective_expanded_providers(dashboard);
+    let items = new_wizard_profile_items(dashboard, &expanded_providers);
     let mut rows = Vec::new();
     for item in items {
         match item {
@@ -145,7 +146,7 @@ fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Ve
                 rows.push(PickerChoice::heading(vec![PickerCell::blank()]));
             }
             ProfilePickerItem::Provider(provider) => {
-                let expanded = wizard.expanded_providers.contains(&provider);
+                let expanded = expanded_providers.contains(&provider);
                 let arrow = if expanded {
                     theme::glyphs().dropdown
                 } else if theme::ascii() {

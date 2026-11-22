@@ -1810,6 +1810,38 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
 }
 
+#[test]
+fn new_session_profile_step_reconciles_when_provider_discovery_completes() {
+    let mut dashboard = dashboard_with_session(running_session());
+    ready_open_new_wizard(&mut dashboard);
+    // Simulate having opened while Codex provider discovery was still resolving:
+    // only the temporary "(resolving)" group is in expanded_providers, while
+    // discovery has now settled to OpenAI.
+    let resolving = mj_core::config::QuotaProvider::Other("Codex (resolving)".into());
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.expanded_providers.clear();
+        wizard.expanded_providers.insert(resolving.clone());
+        wizard.focused_provider = None;
+    }
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("▾ OPENAI"), "{rendered}");
+    assert!(rendered.contains("codex-1"), "{rendered}");
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+
+    // A stale focused "(resolving)" header clears back to the selected profile
+    // instead of leaving Next disabled or swallowing Enter.
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.focused_provider = Some(resolving);
+    }
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+}
+
 /// The profile step reports quota as two percentages remaining, one per
 /// window, in their own columns and with no reset countdown.
 fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {

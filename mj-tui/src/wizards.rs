@@ -259,6 +259,38 @@ impl NewWizard {
             &dashboard.quota_providers,
         ))
     }
+
+    /// The focused provider header if it still exists among offered profiles.
+    /// Asynchronous provider discovery can replace a `(resolving)` group with
+    /// the resolved provider; clearing a stale focus keeps the picker in sync.
+    pub(crate) fn effective_focused_provider(
+        &self,
+        dashboard: &DashboardState,
+    ) -> Option<QuotaProvider> {
+        let focused = self.focused_provider.as_ref()?;
+        let present = dashboard.offered_profiles().any(|(id, profile)| {
+            &crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers)
+                == focused
+        });
+        present.then(|| focused.clone())
+    }
+
+    /// Expanded provider groups for rendering and event handling. Whenever
+    /// focus is on a concrete profile rather than a provider header, its
+    /// current provider is expanded so the selected profile is never hidden
+    /// after asynchronous provider resolution.
+    pub(crate) fn effective_expanded_providers(
+        &self,
+        dashboard: &DashboardState,
+    ) -> BTreeSet<QuotaProvider> {
+        let mut expanded = self.expanded_providers.clone();
+        if self.effective_focused_provider(dashboard).is_none()
+            && let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+        {
+            expanded.insert(provider);
+        }
+        expanded
+    }
 }
 
 impl PartialEq for NewWizard {

@@ -135,6 +135,7 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn handle_extra_shortcut(&mut self, dashboard: &DashboardState, key: KeyEvent);
     /// How many rows the profile picker shows.
     fn profile_count(&self, dashboard: &DashboardState) -> usize;
+    fn reconcile_profile_picker(&mut self, _dashboard: &DashboardState) {}
     fn profile_list_len(&self, dashboard: &DashboardState) -> usize {
         self.profile_count(dashboard)
     }
@@ -617,13 +618,23 @@ impl WizardDraft for NewWizard {
         dashboard.new_wizard_profile_count()
     }
 
+    fn reconcile_profile_picker(&mut self, dashboard: &DashboardState) {
+        if self.step == WizardStep::Profile {
+            self.focused_provider = self.effective_focused_provider(dashboard);
+            self.expanded_providers = self.effective_expanded_providers(dashboard);
+        }
+    }
+
     fn profile_list_len(&self, dashboard: &DashboardState) -> usize {
-        new_wizard_profile_items(dashboard, &self.expanded_providers).len()
+        let expanded = self.effective_expanded_providers(dashboard);
+        new_wizard_profile_items(dashboard, &expanded).len()
     }
 
     fn profile_list_selected(&self, dashboard: &DashboardState) -> usize {
-        let items = new_wizard_profile_items(dashboard, &self.expanded_providers);
-        if let Some(provider) = &self.focused_provider
+        let focused = self.effective_focused_provider(dashboard);
+        let expanded = self.effective_expanded_providers(dashboard);
+        let items = new_wizard_profile_items(dashboard, &expanded);
+        if let Some(provider) = &focused
             && let Some(pos) = items
                 .iter()
                 .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == provider))
@@ -643,18 +654,11 @@ impl WizardDraft for NewWizard {
         }) {
             return pos;
         }
-        if let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
-            && let Some(pos) = items
-                .iter()
-                .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider))
-        {
-            return pos;
-        }
         0
     }
 
-    fn profile_advance_enabled(&self, _dashboard: &DashboardState) -> bool {
-        self.focused_provider.is_none()
+    fn profile_advance_enabled(&self, dashboard: &DashboardState) -> bool {
+        self.effective_focused_provider(dashboard).is_none()
     }
 
     fn select_profile_row(

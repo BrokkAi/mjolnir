@@ -188,6 +188,7 @@ impl DashboardState {
         if wizard.input_locked() {
             return self.keep(wizard);
         }
+        wizard.reconcile_profile_picker(self);
         declare_wizard_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
