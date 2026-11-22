@@ -85,6 +85,7 @@ impl RuntimeState {
                     &config,
                     &provider,
                     execution_policy,
+                    request.subagents.as_ref(),
                 )
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;

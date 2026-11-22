@@ -280,8 +280,15 @@ impl NewWizard {
     }
 
     pub(crate) fn selected_provider(&self, dashboard: &DashboardState) -> Option<QuotaProvider> {
-        self.effective_focused_provider(dashboard)
-            .filter(|provider| !Self::is_resolving_provider(provider))
+        // On later steps, retain the explicit provider choice even if its last
+        // profile disappears so creation reports the unavailability rather than
+        // silently falling back to another profile.
+        let focused = if self.step == WizardStep::Profile {
+            self.effective_focused_provider(dashboard)
+        } else {
+            self.focused_provider.clone()
+        };
+        focused.filter(|provider| !Self::is_resolving_provider(provider))
     }
 
     pub(crate) fn selected_profile_id(&self, dashboard: &DashboardState) -> Option<String> {

@@ -291,6 +291,7 @@ pub async fn resolve_provider_session_selection(
     config: &mj_core::config::Config,
     provider: &mj_core::config::QuotaProvider,
     execution_policy: ExecutionPolicy,
+    subagents: Option<&mj_core::subagent::SubagentPolicy>,
 ) -> Result<ProviderSessionSelection, ApiFailure> {
     let matching_ids: std::collections::BTreeSet<String> = {
         let profiles: Vec<(String, mj_core::config::HarnessProfile)> = config
@@ -335,20 +336,51 @@ pub async fn resolve_provider_session_selection(
             ));
             continue;
         }
-        let default_model = candidate
+        if let Some(policy) = subagents {
+            match policy {
+                mj_core::subagent::SubagentPolicy::Mjolnir { .. }
+                    if !candidate.harness.supports_delegation_tools() =>
+                {
+                    excluded.push(format!(
+                        "profile {} ({}) does not support Mjolnir sub-agent delegation",
+                        candidate.profile_id,
+                        candidate.harness.display_name()
+                    ));
+                    continue;
+                }
+                mj_core::subagent::SubagentPolicy::Native
+                    if !candidate.harness.has_native_subagents() =>
+                {
+                    excluded.push(format!(
+                        "profile {} ({}) does not support native sub-agents",
+                        candidate.profile_id,
+                        candidate.harness.display_name()
+                    ));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let current_model = candidate
             .choices
-            .models
-            .first()
-            .map(|choice| choice.value.as_str())
+            .model
+            .as_deref()
+            .or_else(|| {
+                candidate
+                    .choices
+                    .models
+                    .first()
+                    .map(|choice| choice.value.as_str())
+            })
             .unwrap_or("");
         if let Some(reason) =
-            mj_controller::profile_scheduler::ineligibility(candidate, default_model, now)
+            mj_controller::profile_scheduler::ineligibility(candidate, current_model, now)
         {
-            excluded.push(reason.describe(&candidate.profile_id, default_model));
+            excluded.push(reason.describe(&candidate.profile_id, current_model));
             continue;
         }
-        let scheduled = scheduled_candidate(candidate, default_model, None);
-        eligible.push((candidate.clone(), default_model.to_owned(), scheduled));
+        let scheduled = scheduled_candidate(candidate, current_model, None);
+        eligible.push((candidate.clone(), current_model.to_owned(), scheduled));
     }
     if !matched_any {
         let reasons: Vec<String> = unavailable
@@ -3109,6 +3141,7 @@ mod tests {
             &config,
             &mj_core::config::QuotaProvider::Anthropic,
             ExecutionPolicy::Unconstrained,
+            None,
         )
         .await
         .expect("Anthropic should pick the non-exhausted Claude profile");
@@ -3119,6 +3152,7 @@ mod tests {
             &config,
             &mj_core::config::QuotaProvider::Google,
             ExecutionPolicy::Unconstrained,
+            None,
         )
         .await
         .err()
