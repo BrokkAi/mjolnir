@@ -1573,6 +1573,10 @@ impl DurableRelay {
         self.mailbox_delivery_mode = mode;
     }
 
+    pub(crate) fn in_place_move_hold_active(&self) -> bool {
+        self.snapshot.in_place_move_hold.is_some()
+    }
+
     /// The relay-owned turn boundary shared by command promotion, checkpoint
     /// admission, and background-work accounting. Activity classification
     /// also presents an in-progress `/clear` as a turn, but that command must

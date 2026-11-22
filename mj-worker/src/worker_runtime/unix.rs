@@ -750,30 +750,37 @@ impl Drop for InPlaceHarnessRestartGuard {
 }
 
 /// Worker-wide credential endpoint shared across all active and future proxy
-/// connections. Updated in place when `RestartHarnessInPlace` switches the
-/// session to another harness or staged profile home.
+/// connections. Credential requests hold a read guard across both the
+/// `in_place_move_hold` check and the filesystem operation, while
+/// `HoldInPlaceMoveDispatch` drains in-flight requests and
+/// `RestartHarnessInPlace` swaps the endpoint under the write guard.
 #[derive(Clone)]
 pub(super) struct SharedCredentials(
-    Arc<std::sync::Mutex<std::result::Result<CredentialEndpoint, String>>>,
+    Arc<tokio::sync::RwLock<std::result::Result<CredentialEndpoint, String>>>,
 );
 
 impl SharedCredentials {
     pub(super) fn new(initial: std::result::Result<CredentialEndpoint, String>) -> Self {
-        Self(Arc::new(std::sync::Mutex::new(initial)))
+        Self(Arc::new(tokio::sync::RwLock::new(initial)))
     }
 
-    pub(super) fn snapshot(&self) -> std::result::Result<CredentialEndpoint, String> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+    pub(super) async fn read(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, std::result::Result<CredentialEndpoint, String>> {
+        self.0.read().await
     }
 
-    pub(super) fn set(&self, updated: std::result::Result<CredentialEndpoint, String>) {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = updated;
+    pub(super) async fn drain(&self) {
+        let _guard = self.0.write().await;
+    }
+
+    pub(super) async fn set(&self, updated: std::result::Result<CredentialEndpoint, String>) {
+        *self.0.write().await = updated;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn snapshot(&self) -> std::result::Result<CredentialEndpoint, String> {
+        self.0.read().await.clone()
     }
 }
 
@@ -1129,7 +1136,7 @@ async fn restart_harness_in_place_response(
                 // config. Refresh the shared credential endpoint and harness
                 // policies immediately so subsequent credential RPCs and relay
                 // state match the live harness.
-                credentials.set(updated_credentials.clone());
+                credentials.set(updated_credentials.clone()).await;
                 let login_identity = {
                     let mut relay = relay.lock().expect("relay state lock poisoned");
                     relay.set_turn_verdict_harness(updated_harness);
@@ -3597,9 +3604,44 @@ pub(super) async fn serve_client_with_shared_credentials(
                 let operation = envelope.request.method_name();
                 let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
                 let login_observed = login_installed || matches!(&envelope.request, RelayRequest::CredentialState);
-                let login_identity = relay.observe().expect("relay state lock poisoned").login_identity.clone();
-                let current_credentials = credentials.snapshot();
-                let response = credential_response(envelope, &current_credentials, &relay_root, &login_identity).await;
+                let response = {
+                    // Acquire the read guard before checking `in_place_move_hold`
+                    // and hold it through `credential_response`. Because
+                    // `HoldInPlaceMoveDispatch` sets the hold before draining
+                    // via `credentials.drain().await`, every pre-hold request
+                    // finishes before `InPlaceMoveDispatchHeld` replies, and
+                    // every post-hold request observes the hold and refuses.
+                    let current_credentials = credentials.read().await;
+                    let (move_held, login_identity) = {
+                        let observed = relay.observe().expect("relay state lock poisoned");
+                        (
+                            observed.in_place_move_hold_active(),
+                            observed.login_identity.clone(),
+                        )
+                    };
+                    if move_held {
+                        RelayResponseEnvelope {
+                            request_id: envelope.request_id,
+                            protocol_version: envelope.protocol_version,
+                            body: RelayResponseBody::Error {
+                                error: RelayProtocolError {
+                                    code: RelayErrorCode::InvalidState,
+                                    message: "cannot access credentials while an in-place move dispatch hold is active".into(),
+                                    retryable: true,
+                                    detail: None,
+                                },
+                            },
+                        }
+                    } else {
+                        credential_response(
+                            envelope,
+                            &current_credentials,
+                            &relay_root,
+                            &login_identity,
+                        )
+                        .await
+                    }
+                };
                 if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
                     wake_dispatch(&relay, &dispatch_wake)?;
                 } else if login_observed {
@@ -3889,6 +3931,17 @@ pub(super) async fn serve_client_with_shared_credentials(
                     return Err(error);
                 }
             };
+            if matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::InPlaceMoveDispatchHeld { .. }
+                }
+            ) {
+                // Drain every credential RPC that acquired a read guard before
+                // the hold was recorded, before telling the controller it may
+                // harvest or overwrite staged profile files.
+                credentials.drain().await;
+            }
             // One relay lock decides who owns the relay-local lifecycle work
             // this request may have queued. Until preparation publishes
             // Started, which `start_bridge` does under this same lock, this
@@ -5016,6 +5069,113 @@ mod preparation_tests {
     }
 
     #[tokio::test]
+    async fn in_place_move_hold_drains_and_blocks_credential_requests_until_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch = super::super::relay_tests::launch_config(profile.to_str().unwrap());
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
+        let relay = test_relay(temp.path());
+        let store_id = relay.lock().unwrap().operational_state().store_id.unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        let (wake, _wakes) = mpsc::channel(4);
+        let (fatal, _fatal_reports) = mpsc::channel(1);
+        let handler = mj_core::runtime::spawn(serve_client_with_shared_credentials(
+            server,
+            relay,
+            wake,
+            credentials.clone(),
+            ConnectionRuntime::default(),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read);
+
+        // Hold a read guard simulating an in-flight credential request on another
+        // connection. HoldInPlaceMoveDispatch must wait for it to drain before
+        // returning InPlaceMoveDispatchHeld.
+        let in_flight = credentials.read().await;
+        let held = {
+            let hold_fut = request(
+                &mut reader,
+                &mut writer,
+                "hold",
+                RelayRequest::HoldInPlaceMoveDispatch {
+                    operation_id: "move-cred".into(),
+                    expected_store_id: store_id.clone(),
+                },
+            );
+            tokio::pin!(hold_fut);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut hold_fut)
+                    .await
+                    .is_err(),
+                "HoldInPlaceMoveDispatch must wait for in-flight credential requests to finish"
+            );
+            drop(in_flight);
+            hold_fut.await
+        };
+        assert!(matches!(
+            held.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::InPlaceMoveDispatchHeld { .. }
+            }
+        ));
+
+        // While the dispatch hold is active, credential RPCs are refused with retryable InvalidState.
+        let refused = request(
+            &mut reader,
+            &mut writer,
+            "cred-held",
+            RelayRequest::CredentialState,
+        )
+        .await;
+        assert!(matches!(
+            refused.body,
+            RelayResponseBody::Error {
+                error: RelayProtocolError {
+                    code: RelayErrorCode::InvalidState,
+                    retryable: true,
+                    ..
+                }
+            }
+        ));
+
+        // Releasing the dispatch hold re-admits credential RPCs.
+        let released = request(
+            &mut reader,
+            &mut writer,
+            "release",
+            RelayRequest::ReleaseInPlaceMoveDispatch {
+                operation_id: "move-cred".into(),
+                expected_store_id: store_id,
+            },
+        )
+        .await;
+        assert!(matches!(
+            released.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::InPlaceMoveDispatchReleased
+            }
+        ));
+        let allowed = request(
+            &mut reader,
+            &mut writer,
+            "cred-released",
+            RelayRequest::CredentialState,
+        )
+        .await;
+        assert!(matches!(
+            allowed.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::CredentialState { .. }
+            }
+        ));
+        writer.shutdown().await.unwrap();
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
         let _ = mj_harness_install::login_environment::initialize_from_parent();
         let root = tempfile::tempdir().unwrap();
@@ -5069,7 +5229,7 @@ mod preparation_tests {
             std::fs::read_to_string(&supervisor_path).unwrap(),
             "original-supervisor-spec"
         );
-        assert_eq!(shared_credentials.snapshot(), initial_credentials);
+        assert_eq!(shared_credentials.snapshot().await, initial_credentials);
         assert!(commands_rx.try_recv().is_err());
 
         // Hold active, but ACP rejects the reload -> still does not overwrite acp-supervisor.json.
@@ -5123,7 +5283,7 @@ mod preparation_tests {
             std::fs::read_to_string(&launch_path).unwrap(),
             "original-launch-json"
         );
-        assert_eq!(shared_credentials.snapshot(), initial_credentials);
+        assert_eq!(shared_credentials.snapshot().await, initial_credentials);
         // When ACP accepts the reload, launch.json IS updated, harness_restarted is marked,
         // shared credentials switch to the restarted harness/home, and the reloaded environment
         // merges target_environment + MJ_KEEP_DIR while excluding disallowed keys and preserving
@@ -5204,6 +5364,7 @@ mod preparation_tests {
         ));
         let refreshed_endpoint = shared_credentials
             .snapshot()
+            .await
             .expect("reloaded credential endpoint");
         assert_eq!(refreshed_endpoint.harness, HarnessKind::Claude);
         assert_eq!(refreshed_endpoint.home, dest_home);
@@ -5215,7 +5376,7 @@ mod preparation_tests {
                 protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
                 request: RelayRequest::CredentialState,
             },
-            &shared_credentials.snapshot(),
+            &shared_credentials.snapshot().await,
             root.path(),
             &login_identity,
         )
