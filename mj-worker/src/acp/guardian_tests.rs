@@ -598,6 +598,151 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
 }
 
 #[tokio::test]
+async fn guardian_relay_timeout_uses_the_away_answer_for_antigravity() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (_requests, mut events, runtime, _) = start_scripted_harness(
+        temp.path(),
+        &["touch marker"],
+        &[],
+        &[],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Antigravity;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+            spec.harness
+                .configure_staged_home_environment(temp.path(), &mut spec.environment);
+            spec.operator_away.set(mj_core::state::OperatorPresence {
+                away: true,
+                revision: 1,
+            });
+        },
+    );
+    wait_for_guardian_request(&endpoint).await;
+    assert_eq!(endpoint.pending_count(), 1);
+    tokio::time::pause();
+    tokio::time::advance(GUARDIAN_REVIEW_TIMEOUT).await;
+    tokio::time::resume();
+
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+            break request;
+        }
+    };
+    assert!(
+        request
+            .message
+            .contains("the daemon guardian did not return a verdict before the relay deadline"),
+        "{}",
+        request.message
+    );
+    loop {
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            ..
+        } = next_event(&mut events).await
+        {
+            assert_eq!(elicitation_id, request.id);
+            assert_eq!(action, mj_core::elicitation::OPERATOR_AWAY_ACTION);
+            break;
+        }
+    }
+    assert_eq!(
+        await_recorded(temp.path(), "session_outcomes", 1).await,
+        [
+            json!({"command": "touch marker", "outcome": {"outcome": "selected", "optionId": "reject"}})
+        ]
+    );
+    assert_eq!(endpoint.pending_count(), 0);
+    assert!(recorded(temp.path(), "reviewer_initialize").is_empty());
+    runtime.abort();
+}
+
+#[tokio::test]
+async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_details() {
+    use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
+    use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};
+
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = Arc::new(GuardianEndpoint::default());
+    let (requests, mut events, runtime, _) = start_scripted_harness(
+        temp.path(),
+        &["touch first", "touch second", "touch third"],
+        &[],
+        &[],
+        Some(endpoint.clone()),
+        |spec| {
+            spec.harness = HarnessKind::Kimi;
+            spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+            spec.approval_choices = Default::default();
+        },
+    );
+    let failures = [
+        (
+            "utility guardian inference failed (RateLimited)",
+            "utility guardian inference failed (RateLimited)",
+        ),
+        (
+            "could not load configuration: SECRET_DATA",
+            "could not load configuration",
+        ),
+        (
+            "utility guardian inference failed (Provider) SECRET_DATA",
+            "the daemon reviewer failed",
+        ),
+    ];
+    for (reason, expected) in failures {
+        let request = wait_for_guardian_request(&endpoint).await;
+        endpoint.complete(GuardianReviewResult {
+            request_id: request.request_id,
+            decision: GuardianReviewOutcome::AskPerson {
+                reason: reason.into(),
+            },
+        });
+        let form = loop {
+            if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+                break request;
+            }
+        };
+        assert!(
+            form.message.starts_with(&ask_person_preface(&format!(
+                "its review failed: {expected}"
+            ))),
+            "{}",
+            form.message
+        );
+        assert!(!form.message.contains("SECRET_DATA"), "{}", form.message);
+        let (resolved, confirmation) = oneshot::channel();
+        requests
+            .send(CommandRequest::ResolveElicitation {
+                elicitation_id: form.id,
+                response: ElicitationResponse::Accept {
+                    content: BTreeMap::from([(
+                        "choice".into(),
+                        ElicitationValue::String("approve".into()),
+                    )]),
+                },
+                resolved,
+            })
+            .await
+            .unwrap();
+        confirmation.await.unwrap().unwrap();
+    }
+    let replies = await_recorded(temp.path(), "session_outcomes", failures.len()).await;
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply["outcome"]["optionId"] == "approve"),
+        "{replies:?}"
+    );
+    runtime.abort();
+}
+
+#[tokio::test]
 async fn guardian_uses_acp_when_the_daemon_requests_fallback() {
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};

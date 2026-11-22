@@ -2391,13 +2391,13 @@ impl Config {
         }
         let mut document: toml::Value = contents
             .parse()
-            .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
-        if let Some(found) = newer_version(&document) {
-            bail!(
-                "{} was written by a newer Mjolnir (config version {found}; this build supports \
-                 {CONFIG_VERSION}). Update Mjolnir",
-                path.display()
-            );
+            .map_err(|error| loading::config_toml_error(path, &contents, error))?;
+        if let Some(version) = newer_version(&document) {
+            return Err(ConfigLoadError::NewerSchema {
+                path: path.to_owned(),
+                version,
+            }
+            .into());
         }
         // Every file Mjolnir writes starts with this line, so only a
         // hand-written one lacks it. Serde's "missing field `version`" does
@@ -2471,7 +2471,7 @@ impl Config {
                 }
             })
         })
-        .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        .map_err(|error| loading::config_toml_error(path, &contents, error))?;
         unread.extend(unread_build_cache_keys(&document));
         refuse_unread_keys(path, &unread)?;
         config.validate()?;
