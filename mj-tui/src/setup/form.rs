@@ -234,7 +234,9 @@ impl SetupDialog {
         } else {
             for control in &self.descriptors {
                 let kind = match &control.kind {
-                    SettingKind::Page | SettingKind::ManagedHarness(_) => ControlKind::Button,
+                    SettingKind::Page
+                    | SettingKind::RemoveEntry
+                    | SettingKind::ManagedHarness(_) => ControlKind::Button,
                     SettingKind::Checkbox => ControlKind::Checkbox,
                     SettingKind::Choices(values) => ControlKind::ComboBox {
                         len: values.len(),
@@ -264,7 +266,14 @@ impl SetupDialog {
             self.descriptors
                 .iter()
                 .find(|c| c.kind != SettingKind::ReadOnly)
-                .map_or(Save, |c| c.id)
+                .map_or(
+                    if is_subagent_category_page(&self.path) {
+                        Add
+                    } else {
+                        Save
+                    },
+                    |c| c.id,
+                )
         };
         for (id, _, enabled) in actions {
             form.declare_with_enabled(
@@ -418,7 +427,25 @@ impl SetupDialog {
                 values.len(),
             ))
         });
-        let paths = if self.current().is_object() || self.current().is_array() {
+        let paths = if is_subagent_category_page(&self.path) {
+            let task = self.path[1].clone();
+            let mut paths = Vec::new();
+            if let Some(entries) = self.current().as_array() {
+                for (index, entry) in entries.iter().enumerate() {
+                    let base = vec!["subagents".into(), task.clone(), index.to_string()];
+                    paths.push([base.clone(), vec!["model".into()]].concat());
+                    if entry
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .is_some_and(|m| !m.trim().is_empty())
+                    {
+                        paths.push([base.clone(), vec!["effort".into()]].concat());
+                    }
+                    paths.push(base);
+                }
+            }
+            paths
+        } else if self.current().is_object() || self.current().is_array() {
             self.paths()
         } else {
             vec![self.path.clone()]
@@ -430,11 +457,34 @@ impl SetupDialog {
                 .expect("visible setting exists");
             let kind = if self.build_cache_field_user_managed(&path) {
                 SettingKind::ReadOnly
+            } else if is_subagent_category_page(&self.path)
+                && subagent_row_index(&path).is_some()
+                && path.len() == 3
+            {
+                SettingKind::RemoveEntry
             } else {
-                match mj_client::settings::page::row_kind(&self.draft, &self.path, &path) {
+                let page = if is_subagent_category_page(&self.path) {
+                    &path[..3]
+                } else {
+                    &self.path
+                };
+                match mj_client::settings::page::row_kind(&self.draft, page, &path) {
                     RowKind::Page => SettingKind::Page,
                     RowKind::Checkbox => SettingKind::Checkbox,
-                    RowKind::Choices(choices) => SettingKind::Choices(choices),
+                    RowKind::Choices(mut choices) => {
+                        if is_subagent_category_page(&self.path)
+                            && let Some(current) = value.as_str()
+                            && !current.trim().is_empty()
+                            && !choices.contains(value)
+                        {
+                            let insert_at = usize::from(
+                                path.last().is_some_and(|k| k == "effort")
+                                    && choices.first() == Some(&Value::Null),
+                            );
+                            choices.insert(insert_at, value.clone());
+                        }
+                        SettingKind::Choices(choices)
+                    }
                     RowKind::Field => SettingKind::Field,
                 }
             };

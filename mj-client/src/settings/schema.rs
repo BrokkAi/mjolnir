@@ -41,6 +41,15 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         "subagents" if path.len() == 1 => {
             json!({"max_concurrent":6,"primary":[],"straightforward":[],"subtle":[],"oracle":[]})
         }
+        "subagents"
+            if path.len() == 3
+                && matches!(
+                    path[1].as_str(),
+                    "primary" | "straightforward" | "subtle" | "oracle"
+                ) =>
+        {
+            json!({"model":"","effort":null})
+        }
         "profiles" if path.len() == 2 => {
             profile_defaults(value["kind"].as_str().unwrap_or("codex"))
         }

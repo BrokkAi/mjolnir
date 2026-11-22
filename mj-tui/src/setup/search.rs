@@ -5,7 +5,10 @@
 //! row addressable by what it is called, what it does, and what it is set to,
 //! so the dialog can jump straight to one.
 
-use super::{machine_build_cache_summary, pointer, row_label, row_summary, schema, visible_paths};
+use super::{
+    is_subagent_category_page, machine_build_cache_summary, pointer, row_label, row_summary,
+    schema, visible_paths,
+};
 use mj_chat::theme;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -38,6 +41,51 @@ fn walk(draft: &Value, path: &[String], trail: &str, entries: &mut Vec<SearchEnt
     let Some(current) = draft.pointer(&pointer(path)) else {
         return;
     };
+    if is_subagent_category_page(path) {
+        if let Some(items) = current.as_array() {
+            for (index, item) in items.iter().enumerate() {
+                let entry_path = vec![path[0].clone(), path[1].clone(), index.to_string()];
+                let model_path = [entry_path.clone(), vec!["model".to_owned()]].concat();
+                if let Some(value) = item.get("model") {
+                    let label = format!("Model {}", index + 1);
+                    let summary = row_summary(&entry_path, "model", value, draft, None);
+                    entries.push(SearchEntry {
+                        haystack: format!(
+                            "{label} {trail} model {summary} {}",
+                            schema::help(&model_path)
+                        )
+                        .to_lowercase(),
+                        path: model_path,
+                        label,
+                        trail: trail.to_owned(),
+                        value: summary,
+                    });
+                }
+                if item
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| !m.trim().is_empty())
+                    && let Some(value) = item.get("effort")
+                {
+                    let effort_path = [entry_path.clone(), vec!["effort".to_owned()]].concat();
+                    let label = format!("Effort {}", index + 1);
+                    let summary = row_summary(&entry_path, "effort", value, draft, None);
+                    entries.push(SearchEntry {
+                        haystack: format!(
+                            "{label} {trail} effort {summary} {}",
+                            schema::help(&effort_path)
+                        )
+                        .to_lowercase(),
+                        path: effort_path,
+                        label,
+                        trail: trail.to_owned(),
+                        value: summary,
+                    });
+                }
+            }
+        }
+        return;
+    }
     for item_path in visible_paths(path, current) {
         let key = item_path.last().cloned().unwrap_or_default();
         let parent = item_path

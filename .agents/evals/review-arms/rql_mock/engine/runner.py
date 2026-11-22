@@ -275,15 +275,15 @@ class SealedRunner:
                         raise
                     self.driver.wait_idle(sid)
                     time.sleep(5)
-        self.verify(sid)
+        return self.verify(sid)
 
     def start(self, snapshot, record_id):
         self.check_quota()
         return SealedRunner.launch_session(self, snapshot, record_id)
 
-    def launch_session(self, snapshot, record_id):
+    def launch_session(self, snapshot, record_id, *, title=None):
         sid = self.launch(self.config["bundle"], snapshot["orphan"], self.config["profile"],
-                          f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
+                          title or f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
         if not SESSION_ID.fullmatch(sid):
             raise RuntimeError("unexpected engine session id")
         return sid
@@ -737,15 +737,15 @@ class EngineRunner(SealedRunner):
         return (record.get("outcome") == "error"
                 and record["diagnostic"].get("code") == "Authentication required")
 
-    def start(self, snapshot, record_id):
+    def start(self, snapshot, record_id, *, title=None):
         try:
             self.seed_login()
         except RUN_ERRORS as error:
             raise LaunchPreflightFailure(str(error)) from error
-        return self.launch_session(snapshot, record_id)
+        return self.launch_session(snapshot, record_id, title=title)
 
     def prepare(self, sid, snapshot, directory):
-        super().prepare(sid, snapshot, directory)
+        configured = super().prepare(sid, snapshot, directory)
         container = self.driver.container(sid)["container"]
         proc = subprocess.run(
             ["podman", "exec", container, "cat", str(SESSION_PROFILE_ROOT / sid / "settings.json")],
@@ -768,3 +768,4 @@ class EngineRunner(SealedRunner):
             capture_output=True, text=True, check=True, timeout=300,
         ).stdout.strip()
         save_json(directory / "engine-runtime.json", {"session_id": sid, "claude_code_version": version})
+        return configured

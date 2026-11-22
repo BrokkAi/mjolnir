@@ -1015,18 +1015,38 @@ fn golden_global_subagent_discovery_and_save() {
         ("subtle", "smarter"),
         ("oracle", "smarter"),
     ] {
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        dialog.path = vec!["subagents".into(), task.into()];
-        let added =
-            mj_client::settings::edit::add_entry(&mut dialog.draft, &dialog.path, None).unwrap();
-        dialog.path = added.clone();
-        dialog.prepare();
-        let _ = dialog;
-        dashboard.take_setup_subagent_choices();
-        let model_path = vec!["subagents".into(), task.into(), "0".into(), "model".into()];
-        setup_dialog_mut(&mut dashboard.mode)
-            .unwrap()
-            .focus_path(&model_path);
+        choose(&mut dashboard, task);
+        assert_eq!(
+            setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+            ["subagents", task]
+        );
+        dashboard.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+            ["subagents", task],
+            "Add keeps the user on the single subagent category page"
+        );
+        if task == "straightforward" {
+            // Back rejects a partly configured row and keeps focus on its model.
+            dashboard.handle_key(key(KeyCode::Esc));
+            assert_eq!(
+                setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+                ["subagents", "straightforward"]
+            );
+            append_setup_state(
+                &mut output,
+                "partly configured row rejected",
+                &mut dashboard,
+                140,
+                40,
+            );
+            assert_eq!(
+                setup_dialog_mut(&mut dashboard.mode)
+                    .unwrap()
+                    .save(&Default::default()),
+                DashboardAction::None
+            );
+        }
         dashboard.handle_key(key(KeyCode::Enter));
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert_eq!(
@@ -1038,14 +1058,38 @@ fn golden_global_subagent_discovery_and_save() {
             1
         );
         select_choice(&mut dashboard, model);
-        dashboard.take_setup_subagent_choices();
         let effort_path = vec!["subagents".into(), task.into(), "0".into(), "effort".into()];
         setup_dialog_mut(&mut dashboard.mode)
             .unwrap()
             .focus_path(&effort_path);
         dashboard.handle_key(key(KeyCode::Enter));
         select_choice(&mut dashboard, "high");
-        append_setup_state(&mut output, task, &mut dashboard, 140, 40);
+        if task == "straightforward" {
+            // Show multiple configured rows on one page, then remove the extra row inline.
+            dashboard.handle_key(key(KeyCode::Char('a')));
+            dashboard.handle_key(key(KeyCode::Enter));
+            select_choice(&mut dashboard, "smarter");
+            append_setup_state(&mut output, task, &mut dashboard, 140, 40);
+            let remove_second = vec!["subagents".into(), task.into(), "1".into()];
+            setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .focus_path(&remove_second);
+            dashboard.handle_key(key(KeyCode::Enter));
+            assert_eq!(
+                setup_dialog_mut(&mut dashboard.mode).unwrap().draft["subagents"][task]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        } else {
+            append_setup_state(&mut output, task, &mut dashboard, 140, 40);
+        }
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+            ["subagents"]
+        );
     }
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     let DashboardAction::SaveSetup { updated, .. } = dialog.save(&Default::default()) else {
