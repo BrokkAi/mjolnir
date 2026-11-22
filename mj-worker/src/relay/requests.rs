@@ -190,9 +190,9 @@ impl DurableRelay {
                 barrier_command_id,
                 cut,
             } => match self.checkpoint_native_use(barrier_command_id, cut) {
-                Ok(native_use_evidence) => {
-                    RelayResponsePayload::CheckpointNativeUse { native_use_evidence }
-                }
+                Ok(native_use_evidence) => RelayResponsePayload::CheckpointNativeUse {
+                    native_use_evidence,
+                },
                 Err(message) => {
                     return Ok(relay_error(
                         RelayErrorCode::InvalidState,
@@ -321,6 +321,7 @@ impl DurableRelay {
             | RelayRequest::ProjectMemoryTransfer { .. }
             | RelayRequest::HistoryQuery { .. }
             | RelayRequest::CompleteHistoryRequest { .. }
+            | RelayRequest::CompleteGuardianRequest { .. }
             | RelayRequest::InstallProjectMemorySnapshot { .. }
             | RelayRequest::ReplaceProjectMemoryTree { .. }
             | RelayRequest::CompleteSubagentRequest { .. }
@@ -342,6 +343,11 @@ impl DurableRelay {
             // A durable-only relay has no live history broker. The worker's
             // connection transport intercepts this when a broker is present.
             RelayRequest::HistoryRequests => RelayResponsePayload::HistoryRequests {
+                requests: Vec::new(),
+            },
+            // The live connection owns the worker's pending reviews. A
+            // sealed relay serving only the journal has none.
+            RelayRequest::GuardianRequests => RelayResponsePayload::GuardianRequests {
                 requests: Vec::new(),
             },
             RelayRequest::RespondElicitation { .. } => {

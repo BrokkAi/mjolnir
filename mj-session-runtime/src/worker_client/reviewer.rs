@@ -194,10 +194,12 @@ impl RelayClient {
                 latest_ordinal,
                 state_digest,
                 subagent_queue_changed,
+                guardian_queue_changed,
             } => Ok(ObservedChange {
                 latest_ordinal,
                 state_digest,
                 subagent_queue_changed,
+                guardian_queue_changed,
             }),
             _ => bail!("relay returned an unexpected change-wait response"),
         }
@@ -340,6 +342,91 @@ impl RelayClient {
         }
     }
 
+    pub async fn hold_in_place_move_dispatch(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<Vec<String>> {
+        let request = RelayRequest::HoldInPlaceMoveDispatch {
+            operation_id: operation_id.to_owned(),
+            expected_store_id: expected_store_id.to_owned(),
+        };
+        match self.call(request).await? {
+            RelayResponsePayload::InPlaceMoveDispatchHeld {
+                captured_pending_command_ids,
+            } => Ok(captured_pending_command_ids),
+            _ => bail!("relay returned an unexpected response to HoldInPlaceMoveDispatch"),
+        }
+    }
+
+    pub async fn discard_held_move_commands(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        command_ids: Vec<String>,
+    ) -> Result<()> {
+        let request = RelayRequest::DiscardHeldMoveCommands {
+            operation_id: operation_id.to_owned(),
+            expected_store_id: expected_store_id.to_owned(),
+            command_ids,
+        };
+        match self.call(request).await? {
+            RelayResponsePayload::HeldMoveCommandsDiscarded => Ok(()),
+            _ => bail!("relay returned an unexpected response to DiscardHeldMoveCommands"),
+        }
+    }
+
+    pub async fn submit_front(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        command_id: String,
+        command: mj_core::relay::RelayCommand,
+    ) -> Result<()> {
+        let request = RelayRequest::SubmitFront {
+            operation_id: operation_id.to_owned(),
+            expected_store_id: expected_store_id.to_owned(),
+            command_id,
+            command,
+        };
+        match self.call(request).await? {
+            RelayResponsePayload::Accepted { .. } => Ok(()),
+            _ => bail!("relay returned an unexpected response to SubmitFront"),
+        }
+    }
+
+    pub async fn release_in_place_move_dispatch(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+    ) -> Result<()> {
+        let request = RelayRequest::ReleaseInPlaceMoveDispatch {
+            operation_id: operation_id.to_owned(),
+            expected_store_id: expected_store_id.to_owned(),
+        };
+        match self.call(request).await? {
+            RelayResponsePayload::InPlaceMoveDispatchReleased => Ok(()),
+            _ => bail!("relay returned an unexpected response to ReleaseInPlaceMoveDispatch"),
+        }
+    }
+
+    pub async fn restart_harness_in_place(
+        &mut self,
+        operation_id: &str,
+        expected_store_id: &str,
+        launch_config: Box<mj_core::worker_launch::WorkerLaunchConfig>,
+    ) -> Result<()> {
+        let request = RelayRequest::RestartHarnessInPlace {
+            operation_id: operation_id.to_owned(),
+            expected_store_id: expected_store_id.to_owned(),
+            launch_config,
+        };
+        match self.call(request).await? {
+            RelayResponsePayload::HarnessRestartedInPlace => Ok(()),
+            _ => bail!("relay returned an unexpected response to RestartHarnessInPlace"),
+        }
+    }
+
     pub async fn complete_subagent_request(
         &mut self,
         result: mj_core::subagent::SubagentToolResult,
@@ -421,4 +508,5 @@ pub struct ObservedChange {
     pub latest_ordinal: u64,
     pub state_digest: String,
     pub subagent_queue_changed: bool,
+    pub guardian_queue_changed: bool,
 }

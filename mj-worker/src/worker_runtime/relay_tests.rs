@@ -10425,6 +10425,7 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
                     latest_ordinal,
                     state_digest,
                     subagent_queue_changed,
+                    guardian_queue_changed: false,
                 },
         } => (latest_ordinal, state_digest, subagent_queue_changed),
         other => panic!("expected an observed change, got {other:?}"),
@@ -10432,14 +10433,23 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     let (ordinal, digest) = current();
 
     let started = tokio::time::Instant::now();
-    let quiet = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+    let quiet = unix::wait_for_change(&relay, None, None, &feed, &mut 0, ordinal, Some(&digest))
         .await
         .unwrap();
     assert_eq!(observed(quiet), (ordinal, digest.clone(), false));
     assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
 
     let started = tokio::time::Instant::now();
-    let wait = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest));
+    let mut guardian_generation = 0;
+    let wait = unix::wait_for_change(
+        &relay,
+        None,
+        None,
+        &feed,
+        &mut guardian_generation,
+        ordinal,
+        Some(&digest),
+    );
     let record = async {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         relay
@@ -10456,7 +10466,7 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     assert_ne!(changed_digest, digest);
     assert_eq!(started.elapsed(), std::time::Duration::from_secs(1));
 
-    let stale = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+    let stale = unix::wait_for_change(&relay, None, None, &feed, &mut 0, ordinal, Some(&digest))
         .await
         .unwrap();
     assert_eq!(
@@ -10469,9 +10479,26 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
     // idle until their bound instead of waking each other.
     let (ordinal, digest) = current();
     let started = tokio::time::Instant::now();
+    let mut second_guardian_generation = 0;
     let (first, second) = tokio::join!(
-        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
-        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+        unix::wait_for_change(
+            &relay,
+            None,
+            None,
+            &feed,
+            &mut guardian_generation,
+            ordinal,
+            Some(&digest)
+        ),
+        unix::wait_for_change(
+            &relay,
+            None,
+            None,
+            &feed,
+            &mut second_guardian_generation,
+            ordinal,
+            Some(&digest)
+        ),
     );
     assert_eq!(observed(first.unwrap()).0, ordinal);
     assert_eq!(observed(second.unwrap()).0, ordinal);

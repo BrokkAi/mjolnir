@@ -1100,6 +1100,18 @@ details.mailbox-event[open] > summary::before {
   overflow-wrap: anywhere;
 }
 
+.inbox-elicitation[hidden] {
+  display: none;
+}
+
+.inbox-elicitation {
+  margin: 0 0 12px;
+}
+
+.inbox-elicitation > .elicitation {
+  margin: 0;
+}
+
 .inbox-reply {
   display: flex;
   align-items: center;

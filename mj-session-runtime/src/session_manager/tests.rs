@@ -82,6 +82,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
         session_gate: Arc::default(),
         credential_wakes: Arc::default(),
         harness_failure: Default::default(),
+        guardian_stage1: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
         launches: mpsc::unbounded_channel().0,
@@ -1578,6 +1579,145 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
     assert_eq!(result.value["data"]["messages"][0]["text"], text);
     assert!(worker.subagent_requests.is_empty());
     worker.detach().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guardian_actor_cascades_requests_added_after_attachment() {
+    use mj_core::guardian::{
+        GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
+        WOLF_STAGE1_ALLOW_THRESHOLD,
+    };
+
+    struct FakeStage1;
+    impl GuardianStage1 for FakeStage1 {
+        fn classify<'a>(
+            &'a self,
+            request: &'a GuardianReviewRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = GuardianStage1Verdict> + Send + 'a>>
+        {
+            let verdict = match request.request_id.as_str() {
+                "low" => GuardianStage1Verdict::Scored {
+                    unsafe_prob: WOLF_STAGE1_ALLOW_THRESHOLD,
+                    tokens: 15,
+                    elapsed_ms: 1,
+                },
+                "high" => GuardianStage1Verdict::Scored {
+                    unsafe_prob: 0.9,
+                    tokens: 15,
+                    elapsed_ms: 1,
+                },
+                "overflow" => GuardianStage1Verdict::Overflow { tokens: 6145 },
+                "long" => GuardianStage1Verdict::EscalatedActionTooLong,
+                "unavailable" => GuardianStage1Verdict::Unavailable {
+                    reason: "loading".into(),
+                },
+                id => panic!("unexpected test request {id}"),
+            };
+            Box::pin(std::future::ready(verdict))
+        }
+    }
+
+    const CHILD: &str = "MJ_TEST_GUARDIAN_POLL_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "guardian_actor_cascades_requests_added_after_attachment",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    mj_core::config::Config::default().save().unwrap();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let SessionManagerChannels {
+        targets,
+        control,
+        shutdown,
+        ..
+    } = spawn_session_manager().expect("spawn the session manager");
+    targets.send_replace(vec![leased_relay_target(relay_root.path())]);
+    let session = control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(2))
+        .await
+        .unwrap();
+    session.sync_now().await.unwrap();
+    assert!(session.view().connected);
+
+    let queue = relay_root.path().join("guardian-request.json");
+    let response = relay_root.path().join("guardian-result.json");
+    let config_path = mj_core::config::config_path();
+    let valid_config = std::fs::read(&config_path).unwrap();
+    for (id, expected) in [
+        (
+            "no-classifier",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "low",
+            GuardianReviewOutcome::Allow {
+                stage: "stage1_wolf".into(),
+                stage1_score: Some(WOLF_STAGE1_ALLOW_THRESHOLD),
+            },
+        ),
+        (
+            "high",
+            GuardianReviewOutcome::UseAcpFallback {
+                stage1_score: Some(0.9),
+            },
+        ),
+        (
+            "overflow",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "long",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+        (
+            "unavailable",
+            GuardianReviewOutcome::UseAcpFallback { stage1_score: None },
+        ),
+    ] {
+        if id == "low" {
+            control.install_guardian_stage1(Arc::new(FakeStage1));
+            // The fast path must succeed even when Stage 2 cannot load its configuration.
+            mj_core::config::atomic_write(&config_path, b"invalid TOML").unwrap();
+        } else if id == "high" {
+            mj_core::config::atomic_write(&config_path, &valid_config).unwrap();
+        }
+        mj_core::config::atomic_write(
+            &queue,
+            &serde_json::to_vec(&GuardianReviewRequest {
+                request_id: id.into(),
+                harness: mj_core::config::HarnessKind::Codex,
+                session_id: LEASED_RELAY_SESSION.into(),
+                tool_call_id: "call".into(),
+                action: serde_json::json!({"input": {"command": "cargo test"}}),
+                user_instructions: vec!["Run the tests.".into()],
+                user_instructions_omitted: false,
+                project_instructions: None,
+                transcript: String::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !queue.exists() {
+                    let result: GuardianReviewResult =
+                        serde_json::from_slice(&std::fs::read(&response).unwrap()).unwrap();
+                    break result;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out awaiting {id}"));
+        assert_eq!(result.request_id, id);
+        assert_eq!(result.decision, expected, "{id}");
+    }
+    shutdown.shutdown().await.unwrap();
 }
 
 #[cfg(unix)]

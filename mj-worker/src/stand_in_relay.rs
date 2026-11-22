@@ -299,7 +299,7 @@ pub fn serve_latch_relay() {
                 mj_core::relay::RelayRequest::Submit {
                     command: RelayCommand::BeginCheckpoint { .. },
                     ..
-                }
+                } | mj_core::relay::RelayRequest::HoldInPlaceMoveDispatch { .. }
             ) {
                 relay
                     .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
@@ -425,6 +425,41 @@ pub fn serve_latch_relay() {
                         relay.operational_state(),
                     ),
                 },
+            }
+        } else if let mj_core::relay::RelayRequest::RestartHarnessInPlace {
+            operation_id,
+            expected_store_id,
+            launch_config,
+        } = &request.request
+        {
+            let body = match relay.admit_in_place_harness_restart(operation_id, expected_store_id) {
+                Err(error) => mj_core::relay::RelayResponseBody::Error { error: *error },
+                Ok(crate::relay::InPlaceHarnessRestartDecision::AlreadyRestarted) => {
+                    mj_core::relay::RelayResponseBody::Ok {
+                        payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
+                    }
+                }
+                Ok(crate::relay::InPlaceHarnessRestartDecision::Proceed) => {
+                    let _ = launch_config.write(&Path::new(&root).join("launch.json"));
+                    match relay.mark_in_place_harness_restarted(operation_id, expected_store_id) {
+                        Ok(()) => mj_core::relay::RelayResponseBody::Ok {
+                            payload: mj_core::relay::RelayResponsePayload::HarnessRestartedInPlace,
+                        },
+                        Err(error) => mj_core::relay::relay_error(
+                            mj_core::relay::RelayErrorCode::Internal,
+                            format!("complete in-place harness restart: {error:#}"),
+                            false,
+                            None,
+                        ),
+                    }
+                }
+            };
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id.clone(),
+                protocol_version: max_protocol
+                    .map(|limit| limit.min(mj_core::relay::RELAY_PROTOCOL_VERSION))
+                    .unwrap_or(request.protocol_version),
+                body,
             }
         } else if let Some(response) = subagent_connection_response(&request) {
             response
@@ -710,6 +745,7 @@ fn subagent_connection_response(
                 latest_ordinal: *after_ordinal,
                 state_digest: state_digest.clone().unwrap_or_default(),
                 subagent_queue_changed: !requests().is_empty() || !results().is_empty(),
+                guardian_queue_changed: false,
             }
         }
         _ => return None,
@@ -778,7 +814,7 @@ pub fn serve_leased_relay() {
         let mut output = std::io::stdout().lock();
         let mut subagent_known_ids = std::collections::BTreeSet::new();
         // The queue files this connection last reported to a change wait.
-        let mut reported_queue: Option<[Option<Vec<u8>>; 2]> = None;
+        let mut reported_queue: Option<[Option<Vec<u8>>; 3]> = None;
         while let Some(request) = mj_core::relay::read_relay_frame(&mut input).unwrap() {
             use mj_core::relay::{
                 RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
@@ -869,21 +905,27 @@ pub fn serve_leased_relay() {
                 // wait reports the relay as the controller named it and holds,
                 // like the real worker, until the queue files it rereads change.
                 let queue_files = || {
-                    ["subagent-request.json", "subagent-result.json"]
-                        .map(|name| std::fs::read(PathBuf::from(&root).join(name)).ok())
+                    [
+                        "subagent-request.json",
+                        "subagent-result.json",
+                        "guardian-request.json",
+                    ]
+                    .map(|name| std::fs::read(PathBuf::from(&root).join(name)).ok())
                 };
                 let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                let queue_changed = loop {
+                let (queue_changed, guardian_queue_changed) = loop {
                     if PathBuf::from(&root).join("worker-unreachable").exists() {
                         return;
                     }
                     let queue = queue_files();
-                    if reported_queue.as_ref() != Some(&queue) {
-                        reported_queue = Some(queue);
-                        break true;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        break false;
+                    let subagent = reported_queue
+                        .as_ref()
+                        .is_none_or(|old| old[..2] != queue[..2]);
+                    let guardian = queue[2].is_some()
+                        && reported_queue.as_ref().is_none_or(|old| old[2] != queue[2]);
+                    reported_queue = Some(queue);
+                    if subagent || guardian || std::time::Instant::now() >= deadline {
+                        break (subagent, guardian);
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 };
@@ -897,6 +939,7 @@ pub fn serve_leased_relay() {
                                 latest_ordinal: *after_ordinal,
                                 state_digest: state_digest.clone().unwrap_or_default(),
                                 subagent_queue_changed: queue_changed,
+                                guardian_queue_changed,
                             },
                         },
                     },
@@ -982,6 +1025,31 @@ pub fn serve_leased_relay() {
                         std::fs::remove_file(path).unwrap();
                     }
                     Some(RelayResponsePayload::SubagentRequestCompleted)
+                }
+                RelayRequest::GuardianRequests => {
+                    let path = PathBuf::from(&root).join("guardian-request.json");
+                    let requests = match std::fs::read(path) {
+                        Ok(bytes) => vec![serde_json::from_slice(&bytes).unwrap()],
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                        Err(error) => panic!("read stand-in guardian queue: {error}"),
+                    };
+                    Some(RelayResponsePayload::GuardianRequests { requests })
+                }
+                RelayRequest::CompleteGuardianRequest { result } => {
+                    let path = PathBuf::from(&root).join("guardian-request.json");
+                    if path.exists() {
+                        let pending: mj_core::guardian::GuardianReviewRequest =
+                            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                        if pending.request_id == result.request_id {
+                            mj_core::config::atomic_write(
+                                &PathBuf::from(&root).join("guardian-result.json"),
+                                &serde_json::to_vec(result).unwrap(),
+                            )
+                            .unwrap();
+                            std::fs::remove_file(path).unwrap();
+                        }
+                    }
+                    Some(RelayResponsePayload::GuardianRequestCompleted)
                 }
                 RelayRequest::HistoryRequests => {
                     let path = PathBuf::from(&root).join("history-request.json");

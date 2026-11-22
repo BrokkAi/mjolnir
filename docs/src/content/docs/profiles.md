@@ -187,9 +187,14 @@ tool call that can reach outside the workspace (a hook Mjolnir adds under
 configured approvals, since OpenCode's own default asks for nothing), and DSH
 asks before every write, command, and MCP tool call other than Mjolnir's own,
 but all three run commands on the host without a sandbox. On a raw target the
-[Mjolnir guardian](/security/#the-mjolnir-guardian) answers those requests with
-a review on the same harness and the session's model, unless the profile
-[turns it off](#turn-off-the-mjolnir-guardian). Muse's guardian is
+[Mjolnir guardian](/security/#the-mjolnir-guardian) answers permission requests
+that reach Mjolnir from any harness. A local Wolf Defender Jev model can
+approve short actions it scores as strongly aligned with your task. Other
+actions go to the configured direct utility model, or to a separate review
+on the session's harness and model when none is configured. These reviewers
+receive bounded project instructions from `AGENTS.md`. Any profile can
+[turn it off](#turn-off-the-mjolnir-guardian).
+Muse's native guardian is
 muse-acp's auto-review; see [Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
@@ -542,8 +547,8 @@ Claude profile; setting it on any other profile is a configuration error.
 
 On a runtime that keeps configured approvals, the
 [Mjolnir guardian](/security/#the-mjolnir-guardian) answers the permission
-requests of Kimi Code, OpenCode, and DSH sessions, and asks you only when it
-cannot decide. To answer every request yourself instead, set
+requests that reach Mjolnir from any harness, and asks you when it cannot
+decide. To answer pending requests yourself, set
 `mjolnir_guardian = false` on the profile:
 
 ```toml
@@ -557,10 +562,9 @@ The harness still asks before the same actions, and each request opens
 Mjolnir's permission form. You can also turn off **Mjolnir guardian** in
 Settings, on the profile's page. Every session the profile launches reads the
 setting when it starts, including when an existing session resumes, so a
-change applies from the next launch on. Runtimes that allow all actions never
-ask, so the setting changes nothing there. It applies only to Kimi Code,
-OpenCode, and DSH profiles, the harnesses without a guardian of their own;
-setting it on any other profile is a configuration error.
+change applies from the next launch on. The setting is available on every
+profile. The harness continues to apply its own approval rules and native
+reviewer. Unconstrained runtimes bypass Mjolnir Guardian.
 
 ## Codex profile files
 

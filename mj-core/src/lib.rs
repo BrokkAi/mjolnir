@@ -27,6 +27,7 @@ pub mod go;
 pub mod goal;
 #[cfg(feature = "golden")]
 pub mod golden;
+pub mod guardian;
 #[cfg(unix)]
 pub mod harness_install;
 pub mod harness_runtime;

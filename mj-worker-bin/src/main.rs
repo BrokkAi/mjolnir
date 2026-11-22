@@ -81,9 +81,6 @@ enum AuthorizedKeysCommand {
 
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
-    /// Move-only inventory and disk-backed workspace transfer utilities.
-    #[command(hide = true)]
-    MoveWorkspace,
     /// Locked `~/.ssh/authorized_keys` editor for direct Move transfers.
     #[command(hide = true)]
     AuthorizedKeys(AuthorizedKeysArgs),
@@ -732,11 +729,6 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         }
         WorkerCommand::AcpSupervisor { spec } => {
             run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
-        }
-        WorkerCommand::MoveWorkspace => {
-            let command = serde_json::from_reader(std::io::stdin().lock())?;
-            println!("{}", mj_worker::move_workspace::execute(command)?);
-            Ok(())
         }
         WorkerCommand::AuthorizedKeys(args) => match args.command {
             AuthorizedKeysCommand::Install {

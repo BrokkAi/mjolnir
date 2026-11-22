@@ -1380,6 +1380,27 @@ impl DashboardState {
         DashboardAction::None
     }
 
+    /// Closes the suspend confirmation dialog if it is still waiting on
+    /// `session_id`'s preflight, leaving any unrelated modal untouched.
+    pub fn dismiss_suspend_preflight(&mut self, session_id: &str) -> bool {
+        let matches = matches!(
+            &self.mode,
+            Mode::Confirm(dialog)
+                if matches!(
+                    &dialog.confirmation,
+                    Confirmation::SuspendSession {
+                        session_id: current,
+                        checking: true,
+                        ..
+                    } if current == session_id
+                )
+        );
+        if matches {
+            self.cancel_modal();
+        }
+        matches
+    }
+
     pub fn cancel_modal(&mut self) {
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
         if matches!(self.mode, Mode::WorkspaceManager(_)) {

@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 147;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 149;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2873,6 +2873,37 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (148, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 148;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: replaces `MoveOperation` shape (cross-target/in-place phases,
+    // transport grants, in-place state) and adds `ec2_move_grants` and
+    // `daemon_instance_metadata`. Older daemons decode `MoveOperation` with
+    // `deny_unknown_fields` and treat decode failure as no intent, risking
+    // overlooking active moves and their grants.
+    if version < 149 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS ec2_move_grants (
+                 security_group_id TEXT NOT NULL,
+                 cidr_ip TEXT NOT NULL,
+                 port INTEGER NOT NULL,
+                 state TEXT NOT NULL,
+                 users_json TEXT NOT NULL CHECK(json_valid(users_json)),
+                 absent_checks INTEGER NOT NULL DEFAULT 0,
+                 attempt_id INTEGER NOT NULL DEFAULT 0,
+                 updated_at TEXT NOT NULL,
+                 PRIMARY KEY (security_group_id, cidr_ip, port)
+             );
+             CREATE TABLE IF NOT EXISTS daemon_instance_metadata (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                 instance_id TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             UPDATE schema_compatibility SET minimum_compatible_version = 149 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (149, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 149;
              COMMIT;",
         )?;
     }
@@ -6162,9 +6193,7 @@ mod reader_tests {
             "source_resource_allocation":null, "destination_target":null,
             "destination_native_session_id":null, "destination_store_id":null,
             "configuration_fingerprint":"kept", "checkpoint":null, "recovery_session":recovery,
-            "workspace_transfer":{"assessment":mj_core::move_workspace::WorkspaceAssessment::default(),
-                "source":transfer_source,"source_stage":"/source","controller_stage":"/controller","phase":"planned"},
-            "prepared_destination":prepared, "queue":"start", "phase":"preparing",
+            "prepared_destination":prepared, "queue":"start", "phase":"capturing",
             "queue_admission_started":false, "queue_admission_finished":false,
             "cancellation_requested":false, "created_at":"created", "updated_at":"updated", "error":null
         });
@@ -6189,7 +6218,6 @@ mod reader_tests {
         preparing["operation_id"] = "preparing-size-move".into();
         preparing["selection"]["session_id"] = "partial".into();
         preparing["recovery_session"] = serde_json::Value::Null;
-        preparing["workspace_transfer"] = serde_json::Value::Null;
         preparing["prepared_destination"] = serde_json::Value::Null;
         preparing["source_resource_allocation"] =
             serde_json::json!({"kind":"container","cpus":2,"memory_bytes":4_u64 << 30});
@@ -6267,18 +6295,6 @@ mod reader_tests {
                 memory_bytes: 700 << 20
             })
         );
-        assert_eq!(
-            moved
-                .workspace_transfer
-                .as_ref()
-                .unwrap()
-                .source
-                .resource_allocation,
-            Some(SessionResourceAllocation::Container {
-                cpus: 6,
-                memory_bytes: 4 << 30
-            })
-        );
         let expected_snapshot = Some(SessionResourceAllocation::Container {
             cpus: 3,
             memory_bytes: 6 << 30,
@@ -6288,14 +6304,6 @@ mod reader_tests {
                 .recovery_session
                 .as_ref()
                 .unwrap()
-                .target_runtime
-                .as_deref()
-                .unwrap(),
-            moved
-                .workspace_transfer
-                .as_ref()
-                .unwrap()
-                .source
                 .target_runtime
                 .as_deref()
                 .unwrap(),
@@ -6315,12 +6323,10 @@ mod reader_tests {
         let retained: SessionRecord = serde_json::from_str(&retained).unwrap();
         assert_eq!(
             retained.resource_allocation,
-            moved
-                .workspace_transfer
-                .as_ref()
-                .unwrap()
-                .source
-                .resource_allocation
+            Some(SessionResourceAllocation::Container {
+                cpus: 6,
+                memory_bytes: 4 << 30
+            })
         );
         assert_eq!(
             retained
@@ -7168,7 +7174,7 @@ mod reader_tests {
     }
 
     #[test]
-    fn host_snapshot_cache_migration_148_stays_compatible_with_revision_147() {
+    fn host_snapshot_cache_migration_148_creates_table() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         {
@@ -7176,6 +7182,7 @@ mod reader_tests {
             connection
                 .execute_batch(
                     "DROP TABLE host_snapshot_cache;
+                     UPDATE schema_compatibility SET minimum_compatible_version = 147 WHERE singleton = 1;
                      DELETE FROM schema_migrations WHERE version >= 148;
                      PRAGMA user_version = 147;",
                 )
@@ -7196,10 +7203,56 @@ mod reader_tests {
         );
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(147));
-        assert!(
-            state.ensure_supported_by(147).is_ok(),
-            "revision 148 must remain compatible with revision 147 readers and writers"
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+    }
+
+    #[test]
+    fn move_origin_delta_migration_149_adds_grants_and_refuses_revision_148() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        {
+            let connection = open_writer(&path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE ec2_move_grants;
+                     DROP TABLE daemon_instance_metadata;
+                     UPDATE schema_compatibility SET minimum_compatible_version = 147 WHERE singleton = 1;
+                     DELETE FROM schema_migrations WHERE version >= 149;
+                     PRAGMA user_version = 148;",
+                )
+                .unwrap();
+        }
+        forget_verified_schema(&path);
+        let connection = open_writer(&path).unwrap();
+        let has_grants: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ec2_move_grants'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_grants, 1, "migration 149 must create ec2_move_grants");
+        let has_meta: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='daemon_instance_metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            has_meta, 1,
+            "migration 149 must create daemon_instance_metadata"
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        let err = state.ensure_supported_by(148).unwrap_err();
+        let mismatch = err.downcast_ref::<StoreSchemaMismatch>().unwrap();
+        assert_eq!(
+            mismatch.reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
         );
     }
 }

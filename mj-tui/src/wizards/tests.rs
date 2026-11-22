@@ -2221,7 +2221,9 @@ fn move_preparation() -> mj_core::state::MovePreparation {
     mj_core::state::MovePreparation {
         container_upgrade: None,
         destination_checks: Default::default(),
-        workspace: None,
+        route_preview: None,
+        suspend_preflight: None,
+        skip_keep_sizes: Vec::new(),
         in_place: false,
         stops_subagents: true,
         source_unavailable: false,
@@ -2230,7 +2232,8 @@ fn move_preparation() -> mj_core::state::MovePreparation {
             oracle: None,
             oracle_choice: None,
             subagents: None,
-            workspace: Default::default(),
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),
             target_template_id: Some("podman".into()),
@@ -5056,52 +5059,6 @@ fn a_focused_recent_project_is_drawn_differently_from_its_unfocused_self() {
     assert!(checked >= 2, "Tab reaches both recent directories");
 }
 
-#[test]
-fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
-    use mj_core::move_workspace::*;
-    let mut dashboard = dashboard_with_session(running_session());
-    let request_id = open_move_review(&mut dashboard);
-    let mut preparation = move_preparation();
-    let mut assessment = WorkspaceAssessment::default();
-    assessment.files = vec![
-        WorkspaceFile {
-            location: WorkspacePath {
-                repository: "repo".into(),
-                path: ".agents/qualification/java-b/staged/tool.bin".into(),
-            },
-            bytes: 1_000_000_000,
-        },
-        WorkspaceFile {
-            location: WorkspacePath {
-                repository: "repo".into(),
-                path: ".agents/qualification/java-b/staged/readme.txt".into(),
-            },
-            bytes: 1234,
-        },
-    ];
-    assessment.roots = file_tree(&assessment);
-    assessment.initially_expanded = initial_expansion(&assessment.roots);
-    preparation.workspace = Some(assessment);
-    assert!(dashboard.apply_move_preparation(request_id, preparation));
-    assert_eq!(resume_wizard(&dashboard).step, WizardStep::MoveFiles);
-    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
-    assert_dialog_spacing(
-        &buffer_lines(terminal.backend().buffer()),
-        "Move · choose files",
-        "Continue",
-    );
-    assert!(rendered.contains("Choose files to transfer"), "{rendered}");
-    assert!(rendered.contains("1.00 GB"), "{rendered}");
-    assert!(
-        rendered.contains(".agents/qualification/java-b/staged"),
-        "{rendered}"
-    );
-}
-
 /// #1175: the target step is a table like the profile step, and the resize
 /// keys are offered only for a target that is sized.
 fn target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets() {
@@ -5576,63 +5533,6 @@ fn raw_resume_fast_path_failure_waits_for_explicit_retry() {
     assert_ne!(dashboard.session_preflight_generation(), first_generation);
     assert!(dashboard.resume_preflight_in_flight());
     assert!(resume_wizard(&dashboard).preflight_error.is_none());
-}
-
-#[test]
-fn raw_move_keeps_file_selection_and_returns_to_review_after_it() {
-    use mj_core::move_workspace::*;
-    let mut session = running_session();
-    session.project_directory = Some("/work/project".into());
-    session.target_template_id = "local".into();
-    let mut dashboard = dashboard_with_session(session);
-    *dashboard.config = single_raw_config();
-    let DashboardAction::MoveSession {
-        preparation_request_id: Some(request),
-        ..
-    } = dashboard.begin_move()
-    else {
-        panic!("prepare")
-    };
-    let mut preparation = move_preparation();
-    preparation.selection.profile_id = Some("claude-1".into());
-    preparation.selection.target_template_id = Some("local".into());
-    let mut assessment = WorkspaceAssessment::default();
-    assessment.files = vec![WorkspaceFile {
-        location: WorkspacePath {
-            repository: "repo".into(),
-            path: "large.bin".into(),
-        },
-        bytes: 2 << 30,
-    }];
-    assessment.roots = file_tree(&assessment);
-    preparation.workspace = Some(assessment);
-    assert!(dashboard.apply_move_preparation(request, preparation.clone()));
-    assert_eq!(resume_wizard(&dashboard).step, WizardStep::MoveFiles);
-    assert!(dashboard.take_prerequisite_check().is_none());
-    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
-    assert!(screen.contains("× Move"), "{screen}");
-    assert!(screen.contains("Back"), "{screen}");
-    let DashboardAction::MoveSession {
-        preparation_request_id: Some(next),
-        ..
-    } = ready_key(&mut dashboard, key(KeyCode::Enter))
-    else {
-        panic!("reprepare")
-    };
-    assert_ne!(request, next);
-    preparation.selection.workspace = resume_wizard(&dashboard).files.selection.clone();
-    assert!(preparation.selection.workspace.acknowledge_large_transfer);
-    assert!(dashboard.apply_move_preparation(next, preparation));
-    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
-    assert!(dashboard.take_prerequisite_check().is_none());
-    assert!(matches!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::MoveSession {
-            preparation_request_id: None,
-            ..
-        }
-    ));
-    assert!(dashboard.take_prerequisite_check().is_none());
 }
 
 #[test]

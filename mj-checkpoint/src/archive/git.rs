@@ -7,6 +7,23 @@ pub(super) use operation::{validate_operation_state_tar, validate_operation_stat
 /// invoking the host's Git executable.
 pub trait GitCommandRunner: Sync {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput>;
+
+    /// Run `command` with its stdout written directly to `output` rather than
+    /// buffered in memory. The returned `GitOutput::stdout` is empty.
+    fn run_to_file(
+        &self,
+        repository: &Path,
+        command: &GitCommand,
+        mut output: fs::File,
+    ) -> Result<GitOutput> {
+        let result = self.run(repository, command)?;
+        output.write_all(&result.stdout)?;
+        Ok(GitOutput {
+            status: result.status,
+            stdout: Vec::new(),
+            stderr: result.stderr,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,22 +56,7 @@ pub struct SystemGit;
 
 impl GitCommandRunner for SystemGit {
     fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
-        let mut process = Command::new("git");
-        process.args(&command.arguments).current_dir(repository);
-        for (name, value) in NON_INTERACTIVE_GIT_ENV {
-            process.env(name, value);
-        }
-        for (name, value) in &command.env {
-            process.env(name, value);
-        }
-        if !command
-            .env
-            .iter()
-            .any(|(name, _)| name == "GIT_SSH_COMMAND")
-            && let Some(default) = mj_core::local_git::local_git_ssh_command()
-        {
-            process.env("GIT_SSH_COMMAND", default);
-        }
+        let mut process = prepare_command(repository, command);
         let output = mj_core::subprocess::run_with_input(&mut process, &command.stdin)
             .with_context(|| format!("run git in {}", repository.display()))?;
         Ok(GitOutput {
@@ -63,6 +65,43 @@ impl GitCommandRunner for SystemGit {
             stderr: output.stderr,
         })
     }
+
+    fn run_to_file(
+        &self,
+        repository: &Path,
+        command: &GitCommand,
+        output: fs::File,
+    ) -> Result<GitOutput> {
+        let mut process = prepare_command(repository, command);
+        let output =
+            mj_core::subprocess::run_with_input_to_file(&mut process, &command.stdin, output)
+                .with_context(|| format!("run git in {}", repository.display()))?;
+        Ok(GitOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+}
+
+fn prepare_command(repository: &Path, command: &GitCommand) -> Command {
+    let mut process = Command::new("git");
+    process.args(&command.arguments).current_dir(repository);
+    for (name, value) in NON_INTERACTIVE_GIT_ENV {
+        process.env(name, value);
+    }
+    for (name, value) in &command.env {
+        process.env(name, value);
+    }
+    if !command
+        .env
+        .iter()
+        .any(|(name, _)| name == "GIT_SSH_COMMAND")
+        && let Some(default) = mj_core::local_git::local_git_ssh_command()
+    {
+        process.env("GIT_SSH_COMMAND", default);
+    }
+    process
 }
 
 /// Stable identity for internal commits and reflogs; never written to user config.

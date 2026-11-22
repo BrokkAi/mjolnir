@@ -25,47 +25,11 @@ use mj_core::targets::{
     self, CommandExecutor, CommandSpec, ProcessExecutor, SshTarget, SshTrafficClass, SshWalk,
     TargetLocator,
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use self::ec2_grant::{AcquireOutcome, Ec2GrantKey, Ec2GrantManager, Ec2GrantStore, Ec2SecurityGroupClient};
 
-/// Route taken to move an archive (and optional `.mj/keep/` stream) between targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TransferRoute {
-    SameHost,
-    DirectPush,
-    DirectPull,
-    DaemonStream,
-}
-
-impl TransferRoute {
-    pub const fn is_direct(self) -> bool {
-        matches!(self, Self::DirectPush | Self::DirectPull)
-    }
-
-    pub const fn is_pulled(self) -> bool {
-        matches!(self, Self::DirectPull)
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::SameHost => "same-host pipe",
-            Self::DirectPush => "direct push",
-            Self::DirectPull => "direct pull",
-            Self::DaemonStream => "daemon stream",
-        }
-    }
-}
-
-/// Read-only route preview for `--dry-run`. Never installs keys or AWS SG rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutePreview {
-    SameHost,
-    DirectOrDaemonStream,
-}
+pub use mj_core::state::{RoutePreview, TransferRoute};
 
 /// Preview the transfer route without mutating any host, key, or AWS resource.
 pub fn preview_transfer_route(
@@ -116,6 +80,33 @@ pub struct KeepTransferOptions {
     pub keep_dest: Option<PathBuf>,
     /// Relative paths under `keep_dir` to exclude from the keep tar stream.
     pub skip: Vec<PathBuf>,
+}
+
+/// Worker binaries and `.mj/keep/` options for framed Move streams
+/// (`export-move-stream | receive-move-stream`). Used on `SameHost` and
+/// `DaemonStream` routes even when direct host-to-host SSH is unavailable.
+#[derive(Debug, Clone)]
+pub struct WorkerStreamConfig {
+    pub source_worker_bin: String,
+    pub destination_worker_bin: String,
+    pub keep: KeepTransferOptions,
+}
+
+/// Verified outcome of a Move archive (+ optional `.mj/keep/`) transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferReceipt {
+    pub route: TransferRoute,
+    /// `.mj/keep/` tar payload size in bytes reported by `receive-move-stream`
+    /// (0 when no keep directory was streamed or a raw transfer ran).
+    pub keep_bytes: u64,
+}
+
+fn parse_keep_tar_bytes(stdout: &[u8]) -> u64 {
+    let trimmed = String::from_utf8_lossy(stdout);
+    let last_line = trimmed.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+    serde_json::from_str::<mj_checkpoint::move_stream::MoveStreamReceipt>(last_line.trim())
+        .map(|receipt| receipt.keep_tar_bytes)
+        .unwrap_or(0)
 }
 
 /// Optional parameters for direct host-to-host SSH push/pull transfers.
@@ -210,17 +201,62 @@ where
     S: Ec2GrantStore,
     C: Ec2SecurityGroupClient,
 {
+    let stream = direct.map(|peer| WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    });
+    Ok(transfer_move_stream_with_direct(
+        source,
+        source_path,
+        destination,
+        destination_path,
+        sha256,
+        executor,
+        stream.as_ref(),
+        direct,
+        ec2_grants,
+    )?
+    .route)
+}
+
+/// Full route-ordered Move transfer carrying both archive and `.mj/keep/`
+/// (honoring `--skip`) across `SameHost` -> `DirectPush` -> `DirectPull` ->
+/// `DaemonStream`, returning both the chosen route and verified keep size.
+#[allow(clippy::too_many_arguments)]
+pub fn transfer_move_stream_with_direct<S, C>(
+    source: &TargetLocator,
+    source_path: &Path,
+    destination: &TargetLocator,
+    destination_path: &Path,
+    sha256: &str,
+    executor: &(impl CommandExecutor + Sync),
+    stream: Option<&WorkerStreamConfig>,
+    direct: Option<&DirectPeerConfig>,
+    ec2_grants: Option<&Ec2GrantManager<S, C>>,
+) -> Result<TransferReceipt>
+where
+    S: Ec2GrantStore,
+    C: Ec2SecurityGroupClient,
+{
+    let fallback_stream = direct.map(|peer| WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    });
+    let effective_stream = stream.or(fallback_stream.as_ref());
+
     if targets_share_host(source, destination) {
-        if let Some(peer) = direct {
-            transfer_same_host_stream(
+        let keep_bytes = if let Some(cfg) = effective_stream {
+            transfer_same_host_stream_config(
                 source,
                 source_path,
                 destination,
                 destination_path,
                 sha256,
                 executor,
-                peer,
-            )?;
+                cfg,
+            )?
         } else {
             transfer_same_host(
                 source,
@@ -230,8 +266,12 @@ where
                 sha256,
                 executor,
             )?;
-        }
-        return Ok(TransferRoute::SameHost);
+            0
+        };
+        return Ok(TransferReceipt {
+            route: TransferRoute::SameHost,
+            keep_bytes,
+        });
     }
 
     if let Some(peer) = direct {
@@ -245,8 +285,13 @@ where
             peer,
             ec2_grants,
         ) {
-            Ok(true) => return Ok(TransferRoute::DirectPush),
-            Ok(false) => {}
+            Ok(Some(keep_bytes)) => {
+                return Ok(TransferReceipt {
+                    route: TransferRoute::DirectPush,
+                    keep_bytes,
+                });
+            }
+            Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
                     operation_id = %peer.operation_id,
@@ -266,8 +311,13 @@ where
             peer,
             ec2_grants,
         ) {
-            Ok(true) => return Ok(TransferRoute::DirectPull),
-            Ok(false) => {}
+            Ok(Some(keep_bytes)) => {
+                return Ok(TransferReceipt {
+                    route: TransferRoute::DirectPull,
+                    keep_bytes,
+                });
+            }
+            Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
                     operation_id = %peer.operation_id,
@@ -278,16 +328,16 @@ where
         }
     }
 
-    if let Some(peer) = direct {
-        transfer_daemon_stream_with_worker(
+    let keep_bytes = if let Some(cfg) = effective_stream {
+        transfer_daemon_stream_with_config(
             source,
             source_path,
             destination,
             destination_path,
             sha256,
-            peer,
+            cfg,
             &ProcessStreamPipe,
-        )?;
+        )?
     } else {
         transfer_daemon_stream(
             source,
@@ -297,8 +347,12 @@ where
             sha256,
             executor,
         )?;
-    }
-    Ok(TransferRoute::DaemonStream)
+        0
+    };
+    Ok(TransferReceipt {
+        route: TransferRoute::DaemonStream,
+        keep_bytes,
+    })
 }
 
 /// Run one host-local pipeline piping source archive bytes directly into
@@ -339,6 +393,7 @@ fn transfer_same_host(
 
 /// Same-host framed `export-move-stream | receive-move-stream` pipeline so
 /// `.mj/keep/` (with `--skip`) travels identically on the `SameHost` route.
+#[cfg(test)]
 fn transfer_same_host_stream(
     source: &TargetLocator,
     source_path: &Path,
@@ -348,19 +403,47 @@ fn transfer_same_host_stream(
     executor: &(impl CommandExecutor + Sync),
     peer: &DirectPeerConfig,
 ) -> Result<()> {
+    let cfg = WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    };
+    let _ = transfer_same_host_stream_config(
+        source,
+        source_path,
+        destination,
+        destination_path,
+        expected_sha256,
+        executor,
+        &cfg,
+    )?;
+    Ok(())
+}
+
+/// Same-host framed `export-move-stream | receive-move-stream` pipeline so
+/// `.mj/keep/` (with `--skip`) travels identically on the `SameHost` route.
+fn transfer_same_host_stream_config(
+    source: &TargetLocator,
+    source_path: &Path,
+    destination: &TargetLocator,
+    destination_path: &Path,
+    expected_sha256: &str,
+    executor: &(impl CommandExecutor + Sync),
+    cfg: &WorkerStreamConfig,
+) -> Result<u64> {
     let export_cmd = format_shell_export_command(
         source,
-        &peer.source_worker_bin,
+        &cfg.source_worker_bin,
         source_path,
-        peer.keep.keep_dir.as_deref(),
-        &peer.keep.skip,
+        cfg.keep.keep_dir.as_deref(),
+        &cfg.keep.skip,
     )?;
     let receive_cmd = format_shell_receive_command(
         destination,
-        &peer.destination_worker_bin,
+        &cfg.destination_worker_bin,
         destination_path,
         expected_sha256,
-        peer.keep.keep_dest.as_deref(),
+        cfg.keep.keep_dest.as_deref(),
     )?;
     let script = format!("set -euo pipefail\n{export_cmd} | {receive_cmd}\n");
     let host_locator = host_shell_locator(source);
@@ -382,7 +465,7 @@ fn transfer_same_host_stream(
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(())
+    Ok(parse_keep_tar_bytes(&output.stdout))
 }
 
 /// Bounded-memory concurrent pipe between a source export command and a
@@ -399,6 +482,16 @@ pub trait StreamPipe: Send + Sync {
         destination: &CommandSpec,
         expected_sha256: Option<&str>,
     ) -> Result<()>;
+
+    fn pipe_capture_stdout(
+        &self,
+        source: &CommandSpec,
+        destination: &CommandSpec,
+        expected_sha256: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        self.pipe(source, destination, expected_sha256)?;
+        Ok(Vec::new())
+    }
 }
 
 /// Real bounded-memory (64 KiB buffer) concurrent subprocess pipe.
@@ -433,6 +526,16 @@ impl StreamPipe for ProcessStreamPipe {
         destination: &CommandSpec,
         expected_sha256: Option<&str>,
     ) -> Result<()> {
+        let _ = self.pipe_capture_stdout(source, destination, expected_sha256)?;
+        Ok(())
+    }
+
+    fn pipe_capture_stdout(
+        &self,
+        source: &CommandSpec,
+        destination: &CommandSpec,
+        expected_sha256: Option<&str>,
+    ) -> Result<Vec<u8>> {
         const BUF_SIZE: usize = 64 * 1024;
 
         // Lease any managed SSH sessions without stdout markers (stdout carries
@@ -529,7 +632,7 @@ impl StreamPipe for ProcessStreamPipe {
             .join()
             .unwrap_or_else(|_| Ok(Vec::new()))
             .unwrap_or_default();
-        let _dst_stdout_bytes = dst_out_thread
+        let dst_stdout_bytes = dst_out_thread
             .join()
             .unwrap_or_else(|_| Ok(Vec::new()))
             .unwrap_or_default();
@@ -558,7 +661,7 @@ impl StreamPipe for ProcessStreamPipe {
             "daemon-stream destination write failed ({dst_status}): {}",
             String::from_utf8_lossy(&dst_stderr_bytes).trim()
         );
-        Ok(())
+        Ok(dst_stdout_bytes)
     }
 }
 
@@ -647,19 +750,45 @@ pub fn transfer_daemon_stream_with_worker(
     peer: &DirectPeerConfig,
     pipe: &dyn StreamPipe,
 ) -> Result<()> {
+    let cfg = WorkerStreamConfig {
+        source_worker_bin: peer.source_worker_bin.clone(),
+        destination_worker_bin: peer.destination_worker_bin.clone(),
+        keep: peer.keep.clone(),
+    };
+    let _ = transfer_daemon_stream_with_config(
+        source,
+        source_path,
+        destination,
+        destination_path,
+        expected_sha256,
+        &cfg,
+        pipe,
+    )?;
+    Ok(())
+}
+
+fn transfer_daemon_stream_with_config(
+    source: &TargetLocator,
+    source_path: &Path,
+    destination: &TargetLocator,
+    destination_path: &Path,
+    expected_sha256: &str,
+    cfg: &WorkerStreamConfig,
+    pipe: &dyn StreamPipe,
+) -> Result<u64> {
     let export_cmd = format_shell_export_command(
         source,
-        &peer.source_worker_bin,
+        &cfg.source_worker_bin,
         source_path,
-        peer.keep.keep_dir.as_deref(),
-        &peer.keep.skip,
+        cfg.keep.keep_dir.as_deref(),
+        &cfg.keep.skip,
     )?;
     let receive_cmd = format_shell_receive_command(
         destination,
-        &peer.destination_worker_bin,
+        &cfg.destination_worker_bin,
         destination_path,
         expected_sha256,
-        peer.keep.keep_dest.as_deref(),
+        cfg.keep.keep_dest.as_deref(),
     )?;
     let source_host = host_shell_locator(source);
     let dest_host = host_shell_locator(destination);
@@ -685,7 +814,8 @@ pub fn transfer_daemon_stream_with_worker(
         ],
     )
     .purpose("daemon-stream framed receive");
-    pipe.pipe(&export_spec, &import_spec, None)
+    let stdout = pipe.pipe_capture_stdout(&export_spec, &import_spec, None)?;
+    Ok(parse_keep_tar_bytes(&stdout))
 }
 
 struct EphemeralKeypair {
@@ -829,7 +959,7 @@ fn try_direct_push<S, C>(
     executor: &(impl CommandExecutor + Sync),
     peer: &DirectPeerConfig,
     ec2_grants: Option<&Ec2GrantManager<S, C>>,
-) -> Result<bool>
+) -> Result<Option<u64>>
 where
     S: Ec2GrantStore,
     C: Ec2SecurityGroupClient,
@@ -909,7 +1039,7 @@ where
                 cleanup.ec2_key = Some(key.clone());
             }
             AcquireOutcome::FallbackToDaemonStream => {
-                return Ok(false);
+                return Ok(None);
             }
         }
     }
@@ -948,7 +1078,7 @@ where
         push_out.status,
         String::from_utf8_lossy(&push_out.stderr).trim()
     );
-    Ok(true)
+    Ok(Some(parse_keep_tar_bytes(&push_out.stdout)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -961,7 +1091,7 @@ fn try_direct_pull<S, C>(
     executor: &(impl CommandExecutor + Sync),
     peer: &DirectPeerConfig,
     ec2_grants: Option<&Ec2GrantManager<S, C>>,
-) -> Result<bool>
+) -> Result<Option<u64>>
 where
     S: Ec2GrantStore,
     C: Ec2SecurityGroupClient,
@@ -1038,7 +1168,7 @@ where
                 cleanup.ec2_key = Some(key.clone());
             }
             AcquireOutcome::FallbackToDaemonStream => {
-                return Ok(false);
+                return Ok(None);
             }
         }
     }
@@ -1075,7 +1205,7 @@ where
         pull_out.status,
         String::from_utf8_lossy(&pull_out.stderr).trim()
     );
-    Ok(true)
+    Ok(Some(parse_keep_tar_bytes(&pull_out.stdout)))
 }
 
 fn stage_mode_0600_file(
@@ -1106,6 +1236,154 @@ fn stage_mode_0600_file(
         String::from_utf8_lossy(&out.stderr).trim()
     );
     Ok(())
+}
+
+/// Best-effort revocation of ephemeral Move SSH credentials recorded in
+/// `MoveOperation::granted_keys` after an interrupted or recovered Move.
+///
+/// For each key whose recorded `host` matches one of `candidate_targets` (an
+/// SSH/EC2 host), runs both `worker authorized-keys remove --operation-id` and
+/// `rm -f -- <private_key_path> <known_hosts_path>` on that host via the
+/// daemon's control connection. Keys without a matching remote locator fall
+/// back to local file removal.
+///
+/// Returns the subset of keys whose remote cleanup failed so callers can retain
+/// them for retry if a host was unreachable.
+pub(crate) fn cleanup_interrupted_move_credentials(
+    operation_id: &str,
+    granted_keys: &[mj_core::state::GrantedMoveKey],
+    candidate_targets: &[&TargetLocator],
+    executor: &(impl CommandExecutor + Sync),
+) -> Vec<mj_core::state::GrantedMoveKey> {
+    let mut remaining = Vec::new();
+    for key in granted_keys {
+        let matched_host = key
+            .ssh_target
+            .as_ref()
+            .map(|ssh| TargetLocator::SshBare {
+                ssh: ssh.clone(),
+                workspace: String::new(),
+                worker_id: None,
+            })
+            .or_else(|| {
+                candidate_targets
+                    .iter()
+                    .copied()
+                    .find(|locator| target_ssh_host(locator).as_deref() == Some(key.host.as_str()))
+                    .map(host_shell_locator)
+            });
+        let Some(host) = matched_host else {
+            super::recovery::cleanup_local_move_key_files(std::slice::from_ref(key));
+            continue;
+        };
+        let key_operation_id = key
+            .comment
+            .strip_prefix("mj-move-")
+            .filter(|id| !id.is_empty())
+            .unwrap_or(operation_id);
+        let mut ok = true;
+        if let (Some(worker_bin), Some(auth_keys_path)) =
+            (key.worker_bin.as_deref(), key.authorized_keys_path.as_deref())
+        {
+            let remove_spec = targets::locator_command(
+                SshTrafficClass::Control,
+                &host,
+                vec![
+                    worker_bin.to_owned(),
+                    "worker".into(),
+                    "authorized-keys".into(),
+                    "remove".into(),
+                    "--path".into(),
+                    auth_keys_path.to_string_lossy().into_owned(),
+                    "--operation-id".into(),
+                    key_operation_id.to_owned(),
+                ],
+            )
+            .purpose("remove temporary Move authorized_keys entry");
+            match executor.execute_cleanup(&remove_spec) {
+                Ok(out) if out.status == 0 => {}
+                Ok(out) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        status = out.status,
+                        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                        "failed to revoke temporary Move authorized_keys entry during recovery"
+                    );
+                }
+                Err(err) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        error = %err,
+                        "failed to revoke temporary Move authorized_keys entry during recovery"
+                    );
+                }
+            }
+        }
+        let mut stage_files = Vec::new();
+        if let Some(path) = &key.private_key_path {
+            stage_files.push(path.to_string_lossy().into_owned());
+        }
+        if let Some(path) = &key.known_hosts_path {
+            stage_files.push(path.to_string_lossy().into_owned());
+        }
+        if !stage_files.is_empty() {
+            let mut argv = vec!["rm".into(), "-f".into(), "--".into()];
+            argv.extend(stage_files);
+            let rm_spec = targets::locator_command(SshTrafficClass::Control, &host, argv)
+                .purpose("remove temporary Move SSH key and known_hosts");
+            match executor.execute_cleanup(&rm_spec) {
+                Ok(out) if out.status == 0 => {}
+                Ok(out) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        status = out.status,
+                        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                        "failed to remove temporary Move SSH files during recovery"
+                    );
+                }
+                Err(err) => {
+                    ok = false;
+                    tracing::warn!(
+                        operation_id,
+                        host = %key.host,
+                        error = %err,
+                        "failed to remove temporary Move SSH files during recovery"
+                    );
+                }
+            }
+        }
+        if !ok {
+            remaining.push(key.clone());
+        }
+    }
+    remaining
+}
+
+fn target_ssh_host(locator: &TargetLocator) -> Option<String> {
+    let ssh = match locator {
+        TargetLocator::SshBare { ssh, .. }
+        | TargetLocator::AwsEc2 { ssh, .. }
+        | TargetLocator::SshPodman { ssh, .. }
+        | TargetLocator::SshDocker { ssh, .. }
+        | TargetLocator::SshAppleContainer { ssh, .. }
+        | TargetLocator::SshNitro { ssh, .. } => ssh,
+        TargetLocator::LocalBare { .. }
+        | TargetLocator::LocalPodman { .. }
+        | TargetLocator::LocalDocker { .. }
+        | TargetLocator::AppleContainer { .. } => return None,
+    };
+    Some(
+        ssh.destination
+            .rsplit_once('@')
+            .map_or(ssh.destination.as_str(), |(_, host)| host)
+            .to_owned(),
+    )
 }
 
 /// Convert any target locator into a host-level locator for running host-local
@@ -2160,5 +2438,132 @@ fi
         let purposes = executor.recorded_purposes.lock().unwrap().clone();
         assert!(purposes.iter().any(|p| p == "remove temporary Move authorized_keys entry"));
         assert!(purposes.iter().any(|p| p == "remove temporary Move SSH key and known_hosts"));
+    }
+
+    #[test]
+    fn cleanup_interrupted_move_credentials_revokes_remote_authorized_keys_and_stage_files() {
+        #[derive(Default)]
+        struct RecordingCleanupExecutor {
+            commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        }
+        impl CommandExecutor for RecordingCleanupExecutor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands
+                    .lock()
+                    .unwrap()
+                    .push((command.purpose.clone(), command.args.clone()));
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+            fn execute_with_stdin(
+                &self,
+                command: &CommandSpec,
+                _input: &mut (dyn std::io::Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+        }
+        let src = TargetLocator::SshBare {
+            ssh: mj_core::targets::SshTarget {
+                destination: "user@src.example.com".into(),
+                ssh_args: vec![],
+            },
+            workspace: "/w".into(),
+            worker_id: None,
+        };
+        let dst = TargetLocator::SshBare {
+            ssh: mj_core::targets::SshTarget {
+                destination: "user@dst.example.com".into(),
+                ssh_args: vec![],
+            },
+            workspace: "/w".into(),
+            worker_id: None,
+        };
+        let keys = vec![
+            mj_core::state::GrantedMoveKey {
+                host: "src.example.com".into(),
+                comment: "mj-move-op-crash".into(),
+                private_key_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.key")),
+                known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.known_hosts")),
+                authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
+                worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
+                ssh_target: None,
+            },
+            mj_core::state::GrantedMoveKey {
+                host: "dst.example.com".into(),
+                comment: "mj-move-op-crash".into(),
+                private_key_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.key")),
+                known_hosts_path: Some(PathBuf::from("/home/u/.cache/mjolnir/move-stage/mj-move-op-crash.pull.known_hosts")),
+                authorized_keys_path: Some(PathBuf::from("/home/u/.ssh/authorized_keys")),
+                worker_bin: Some("/home/u/.local/share/mjolnir/workers/s1/hel".into()),
+                ssh_target: Some(mj_core::targets::SshTarget {
+                    destination: "user@dst.example.com".into(),
+                    ssh_args: vec![],
+                }),
+            },
+        ];
+        let executor = RecordingCleanupExecutor::default();
+        let remaining = cleanup_interrupted_move_credentials(
+            "op-different",
+            &keys,
+            &[&src, &dst],
+            &executor,
+        );
+        assert!(remaining.is_empty(), "all remote credentials should be revoked");
+        let commands = executor.commands.lock().unwrap();
+        assert_eq!(commands.len(), 4, "expected 2 authorized-keys remove + 2 rm -f: {commands:?}");
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move authorized_keys entry"
+                && args.iter().any(|a| a.contains("src.example.com"))
+                && args.iter().any(|a| a.contains("authorized-keys"))
+                && args.iter().any(|a| a.contains("op-crash"))
+        }));
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move authorized_keys entry"
+                && args.iter().any(|a| a.contains("dst.example.com"))
+                && args.iter().any(|a| a.contains("authorized-keys"))
+                && args.iter().any(|a| a.contains("op-crash"))
+        }));
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move SSH key and known_hosts"
+                && args.iter().any(|a| a.contains("src.example.com"))
+                && args.iter().any(|a| a.contains("mj-move-op-crash.key"))
+        }));
+        assert!(commands.iter().any(|(p, args)| {
+            p == "remove temporary Move SSH key and known_hosts"
+                && args.iter().any(|a| a.contains("dst.example.com"))
+                && args.iter().any(|a| a.contains("mj-move-op-crash.pull.key"))
+        }));
+
+        // Self-contained `ssh_target` revokes even when no candidate targets exist
+        // (e.g. after source retirement or carry-over onto a newer Move).
+        let deferred_executor = RecordingCleanupExecutor::default();
+        let deferred_remaining = cleanup_interrupted_move_credentials(
+            "op-later-move",
+            std::slice::from_ref(&keys[1]),
+            &[],
+            &deferred_executor,
+        );
+        assert!(deferred_remaining.is_empty());
+        assert_eq!(deferred_executor.commands.lock().unwrap().len(), 2);
     }
 }

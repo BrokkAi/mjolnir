@@ -36,9 +36,11 @@ use crate::archive::{
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_plain_directory_snapshot, ensure_no_symlink_ancestors, has_origin_refs,
-    remote_workspace_base, validate_component, verify_archive_streaming, write_archive_hashed,
-    write_archive_hashed_borrowed,
+    remote_workspace_base, validate_component, verify_archive_streaming,
+    write_archive_hashed_borrowed_with_manifest, write_archive_hashed_with_manifest,
 };
+#[cfg(test)]
+use crate::archive::{write_archive_hashed, write_archive_hashed_borrowed};
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.
 /// Shared archive algorithms never open a provider's database themselves.
@@ -282,6 +284,10 @@ pub struct TargetCheckpoint {
     /// simply omits it, so the controller must treat it as optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timings: Option<CheckpointExportTimings>,
+    /// Archive manifest written into the archive. Allows cross-target Move to
+    /// inspect repository metadata without downloading the archive to daemon disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<crate::archive::ArchiveManifest>,
 }
 
 /// Wall-clock cost of each target-side checkpoint phase, in milliseconds.

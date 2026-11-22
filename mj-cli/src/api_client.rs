@@ -912,6 +912,23 @@ impl ApiClient {
         .map(|_| ())
     }
 
+    pub(crate) async fn restart_session(&self, session_id: &str) -> Result<serde_json::Value> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/restart")))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?;
+        let text = response.text().await?;
+        if text.trim().is_empty() {
+            Ok(serde_json::json!({ "session_id": session_id, "restarted": true }))
+        } else {
+            Ok(serde_json::from_str(&text)
+                .unwrap_or_else(|_| serde_json::json!({ "session_id": session_id, "restarted": true })))
+        }
+    }
+
     /// Start a one-off review of the turn the session just finished. The
     /// daemon answers once the review has opened, which includes choosing and
     /// starting a reviewer, so this may take minutes.

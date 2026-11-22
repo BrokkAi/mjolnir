@@ -60,7 +60,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 pub(crate) use crate::targets::{removable_profile_root, target_profile_home};
-pub(crate) use mj_targets::command_checks::{check_output, execute_checked};
+pub(crate) use mj_targets::command_checks::execute_checked;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;

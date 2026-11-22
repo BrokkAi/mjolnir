@@ -62,8 +62,12 @@ pub fn purge_session_untracked_archive(
     ensure_admission(admission, session_id)?;
     let state = crate::database::load_state()?;
     let operations = crate::database::load_move_operations()?;
+    let legacy_operations: Vec<_> = crate::database::load_legacy_move_operations()?
+        .into_iter()
+        .map(|(_, op)| op)
+        .collect();
     let restarts = crate::database::load_session_restarts()?;
-    let recovery = recovery_referenced_archive_names(&operations, &restarts);
+    let recovery = recovery_referenced_archive_names(&operations, &legacy_operations, &restarts);
     purge_loaded(admission, session_id, dry_run, &state, &recovery)
 }
 
@@ -82,8 +86,12 @@ pub fn purge_sessions_untracked_archives(
     }
     let state = crate::database::load_state()?;
     let operations = crate::database::load_move_operations()?;
+    let legacy_operations: Vec<_> = crate::database::load_legacy_move_operations()?
+        .into_iter()
+        .map(|(_, op)| op)
+        .collect();
     let restarts = crate::database::load_session_restarts()?;
-    let recovery = recovery_referenced_archive_names(&operations, &restarts);
+    let recovery = recovery_referenced_archive_names(&operations, &legacy_operations, &restarts);
     let mut report = PurgeUntrackedReport {
         sessions: Vec::with_capacity(sessions.len()),
         total_bytes_reclaimed: 0,
@@ -490,8 +498,17 @@ mod tests {
             prepared_destination: None,
             accepted_preparation: None,
             acknowledge_interruption: false,
-            workspace_transfer: None,
-            handoff: None,
+            transfer_route: None,
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            granted_keys: Vec::new(),
+            granted_ec2_rules: Vec::new(),
+            in_place_expected_store_id: None,
+            in_place_continuation_command_id: None,
+            in_place_held_command_ids: Vec::new(),
+            in_place_harness_restarted: false,
+            deferred_environment_changes: Vec::new(),
+            source_snapshot: None,
             in_place: false,
             source_checkpoint_only: false,
             operation_id: "move-purge".into(),
@@ -499,7 +516,8 @@ mod tests {
                 oracle: None,
                 oracle_choice: None,
                 subagents: None,
-                workspace: Default::default(),
+                consent: Default::default(),
+                skip_keep_paths: Vec::new(),
                 clear_resource_allocation: false,
                 session_id: "44444444444444444444444444444444".into(),
                 profile_id: None,
@@ -522,7 +540,7 @@ mod tests {
             checkpoint: Some(checkpoint),
             recovery_session: None,
             queue: ResumeQueueDisposition::Discard,
-            phase: MovePhase::Preparing,
+            phase: MovePhase::Capturing,
             queue_admission_started: false,
             queue_admission_finished: false,
             cancellation_requested: false,

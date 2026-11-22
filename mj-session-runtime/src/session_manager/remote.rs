@@ -492,6 +492,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
             session_gate,
             credential_wakes,
             harness_failure: Default::default(),
+            guardian_stage1: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,
             commands: commands_tx,
             launches: launches_tx,

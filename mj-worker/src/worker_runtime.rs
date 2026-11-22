@@ -346,6 +346,7 @@ pub async fn discover_profile_config(
     anyhow::bail!("profile discovery requires a Unix worker host")
 }
 
+pub(crate) mod guardian_endpoint;
 #[cfg(unix)]
 mod history;
 #[cfg(unix)]

@@ -1640,19 +1640,21 @@ pub(crate) async fn apply_dashboard_action(
             start_session_launch(context, action);
         }
         DashboardAction::SuspendPreflight { session_id } => {
-            let io_tx = context.dashboard_io_tx.clone();
-            std::thread::spawn(move || {
-                let result = mj_core::runtime::block_on(async {
-                    let mut client = daemon::connect_or_start().await?;
-                    client
+            let updates = context.dashboard_io_tx.clone();
+            mj_core::runtime::spawn(async move {
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
                         .suspend_preflight(session_id.clone(), false, false)
                         .await
-                })
-                .and_then(|res| res);
-                let _ = io_tx.send(DashboardIoUpdate::SuspendPreflight {
-                    session_id,
-                    result: result.map_err(|error| format!("{error:#}")),
-                });
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                report(
+                    "checking workspace before suspend",
+                    &updates,
+                    DashboardIoUpdate::SuspendPreflight { session_id, result },
+                );
             });
         }
         DashboardAction::Suspend {
@@ -1759,7 +1761,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
         subagents,
         oracle,
         oracle_choice,
-        workspace_selection,
+        consent,
+        skip_keep_paths,
         session_id,
         profile_id,
         target_template_id,
@@ -1781,7 +1784,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
                     oracle,
                     oracle_choice,
                     subagents,
-                    workspace: workspace_selection,
+                    consent,
+                    skip_keep_paths,
                     session_id: session_id.clone(),
                     profile_id: Some(profile_id),
                     target_template_id: Some(target_template_id),

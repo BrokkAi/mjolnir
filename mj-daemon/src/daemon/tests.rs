@@ -8218,24 +8218,26 @@ esac
             }),
             accepted_preparation: None,
             acknowledge_interruption: false,
-            workspace_transfer: retained_workspace.then(|| {
-                mj_core::move_workspace::WorkspaceTransfer {
-                    assessment: Default::default(),
-                    source: Box::new(source.clone()),
-                    source_stage: root.path().join("source-stage"),
-                    controller_stage: root.path().join("controller-stage"),
-                    phase: mj_core::move_workspace::WorkspaceTransferPhase::SourceStopped,
-                }
-            }),
-            handoff: retained_workspace.then(|| checkpoint.clone()),
+            transfer_route: None,
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
+            granted_keys: Vec::new(),
+            granted_ec2_rules: Vec::new(),
+            in_place_expected_store_id: None,
+            in_place_continuation_command_id: None,
+            in_place_held_command_ids: Vec::new(),
+            in_place_harness_restarted: false,
+            deferred_environment_changes: Vec::new(),
+            source_snapshot: None,
             source_checkpoint_only: false,
-            in_place: false,
+            in_place: retained_workspace,
             operation_id: format!("mid-clone-{id}"),
             selection: mj_core::state::MoveSelection {
                 session_id: id.into(),
                 profile_id: Some("codex".into()),
                 target_template_id: Some("local".into()),
-                workspace: Default::default(),
+                consent: Default::default(),
+            skip_keep_paths: Vec::new(),
                 clear_resource_allocation: false,
                 additional_mounts: None,
                 resource_allocation: None,
@@ -8258,7 +8260,7 @@ esac
             checkpoint: Some(checkpoint.clone()),
             recovery_session: sealed.then(|| source.clone()),
             queue: mj_core::state::ResumeQueueDisposition::Discard,
-            phase: mj_core::state::MovePhase::ResumingDestination,
+            phase: mj_core::state::MovePhase::Restoring,
             queue_admission_started: false,
             queue_admission_finished: false,
             cancellation_requested: false,
@@ -11799,8 +11801,17 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
-        workspace_transfer: None,
-        handoff: None,
+        transfer_route: None,
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
         source_checkpoint_only: false,
         in_place: false,
         operation_id: "retained-move".into(),
@@ -11808,7 +11819,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
             oracle: None,
             oracle_choice: None,
             subagents: None,
-            workspace: Default::default(),
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
             session_id: session.id.clone(),
             profile_id: Some(session.last_profile.clone()),
             target_template_id: Some(session.target_template_id.clone()),
@@ -11831,7 +11843,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         checkpoint: None,
         recovery_session: Some(session.clone()),
         queue: mj_core::state::ResumeQueueDisposition::Start,
-        phase: mj_core::state::MovePhase::StartingQueue,
+        phase: mj_core::state::MovePhase::DestinationOwns,
         queue_admission_started: true,
         queue_admission_finished: false,
         cancellation_requested: false,
@@ -13166,8 +13178,17 @@ pub(super) fn retained_startup_test_move(
         prepared_destination: None,
         accepted_preparation: None,
         acknowledge_interruption: false,
-        workspace_transfer: None,
-        handoff: None,
+        transfer_route: None,
+        consent: Default::default(),
+        skip_keep_paths: Vec::new(),
+        granted_keys: Vec::new(),
+        granted_ec2_rules: Vec::new(),
+        in_place_expected_store_id: None,
+        in_place_continuation_command_id: None,
+        in_place_held_command_ids: Vec::new(),
+        in_place_harness_restarted: false,
+        deferred_environment_changes: Vec::new(),
+        source_snapshot: None,
         source_checkpoint_only: false,
         in_place: false,
         operation_id: "startup-durable-move".into(),
@@ -13175,7 +13196,8 @@ pub(super) fn retained_startup_test_move(
             oracle: None,
             oracle_choice: None,
             subagents: None,
-            workspace: Default::default(),
+            consent: Default::default(),
+            skip_keep_paths: Vec::new(),
             session_id: session.id.clone(),
             profile_id: Some(session.last_profile.clone()),
             target_template_id: Some(session.target_template_id.clone()),
@@ -13198,7 +13220,7 @@ pub(super) fn retained_startup_test_move(
         checkpoint: None,
         recovery_session: Some(session.clone()),
         queue: mj_core::state::ResumeQueueDisposition::Start,
-        phase: mj_core::state::MovePhase::StartingQueue,
+        phase: mj_core::state::MovePhase::DestinationOwns,
         queue_admission_started: true,
         queue_admission_finished: false,
         cancellation_requested: false,
@@ -13770,7 +13792,7 @@ async fn startup_failed_and_cancelled_moves_restore_images_instead_of_using_reta
         let mut operation = retained_startup_test_move(&session);
         operation.in_place = true;
         operation.queue_admission_started = index != 0;
-        operation.phase = mj_core::state::MovePhase::Preparing;
+        operation.phase = mj_core::state::MovePhase::Capturing;
         mj_controller::database::save_move_operation(&operation).unwrap();
         manager
             .publisher
@@ -16639,4 +16661,48 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         SessionState::Running,
         "refused without_checkpoint must not transition session to Closing"
     );
+}
+
+// Hard-won: c9cb0752f: SuspendPreflight was marked as a cancellable machine action without a machine::execute arm.
+#[tokio::test]
+async fn suspend_preflight_runs_through_cancellable_machine_action_dispatch() {
+    const CHILD: &str = "MJ_TEST_SUSPEND_PREFLIGHT_MACHINE_DISPATCH";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "suspend_preflight_runs_through_cancellable_machine_action_dispatch",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let session_id = "daemon-suspend-preflight-machine";
+    let record = runtime_test_session(session_id, "default", SessionState::Running);
+    mj_controller::database::save_session(&record).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let cancellation = CancellationToken::new();
+    let server = mj_core::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, cancellation).await
+    });
+
+    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+        .await
+        .unwrap();
+    let preflight = client
+        .suspend_preflight(session_id.into(), false, false)
+        .await
+        .expect("suspend preflight must succeed over the cancellable machine dispatch path");
+    assert_eq!(preflight.session_id, session_id);
+    drop(client);
+    server.await.unwrap().unwrap();
 }
