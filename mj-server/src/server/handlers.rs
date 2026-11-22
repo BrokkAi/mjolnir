@@ -426,10 +426,9 @@ pub(super) async fn action(
                 .subagent
                 .as_ref()
                 .ok_or_else(ApiError::controller_unavailable)?;
-            let subagents = backend
-                .subagent_config()
-                .await
-                .map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")))?;
+            let subagents = backend.subagent_config().await.map_err(|error| {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}"))
+            })?;
             if !subagents.primary_configured() {
                 return Err(ApiError::bad_request(
                     "primary auto-selection is not configured; set [subagents] primary in config.toml or choose an explicit profile",
@@ -511,17 +510,23 @@ pub(super) async fn action(
         && let Some(backend) = state.subagent.as_ref()
     {
         selection.reservation.commit(Some(session_id.clone()));
-        backend
+        if let Err(error) = backend
             .start_followup(
-                session_id,
+                session_id.clone(),
                 crate::server::api::StartFollowup {
-                    model: Some(selection.model),
-                    effort: selection.effort,
+                    model: Some(selection.model.clone()),
+                    effort: selection.effort.clone(),
                     ..Default::default()
                 },
             )
             .await
-            .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
+        {
+            tracing::warn!(session_id = %session_id, model = %selection.model, effort = ?selection.effort, %error, "failed to queue selected primary model/effort after creating session");
+            backend.push_notice(
+                &session_id,
+                format!("Session created on profile {}, but applying primary model {} failed ({error:#}). Select the model manually in the session.", selection.profile_id, selection.model),
+            );
+        }
     }
     Ok(StatusCode::ACCEPTED.into_response())
 }

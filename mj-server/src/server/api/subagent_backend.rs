@@ -23,6 +23,7 @@ impl UploadBody {
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn push_notice(&self, _session_id: &str, _message: String) {}
     /// Current login failures from the daemon's publication; memory only.
     fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
         Ok(Default::default())

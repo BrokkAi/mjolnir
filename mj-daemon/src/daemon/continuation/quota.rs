@@ -11,11 +11,13 @@ pub(super) enum Plan {
     Wait(QuotaRecovery),
     ChildSwitch {
         destination: String,
+        reservation: Option<mj_controller::quota_telemetry::PlacementReservation>,
         fallback: QuotaRecovery,
     },
     Move {
         request: Box<MoveSessionRequest>,
         destination: String,
+        reservation: Option<mj_controller::quota_telemetry::PlacementReservation>,
         /// Why the session moves, as a clause for the destination's notice.
         reason: String,
         abstention: QuotaRecovery,
@@ -33,12 +35,13 @@ pub(super) type StartMove = Arc<
 >;
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn destinations(
     config: &mj_core::config::Config,
     source: &str,
     harness: mj_core::config::HarnessKind,
     model: &str,
-    mut candidates: Vec<SubagentCandidate>,
+    candidates: Vec<SubagentCandidate>,
     now: i64,
     execution_policy: mj_core::config::ExecutionPolicy,
     placement: mj_controller::profile_scheduler::Placement,
@@ -46,6 +49,41 @@ pub(super) fn destinations(
     telemetry: &mj_controller::quota_telemetry::QuotaTelemetrySnapshot,
     power_ranking: &mj_controller::power_ranking::PowerRankingSnapshot,
 ) -> Result<Vec<SubagentCandidate>> {
+    let mut wrapped = wrap_destinations(
+        eligible_destinations(
+            config,
+            source,
+            harness,
+            model,
+            candidates,
+            now,
+            execution_policy,
+        ),
+        model,
+    );
+    let ctx = mj_controller::profile_scheduler::SchedulingContext {
+        execution_policy,
+        placement,
+        category,
+        ranking_anchor: None,
+        prefer: &config.quota.prefer,
+        telemetry,
+        power_ranking,
+        now_seconds: now,
+    };
+    mj_controller::profile_scheduler::draw_scheduled_candidates(&mut wrapped, &ctx)?;
+    Ok(wrapped.into_iter().map(|w| w.candidate).collect())
+}
+
+fn eligible_destinations(
+    config: &mj_core::config::Config,
+    source: &str,
+    harness: mj_core::config::HarnessKind,
+    model: &str,
+    mut candidates: Vec<SubagentCandidate>,
+    now: i64,
+    execution_policy: mj_core::config::ExecutionPolicy,
+) -> Vec<SubagentCandidate> {
     candidates.retain(|c| {
         c.profile_id != source
             && c.harness == harness
@@ -57,16 +95,21 @@ pub(super) fn destinations(
             && !c.unhealthy.contains_key(model)
             && mj_controller::profile_scheduler::ineligibility(c, model, now).is_none()
     });
-    struct DestinationCandidate {
-        candidate: SubagentCandidate,
-        scheduled: mj_controller::profile_scheduler::ScheduledCandidate,
+    candidates
+}
+
+struct DestinationCandidate {
+    candidate: SubagentCandidate,
+    scheduled: mj_controller::profile_scheduler::ScheduledCandidate,
+}
+impl AsRef<mj_controller::profile_scheduler::ScheduledCandidate> for DestinationCandidate {
+    fn as_ref(&self) -> &mj_controller::profile_scheduler::ScheduledCandidate {
+        &self.scheduled
     }
-    impl AsRef<mj_controller::profile_scheduler::ScheduledCandidate> for DestinationCandidate {
-        fn as_ref(&self) -> &mj_controller::profile_scheduler::ScheduledCandidate {
-            &self.scheduled
-        }
-    }
-    let mut wrapped: Vec<DestinationCandidate> = candidates
+}
+
+fn wrap_destinations(candidates: Vec<SubagentCandidate>, model: &str) -> Vec<DestinationCandidate> {
+    candidates
         .into_iter()
         .map(|candidate| {
             let scheduled = mj_controller::profile_scheduler::ScheduledCandidate {
@@ -83,19 +126,7 @@ pub(super) fn destinations(
                 scheduled,
             }
         })
-        .collect();
-    let ctx = mj_controller::profile_scheduler::SchedulingContext {
-        execution_policy,
-        placement,
-        category,
-        ranking_anchor: None,
-        prefer: &config.quota.prefer,
-        telemetry,
-        power_ranking,
-        now_seconds: now,
-    };
-    mj_controller::profile_scheduler::draw_scheduled_candidates(&mut wrapped, &ctx)?;
-    Ok(wrapped.into_iter().map(|w| w.candidate).collect())
+        .collect()
 }
 
 fn local_reset(ms: i64) -> Option<String> {
@@ -398,42 +429,44 @@ pub(super) async fn prepare(
             } else {
                 "primary"
             };
-            let telemetry = state.quota_telemetry.snapshot();
             let power_ranking = state.power_ranking.snapshot();
             let mut refused = false;
-            for candidate in destinations(
-                &config,
-                &source,
-                harness,
+            let mut remaining = wrap_destinations(
+                eligible_destinations(
+                    &config,
+                    &source,
+                    harness,
+                    &model,
+                    candidates,
+                    now_ms / 1000,
+                    execution_policy,
+                ),
                 &model,
-                candidates,
-                now_ms / 1000,
-                execution_policy,
-                placement,
-                Some(category),
-                &telemetry,
-                &power_ranking,
-            )? {
+            );
+            while !remaining.is_empty() {
+                let reservation = state.quota_telemetry.draw_and_reserve(
+                    &mut remaining,
+                    execution_policy,
+                    placement,
+                    Some(category),
+                    None,
+                    &config.quota.prefer,
+                    &power_ranking,
+                    now_ms / 1000,
+                )?;
+                let Some(reservation) = reservation else {
+                    break;
+                };
+                let candidate = remaining.remove(0).candidate;
                 if child {
-                    state.quota_telemetry.record_committed_placement(
-                        id,
-                        &candidate.profile_id,
-                        category,
-                        now_ms / 1000,
-                    );
                     return Ok(Plan::ChildSwitch {
                         destination: candidate.profile_id,
+                        reservation: Some(reservation),
                         fallback,
                     });
                 }
                 match state.prepare_quota_move(id, &candidate.profile_id).await {
                     Ok(request) => {
-                        state.quota_telemetry.record_committed_placement(
-                            id,
-                            &candidate.profile_id,
-                            category,
-                            now_ms / 1000,
-                        );
                         // The record keeps the fallback's times, so a Move that
                         // fails leaves the retry on the source profile in place.
                         // A completed Move changes the profile, which clears it.
@@ -442,12 +475,14 @@ pub(super) async fn prepare(
                         return Ok(Plan::Move {
                             request: Box::new(request),
                             destination: candidate.profile_id,
+                            reservation: Some(reservation),
                             reason,
                             abstention,
                             fallback,
                         });
                     }
                     Err(error) => {
+                        drop(reservation);
                         refused = true;
                         preparation_refused(
                             &mut fallback.notice,
@@ -716,6 +751,7 @@ pub(super) async fn schedule(
     let plan = match plan {
         Plan::ChildSwitch {
             destination,
+            reservation,
             mut fallback,
         } => {
             let turn = view
@@ -737,6 +773,9 @@ pub(super) async fn schedule(
                 .await
             {
                 Ok(()) => {
+                    if let Some(reservation) = reservation {
+                        reservation.commit(Some(id.to_owned()));
+                    }
                     let handle = env
                         .control
                         .find_session(id)
@@ -958,6 +997,7 @@ pub(super) async fn schedule(
         Plan::Move {
             request,
             destination,
+            reservation,
             reason,
             fallback,
             ..
@@ -976,6 +1016,9 @@ pub(super) async fn schedule(
             };
             match (env.start_quota_move)((**request).clone(), reason.clone(), continuation).await {
                 Ok(()) => {
+                    if let Some(reservation) = reservation {
+                        reservation.commit(Some(id.to_owned()));
+                    }
                     record_finished(env, id);
                     Ok(Box::new(handle.view()))
                 }

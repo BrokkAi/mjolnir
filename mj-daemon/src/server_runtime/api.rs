@@ -53,6 +53,7 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn push_notice(&self, _session_id: &str, _message: String) {}
     fn workspace_admission(
         &self,
         _session_id: String,
@@ -304,6 +305,9 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn push_notice(&self, session_id: &str, message: String) {
+        RuntimeState::push_notice(self, session_id, message);
+    }
     fn workspace_admission(
         &self,
         session_id: String,
@@ -4088,6 +4092,9 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn push_notice(&self, session_id: &str, message: String) {
+        self.exports.push_notice(session_id, message);
+    }
     fn subagent_work_liveness(
         &self,
         child_session_id: String,

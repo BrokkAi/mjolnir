@@ -971,6 +971,102 @@ fn quota_move_request() -> mj_core::state::MoveSessionRequest {
     .unwrap()
 }
 
+#[test]
+fn concurrent_quota_destination_reservations_spill_to_peer_and_drop_releases() {
+    use mj_controller::profile_scheduler::{CandidateQuota, Placement, ScheduledCandidate};
+    use mj_controller::quota::QuotaWindow;
+    use mj_core::config::{ExecutionPolicy, HarnessKind};
+
+    let store = mj_controller::quota_telemetry::QuotaTelemetryStore::new();
+    let now = 1_700_000_000;
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let candidate = move |id: &str, remaining_percent| ScheduledCandidate {
+        profile_id: id.into(),
+        harness: HarnessKind::Codex,
+        model: "model".into(),
+        effort: None,
+        may_consume_credits: false,
+        quota: CandidateQuota::Subscription {
+            monthly_price_usd: None,
+            paid_credits: None,
+            refreshed_at_epoch_seconds: now as u64,
+            windows: vec![QuotaWindow {
+                label: "weekly".into(),
+                remaining_percent: Some(remaining_percent),
+                resets_at_epoch_seconds: Some(now + 86400),
+                duration_seconds: Some(604800),
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+            }],
+        },
+        cache_identity: Some(id.into()),
+    };
+    let first_store = store.clone();
+    let first_barrier = barrier.clone();
+    let first = std::thread::spawn(move || {
+        let mut candidates = vec![candidate("nearly-empty", 3)];
+        let reservation = first_store
+            .draw_and_reserve(
+                &mut candidates,
+                ExecutionPolicy::Unconstrained,
+                Placement::TopLevel,
+                Some("primary"),
+                None,
+                &[],
+                mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        first_barrier.wait();
+        reservation
+    });
+    let second_store = store.clone();
+    let second = std::thread::spawn(move || {
+        barrier.wait();
+        let mut candidates = vec![candidate("nearly-empty", 3), candidate("peer", 80)];
+        let reservation = second_store
+            .draw_and_reserve(
+                &mut candidates,
+                ExecutionPolicy::Unconstrained,
+                Placement::TopLevel,
+                Some("primary"),
+                None,
+                &[],
+                mj_controller::power_ranking::PowerRankingSnapshot::baseline(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        (candidates[0].profile_id.clone(), reservation)
+    });
+    let first = first.join().unwrap();
+    let (second_pick, second_reservation) = second.join().unwrap();
+    assert_eq!(second_pick, "peer");
+    drop(first);
+    assert_eq!(
+        store
+            .snapshot()
+            .recent_placements
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        1
+    );
+    drop(second_reservation);
+    assert_eq!(
+        store
+            .snapshot()
+            .recent_placements
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        0
+    );
+}
+
 fn private_quota_move_error() -> anyhow::Error {
     let error = toml::from_str::<toml::Value>(
         r#"experimental_bearer_token = "quota-secret-canary" unexpected"#,
@@ -1129,6 +1225,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             abstention.notice =
                 quota::move_notice("the weekly quota is exhausted", "destination", &fallback);
             quota::Plan::Move {
+                reservation: None,
                 request: Box::new(quota_move_request()),
                 destination: "destination".into(),
                 reason: "the weekly quota is exhausted".into(),
@@ -2425,6 +2522,7 @@ async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() 
                     abstention.notice =
                         quota::move_notice("quota exhausted", "destination", &recovery);
                     quota::Plan::Move {
+                        reservation: None,
                         request: Box::new(quota_move_request()),
                         destination: "destination".into(),
                         reason: "quota exhausted".into(),
@@ -2683,6 +2781,7 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
                         abstention.notice =
                             quota::move_notice("quota exhausted", destination, &fallback);
                         Ok(quota::Plan::Move {
+                            reservation: None,
                             request: Box::new(request),
                             destination: destination.into(),
                             reason: "quota exhausted".into(),

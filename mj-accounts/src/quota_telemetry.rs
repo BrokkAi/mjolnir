@@ -447,7 +447,7 @@ struct QuotaTelemetryStoreInner {
     category_stats: BTreeMap<String, CategoryBurnStats>,
     next_reservation_id: u64,
     in_flight: BTreeMap<u64, (String, RecentPlacement)>,
-    committed_pending: BTreeMap<String, (String, RecentPlacement)>,
+    committed_pending: BTreeMap<(String, String), (String, RecentPlacement)>,
 }
 
 impl QuotaTelemetryStoreInner {
@@ -481,14 +481,17 @@ impl QuotaTelemetryStoreInner {
 pub struct PlacementReservation {
     store: QuotaTelemetryStore,
     reservation_id: u64,
-    committed: bool,
+    committed: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for PlacementReservation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlacementReservation")
             .field("reservation_id", &self.reservation_id)
-            .field("committed", &self.committed)
+            .field(
+                "committed",
+                &self.committed.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -496,15 +499,19 @@ impl std::fmt::Debug for PlacementReservation {
 impl PlacementReservation {
     /// Promote this tentative reservation to a committed placement. Passing
     /// `Some(session_id)` enables exact deduplication on `refresh_from_store`.
-    pub fn commit(mut self, session_id: Option<String>) {
-        self.committed = true;
+    pub fn commit(&self, session_id: Option<String>) {
+        self.committed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let mut guard = self
             .store
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = guard.in_flight.remove(&self.reservation_id) {
-            let key = session_id.unwrap_or_else(|| format!("__unkeyed-{}", self.reservation_id));
+            let key = (
+                session_id.unwrap_or_else(|| format!("__unkeyed-{}", self.reservation_id)),
+                entry.0.clone(),
+            );
             guard.committed_pending.insert(key, entry);
         }
     }
@@ -512,7 +519,7 @@ impl PlacementReservation {
 
 impl Drop for PlacementReservation {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed.load(std::sync::atomic::Ordering::Relaxed) {
             let mut guard = self
                 .store
                 .inner
@@ -590,7 +597,7 @@ impl QuotaTelemetryStore {
         Ok(Some(PlacementReservation {
             store: self.clone(),
             reservation_id,
-            committed: false,
+            committed: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -623,7 +630,7 @@ impl QuotaTelemetryStore {
         let id = guard.next_reservation_id;
         guard.next_reservation_id = guard.next_reservation_id.saturating_add(1);
         guard.committed_pending.insert(
-            format!("__recorded-{id}"),
+            (format!("__recorded-{id}"), format!("__recorded-{id}")),
             (
                 profile_id.to_owned(),
                 RecentPlacement {
@@ -646,7 +653,7 @@ impl QuotaTelemetryStore {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.committed_pending.insert(
-            session_id.to_owned(),
+            (session_id.to_owned(), profile_id.to_owned()),
             (
                 profile_id.to_owned(),
                 RecentPlacement {
@@ -669,7 +676,7 @@ impl QuotaTelemetryStore {
     /// `(profile_id, cache_identity)` pairs. Safe to call on the 10-minute
     /// quota poller background task (never on the spawn hot path).
     ///
-    /// Deduplicates `committed_pending` by `session_id` against the loaded
+    /// Deduplicates `committed_pending` by `(session_id, profile_id)` against the loaded
     /// SQLite rows so a placement committed concurrently with a refresh is
     /// never double-counted.
     pub fn refresh_from_store(
@@ -700,10 +707,12 @@ impl QuotaTelemetryStore {
         rows: Vec<crate::database::RecentPlacementRow>,
         placements_since: i64,
     ) {
-        let mut seen_session_ids = std::collections::HashSet::with_capacity(rows.len());
+        let mut seen: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut durable_placements: BTreeMap<String, Vec<RecentPlacement>> = BTreeMap::new();
         for row in rows {
-            seen_session_ids.insert(row.session_id);
+            seen.entry((row.session_id, row.profile_id.clone()))
+                .and_modify(|timestamp| *timestamp = (*timestamp).max(row.created_at_epoch_seconds))
+                .or_insert(row.created_at_epoch_seconds);
             durable_placements
                 .entry(row.profile_id)
                 .or_default()
@@ -718,9 +727,13 @@ impl QuotaTelemetryStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .committed_pending
-            .retain(|session_id, (_, placement)| {
-                !seen_session_ids.contains(session_id)
-                    && placement.created_at_epoch_seconds >= placements_since
+            .retain(|(session_id, profile_id), (_, placement)| {
+                placement.created_at_epoch_seconds >= placements_since
+                    && seen
+                        .get(&(session_id.clone(), profile_id.clone()))
+                        .is_none_or(|row_ts| {
+                            *row_ts < placement.created_at_epoch_seconds.saturating_sub(60)
+                        })
             });
         guard.windows = all_windows;
         guard.durable_placements = durable_placements;
@@ -951,5 +964,54 @@ mod tests {
             1,
             "committed_pending entry must be deduplicated by session_id on refresh"
         );
+
+        // A Move's destination reservation survives rows that still describe
+        // its source, and rows with an older session creation timestamp.
+        let moved = QuotaTelemetryStore::new();
+        let mut candidates = vec![make_cand("profile-b", 80)];
+        moved
+            .draw_and_reserve(
+                &mut candidates,
+                ExecutionPolicy::Unconstrained,
+                Placement::Child,
+                Some("primary"),
+                None,
+                &[],
+                ranking,
+                now,
+            )
+            .unwrap()
+            .unwrap()
+            .commit(Some("moved-session".into()));
+        for (profile_id, created_at_epoch_seconds) in
+            [("profile-a", now - 30), ("profile-b", now - 3600)]
+        {
+            moved.apply_store_refresh(
+                BTreeMap::new(),
+                vec![crate::database::RecentPlacementRow {
+                    session_id: "moved-session".into(),
+                    profile_id: profile_id.into(),
+                    category: "primary".into(),
+                    created_at_epoch_seconds,
+                }],
+                now - 7200,
+            );
+            assert_eq!(
+                moved.snapshot().recent_placements["profile-b"].len(),
+                if profile_id == "profile-b" { 2 } else { 1 },
+                "destination reservation must survive source or older destination history"
+            );
+        }
+        moved.apply_store_refresh(
+            BTreeMap::new(),
+            vec![crate::database::RecentPlacementRow {
+                session_id: "moved-session".into(),
+                profile_id: "profile-b".into(),
+                category: "primary".into(),
+                created_at_epoch_seconds: now,
+            }],
+            now - 7200,
+        );
+        assert_eq!(moved.snapshot().recent_placements["profile-b"].len(), 1);
     }
 }

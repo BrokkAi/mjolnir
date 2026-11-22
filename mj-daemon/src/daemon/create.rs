@@ -100,16 +100,23 @@ impl RuntimeState {
             selected
                 .reservation
                 .commit(Some(registered.session.id.clone()));
-            backend
+            if let Err(error) = backend
                 .start_followup(
                     registered.session.id.clone(),
                     crate::server::api::StartFollowup {
-                        model: Some(selected.model),
-                        effort: selected.effort,
+                        model: Some(selected.model.clone()),
+                        effort: selected.effort.clone(),
                         ..Default::default()
                     },
                 )
-                .await?;
+                .await
+            {
+                tracing::warn!(session_id = %registered.session.id, model = %selected.model, effort = ?selected.effort, %error, "failed to queue selected primary model/effort after creating session");
+                self.push_notice(
+                    &registered.session.id,
+                    format!("Session created on profile {}, but applying primary model {} failed ({error:#}). Select the model manually in the session.", registered.session.last_profile, selected.model),
+                );
+            }
         }
         if let Some(warning) = warning {
             self.push_notice(&registered.session.id, warning);
