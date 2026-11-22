@@ -78,14 +78,19 @@ Priority order now:
   with `touch /mnt/optane/review-arms-pilot/fidelity/stop-requested` (it exits 3 at the next query boundary);
   remove the file and run the new `start.sh`. Engine identity must not change, or all 55 answers are void.
 - **"an incomplete fidelity launch needs reconciliation at <dir>"**: a Terra or adjudicator checkpoint has a
-  session and intent but no completion. If `<dir>/destroy-receipt.json` exists and no `completed.json`,
-  rename the dir to `<name>-failed-<first 8 of session_id>` and restart. If no destroy receipt, the session
-  may be live: inspect with `./mjx --instance rql-census-pilot sessions --json` before touching anything.
+  session and intent but no completion. **First check for a double Terra stall**: if a `terra-stalled/`
+  directory sits beside `terra/`, and `live.log` ended with "Terra repair stalled in both sessions", the
+  query has no gold and the gate stopped on purpose. Do not rename and restart, which would only buy a
+  third enumeration; bring it to the coordinator or the user, since how to score such a query is unruled.
+  Otherwise, if `<dir>/destroy-receipt.json` exists and no `completed.json`, rename the dir to
+  `<name>-failed-<first 8 of session_id>` and restart. If no destroy receipt, the session may be live:
+  inspect with `./mjx --instance rql-census-pilot sessions --json` before touching anything.
 - Monitoring: in the active checkpoint directory only (the `88095b…/896aec04…` path above; another
   engine identity gets its own directory), count `measurement.json`, and count `engine.json` and
   `fresh-engine.json` by their `status`: `ok` receipts are accepted answers, `engine_error` receipts
-  with `failure: "repair_stalled"` are recorded engine failures. Watch
-  `engine-cache/*/retired/*/void.json` for voids; read `gate-full/<sha>/live.log` and `exit.json`.
+  with `failure: "repair_stalled"` are recorded engine failures. Read `gate-full/<sha>/live.log` and
+  `exit.json`. A new `engine-cache/*/retired/*/void.json` is worth reading, but it is not a stop: a first
+  void retries in a fresh session, and only a second void for the same query stops the gate.
 
 ### What is fixed (all reviewed and pushed) and what to expect
 - Engine: no shell (Read/Grep/Glob/Write/Edit only), host-side offsets and site lists, audit fixes for
@@ -115,7 +120,8 @@ User rulings (2026-11-21/22; all in the ExecPlan Decision Log):
   claude4 (reset ~2026-11-23 05Z) and claude7 (~2026-11-24 13Z), only if pace requires; deployment steps in
   `.mj/agents/8b56d5e7a536a7cfbb3e3df33fc3e92e/deployment.md`.
 - A query whose repair stalls in both engine sessions counts as an engine failure: zero rows, against recall,
-  reported by name. Voids, holds and infrastructure errors still stop the gate.
+  reported by name. A second void for the same query, a quota hold, or an infrastructure error still
+  stops the gate; a first void just retries in a fresh session.
 - Writers' suffix-free in-place edits of their own files pass the audit, narrowly (Decision Log 2026-11-21).
 
 Standing rules:
