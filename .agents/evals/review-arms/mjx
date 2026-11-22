@@ -22,9 +22,9 @@ mj=/home/jonathan/.cargo/bin/mj
 pilot=
 prev=
 for arg in "$@"; do
-  case "$prev|$arg" in
-    "--instance|rql-census-pilot"|"|--instance=rql-census-pilot") pilot=1 ;;
-  esac
+  if [ "$arg" = "--instance=rql-census-pilot" ] || { [ "$prev" = "--instance" ] && [ "$arg" = "rql-census-pilot" ]; }; then
+    pilot=1
+  fi
   prev=$arg
 done
 if [ -n "$pilot" ]; then
