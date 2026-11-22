@@ -187,7 +187,7 @@ pub fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> Mov
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
             oracle: None,
-        supervisors: None,
+            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),

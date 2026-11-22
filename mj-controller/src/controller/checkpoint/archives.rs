@@ -269,9 +269,8 @@ mod tests {
             automatic: false,
             container_upgrade: None,
         };
-        let legacy_handoff = checkpoint(
-            "sessions/legacy-7-archive-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.hel.zip",
-        );
+        let legacy_handoff =
+            checkpoint("sessions/legacy-7-archive-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.hel.zip");
         let legacy_failed = mj_core::state::LegacyMoveOperation {
             selection: Some(mj_core::state::LegacyMoveSelection {
                 session_id: "legacy".into(),

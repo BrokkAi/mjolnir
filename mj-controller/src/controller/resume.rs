@@ -40,15 +40,13 @@ use super::readiness::{
 use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
-    apply_workspace_to_raw, create_managed_worktree, managed_worktree_checkout_exists,
-    managed_worktree_target, plan_raw_to_workspace_for_session,
-    plan_raw_to_workspace_from_origin_delta,
+    apply_workspace_to_raw, capture_legacy_raw_checkout_snapshot, create_managed_worktree,
+    ensure_managed_worktree_available, managed_worktree_checkout_exists, managed_worktree_target,
+    plan_raw_to_workspace_for_session, plan_raw_to_workspace_from_origin_delta,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
-    capture_legacy_raw_checkout_snapshot, ensure_managed_worktree_available,
     raw_checkout_position_with_checkout, raw_conversion_preview_with_checkout,
     restore_legacy_worktree_as_managed_clone, restore_managed_worktree,
-    upgrade_legacy_worktree_to_clone,
-    resume_compatibility_with_checkout,
+    resume_compatibility_with_checkout, upgrade_legacy_worktree_to_clone,
 };
 use super::{
     Controller, SessionResumeOptions, execute_checked, now, selected_host_container_size,
@@ -1026,15 +1024,17 @@ impl Controller {
                         let computed_dest_keep = match transfer.dest_keep_dir.clone() {
                             Some(path) => Some(path),
                             None => {
-                                let repo_root = resumed_project_directory.clone().unwrap_or_else(|| {
-                                    self.state.sessions[session_id]
-                                        .project_bundle(&self.config)
-                                        .and_then(|bundle| bundle.primary())
-                                        .map(|primary| {
-                                            PathBuf::from(&workspace_root).join(&primary.destination)
-                                        })
-                                        .unwrap_or_else(|| PathBuf::from(&workspace_root))
-                                });
+                                let repo_root =
+                                    resumed_project_directory.clone().unwrap_or_else(|| {
+                                        self.state.sessions[session_id]
+                                            .project_bundle(&self.config)
+                                            .and_then(|bundle| bundle.primary())
+                                            .map(|primary| {
+                                                PathBuf::from(&workspace_root)
+                                                    .join(&primary.destination)
+                                            })
+                                            .unwrap_or_else(|| PathBuf::from(&workspace_root))
+                                    });
                                 Some(resolve_move_keep_dir(
                                     restoring,
                                     backend_ref,
@@ -1082,9 +1082,7 @@ impl Controller {
                         ],
                         || {
                             Ok(std::fs::metadata(restored_archive)
-                                .with_context(|| {
-                                    format!("measure {}", restored_archive.display())
-                                })?
+                                .with_context(|| format!("measure {}", restored_archive.display()))?
                                 .len())
                         },
                         "restore the checkpoint",
@@ -1110,21 +1108,20 @@ impl Controller {
                             let restoring =
                                 &StagedExecutor::new(executor, ProvisionStage::Restoring);
                             if should_upload_restore_archive(&backend) {
-                                let reused = mj_checkpoint::checkpoint::checkpoint_sha256(
-                                    restored_archive,
-                                )
-                                .ok()
-                                .and_then(|sha256| {
-                                    super::checkpoint::try_stage_host_snapshot_cache(
-                                        restoring,
-                                        backend_ref,
-                                        session_id,
-                                        &sha256,
-                                        &remote_archive,
-                                    )
-                                    .ok()
-                                })
-                                .unwrap_or(false);
+                                let reused =
+                                    mj_checkpoint::checkpoint::checkpoint_sha256(restored_archive)
+                                        .ok()
+                                        .and_then(|sha256| {
+                                            super::checkpoint::try_stage_host_snapshot_cache(
+                                                restoring,
+                                                backend_ref,
+                                                session_id,
+                                                &sha256,
+                                                &remote_archive,
+                                            )
+                                            .ok()
+                                        })
+                                        .unwrap_or(false);
                                 if !reused {
                                     upload_checkpoint_spec(
                                         restoring,
@@ -1158,7 +1155,12 @@ impl Controller {
                             SshTrafficClass::Control,
                             &backend,
                             session_id,
-                            vec!["rm".into(), "-f".into(), "--".into(), remote_archive.clone()],
+                            vec![
+                                "rm".into(),
+                                "-f".into(),
+                                "--".into(),
+                                remote_archive.clone(),
+                            ],
                             "remove consumed Move restore archive",
                         ) {
                             let _ = executor.execute_cleanup(&rm_cmd);

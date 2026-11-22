@@ -14,7 +14,9 @@ pub(crate) fn confirmation_buttons(
         labels.iter().copied().map(Cow::Borrowed).collect()
     };
     match confirmation {
-        Confirmation::RepairRepositoryRemotes { .. } => borrowed(&["Cancel", "Repair and continue"]),
+        Confirmation::RepairRepositoryRemotes { .. } => {
+            borrowed(&["Cancel", "Repair and continue"])
+        }
         Confirmation::ConfigurationRepair { .. } => {
             borrowed(&["Dismiss", "Open transcript", "Open settings"])
         }
@@ -40,9 +42,7 @@ pub(crate) fn confirmation_buttons(
         Confirmation::CloseFailed { .. } => {
             borrowed(&["Cancel", "Retry suspension", "Suspend without checkpoint…"])
         }
-        Confirmation::SuspendSession {
-            checking: true, ..
-        } => borrowed(&["Cancel"]),
+        Confirmation::SuspendSession { checking: true, .. } => borrowed(&["Cancel"]),
         Confirmation::SuspendSession {
             preflight: Some(preflight),
             ..
@@ -62,7 +62,10 @@ pub(crate) fn confirmation_buttons(
                         if untracked == 1 { "file" } else { "files" }
                     )),
                 ]
-            } else if preflight.has_warnings() || *interrupting || !children_not_handed_back.is_empty() {
+            } else if preflight.has_warnings()
+                || *interrupting
+                || !children_not_handed_back.is_empty()
+            {
                 borrowed(&["Cancel", "Continue anyway"])
             } else {
                 borrowed(&["Cancel", "Suspend session"])
@@ -1601,10 +1604,15 @@ pub(crate) fn confirmation_body(
                         Style::default().fg(theme::palette().error),
                     ));
                     for blocker in &preflight.blockers {
-                        lines.push(Line::raw(format!("  {} — {}", blocker.kind, blocker.remedy)));
+                        lines.push(Line::raw(format!(
+                            "  {} — {}",
+                            blocker.kind, blocker.remedy
+                        )));
                     }
                 } else {
-                    lines.push(Line::raw("Save a recovery copy and release the environment."));
+                    lines.push(Line::raw(
+                        "Save a recovery copy and release the environment.",
+                    ));
                     lines.push(Line::raw("You can resume this session later."));
                     if preflight.raw {
                         lines.push(Line::styled(
@@ -1630,17 +1638,28 @@ pub(crate) fn confirmation_body(
                             format!(
                                 "{} untracked {} will not be kept (ignored files are never kept):",
                                 untracked_paths.len(),
-                                if untracked_paths.len() == 1 { "file" } else { "files" }
+                                if untracked_paths.len() == 1 {
+                                    "file"
+                                } else {
+                                    "files"
+                                }
                             ),
                             Style::default().fg(theme::palette().warning),
                         ));
-                        let limit = if *viewing_all_untracked { untracked_paths.len() } else { 5 };
+                        let limit = if *viewing_all_untracked {
+                            untracked_paths.len()
+                        } else {
+                            5
+                        };
                         for path in untracked_paths.iter().take(limit) {
                             lines.push(Line::raw(format!("  {path}")));
                         }
                         if !*viewing_all_untracked && untracked_paths.len() > limit {
                             lines.push(Line::styled(
-                                format!("  and {} more (v to view all)", untracked_paths.len() - limit),
+                                format!(
+                                    "  and {} more (v to view all)",
+                                    untracked_paths.len() - limit
+                                ),
                                 Style::default().fg(theme::palette().muted),
                             ));
                         }
@@ -1653,7 +1672,9 @@ pub(crate) fn confirmation_body(
                     }
                 }
             } else {
-                lines.push(Line::raw("Save a recovery copy and release the environment."));
+                lines.push(Line::raw(
+                    "Save a recovery copy and release the environment.",
+                ));
                 lines.push(Line::raw("You can resume this session later."));
             }
             if *interrupting {

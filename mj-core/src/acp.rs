@@ -548,7 +548,10 @@ pub struct NativeGoalResumeAck(
 impl NativeGoalResumeAck {
     pub fn new_pair() -> (Self, tokio::sync::oneshot::Receiver<()>) {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        (Self(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))), rx)
+        (
+            Self(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
+            rx,
+        )
     }
 
     pub fn acknowledge(&self) {

@@ -13,12 +13,12 @@
 //! file's on-disk delta, or for a dry run the compressed size of the removed
 //! untracked ZIP entries.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::RuntimeState;
 
-use mj_controller::controller::checkpoint::{purge_session_untracked_archive, PurgeSessionOutcome};
+use mj_controller::controller::checkpoint::{PurgeSessionOutcome, purge_session_untracked_archive};
 use mj_controller::recovery_gate::{LifecycleOrigin, RefusalCause, SessionAdmission};
 
 use crate::server::api::{
@@ -97,8 +97,7 @@ impl RuntimeState {
             let joined = mj_core::runtime::spawn_blocking(move || {
                 let admitted = SessionAdmission::Foreground(admission);
                 let cancelled: mj_checkpoint::archive::ArchivePurgeCancel = Arc::new(move || {
-                    cancel_flag.load(Ordering::Acquire)
-                        || !mj_controller::upgrade::gate().is_open()
+                    cancel_flag.load(Ordering::Acquire) || !mj_controller::upgrade::gate().is_open()
                 });
                 purge_session_untracked_archive(&admitted, &id, dry_run, &cancelled)
             })
@@ -293,7 +292,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use mj_checkpoint::archive::{write_archive_atomic, RepositoryMetadata, RepositorySnapshot};
+    use mj_checkpoint::archive::{RepositoryMetadata, RepositorySnapshot, write_archive_atomic};
     use mj_core::state::{CheckpointMetadata, SessionState};
 
     const CHILD: &str = "MJ_PURGE_UNTRACKED_DAEMON_TEST";
@@ -369,8 +368,7 @@ mod tests {
             dry.sessions[1].reason.as_deref().unwrap_or("")
         );
         let purge_len = purge_bytes.len() as u64;
-        let inspected =
-            mj_checkpoint::archive::verify_archive_streaming(&purge_archive).unwrap();
+        let inspected = mj_checkpoint::archive::verify_archive_streaming(&purge_archive).unwrap();
         let uncompressed: u64 = inspected
             .manifest
             .payloads
@@ -607,8 +605,7 @@ mod tests {
             return;
         }
         let _writer = mj_controller::database::install_isolated_test_writer();
-        let mut skipped =
-            mj_controller::controller::test_support::checkpoint_test_session(SKIPPED);
+        let mut skipped = mj_controller::controller::test_support::checkpoint_test_session(SKIPPED);
         skipped.state = mj_core::state::SessionState::Stopped;
         skipped.checkpoint = None;
         mj_controller::database::save_session(&skipped).unwrap();
@@ -679,11 +676,7 @@ mod tests {
             .collect();
         assert_eq!(
             archives,
-            vec![archive
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()]
+            vec![archive.file_name().unwrap().to_string_lossy().into_owned()]
         );
         // The upgrade gate is closed, so try_enter_foreground would refuse
         // with daemon handoff even after this session's admission is gone.

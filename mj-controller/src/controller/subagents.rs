@@ -1407,12 +1407,7 @@ mod tests {
 
         // Parking sup-1 frees its slot, while its live depth-2 worker STILL consumes a slot
         // (live count drops from 4 to 3: sup-2, d2-worker-1, d2-worker-2).
-        controller
-            .state
-            .sessions
-            .get_mut("sup-1")
-            .unwrap()
-            .state = SessionState::Parked;
+        controller.state.sessions.get_mut("sup-1").unwrap().state = SessionState::Parked;
         // Now 1 live supervisor < 2 and 3 total live < 4, so unparking sup-3 fits.
         controller
             .ensure_subagent_slot_available_for("primary-1", Some("sup-3-parked"), true)

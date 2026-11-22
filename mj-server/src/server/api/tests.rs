@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use axum::body::Body;
-use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
 use axum::http::Request;
+use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
 use http_body_util::BodyExt as _;
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, watch};
 use tower::ServiceExt as _;
 
 use super::super::{
-    router, tests::sample_config_state, ControllerRequest, ServerOptions, ServerRequests,
-    ViewerOperation, ViewerOperationKind, ViewerProfile, ViewerSnapshot,
+    ControllerRequest, ServerOptions, ServerRequests, ViewerOperation, ViewerOperationKind,
+    ViewerProfile, ViewerSnapshot, router, tests::sample_config_state,
 };
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
@@ -80,10 +80,12 @@ async fn wiki_backend_failures_are_not_retryable_shutdowns() {
             StatusCode::INTERNAL_SERVER_ERROR,
             "{path}"
         );
-        assert!(response
-            .headers()
-            .get(crate::server::UPGRADE_HEADER)
-            .is_none());
+        assert!(
+            response
+                .headers()
+                .get(crate::server::UPGRADE_HEADER)
+                .is_none()
+        );
         assert_eq!(
             json_body(response).await,
             serde_json::json!({"error": expected})
@@ -167,9 +169,11 @@ async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessi
             assert_eq!(value["claude"], failure);
         } else if let Some(sessions) = value["sessions"].as_array() {
             assert!(!sessions.is_empty());
-            assert!(sessions
-                .iter()
-                .all(|session| session["profile_login_error"] == failure));
+            assert!(
+                sessions
+                    .iter()
+                    .all(|session| session["profile_login_error"] == failure)
+            );
         } else {
             assert_eq!(value["profile_login_error"], failure);
         }
@@ -668,14 +672,16 @@ async fn external_event_same_key_retries_ignore_creation_time() {
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
     let original = serde_json::from_str::<serde_json::Value>(&first_row.event_json).unwrap();
-    assert!(mj_controller::database::enqueue_mailbox_event(
-        event_key,
-        "session-2",
-        &original.to_string(),
-        false,
-        false,
-    )
-    .is_err());
+    assert!(
+        mj_controller::database::enqueue_mailbox_event(
+            event_key,
+            "session-2",
+            &original.to_string(),
+            false,
+            false,
+        )
+        .is_err()
+    );
 
     writer.shutdown().unwrap();
 }
@@ -710,15 +716,17 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
         "text":"A comment from an older daemon.",
         "created_at_ms":42
     });
-    assert!(mj_controller::database::enqueue_mailbox_event(
-        "github:acme/repo#12:comment:3",
-        "session-1",
-        &legacy.to_string(),
-        true,
-        false,
-    )
-    .unwrap()
-    .inserted());
+    assert!(
+        mj_controller::database::enqueue_mailbox_event(
+            "github:acme/repo#12:comment:3",
+            "session-1",
+            &legacy.to_string(),
+            true,
+            false,
+        )
+        .unwrap()
+        .inserted()
+    );
     let row = mj_controller::database::pending_mailbox_events(10)
         .unwrap()
         .into_iter()
@@ -731,15 +739,17 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             text: "A comment from an older daemon.".into()
         }
     );
-    assert!(!mj_controller::database::enqueue_mailbox_event(
-        &event.key,
-        &row.target_session_id,
-        &serde_json::to_string(&event).unwrap(),
-        true,
-        false,
-    )
-    .unwrap()
-    .inserted());
+    assert!(
+        !mj_controller::database::enqueue_mailbox_event(
+            &event.key,
+            &row.target_session_id,
+            &serde_json::to_string(&event).unwrap(),
+            true,
+            false,
+        )
+        .unwrap()
+        .inserted()
+    );
     writer.shutdown().unwrap();
 }
 
@@ -992,9 +1002,11 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(std::str::from_utf8(frame.data_ref().unwrap())
-        .unwrap()
-        .contains("id: 3"));
+    assert!(
+        std::str::from_utf8(frame.data_ref().unwrap())
+            .unwrap()
+            .contains("id: 3")
+    );
     snapshots.send_modify(|snapshot| {
         snapshot
             .sessions
@@ -1163,9 +1175,11 @@ async fn event_stream_without_cursor_starts_at_the_current_frontier() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(std::str::from_utf8(frame.data_ref().unwrap())
-        .unwrap()
-        .contains("id: 2"));
+    assert!(
+        std::str::from_utf8(frame.data_ref().unwrap())
+            .unwrap()
+            .contains("id: 2")
+    );
 }
 
 #[tokio::test]
@@ -4156,12 +4170,16 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
     assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
     assert!(body["capacity_retry"].is_null());
-    assert!(body["session"]["last_turn_outcome"]
-        .get("answered_through")
-        .is_none());
-    assert!(body["session"]["last_turn_outcome"]
-        .get("diagnostic")
-        .is_none());
+    assert!(
+        body["session"]["last_turn_outcome"]
+            .get("answered_through")
+            .is_none()
+    );
+    assert!(
+        body["session"]["last_turn_outcome"]
+            .get("diagnostic")
+            .is_none()
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -4334,9 +4352,11 @@ async fn an_event_stream_ended_by_a_handoff_names_the_cursor_to_resume_from() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(std::str::from_utf8(frame.data_ref().unwrap())
-        .unwrap()
-        .contains("id: 4"));
+    assert!(
+        std::str::from_utf8(frame.data_ref().unwrap())
+            .unwrap()
+            .contains("id: 4")
+    );
     assert!(backend.upgrade_gate.try_close());
     backend.shutdown.cancel();
     let rest = tokio::time::timeout(Duration::from_secs(2), body.collect())
@@ -4754,7 +4774,7 @@ fn projection_with(outcome: MaterializedTurnOutcome) -> mj_core::state::Material
 // Hard-won: #1304: a stored expect-continuation verdict held every wait on an idle session open.
 #[test]
 fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
-    use mj_core::activity::{verdict, ActivityState};
+    use mj_core::activity::{ActivityState, verdict};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
         work_facts: None,
@@ -5520,9 +5540,11 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
         response.headers()[axum::http::header::CONTENT_ENCODING],
         "gzip"
     );
-    assert!(!response
-        .headers()
-        .contains_key(axum::http::header::CONTENT_LENGTH));
+    assert!(
+        !response
+            .headers()
+            .contains_key(axum::http::header::CONTENT_LENGTH)
+    );
     let mut body = response.into_body().into_data_stream();
     use futures::StreamExt as _;
     let first = body.next().await.unwrap().unwrap();
@@ -6597,14 +6619,16 @@ async fn only_the_session_wait_follows_the_quota_check() {
             .outcome,
         WaitOutcome::QuotaLimit,
     );
-    assert!(resolve_wait(
-        &WaitObservation {
-            subagent: true,
-            ..queued
-        },
-        &request,
-    )
-    .is_none());
+    assert!(
+        resolve_wait(
+            &WaitObservation {
+                subagent: true,
+                ..queued
+            },
+            &request,
+        )
+        .is_none()
+    );
 
     let response = finish_wait(
         &backend,
@@ -6915,10 +6939,12 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(json_body(response)
-        .await
-        .to_string()
-        .contains("Docker is not installed on this host"));
+    assert!(
+        json_body(response)
+            .await
+            .to_string()
+            .contains("Docker is not installed on this host")
+    );
 }
 
 /// A target the daemon has no worker binary for is refused at admission with
@@ -8310,22 +8336,26 @@ fn queued_rejection_does_not_finish_the_running_prompt_wait() {
         message: "transport failed".into(),
     };
     let observation = idle(Some(outcome));
-    assert!(resolve_wait(
-        &observation,
-        &WaitRequest {
-            turn_id: Some(5),
-            ..Default::default()
-        }
-    )
-    .is_none());
-    assert!(resolve_wait(
-        &observation,
-        &WaitRequest {
-            turn_id: Some(7),
-            ..Default::default()
-        }
-    )
-    .is_some());
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(5),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(7),
+                ..Default::default()
+            }
+        )
+        .is_some()
+    );
 }
 
 #[tokio::test]
@@ -8369,10 +8399,12 @@ async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() 
 
     let invalid = post(app.clone(), serde_json::json!({"session_id": "bad id"})).await;
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert!(json_body(invalid).await["error"]
-        .as_str()
-        .unwrap()
-        .contains("session ID must be 8-128"),);
+    assert!(
+        json_body(invalid).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("session ID must be 8-128"),
+    );
 
     let unknown_field = post(
         app.clone(),
@@ -8499,10 +8531,12 @@ async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() 
     )
     .await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    assert!(json_body(missing).await["error"]
-        .as_str()
-        .unwrap()
-        .contains("unknown session missing01"));
+    assert!(
+        json_body(missing).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown session missing01")
+    );
 
     let busy = round_trip(
         app.clone(),
@@ -8519,10 +8553,12 @@ async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() 
     )
     .await;
     assert_eq!(busy.status(), StatusCode::CONFLICT);
-    assert!(json_body(busy).await["error"]
-        .as_str()
-        .unwrap()
-        .contains("lifecycle operation in progress"));
+    assert!(
+        json_body(busy).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("lifecycle operation in progress")
+    );
 
     let dropped = mj_core::runtime::spawn(post(
         app.clone(),

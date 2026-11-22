@@ -2756,8 +2756,12 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
             },
             quota: {
                 let preparations = preparations.clone();
+                let profile = profile.clone();
                 Arc::new(move |_, view| {
                     let ordinal = preparations.fetch_add(1, Ordering::SeqCst);
+                    if *profile.lock().unwrap() == "person-destination" {
+                        return Box::pin(async { Ok(quota::Plan::Obsolete) });
+                    }
                     Box::pin(async move {
                         let destination = if ordinal == 0 {
                             "old-automatic"
@@ -2870,11 +2874,11 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
         );
         if moved_profile {
             *profile.lock().unwrap() = "person-destination".into();
+            // Same-native manual Move clears the mismatched recovery record but
+            // leaves the prior RecoverQuota assessment current; provenance
+            // settles it as obsolete without masking the assessment.
             let snapshot = blocked.snapshot.as_mut().unwrap();
             snapshot.operational.continuation.quota_recovery = None;
-            let assessment = Arc::make_mut(snapshot.operational.assessment.as_mut().unwrap());
-            assessment.action = Some(mj_core::assessment::Action::Finished);
-            assessment.status = mj_core::assessment::Status::Assessed;
             remote
                 .publisher
                 .publish("one".into(), blocked.clone())
@@ -2956,13 +2960,22 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
                 .unwrap();
             drop(automatic);
         }
+        if moved_profile {
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+            // Confirm Plan::Obsolete settled once with no backoff retry on a
+            // subsequent view publication for the same assessment revision.
+            remote
+                .publisher
+                .publish("one".into(), blocked.clone())
+                .await
+                .unwrap();
+        }
         for _ in 0..128 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(
-            preparations.load(Ordering::SeqCst),
-            if moved_profile { 1 } else { 2 }
-        );
+        assert_eq!(preparations.load(Ordering::SeqCst), 2);
         assert!(
             !moved_profile || moves.lock().unwrap().is_empty(),
             "a person's destination must never be overridden"
@@ -2975,4 +2988,189 @@ async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
         task.await.unwrap().unwrap();
         remote.shutdown.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
+    use mj_controller::controller::test_support::{IsolatedTest, test_name};
+    use mj_controller::quota::{
+        ProfileQuota, QuotaRefreshRequest, QuotaReportMap, QuotaReportPublication, QuotaWindow,
+    };
+    use mj_core::config::{HarnessKind, HarnessProfile};
+
+    const CHILD: &str = "MJ_QUOTA_PROVENANCE_TEST_CHILD";
+    const NAME: &str = "quota_prepare_ignores_stale_profile_for_top_level_only";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "quota-provenance-test")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let home = tempfile::tempdir().unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf());
+    let mut config = Config::default();
+    config.profiles.insert("profile-a".into(), profile.clone());
+    config.profiles.insert("profile-b".into(), profile.clone());
+    let mut session = super::super::tests::runtime_test_session(
+        "one",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        mj_core::state::SessionState::Running,
+    );
+    session.last_profile = "profile-b".into();
+    session.harness_kind = HarnessKind::Claude;
+    let mut controller = Controller {
+        config: config.clone(),
+        state: Default::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert("one".into(), session.clone());
+    mj_controller::database::save_session(&session).unwrap();
+
+    let state = super::super::tests::test_runtime_state_with(controller);
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let reset = now + 2 * 3600;
+    let request =
+        QuotaRefreshRequest::for_profile("profile-b", &profile, home.path().to_path_buf());
+    let observed = ProfileQuota {
+        profile_id: "profile-b".into(),
+        harness: HarnessKind::Claude,
+        windows: vec![QuotaWindow {
+            label: "5H".into(),
+            model_scope: None,
+            remaining_percent: Some(80),
+            resets_at_epoch_seconds: Some(reset),
+            resets: None,
+            duration_seconds: Some(5 * 3600),
+            used: None,
+            limit: None,
+        }],
+        paid_credits: None,
+        monthly_price_usd: None,
+        banked_resets: None,
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: now as u64,
+        rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
+    };
+    let reports = Arc::new(Mutex::new(QuotaReportMap::from([(
+        "profile-b".into(),
+        QuotaReportPublication {
+            login_error: None,
+            cache_identity: request.cache_identity(),
+            last_good: None,
+            report: Some(observed),
+        },
+    )])));
+    let (_publications, quota_feed) = tokio::sync::watch::channel(reports.lock().unwrap().clone());
+    let catalog = mj_controller::profile_catalog::ProfileCatalog::with_probe(
+        mj_controller::profile_catalog::counting_probe(Arc::new(
+            std::sync::atomic::AtomicUsize::new(0),
+        )),
+    );
+    catalog.sync(&config);
+    let (refresh, _refreshes) = mpsc::unbounded_channel();
+    let backend = Arc::new(
+        crate::server_runtime::api::ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            state.clone(),
+        )
+        .with_quota_reports(reports)
+        .with_quota_publications(quota_feed)
+        .with_quota_refresh(refresh.clone())
+        .with_profile_catalog(catalog),
+    );
+    state.install_report_backend(&backend);
+    state.attach_quota_refresh(refresh);
+
+    let mut blocked = view("one", true);
+    quota_assessed(&mut blocked);
+    let explicit_reset = now + 10 * 3600;
+    let outcome = blocked
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .materialized
+        .last_turn_outcome
+        .as_mut()
+        .unwrap();
+    outcome.completed_at_ms = now * 1000;
+    outcome.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "You've hit your usage limit.".into(),
+        code: Some("usageLimitExceeded".into()),
+        http_status: None,
+        reset_at: Some(explicit_reset.to_string()),
+        login_fingerprint: None,
+    });
+
+    // Without a selection row, provenance coalesces to current profile-b and
+    // planning proceeds normally.
+    let missing_row = quota::prepare(&state, "one", &blocked).await.unwrap();
+    assert!(
+        !matches!(missing_row, quota::Plan::Obsolete),
+        "missing turn selection row must coalesce to current profile: {missing_row:?}"
+    );
+
+    // Recording that the stopped turn ran on profile-a makes planning on
+    // profile-b obsolete for a top-level session.
+    rusqlite::Connection::open(mj_controller::database::database_path())
+        .unwrap()
+        .execute(
+            "INSERT INTO session_turn_selections(session_id, command_id, profile, model) \
+             VALUES ('one', 'request', 'profile-a', 'claude-opus')",
+            [],
+        )
+        .unwrap();
+    let stale = quota::prepare(&state, "one", &blocked).await.unwrap();
+    assert!(
+        matches!(stale, quota::Plan::Obsolete),
+        "top-level turn from profile-a must be obsolete on profile-b: {stale:?}"
+    );
+
+    // Managed Worker subagents keep replanning so an interrupted switch cannot
+    // strand a waiting parent.
+    let mut child_controller = Controller {
+        config,
+        state: Default::default(),
+    };
+    child_controller
+        .state
+        .sessions
+        .insert("one".into(), session);
+    child_controller.state.subagents.insert(
+        "one".into(),
+        mj_core::subagent::SubagentRecord {
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            child_session_id: "one".into(),
+            parent_session_id: "parent".into(),
+            task_name: "worker".into(),
+            profile_id: "profile-b".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "work".into(),
+            request_key: "req".into(),
+            created_at: "2026-11-22T00:00:00Z".into(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: true,
+            supervisor: false,
+        }
+        .into(),
+    );
+    let child_state = super::super::tests::test_runtime_state_with(child_controller);
+    child_state.install_report_backend(&backend);
+    let child_plan = quota::prepare(&child_state, "one", &blocked).await.unwrap();
+    assert!(
+        !matches!(child_plan, quota::Plan::Obsolete),
+        "managed Worker child must keep replanning after profile change: {child_plan:?}"
+    );
 }

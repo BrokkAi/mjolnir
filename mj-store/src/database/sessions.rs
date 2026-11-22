@@ -2000,7 +2000,8 @@ pub(super) fn save_session_with_container_size_to(
              'destination_owns','source_retired','queue_admitted','dispatch_released',
              'preparing','closing_source','resuming_destination','starting_queue'
          ))",
-        [&session.id], |row| row.get(0),
+        [&session.id],
+        |row| row.get(0),
     )?;
     if moving {
         // A Move may provision for minutes while clients keep editing drafts

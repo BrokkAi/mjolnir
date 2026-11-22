@@ -9713,7 +9713,8 @@ for line in sys.stdin:
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let runtime = mj_core::runtime::spawn(run_with_shutdown(spec, cmd_rx, event_tx, shutdown.clone()));
+    let runtime =
+        mj_core::runtime::spawn(run_with_shutdown(spec, cmd_rx, event_tx, shutdown.clone()));
 
     let mut configured = false;
     let mut seen = Vec::new();

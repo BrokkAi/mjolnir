@@ -2339,7 +2339,7 @@ fn interrupt_queued_recovery_finishes_locally_across_partial_completion() {
                         command_id: "interrupt-reload".into(),
                         command: RelayCommand::CancelTurn,
                         created_at_ms: 1,
-                insert_at_front: false,
+                        insert_at_front: false,
                     },
                 )
                 .unwrap();

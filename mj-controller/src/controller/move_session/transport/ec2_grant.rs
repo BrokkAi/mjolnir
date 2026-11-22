@@ -511,7 +511,10 @@ struct InFlightRevokeGuard<'a> {
 
 impl Drop for InFlightRevokeGuard<'_> {
     fn drop(&mut self) {
-        self.set.lock().expect("in-flight revoke lock").remove(&self.key);
+        self.set
+            .lock()
+            .expect("in-flight revoke lock")
+            .remove(&self.key);
     }
 }
 
@@ -830,7 +833,10 @@ impl<S: Ec2GrantStore, C: Ec2SecurityGroupClient> Ec2GrantManager<S, C> {
         expected_attempt_id: u64,
     ) -> Result<bool> {
         {
-            let mut revokes = self.in_flight_revokes.lock().expect("in-flight revoke lock");
+            let mut revokes = self
+                .in_flight_revokes
+                .lock()
+                .expect("in-flight revoke lock");
             if !revokes.insert(key.clone()) {
                 return Ok(false);
             }
@@ -1261,17 +1267,30 @@ mod tests {
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         let key = Ec2GrantKey::ssh("sg-1", "10.0.0.5/32");
 
-        assert_eq!(mgr.acquire(&key, "op-1").expect("acquire 1"), AcquireOutcome::Granted);
-        assert_eq!(mgr.acquire(&key, "op-2").expect("acquire 2"), AcquireOutcome::Granted);
+        assert_eq!(
+            mgr.acquire(&key, "op-1").expect("acquire 1"),
+            AcquireOutcome::Granted
+        );
+        assert_eq!(
+            mgr.acquire(&key, "op-2").expect("acquire 2"),
+            AcquireOutcome::Granted
+        );
         assert_eq!(client.rules_for("sg-1").len(), 1);
         assert_eq!(client.revoke_calls(), 0);
 
         mgr.release(&key, "op-1").expect("release 1");
-        assert_eq!(client.rules_for("sg-1").len(), 1, "rule must remain while op-2 holds it");
+        assert_eq!(
+            client.rules_for("sg-1").len(),
+            1,
+            "rule must remain while op-2 holds it"
+        );
         assert_eq!(client.revoke_calls(), 0);
 
         mgr.release(&key, "op-2").expect("release 2");
-        assert!(client.rules_for("sg-1").is_empty(), "rule must be revoked on last release");
+        assert!(
+            client.rules_for("sg-1").is_empty(),
+            "rule must be revoked on last release"
+        );
         assert_eq!(client.revoke_calls(), 1);
         assert!(mgr.store().snapshot().is_empty());
     }
@@ -1291,14 +1310,21 @@ mod tests {
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         let key = Ec2GrantKey::ssh("sg-ext", "10.0.0.9/32");
 
-        assert_eq!(mgr.acquire(&key, "op-1").expect("acquire"), AcquireOutcome::Granted);
+        assert_eq!(
+            mgr.acquire(&key, "op-1").expect("acquire"),
+            AcquireOutcome::Granted
+        );
         assert_eq!(
             mgr.store().snapshot().get(&key).map(|r| r.state),
             Some(Ec2GrantState::External)
         );
 
         mgr.release(&key, "op-1").expect("release");
-        assert_eq!(client.rules_for("sg-ext").len(), 1, "external rule must never be revoked");
+        assert_eq!(
+            client.rules_for("sg-ext").len(),
+            1,
+            "external rule must never be revoked"
+        );
         assert_eq!(client.revoke_calls(), 0);
         assert!(mgr.store().snapshot().is_empty());
     }
@@ -1379,7 +1405,11 @@ mod tests {
     fn ambiguous_absent_install_requires_two_separated_checks_to_drop() {
         let store = InMemoryGrantStore::new();
         let client = FakeEc2Client::default();
-        client.state.lock().unwrap().fail_next_authorize_without_creating = true;
+        client
+            .state
+            .lock()
+            .unwrap()
+            .fail_next_authorize_without_creating = true;
         let mgr = Ec2GrantManager::new(store, client.clone(), "daemon-a", fast_config());
         let key = Ec2GrantKey::ssh("sg-abs", "10.0.0.30/32");
 
@@ -1387,7 +1417,10 @@ mod tests {
         assert_eq!(outcome, AcquireOutcome::FallbackToDaemonStream);
         // After 1st absent check, record must still be in `Removing` (not dropped).
         let snap = mgr.store().snapshot();
-        assert_eq!(snap.get(&key).map(|r| r.state), Some(Ec2GrantState::Removing));
+        assert_eq!(
+            snap.get(&key).map(|r| r.state),
+            Some(Ec2GrantState::Removing)
+        );
         assert_eq!(snap.get(&key).map(|r| r.absent_checks), Some(1));
 
         // Second separated reconcile check confirms absence and drops the record.
@@ -1533,7 +1566,10 @@ mod tests {
                     .is_some_and(|r| r.state == Ec2GrantState::Removing && r.absent_checks == 0))
             })
             .unwrap();
-        assert!(still_reserved, "Removing grant must remain reserved while revoke is in flight");
+        assert!(
+            still_reserved,
+            "Removing grant must remain reserved while revoke is in flight"
+        );
         client.state.lock().unwrap().rules = saved_rules;
 
         // Now finish the first revoke, re-acquire a fresh grant (generation 42 != 7),

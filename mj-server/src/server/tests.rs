@@ -145,7 +145,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-            supervisors: false,
+                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -862,7 +862,7 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-            supervisor: false,
+                supervisor: false,
             }
             .into(),
         );
@@ -1560,38 +1560,102 @@ if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace ex
 
 #[test]
 fn embedded_viewer_warns_before_stopping_an_active_session() {
-    let source = format!(
-        "{}\n{}",
+    let source = [
+        viewer_source("function el(", "const bootStatus"),
+        viewer_source("async function request(", "/// Read a response body"),
         viewer_source("function sessionById(", "function sessionInWorkspace("),
-        viewer_source("async function runSessionAction", "sessions.onclick =")
-    );
+        viewer_source(
+            "function buildShownSuspendConsent(",
+            "function dialogControls(",
+        ),
+        viewer_source("async function runSessionAction", "sessions.onclick ="),
+    ]
+    .join("\n");
     let setup = r#"
+import { installDocument, elements, only, check, checkEqual } from './test-dom.js';
+
+installDocument();
+const createElement = document.createElement;
+document.createElement = name => {
+  const node = createElement(name);
+  const append = node.append.bind(node);
+  node.append = (...children) => {
+    for (const child of children) child.parentNode = node;
+    append(...children);
+  };
+  node.insertBefore = (child, before) => {
+    child.parentNode = node;
+    node.childNodes.splice(node.childNodes.indexOf(before), 0, child);
+  };
+  node.remove = () => {
+    const parent = node.parentNode;
+    parent.childNodes.splice(parent.childNodes.indexOf(node), 1);
+    node.parentNode = null;
+  };
+  node.focus = () => { document.activeElement = node; };
+  if (name === "dialog") {
+    node.showModal = () => { node.open = true; };
+    node.close = () => {
+      node.open = false;
+      node.dispatch("close");
+    };
+  }
+  return node;
+};
+document.body = document.createElement("body");
+
 const pendingActions = new Set();
 const pendingLifecycleActions = new Map();
-const snapshot = {
-  sessions: [
-{ id: "active", chat_phase: "running" },
-{ id: "idle", chat_phase: "idle" },
-  ],
-};
-const questions = [];
-const viewerState = { rows: new Map(snapshot.sessions.map(row => [row.id, row])) };
-function confirm(question) { questions.push(question); return false; }
-function navigate() {}
+const rows = new Map([
+  ["active", { id: "active", chat_phase: "running" }],
+  ["idle", { id: "idle", chat_phase: "idle" }],
+]);
+const viewerState = { rows };
+const requests = [];
+async function upgradeAwareFetch(url, options) {
+  const method = options.method ?? "GET";
+  requests.push(`${method} ${url}`);
+  const match = url.match(/^\/api\/v1\/sessions\/([^/]+)\/suspend-preflight$/);
+  if (method !== "GET" || !match || !rows.has(match[1])) {
+    throw new Error(`unexpected request: ${method} ${url}`);
+  }
+  return Response.json({
+    session_id: match[1],
+    untracked: [],
+    nested_repositories: [],
+    untracked_stashes: [],
+    keep_dir_entries: [],
+    keep_dir_bytes: 0,
+    operations: [],
+    children_not_handed_back: [],
+    blockers: [],
+    raw: false,
+    interrupting: false,
+  });
+}
 "#;
     let checks = r#"
 const errorNode = { textContent: "" };
-await runSessionAction({ action: "suspend", id: "active" }, errorNode);
-await runSessionAction({ action: "suspend", id: "idle" }, errorNode);
-if (!questions[0].startsWith("Suspend session?\n\n")) {
-  throw new Error(`active close warning was ${JSON.stringify(questions[0])}`);
+for (const [id, expectsWarning] of [["active", true], ["idle", false]]) {
+  const action = runSessionAction({ action: "suspend", id }, errorNode);
+  const dialog = only(document.body, "dialog");
+  check(dialog.open, `${id} suspend dialog did not open`);
+  checkEqual(dialog.getAttribute("aria-label"), "Suspend session", "dialog label");
+  await new Promise(resolve => setImmediate(resolve));
+  check(dialog.textContent.includes("Save a recovery copy"), `${id} preflight did not finish`);
+  const warning = "The current turn will be interrupted.";
+  checkEqual(dialog.textContent.includes(warning), expectsWarning, `${id} interruption warning`);
+
+  const cancel = elements(dialog, "button").find(button => button.textContent === "Cancel");
+  check(cancel && document.activeElement === cancel, `${id} Cancel did not receive focus`);
+  cancel.onclick();
+  checkEqual(await action, false, `${id} suspension was not canceled`);
+  check(!dialog.open && !elements(document.body, "dialog").length, `${id} dialog did not close`);
 }
-if (!questions[0].includes("current turn will be interrupted")) {
-  throw new Error(`active close omitted interruption: ${JSON.stringify(questions[0])}`);
-}
-if (!questions[1].startsWith("Suspend session?\n\n")) {
-  throw new Error(`idle close warning was ${JSON.stringify(questions[1])}`);
-}
+checkEqual(requests.join("\n"), [
+  "GET /api/v1/sessions/active/suspend-preflight",
+  "GET /api/v1/sessions/idle/suspend-preflight",
+].join("\n"), "cancel must send only the preflight requests");
 "#;
     run_viewer_script(
         "active-session-stop-confirmation",
@@ -3297,7 +3361,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 oracle: None,
-        supervisors: None,
+                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,

@@ -1,7 +1,9 @@
 //! Move intent uses the same guarded writer as session lifecycle transitions.
 
 use super::*;
-use mj_core::state::{LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation};
+use mj_core::state::{
+    LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation,
+};
 
 pub fn retained_move_sources(
     session_id: &str,
@@ -61,9 +63,7 @@ pub fn remove_revoked_move_granted_keys(
             return Ok(());
         };
         let before = current.granted_keys.len();
-        current
-            .granted_keys
-            .retain(|key| !revoked.contains(key));
+        current.granted_keys.retain(|key| !revoked.contains(key));
         if current.granted_keys.len() != before {
             current.updated_at = updated_at;
             tx.execute(
@@ -309,9 +309,8 @@ pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
 /// destination-owned moves.
 pub fn load_legacy_move_operations() -> Result<Vec<(String, LegacyMoveOperation)>> {
     let connection = open_reader(&database_path())?;
-    let mut statement = connection.prepare(
-        "SELECT session_id, operation_json FROM session_moves ORDER BY session_id",
-    )?;
+    let mut statement = connection
+        .prepare("SELECT session_id, operation_json FROM session_moves ORDER BY session_id")?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -999,13 +998,7 @@ mod tests {
             ),
             ("cancelled-gone", MovePhase::Cancelled, false, false, false),
             ("failed-gone", MovePhase::Failed, false, false, true),
-            (
-                "running-gone",
-                MovePhase::Restoring,
-                false,
-                false,
-                true,
-            ),
+            ("running-gone", MovePhase::Restoring, false, false, true),
         ];
         for (session_id, phase, archive_present, mid_admission, _) in cases {
             let session = super::super::tests::session(session_id, "project");

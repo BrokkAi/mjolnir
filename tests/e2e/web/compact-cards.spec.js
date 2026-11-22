@@ -100,6 +100,7 @@ function stateWith(sessions) {
     snapshots: 0,
     detailRequests: [],
     actions: [],
+    suspendPreflight: new Map(),
     conversationRequests: 0,
     conversationResponses: 0,
     conversation: { entries: [], latest_seq: 0, reset: true },
@@ -158,6 +159,24 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
         status: 200,
         headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
         body: ': fixture\n\n',
+      });
+    }
+    const preflight = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/suspend-preflight$/);
+    if (preflight && route.request().method() === 'GET') {
+      const id = decodeURIComponent(preflight[1]);
+      return json({
+        session_id: id,
+        untracked: [],
+        nested_repositories: [],
+        untracked_stashes: [],
+        keep_dir_entries: [],
+        keep_dir_bytes: 0,
+        operations: [],
+        children_not_handed_back: [],
+        blockers: [],
+        raw: false,
+        interrupting: false,
+        ...state.suspendPreflight.get(id),
       });
     }
     const lifecycle = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(suspend|destroy)$/);
@@ -994,14 +1013,15 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
 
   state.failAction = { action: 'suspend', error: 'stop failed in fixture' };
   await openTrigger.click();
-  let confirmed = false;
-  page.once('dialog', async dialog => {
-    confirmed = dialog.type() === 'confirm' && dialog.message().includes('Suspend session?');
-    await dialog.accept();
-  });
   await openMenu.getByRole('menuitem', { name: 'Suspend session…' }).click();
+  const suspendDialog = page.getByRole('dialog', { name: 'Suspend session', exact: true });
+  await expect(suspendDialog).toBeVisible();
+  await suspendDialog.getByRole('button', { name: 'Suspend session', exact: true }).click();
   await expect(page.locator('#action-error')).toHaveText('stop failed in fixture');
-  expect(confirmed).toBe(true);
+  expect(state.actions.filter(action => action.action === 'suspend')).toEqual([{
+    action: 'suspend', session_id: 'openable',
+    discard_untracked: 'None', abort_operations: 'None', without_checkpoint: false,
+  }]);
 
   // Dismissal sits in the menu where the TUI puts it, not on the card, and
   // names the notification the menu showed.
@@ -1315,15 +1335,20 @@ test('a moved parent keeps 23 native histories without claiming any are working'
 test('suspension remains pending after acceptance and exposes failure after reconnect', async ({ page }) => {
   const state = await mount(page, [session('suspend-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
   const current = card(page, 'suspend-me');
+  const dialog = page.getByRole('dialog', { name: 'Suspend session', exact: true });
   await current.locator('button[aria-label^="Actions for"]').click();
-  page.once('dialog', dialog => dialog.dismiss());
   await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
   expect(state.actions).toHaveLength(0);
   await current.locator('button[aria-label^="Actions for"]').click();
-  page.once('dialog', dialog => dialog.accept());
   await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
+  await dialog.getByRole('button', { name: 'Suspend session', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toEqual({ action: 'suspend', session_id: 'suspend-me', acknowledge_active_subagents: true, acknowledge_unpublished_work: true });
+  expect(state.actions[0]).toEqual({
+    action: 'suspend', session_id: 'suspend-me',
+    discard_untracked: 'None', abort_operations: 'None', without_checkpoint: false,
+  });
   await expect(current.locator('.session-activity')).toHaveText('Suspending…');
   await current.locator('button[aria-label^="Actions for"]').click();
   await expect(current.getByRole('menuitem', { name: 'Suspend session…' })).toBeDisabled();
@@ -1336,37 +1361,44 @@ test('suspension remains pending after acceptance and exposes failure after reco
   await expect(current.locator('.session-activity')).toHaveText(saved.launch_error);
 });
 
-test('destroy is separately confirmed and defaults to keeping the branch', async ({ page }) => {
+test('destroying a live session requires separate confirmation', async ({ page }) => {
   const state = await mount(page, [session('destroy-me', 'project', 'Project', { managedCheckoutKind: 'worktree', capabilities: { suspend: true, destroy: true } })]);
   const current = card(page, 'destroy-me');
   await current.locator('button[aria-label^="Actions for"]').click();
   await current.getByRole('menuitem', { name: 'Destroy session…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Destroy session' });
   await expect(dialog).toContainText('Work held only in the environment will be lost');
-  await expect(dialog.getByRole('checkbox')).not.toBeChecked();
+  await expect(dialog.getByRole('checkbox')).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
   expect(state.actions).toHaveLength(0);
   await current.locator('button[aria-label^="Actions for"]').click();
   await current.getByRole('menuitem', { name: 'Destroy session…' }).click();
   await dialog.getByRole('button', { name: 'Destroy session', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'destroy-me', delete_branch: false });
+  expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'destroy-me' });
   await expect(current.locator('.session-activity')).toHaveText('Destroying…');
   state.snapshot.sessions = [];
   await refresh(page, state);
   await expect(current).toHaveCount(0);
 });
 
-test('destroying retained history offers explicit branch deletion', async ({ page }) => {
+test('destroying a retained session from its history requires confirmation', async ({ page }) => {
   const state = await mount(page, [session('retained', 'project', 'Project', { lifecycle: 'suspended', managedCheckoutKind: 'worktree', capabilities: { open: false, resume: true, destroy: true } }), session('live-other', 'project', 'Project')]);
   await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}/resume/retained`);
-  await page.getByRole('button', { name: 'Destroy session…', exact: true }).click();
+  const destroy = page.getByRole('button', { name: 'Destroy session…', exact: true });
+  await destroy.click();
   const dialog = page.getByRole('dialog', { name: 'Destroy session' });
-  await dialog.getByRole('checkbox').check();
+  await expect(dialog).toContainText('Work held only in the environment will be lost');
+  await expect(dialog.getByRole('checkbox')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.actions).toHaveLength(0);
+  await destroy.click();
   await dialog.getByRole('button', { name: 'Destroy session', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'retained', delete_branch: true });
-  await expect(page.getByRole('button', { name: 'Destroy session…', exact: true })).toBeDisabled();
+  expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'retained' });
+  await expect(destroy).toBeDisabled();
 });
 
 for (const queued of [0, 1]) {
@@ -1632,14 +1664,14 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   reviewOpen.chat_phase = 'running';
   const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', active: false, capabilities: { open: false, read_history: true, resume: true } });
   const state = await mount(page, [parent, worker, reviewOpen, reviewDone]);
+  state.suspendPreflight.set(parent.id, { children_not_handed_back: ['worker', 'review-open'] });
   await card(page, 'parent').locator('button[aria-label^="Actions for"]').click();
-  let suspendWarning;
-  page.once('dialog', async dialog => {
-    suspendWarning = dialog.message();
-    await dialog.dismiss();
-  });
   await card(page, 'parent').getByRole('menuitem', { name: 'Suspend session…' }).click();
-  expect(suspendWarning).toContain('2 sub-agents have not handed back');
+  const dialog = page.getByRole('dialog', { name: 'Suspend session', exact: true });
+  await expect(dialog).toContainText('2 sub-agents have not handed back');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(state.actions).toHaveLength(0);
   await card(page, 'parent').click();
   await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
   await expect(page.locator('#reviewers-button')).toHaveText('Reviewers · 1');
