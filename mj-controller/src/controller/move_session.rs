@@ -511,9 +511,37 @@ use mj_core::relay::RelayCommand;
 
 /// Bind automatic Move confirmation to the turn that stopped for quota.
 pub fn quota_move_fingerprint(
+    session_id: &str,
     base: &str,
     operational: &mj_core::relay::RelayOperationalState,
 ) -> Result<String> {
+    in_place::ensure_worker_supports_in_place_move(
+        session_id,
+        operational.relay_protocol_version.unwrap_or_default(),
+        true,
+    )
+    .map_err(|error| {
+        mj_core::refusal::Refusal::precondition(error.to_string())
+            .with_code(QUOTA_MOVE_SAFETY_REFUSAL)
+    })?;
+    let continuation = &operational.continuation;
+    ensure!(
+        !continuation.quota_suppressed
+            && continuation.user_command_id.is_some()
+            && operational.assessment.as_ref().is_some_and(|assessment| {
+                assessment.current()
+                    && assessment.action == Some(mj_core::assessment::Action::RecoverQuota)
+                    && continuation.completed_command_id.as_ref() == Some(&assessment.turn_id)
+                    && !continuation
+                        .quota_recovery
+                        .as_ref()
+                        .is_some_and(|recovery| {
+                            recovery.submitted
+                                && recovery.completed_command_id == assessment.turn_id
+                        })
+            }),
+        "quota Move assessment was superseded"
+    );
     digest(&(
         base,
         &operational.continuation.user_command_id,
@@ -1988,8 +2016,7 @@ impl Controller {
                 checked.queued_commands = queue;
                 checked.fingerprint = if quota_move.is_some() {
                     let operational = &snapshot.as_ref().context("quota Move source unavailable")?.operational;
-                    quota_move_recovery(operational)?;
-                    quota_move_fingerprint(&fingerprint, operational)?
+                    quota_move_fingerprint(&id, &fingerprint, operational)?
                 } else { fingerprint };
             }
             checked

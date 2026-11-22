@@ -17,23 +17,14 @@ use tokio::task::{AbortHandle, JoinSet};
 enum Outcome {
     QuotaPrepared(Result<Box<quota::Plan>>),
     QuotaChanged(Result<()>),
-    Submitted(Result<Box<ManagedSessionView>>),
+    Submitted(Result<Option<Box<ManagedSessionView>>>),
 }
 
 enum Phase {
     /// Resolving the reset deadline of a quota-limited turn.
     Resolving(mj_controller::upgrade::Work),
     WaitingQuota,
-    Submitting(Option<mj_controller::upgrade::Work>),
-}
-
-impl Phase {
-    fn work(&self) -> &mj_controller::upgrade::Work {
-        match self {
-            Self::Resolving(work) | Self::Submitting(Some(work)) => work,
-            _ => unreachable!("this quota phase holds no admission"),
-        }
-    }
+    Submitting,
 }
 
 struct Pending {
@@ -337,7 +328,11 @@ fn check_eligible(view: &ManagedSessionView) -> bool {
         })
 }
 fn scheduling_eligible(env: &Environment, id: &str, view: &ManagedSessionView) -> bool {
-    check_eligible(view) || (quota_assessment_eligible(view) && quota::unfinished(env, id, view))
+    if quota::unanswered(env, id) {
+        view.connected
+    } else {
+        check_eligible(view) && !quota::finished(env, id, view)
+    }
 }
 
 /// Who may act on a session now. One call reads the quota recovery setting, the
@@ -384,18 +379,12 @@ fn claim(state: &RuntimeState, session: &str) -> Claim {
     }
 }
 
-fn allowed(state: &RuntimeState, session: &str) -> bool {
-    claim(state, session) == Claim::Allowed
-}
-
 #[derive(Clone)]
 struct Environment {
     log: Option<mj_core::jev::DecisionLog>,
     control: SessionManagerControl,
     session_gate: Arc<mj_controller::recovery_gate::RecoveryGate>,
     schedules: Arc<Mutex<BTreeMap<String, quota::Schedule>>>,
-    allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-    /// The same decision as `allowed`, with a Move told apart; see [`Claim`].
     claim: Arc<dyn Fn(&str) -> Claim + Send + Sync>,
     /// The daemon's session records. The map is shared, so taking it on each
     /// update costs a pointer copy rather than one string per session.
@@ -522,10 +511,6 @@ pub(super) fn spawn(
         control: state.session_manager.clone(),
         session_gate: state.session_gate.clone(),
         schedules: Default::default(),
-        allowed: {
-            let state = state.clone();
-            Arc::new(move |id| allowed(&state, id))
-        },
         claim: {
             let state = state.clone();
             Arc::new(move |id| claim(&state, id))
@@ -544,9 +529,13 @@ pub(super) fn spawn(
         child_switch_runtime: Some(state.clone()),
         start_quota_move: {
             let state = state.clone();
-            Arc::new(move |request, reason, continuation| {
+            Arc::new(move |request, reason, continuation, admission| {
                 let state = state.clone();
-                Box::pin(async move { state.start_quota_move(request, reason, continuation).await })
+                Box::pin(async move {
+                    state
+                        .start_quota_move(request, reason, continuation, admission)
+                        .await
+                })
             })
         },
         profile: {
@@ -594,14 +583,9 @@ fn spawn_with_gate(
 ) {
     let (tx, rx) = coalesced_update_channel();
     let task = mj_core::runtime::spawn(async move {
-        // A quota recovery can wait for the same turn to reconnect; the value
-        // is the completed turn it was deferred for.
-        let mut deferred = BTreeMap::<String, String>::new();
         // A refused admission must not consume a completed-turn trigger.
         let mut admission_deferred = BTreeMap::<String, Option<String>>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
-        let mut refresh_after_release = BTreeSet::<String>::new();
-        let mut foreground_releases = environment.session_gate.foreground_releases();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut retry_after = BTreeMap::<String, QuotaRetry>::new();
         let mut skips = QuotaSkips::default();
@@ -621,16 +605,6 @@ fn spawn_with_gate(
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break FeedEnd::Shutdown,
-                released = foreground_releases.changed() => {
-                    if released.is_err() { break FeedEnd::SessionManagerStopped; }
-                    for (id, origin) in environment.session_gate.take_foreground_releases() {
-                        if origin != mj_controller::recovery_gate::LifecycleOrigin::Person { continue; }
-                        refresh_after_release.insert(id.clone());
-                        if pending.get(&id).is_some_and(|p| !matches!(p.phase, Phase::Submitting(_)))
-                            && let Some(previous) = pending.remove(&id) { previous.abort.abort(); }
-                        if !pending.contains_key(&id) { rechecks.insert(id); }
-                    }
-                }
                 update = async {
                     loop {
                         tokio::select! {
@@ -655,12 +629,6 @@ fn spawn_with_gate(
                     let id = update.session_id;
                     let view = update.view;
                     latest.insert(id.clone(), view.clone());
-                    let refresh = !pending.contains_key(&id) && refresh_after_release.remove(&id);
-                    if refresh {
-                        quota::invalidate(&environment, &id);
-                        assessed.remove(&id);
-                        retry_after.remove(&id);
-                    }
                     if let Some(snapshot) = view.snapshot.as_ref().filter(|s| unified(s) && s.operational.assessment_context.is_none())
                         && view.connected && seed_after.get(&id).is_none_or(|at| *at <= std::time::Instant::now())
                         && let Ok(seed_work) = gate.enter_unless_draining("seed Jev authorization") {
@@ -689,11 +657,8 @@ fn spawn_with_gate(
                         .as_ref()
                         .and_then(ended_turn)
                         .map(|t| t.key.to_owned());
-                    if deferred.get(&id).is_some_and(|key| Some(key) != completed.as_ref()) {
-                        deferred.remove(&id);
-                    }
                     if let Some(p) = pending.get_mut(&id) {
-                        let same_frontier = (environment.allowed)(&id)
+                        let same_frontier = (environment.claim)(&id) == Claim::Allowed
                             && view.snapshot.as_ref().is_some_and(|s| {
                                 s.operational.continuation.user_command_id.as_ref() == Some(&p.user)
                                     && s.operational.continuation.completed_command_id.as_ref()
@@ -705,10 +670,7 @@ fn spawn_with_gate(
                             publish(&tx, &environment, id, view, true);
                             continue;
                         }
-                        if same_frontier && !view.connected && matches!(p.phase, Phase::WaitingQuota) {
-                            deferred.insert(id.clone(), p.completed.clone());
-                        }
-                        if matches!(p.phase, Phase::Submitting(_)) {
+                        if matches!(p.phase, Phase::Submitting) {
                             // Submission owns its acceptance and remaining control
                             // transition until the task settles, even if stale.
                             publish(&tx, &environment, id, view, false);
@@ -722,24 +684,18 @@ fn spawn_with_gate(
                         } else {
                             failed_quota_attempt(&mut retry_after, &id, &previous.view);
                         }
-                        if !matches!(previous.phase, Phase::Submitting(_)) {
-                            previous.abort.abort();
-                        }
-                        // An already-dispatched submission retains its bounded task
-                        // to record the worker's actual acceptance or rejection.
-                        // Its atomic frontier guard still lets new input win.
+                        previous.abort.abort();
                     }
                     // The worker's assessment decides whether the turn hit a
                     // quota; each assessment revision is acted on once.
-                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && (a.verdict.is_some() || a.glide.is_some() || a.action == Some(mj_core::assessment::Action::RecoverQuota)));
+                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && a.action == Some(mj_core::assessment::Action::RecoverQuota));
                     let new_completion = worker_assessment.is_some_and(|a| assessed.get(&id).copied() != Some(a.revision));
-                    // A deferred recovery is released once it can be recorded.
-                    let released = !new_completion && deferred.contains_key(&id) && quota_schedulable(&view);
                     let retry_ready = retry_after.get(&id).is_some_and(|r| r.revision != assessment_revision(&view) || r.after <= tokio::time::Instant::now());
                     let retry_blocked = retry_after.get(&id).is_some_and(|r| r.revision == assessment_revision(&view) && r.after > tokio::time::Instant::now());
                     if admission_deferred.get(&id).is_some_and(|key| key != &completed) { admission_deferred.remove(&id); }
-                    let admission_retry = !retry_blocked && admission_deferred.contains_key(&id);
-                    if !retry_blocked && (refresh || new_completion || released || admission_retry || retry_ready) && scheduling_eligible(&environment, &id, &view) && (environment.allowed)(&id) {
+                    let admission_retry = admission_deferred.contains_key(&id);
+                    let reconcile = quota::unanswered(&environment, &id);
+                    if !retry_blocked && (reconcile || new_completion || admission_retry || retry_ready) && scheduling_eligible(&environment, &id, &view) && (reconcile || (environment.claim)(&id) == Claim::Allowed) {
                         let Ok(upgrade_work) = gate.enter_unless_draining("quota assessment") else {
                             failed_quota_attempt(&mut retry_after, &id, &view);
                             admission_deferred.insert(id.clone(), completed);
@@ -748,39 +704,41 @@ fn spawn_with_gate(
                         };
                         // Commit the processed frontier only after this decision
                         // can run. Disconnection and refused admission preserve it.
-                        if let Some(a) = worker_assessment {
+                        if !reconcile && let Some(a) = worker_assessment {
                             assessed.insert(id.clone(), a.revision);
                         }
-                        deferred.remove(&id);
                         admission_deferred.remove(&id);
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
                         let session = id.clone();
                         let env = environment.clone();
                         let quota_view = view.clone();
-                        let task_work = upgrade_work.clone();
-                        // The worker's assessment already identified the quota
-                        // stop; resolve its reset deadline without an LLM.
-                        let abort = jobs.spawn(async move {
-                            let _task_work = task_work;
-                            let result = (env.quota)(session.clone(), quota_view).await;
-                            (session, epoch, Outcome::QuotaPrepared(result.map(Box::new)))
-                        });
-                        let s = &view
-                            .snapshot
-                            .as_ref()
-                            .expect("eligible snapshot")
-                            .operational
-                            .continuation;
+                        let (phase, abort) = if reconcile {
+                            let abort = jobs.spawn(async move {
+                                let _work = upgrade_work;
+                                let result = quota::wait(&env, &session, &quota_view, None).await.map(Some);
+                                (session, epoch, Outcome::Submitted(result))
+                            });
+                            (Phase::Submitting, abort)
+                        } else {
+                            let task_work = upgrade_work.clone();
+                            let abort = jobs.spawn(async move {
+                                let _work = task_work;
+                                let result = (env.quota)(session.clone(), quota_view).await;
+                                (session, epoch, Outcome::QuotaPrepared(result.map(Box::new)))
+                            });
+                            (Phase::Resolving(upgrade_work), abort)
+                        };
+                        let continuation = view.snapshot.as_ref().map(|s| &s.operational.continuation);
                         pending.insert(
                             id.clone(),
                             Pending {
-                                phase: Phase::Resolving(upgrade_work),
+                                phase,
                                 generation: epoch,
                                 abort,
                                 view: view.clone(),
-                                user: s.user_command_id.clone().unwrap(),
-                                completed: s.completed_command_id.clone().unwrap(),
+                                user: continuation.and_then(|c| c.user_command_id.clone()).unwrap_or_default(),
+                                completed: completed.unwrap_or_default(),
                                 evidence_ordinal: evidence_ordinal(&view),
                             },
                         );
@@ -803,8 +761,7 @@ fn spawn_with_gate(
                                 continue;
                             }
                             let mut p = pending.remove(&id).expect("current request");
-                            if refresh_after_release.contains(&id)
-                                || latest.get(&id).is_some_and(|view| evidence_ordinal(view) != p.evidence_ordinal
+                            if latest.get(&id).is_some_and(|view| evidence_ordinal(view) != p.evidence_ordinal
                                     || assessment_revision(view) != assessment_revision(&p.view))
                             { rechecks.insert(id.clone()); }
                             match result {
@@ -815,7 +772,7 @@ fn spawn_with_gate(
                                         publish(&tx, &environment, id, p.view, false);
                                         continue;
                                     }
-                                    if !(environment.allowed)(&id) || !quota_schedulable(&p.view) {
+                                    if (environment.claim)(&id) != Claim::Allowed || !quota_schedulable(&p.view) {
                                         failed_quota_attempt(&mut retry_after, &id, &p.view);
                                         publish(&tx, &environment, id, p.view, false);
                                         continue;
@@ -858,18 +815,17 @@ fn spawn_with_gate(
                                             publish(&tx, &environment, id.clone(), p.view.clone(), true);
                                             pending.insert(id, Pending { abort, ..p });
                                         }
-                                        Ok(recovery) if (environment.allowed)(&id) && quota_schedulable(&p.view) => {
+                                        Ok(recovery) if (environment.claim)(&id) == Claim::Allowed && quota_schedulable(&p.view) => {
                                             let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
-                                            // Child staging uses lifecycle admission and can be cancelled by handoff.
-                                            let work = (!matches!(*recovery, quota::Plan::ChildSwitch { .. }))
-                                                .then(|| p.phase.work().clone());
-                                            let task_work = work.clone();
+                                            let Phase::Resolving(work) = p.phase else { unreachable!() };
+                                            // Child staging and admitted Moves own their own lifecycle admission.
+                                            let work = (!matches!(*recovery, quota::Plan::ChildSwitch { .. })).then_some(work);
+                                            let gate = gate.clone();
                                             let abort = jobs.spawn(async move {
-                                                let _task_work = task_work;
-                                                let result = quota::schedule(&env, &session, view, *recovery).await;
+                                                let result = quota::schedule(&env, &session, view, *recovery, &gate, work).await;
                                                 (session, epoch, Outcome::Submitted(result))
                                             });
-                                            pending.insert(id, Pending { abort, phase: Phase::Submitting(work), ..p });
+                                            pending.insert(id, Pending { abort, phase: Phase::Submitting, ..p });
                                         }
                                         result => {
                                             tracing::warn!(session=%id, ?result, "quota recovery could not be scheduled");
@@ -883,11 +839,14 @@ fn spawn_with_gate(
                                     match result {
                                         Ok(view) => {
                                             retry_after.remove(&id);
-                                            latest.insert(id.clone(), (*view).clone());
+                                            let view = view.map(|view| *view)
+                                                .or_else(|| latest.get(&id).cloned()).unwrap_or(p.view);
+                                            latest.insert(id.clone(), view.clone());
+                                            rechecks.insert(id.clone());
                                             tx.send(SessionManagerUpdate {
                                                 raw_observation: None,
                                                 session_id: id,
-                                                view: *view,
+                                                view,
                                             });
                                         }
                                         Err(error) => {
@@ -918,11 +877,11 @@ fn spawn_with_gate(
                     if !gate.is_draining() {
                         for id in admission_deferred.keys() {
                             if retry_after.get(id).is_none_or(|r| r.after <= tokio::time::Instant::now())
-                                && latest.get(id).is_some_and(|view| scheduling_eligible(&environment, id, view) && (environment.allowed)(id)) { rechecks.insert(id.clone()); }
+                                && latest.get(id).is_some_and(|view| scheduling_eligible(&environment, id, view) && (quota::unanswered(&environment, id) || (environment.claim)(id) == Claim::Allowed)) { rechecks.insert(id.clone()); }
                         }
                         for (id, retry) in &retry_after {
                             if retry.after <= tokio::time::Instant::now() && !pending.contains_key(id)
-                                && latest.get(id).is_some_and(|view| scheduling_eligible(&environment, id, view) && (environment.allowed)(id)) { rechecks.insert(id.clone()); }
+                                && latest.get(id).is_some_and(|view| scheduling_eligible(&environment, id, view) && (quota::unanswered(&environment, id) || (environment.claim)(id) == Claim::Allowed)) { rechecks.insert(id.clone()); }
                         }
                     }
                     if gate.is_draining() {
@@ -939,7 +898,7 @@ fn spawn_with_gate(
                     }
                     let invalid: Vec<_> = pending
                         .iter()
-                        .filter(|(id, p)| !(environment.allowed)(id) && !matches!(p.phase, Phase::Submitting(_)))
+                        .filter(|(id, p)| (environment.claim)(id) != Claim::Allowed && !matches!(p.phase, Phase::Submitting))
                         .map(|(id, _)| id)
                         .cloned()
                         .collect();
@@ -950,9 +909,7 @@ fn spawn_with_gate(
                         } else {
                             failed_quota_attempt(&mut retry_after, &id, &p.view);
                         }
-                        if !matches!(p.phase, Phase::Submitting(_)) {
-                            p.abort.abort();
-                        }
+                        p.abort.abort();
                         publish(&tx, &environment, id, p.view, false);
                     }
                     for (id, view) in &latest {
@@ -963,7 +920,7 @@ fn spawn_with_gate(
                         // One snapshot feeds both decisions: a Move that fails between two reads would clear a record whose session is free again.
                         let claim = (environment.claim)(id);
                         let clear = (recovery.retry_at_ms.is_some() && claim == Claim::Blocked) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
-                        if !clear && quota::unfinished(&environment, id, view) { continue; }
+                        if quota::unanswered(&environment, id) { continue; }
                         if !clear && recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis()) { continue; }
                         // Due from here on: every refusal to submit is named, once a minute.
                         let mut refusal = if clear { Vec::new() } else { quota_resume_blockers(view) };
@@ -986,13 +943,12 @@ fn spawn_with_gate(
                         };
                         skips.forget(id);
                         let env = environment.clone(); let session = id.clone(); let current = view.clone();
-                        let task_work = upgrade_work.clone();
                         let abort = jobs.spawn(async move {
-                            let _task_work = task_work;
-                            let result = quota::resume(&env, &session, &current, clear).await;
+                            let _work = upgrade_work;
+                            let result = quota::resume(&env, &session, &current, clear).await.map(Some);
                             (session, epoch, Outcome::Submitted(result))
                         });
-                        pending.insert(id.clone(), Pending { phase: Phase::Submitting(Some(upgrade_work)), generation: epoch, abort,
+                        pending.insert(id.clone(), Pending { phase: Phase::Submitting, generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
                     for (id, view) in &latest {
@@ -1005,10 +961,8 @@ fn spawn_with_gate(
                         }
                     }
                     let live = (environment.live)();
-                    deferred.retain(|id, _| live.contains_key(id));
                     admission_deferred.retain(|id, _| live.contains_key(id));
                     rechecks.retain(|id| live.contains_key(id));
-                    refresh_after_release.retain(|id| live.contains_key(id));
                     latest.retain(|id, _| live.contains_key(id));
                     retry_after.retain(|id, _| live.contains_key(id));
                     environment.schedules.lock().unwrap().retain(|id, _| live.contains_key(id));
