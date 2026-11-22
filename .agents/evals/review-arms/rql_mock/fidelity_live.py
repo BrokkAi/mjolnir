@@ -85,6 +85,13 @@ class LiveModels:
         identity = {"model": model, "effort": EFFORT, "profile": profile, **snapshot,
                     "inputs_sha256": sha(canonical([files, prompt(".scratch")]).encode())}
         sid = None
+        retiring = False
+
+        def retire(*, failed_turn=False):
+            return runner.retire(directory, {"session_id": sid, "orphan": snapshot["orphan"],
+                                             "commit": commit, "model_version": version,
+                                             "instance": runner.instance}, failed_turn=failed_turn)
+
         try:
             if state.exists():
                 sid = json.loads(state.read_bytes())["session_id"]
@@ -115,9 +122,9 @@ class LiveModels:
                 checked = check_output(output, read)
                 runner.clean_checkout(sid)
                 driver.save(completed, record)
-            runner.retire(directory, {"session_id": sid, "orphan": snapshot["orphan"],
-                                      "commit": commit, "model_version": record["version"],
-                                      "instance": runner.instance}, require_clean_audit=True)
+            retiring = True
+            if not retire():
+                raise RuntimeError("the stored transcript did not pass the audit")
             return checked, record
         except (Exception, KeyboardInterrupt) as error:
             failed = directory / "failed.json"
@@ -126,6 +133,11 @@ class LiveModels:
                     driver.save(failed, {"session_id": sid, "reason": str(error)})
                 except OSError as save_error:
                     error.add_note(f"Could not record fidelity session {sid} failure: {save_error}")
+            if sid is not None and not retiring:
+                try:
+                    retire(failed_turn=True)
+                except Exception as retirement_error:
+                    error.add_note(f"Could not retire fidelity session {sid}: {retirement_error}")
             raise
 
     def run_turn(self, runner, sid, snapshot, directory, model, profile, files, prompt):
