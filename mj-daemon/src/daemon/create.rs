@@ -47,7 +47,10 @@ impl RuntimeState {
         self: &Arc<Self>,
         mut request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        let (primary_selection, provider_reservation) = if request.profile_id.is_empty() {
+        let (primary_selection, provider_reservation, delegation_notice) = if request
+            .profile_id
+            .is_empty()
+        {
             let config = self.owner().controller().config.clone();
             let execution_policy = if config
                 .targets
@@ -90,16 +93,21 @@ impl RuntimeState {
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
                 apply_chosen_profile(&mut request, &selected.profile_id);
+                let mut notice = None;
                 if matches!(
                     request.subagents,
                     Some(mj_core::subagent::SubagentPolicy::Native)
-                ) && config
-                    .enabled_profile(&selected.profile_id)
-                    .is_some_and(|profile| !profile.kind.has_native_subagents())
+                ) && let Some(profile) = config.enabled_profile(&selected.profile_id)
+                    && !profile.kind.has_native_subagents()
                 {
                     request.subagents = Some(mj_core::subagent::SubagentPolicy::None);
+                    notice = Some(format!(
+                        "Disabled native sub-agents for this session: selected profile {} ({}) does not support native sub-agents.",
+                        selected.profile_id,
+                        profile.kind.display_name(),
+                    ));
                 }
-                (None, Some(selected.reservation))
+                (None, Some(selected.reservation), notice)
             } else {
                 anyhow::ensure!(
                     config.subagents.primary_configured(),
@@ -114,16 +122,19 @@ impl RuntimeState {
                 .await
                 .map_err(|failure| anyhow::anyhow!(failure.message))?;
                 apply_chosen_profile(&mut request, &selected.profile_id);
-                (Some((selected, backend)), None)
+                (Some((selected, backend)), None, None)
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
         let (registered, _, warning) = self
             .start_create_session_inner(request, LifecycleControl::default(), None)
             .await?;
         if let Some(reservation) = provider_reservation {
             reservation.commit(Some(registered.session.id.clone()));
+        }
+        if let Some(notice) = delegation_notice {
+            self.push_notice(&registered.session.id, notice);
         }
         if let Some((selected, backend)) = primary_selection {
             selected

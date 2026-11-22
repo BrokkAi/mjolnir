@@ -60,7 +60,7 @@ pub fn partial_review_events(
                 created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
                 body: MailboxEventBody::PlainText {
                     text: format!(
-                        "Review {completed}/{total} — partial result for commits {range} in {} (review {}).\n{report}\n{} of {total} reviewers are still running. Independent reviewer reports may overlap. Start investigating and fixing findings you agree with now instead of idling until all reviewers finish. Wait for the final result before pushing, calling override_review, or requesting another review.",
+                        "Review {completed}/{total} — partial result for commits {range} in {} (review {}).\n{report}\n{} of {total} reviewers are still running. Independent reviewer reports may overlap. Start investigating and fixing findings you agree with now instead of idling until all reviewers finish. Wait for the final result before committing, pushing, calling override_review, or requesting another review.",
                         delta.root.display(),
                         snapshot.review_id,
                         total - completed,

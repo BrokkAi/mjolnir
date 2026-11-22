@@ -1,7 +1,7 @@
 Review 1/2 — partial result for commits basecommit..headcommit in /workspace/app (review review-id).
 Reviewer 2 (session reviewer-two)
 second defect
-1 of 2 reviewers are still running. Independent reviewer reports may overlap. Start investigating and fixing findings you agree with now instead of idling until all reviewers finish. Wait for the final result before pushing, calling override_review, or requesting another review.
+1 of 2 reviewers are still running. Independent reviewer reports may overlap. Start investigating and fixing findings you agree with now instead of idling until all reviewers finish. Wait for the final result before committing, pushing, calling override_review, or requesting another review.
 
 Review of commits basecom..headcom in /workspace/app found:
 Independent reviewer reports may overlap. Check each finding against the source.
