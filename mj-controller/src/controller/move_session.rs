@@ -1593,7 +1593,10 @@ impl Controller {
                                 .keep_dir_entries
                                 .iter()
                                 .filter(|entry| {
-                                    entry.path == *skip || entry.path.starts_with(skip)
+                                    entry
+                                        .path
+                                        .strip_prefix(&source.id)
+                                        .is_ok_and(|rel| rel == *skip || rel.starts_with(skip))
                                 })
                                 .map(|entry| entry.bytes)
                                 .sum();

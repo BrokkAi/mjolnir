@@ -1200,7 +1200,7 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
 }
 
 #[cfg(unix)]
-fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+pub(super) fn test_runtime_state_loading_the_store_with_live_recovery() -> (
     Arc<RuntimeState>,
     Arc<RecoveryGate>,
     crate::worker_upgrade::WorkerUpgradeCoordinator,
@@ -16642,6 +16642,28 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
     mj_controller::database::save_session(&record).unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    // `DaemonAction::SuspendPreflight` is routed as a cancellable machine action
+    // by `serve.rs`; verify `machine::execute` handles it instead of rejecting
+    // it as "not a machine read".
+    let preflight_reply = super::machine::execute(
+        DaemonAction::SuspendPreflight {
+            session_id: session_id.into(),
+            dry_run: false,
+            without_checkpoint: true,
+        },
+        &state,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .expect("SuspendPreflight must execute through machine::execute");
+    assert!(
+        matches!(
+            preflight_reply,
+            DaemonReply::SuspendPreflight(ref preflight) if preflight.existing_checkpoint.is_none()
+        ),
+        "expected SuspendPreflight reply with existing_checkpoint=None, got: {preflight_reply:?}"
+    );
+
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
@@ -16655,10 +16677,68 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         format!("{err:#}").contains("No verified checkpoint exists"),
         "expected refusal, got: {err:#}"
     );
+    // `suspend_session_with_consent` awaited `started.result`, which only
+    // resolves after lifecycle completion (and any failure recording).
+    assert!(
+        state
+            .owner()
+            .lifecycle
+            .get(session_id)
+            .is_none_or(|active| !active.is_running()),
+        "refused suspend lifecycle must be finished once wait_lifecycle_result returns"
+    );
     let loaded = Controller::load().unwrap();
     assert_eq!(
         loaded.state.sessions[session_id].state,
         SessionState::Running,
         "refused without_checkpoint must not transition session to Closing"
     );
+    assert_eq!(
+        loaded.state.sessions[session_id].last_error, None,
+        "pre-acceptance suspend refusal must not stamp last_error onto a live session"
+    );
+}
+
+// Hard-won: c9cb0752f: SuspendPreflight was marked as a cancellable machine action without a machine::execute arm.
+#[tokio::test]
+async fn suspend_preflight_runs_through_cancellable_machine_action_dispatch() {
+    const CHILD: &str = "MJ_TEST_SUSPEND_PREFLIGHT_MACHINE_DISPATCH";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "suspend_preflight_runs_through_cancellable_machine_action_dispatch",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let session_id = "daemon-suspend-preflight-machine";
+    let record = runtime_test_session(session_id, "default", SessionState::Running);
+    mj_controller::database::save_session(&record).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let cancellation = CancellationToken::new();
+    let server = mj_core::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, cancellation).await
+    });
+
+    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+        .await
+        .unwrap();
+    let preflight = client
+        .suspend_preflight(session_id.into(), false, false)
+        .await
+        .expect("suspend preflight must succeed over the cancellable machine dispatch path");
+    assert_eq!(preflight.session_id, session_id);
+    drop(client);
+    server.await.unwrap().unwrap();
 }

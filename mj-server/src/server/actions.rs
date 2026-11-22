@@ -564,8 +564,18 @@ pub enum ClientStateRequest {
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
-        reply:
-            tokio::sync::oneshot::Sender<Result<mj_core::suspend_consent::SuspendPreflight, String>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<mj_core::suspend_consent::SuspendPreflight, String>,
+        >,
+    },
+    PurgeUntracked {
+        request: crate::server::api::PurgeUntrackedRequest,
+        reply: tokio::sync::oneshot::Sender<
+            Result<
+                crate::server::api::PurgeUntrackedResponse,
+                crate::server::api::PurgeUntrackedFailure,
+            >,
+        >,
     },
     Read {
         client_id: String,
@@ -767,11 +777,9 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            serde_json::to_value(older_client)
-                .unwrap()
-                .get("resource_allocation")
-                .is_none()
-        );
+        assert!(serde_json::to_value(older_client)
+            .unwrap()
+            .get("resource_allocation")
+            .is_none());
     }
 }

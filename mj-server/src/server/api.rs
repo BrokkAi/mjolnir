@@ -120,6 +120,8 @@ mod subagents;
 pub use subagents::*;
 mod turns;
 pub use turns::*;
+mod checkpoints;
+pub use checkpoints::*;
 mod files;
 pub use files::*;
 mod wait;

@@ -223,7 +223,7 @@ kind = "bare"
         # A second startup must reuse the winning daemon.
         self.run("api-info", "--json")
         assert self.metadata()["pid"] == after["pid"], "repeated startup replaced the daemon"
-        self.run("suspend", "--session", self.session, "--acknowledge-unpublished-work")
+        self.run("suspend", "--session", self.session, "--discard-untracked")
         self.until(self.session_state, lambda value: value["state"] == "suspended",
                    "suspension completion")
         self.run("resume", "--session", self.session)

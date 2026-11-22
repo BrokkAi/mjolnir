@@ -114,8 +114,8 @@ pub(crate) fn confirmation_buttons(
 /// that no earlier button took, then of a later word, then any later letter
 /// of the label; a label with nothing left gets no letter (`\0`).
 ///
-/// `Yes` and `Yes, delete branch` therefore answer `y` and `d`; `Cancel` and
-/// `Confirm` answer `c` and `o`.
+/// `Cancel` and `Continue anyway` therefore answer `c` and `o`; `Yes` and `No`
+/// answer `y` and `n`.
 pub(crate) fn confirmation_accelerators<S: AsRef<str>>(labels: &[S]) -> Vec<char> {
     let mut taken = Vec::new();
     labels
@@ -137,7 +137,7 @@ pub(crate) fn confirmation_accelerators<S: AsRef<str>>(labels: &[S]) -> Vec<char
 }
 
 /// The line under a confirmation's text naming each button's letter, in the
-/// same order the buttons are drawn: `n No · y Yes · d Yes, delete branch`.
+/// same order the buttons are drawn: `c Cancel · o Continue anyway`.
 pub(crate) fn confirmation_key_line<S: AsRef<str>>(labels: &[S]) -> Line<'static> {
     let accelerators = confirmation_accelerators(labels);
     let mut spans = Vec::new();

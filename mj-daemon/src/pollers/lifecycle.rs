@@ -10,7 +10,6 @@ pub enum LifecycleSuccess {
     },
     Moved(mj_core::state::MoveOutcome),
     Closed,
-    ForceStopped,
     DestroyedStopped,
     ForceDestroyed,
 }

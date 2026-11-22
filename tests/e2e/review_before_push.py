@@ -477,7 +477,7 @@ effort = {json.dumps(args.effort)}
             if session:
                 (root / "session-transcript-final.json").write_text(
                     cli("transcript", "--session", session, "--limit", "1000", "--json", check=False))
-                cli("suspend", "--session", session, "--acknowledge-unpublished-work", check=False)
+                cli("suspend", "--session", session, "--discard-untracked", check=False)
                 child_ids = [relation["child_session_id"] for relation in relations()]
                 for child in child_ids:
                     with sqlite3.connect(f"file:{data / 'mj.sqlite3'}?mode=ro", uri=True) as database:

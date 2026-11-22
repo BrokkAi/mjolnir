@@ -150,7 +150,7 @@ mj import claude --session 018f2d00-0000-7000-8000-000000000000 \
 mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--cpus <n> --memory-gib <gib>] [--clear-resources]
         [--queue discard|start] [--yes] [--json]
-        [--prepare] [--allow-large-transfer] [--exclude <repository>:<path>]...
+        [--dry-run] [--discard-untracked] [--abort-operation] [--skip <path>]...
         [--subagents native|mjolnir|none]
         [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
         [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
@@ -166,6 +166,15 @@ keeps its current value. The destination must satisfy the same compatibility
 checks as resume.
 Moving between harnesses creates a bounded transcript handoff rather than
 copying harness-private process state.
+
+A suspend, and a Move that rebuilds the environment, keep Git state only:
+branches, tags, stashes, commits, staged and unstaged changes to tracked
+files, and linked worktrees inside the checkout. Untracked files are lost
+unless they are `git add`ed first. Git-ignored files are never kept.
+`$MJ_KEEP_DIR` (`.mj/keep/<session-id>/` in the checkout) travels with a Move
+to another machine and is not saved when the session is suspended. An in-place
+Move keeps the environment, so files stay on disk. Suspending a raw checkout
+leaves that checkout on disk as well.
 
 Move inherits the source resource sizing and attached directories by default.
 Attached directories stay part of the fixed workspace selection, and
@@ -213,23 +222,28 @@ the same host; that Move is the same in-place profile switch, keeping the
 checkout and transferring no files. To continue elsewhere, push its branch and start a new session
 from that branch. The same rule applies to `mj resume --target`.
 
-When the move copies a workspace, it transfers the repository history and
-tracked edits, plus the untracked files you keep selected. Three flags control
-that selection:
+When the move rebuilds the environment on another target, it transfers that
+origin-relative Git snapshot and `$MJ_KEEP_DIR` directly from source to
+destination (streaming through the daemon only when the two machines cannot
+reach each other, without writing the snapshot to the daemon's disk). Untracked
+files and Git-ignored files are not copied. These flags control cross-target
+moves:
 
-- `--prepare` inspects the transfer and prints the preparation as JSON without
-  moving anything. Use it to see the eligible files, their sizes, and any
-  blockers.
-- `--exclude <repository>:<path>` leaves an untracked file or directory at
-  the source. Repeat it for each path.
-- `--allow-large-transfer` accepts a workspace transfer of at least 1 GB.
-  Without it, a large selection is refused, and the error says which of these
-  flags can resolve it.
+- `--dry-run` inspects the workspace, reports the transfer route, and prints
+  any untracked files, in-progress Git operations, or `$MJ_KEEP_DIR` sizes
+  without moving anything.
+- `--discard-untracked` consents to dropping untracked files when moving a
+  managed checkout.
+- `--abort-operation` consents to aborting an in-progress Git operation
+  (merge, rebase, cherry-pick, revert, `am`, or bisect) before capture.
+- `--skip <path>` omits a path inside `$MJ_KEEP_DIR` from the transfer. Repeat
+  it for each path. Skipped paths are deleted when a managed source is retired
+  and remain on disk in a raw checkout.
 
-Paths left behind stay in a retained source. `mj move-sources --session <id>`
-lists the retained sources for a session as JSON. To delete one together with
-its excluded files, pass its operation ID as `--cleanup <operation-id>` and
-confirm with `--yes`; `--cleanup` without `--yes` is refused.
+Legacy move sources retained by earlier releases remain inspectable via
+`mj move-sources --session <id>` (JSON). To delete one, pass its operation ID
+as `--cleanup <operation-id>` and confirm with `--yes`; `--cleanup` without
+`--yes` is refused.
 
 An interactive invocation prepares the destination and asks for confirmation.
 `--yes` confirms the interruption for unattended use, but it does not choose
@@ -305,8 +319,11 @@ mj export --session <id> [--kind patch|branch|bundle] [--branch <name>]
            [--out <path>] [--json]
 mj fetch --session <id> --path <path> [--stdout | --ls] [--json]
 mj sessions [--session <id>] [--all] [--workspace <name>] [--target <id>] [--host <name>] [--json]
-mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
-mj destroy --session <id> [--delete-branch] [--json]
+mj suspend --session <id> [--discard-untracked] [--abort-operation]
+           [--without-checkpoint] [--dry-run] [--yes] [--json]
+mj restart --session <id> [--json]
+mj purge-untracked (--session <id> | --all) [--dry-run] [--json]
+mj destroy --session <id> [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>] [--workspace <name>]
           [--queue start|discard] [--json]
@@ -619,19 +636,36 @@ mapping task IDs to errors. All selected stops are attempted; any failure makes
 the command exit nonzero. Acceptance does not establish that the task has exited:
 inspect the session again to confirm it disappeared.
 
-`mj suspend` saves a verified recovery copy and releases the environment. It
-reports acceptance; follow it with `mj wait --session <id>` to observe completion
-or a reported failure. A session's active Mjolnir sub-agents are stopped
-without a recovery copy of their own, and only the session is suspended. When
-some of them have not handed back their reports, `mj suspend` prints a warning
-on standard error, such as `warning: 2 sub-agents have not handed back;
-suspending stops them`. With `--json` the answer carries `stopped_subagents`,
-`subagents_not_handed_back`, and `warning` (omitted when there is none). When the
-session resumes, its agent is told which sub-agents were stopped. For an
-independent clone whose work may be unpublished,
-pass `--acknowledge-unpublished-work` after reviewing the warning; suspension
-still verifies the recovery copy before releasing the clone. `mj interrupt-turn` interrupts only the current turn and
-keeps the session available for another prompt.
+`mj suspend` saves a verified recovery copy and releases the environment. The
+copy keeps Git state only: branches, tags, stashes, commits, staged and
+unstaged changes to tracked files, and linked worktrees. Untracked files are
+lost unless they are `git add`ed first. Git-ignored files are never kept.
+`$MJ_KEEP_DIR` is not saved. A raw checkout stays on disk when its worker is
+removed. Pass `--dry-run` to inspect untracked files, in-progress Git
+operations, and estimated snapshot size without suspending; pass
+`--discard-untracked` or `--abort-operation` to give explicit consent for those
+losses on a managed checkout; pass `--without-checkpoint` (adding `--yes` when
+no prior checkpoint exists) to stop a session and release its environment
+without taking a new checkpoint. `mj suspend` reports acceptance; follow it with
+`mj wait --session <id>` to observe completion or a reported failure. A
+session's active Mjolnir sub-agents are stopped without a recovery copy of their
+own, and only the session is suspended. When some of them have not handed back
+their reports, `mj suspend` prints a warning on standard error, such as
+`warning: 2 sub-agents have not handed back; suspending stops them`. With
+`--json` the answer carries `stopped_subagents`, `subagents_not_handed_back`,
+and `warning` (omitted when there is none). When the session resumes, its agent
+is told which sub-agents were stopped. `mj interrupt-turn` interrupts only the
+current turn and keeps the session available for another prompt. `mj restart
+--session <id>` restarts the session's agent harness in place without moving or
+rebuilding its checkout.
+
+`mj purge-untracked` rewrites legacy (pre-origin-delta) checkpoints of stopped
+sessions to replace stored untracked-file payloads with empty archives while
+keeping tracked Git history and transcript state intact. Select one session with
+`--session <id>` or every stopped session with `--all`; pass `--dry-run` to
+estimate reclaimed on-disk bytes without modifying archives. Sessions that are
+running, already use origin-delta format, or whose archive is referenced by
+durable recovery state are skipped and reported.
 
 `mj review start` reviews the turn a session just finished with the session's
 reviewer, as `/review` does in Prompt. It answers once the review has opened,
@@ -651,9 +685,7 @@ recovery archive. Its conversation is indexed in SessionWiki first:
 `mj sessions --session <id>` can find the archived conversation, and
 `mj resume --wiki <id>` starts a new session from it. That restores conversation
 context, not the deleted checkout or unexported files.
-New managed clones have no branch in the source repository. For older linked
-worktree sessions, the managed branch remains unless `--delete-branch` is
-specified. `mj close` was removed: use `mj suspend` to keep the session, or `mj destroy` to
+New managed clones have no branch in the source repository. `mj close` was removed: use `mj suspend` to keep the session, or `mj destroy` to
 remove it (this replaces `mj close --force`). `mj cancel-turn` was removed too;
 use `mj interrupt-turn`. Both old names fail with a notice naming their
 replacement and perform no lifecycle action.

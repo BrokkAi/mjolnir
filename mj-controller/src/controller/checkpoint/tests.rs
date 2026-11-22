@@ -427,7 +427,6 @@ fn exported_checkpoint_json() -> Vec<u8> {
 }
 fn export_spec_fixture() -> CheckpointExportSpec {
     CheckpointExportSpec {
-        ignore_nested_repositories: false,
         consent: Default::default(),
         report_directories: None,
         protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
@@ -714,17 +713,13 @@ fn an_export_with_no_native_history_tells_the_caller_why() {
 /// current spec before it can apply obsolete path or collection behavior.
 #[test]
 fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
-    for (ignore_nested_repositories, field) in [
-        (false, "protocol_version"),
-        (true, "ignore_nested_repositories"),
-    ] {
+    for field in ["protocol_version", "consent"] {
         let locator = targets::TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
             workspace_storage: Default::default(),
         };
-        let mut spec = export_spec_fixture();
-        spec.ignore_nested_repositories = ignore_nested_repositories;
+        let spec = export_spec_fixture();
         let failure = format!(
             "Error: parse checkpoint export spec from standard input\n\nCaused by:\n    unknown field `{field}`, expected `session` at line 1 column 20\n"
         );

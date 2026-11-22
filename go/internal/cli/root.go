@@ -57,6 +57,7 @@ var topLevelCommands = []struct{ name, about string }{
 	{"export", "Get a session's work out as a patch, a pushed branch, or a git bundle"},
 	{"sessions", "List the sessions the daemon holds"},
 	{"suspend", "Save a recovery copy and release the environment for later Resume"},
+	{"purge-untracked", "Remove legacy untracked checkpoint payloads from stopped sessions"},
 	{"destroy", "Permanently destroy a session, its environment, and recovery archive"},
 	{"notices", "Read recent cleanup notices, including after a session was destroyed"},
 	{"resume", "Resume a stopped session from its checkpoint"},

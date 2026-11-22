@@ -18,6 +18,7 @@ pub(super) async fn handle_action(
         | DaemonAction::DiscoverSetup { .. }
         | DaemonAction::ProfileLoginStatuses
         | DaemonAction::PreflightNewSession { .. }
+        | DaemonAction::SuspendPreflight { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
         | DaemonAction::CompletePath { .. }
         | DaemonAction::CheckProjectDirectories { .. }
@@ -1147,15 +1148,6 @@ pub(super) async fn handle_action(
             }
         }
         DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
-        DaemonAction::SuspendPreflight {
-            session_id,
-            dry_run,
-            without_checkpoint,
-        } => Ok(DaemonReply::SuspendPreflight(Box::new(
-            state
-                .suspend_preflight(session_id, dry_run, without_checkpoint)
-                .await?,
-        ))),
         DaemonAction::SuspendSession {
             session_id,
             discard_untracked,

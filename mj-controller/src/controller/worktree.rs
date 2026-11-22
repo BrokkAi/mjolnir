@@ -2179,14 +2179,60 @@ pub(super) fn create_managed_worktree(
     Ok(())
 }
 
+enum CloneSeedMode<'a> {
+    FreshBranch,
+    LocalSnapshot(&'a mj_checkpoint::snapshot::WorkspaceSnapshot),
+    RemoteSnapshot {
+        object_format: &'a str,
+        origin_url: Option<&'a str>,
+    },
+}
+
+impl<'a> CloneSeedMode<'a> {
+    fn snapshot_object_format(&self) -> Option<&'a str> {
+        match self {
+            Self::FreshBranch => None,
+            Self::LocalSnapshot(snapshot) => Some(snapshot.metadata.object_format.as_str()),
+            Self::RemoteSnapshot { object_format, .. } => Some(*object_format),
+        }
+    }
+
+    fn snapshot_origin_url(&self) -> Option<&'a str> {
+        match self {
+            Self::FreshBranch => None,
+            Self::LocalSnapshot(snapshot) => snapshot.metadata.origin_url.as_deref(),
+            Self::RemoteSnapshot { origin_url, .. } => *origin_url,
+        }
+    }
+
+    fn local_snapshot(&self) -> Option<&'a mj_checkpoint::snapshot::WorkspaceSnapshot> {
+        match self {
+            Self::LocalSnapshot(snapshot) => Some(snapshot),
+            Self::FreshBranch | Self::RemoteSnapshot { .. } => None,
+        }
+    }
+
+    fn is_fresh_branch(&self) -> bool {
+        matches!(self, Self::FreshBranch)
+    }
+}
+
+pub(super) enum ManagedCloneRestoreOutcome {
+    /// Snapshot was applied directly into the local managed clone.
+    RestoredLocally(Vec<String>),
+    /// Empty clone was seeded on the remote SSH target; the target worker
+    /// must run `restore_repositories` during `restore_into_target`.
+    SeededForRemoteRestore,
+}
+
 fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorktree) -> Result<()> {
-    create_managed_clone_with_snapshot(executor, checkout, None).map(drop)
+    create_managed_clone_with_snapshot(executor, checkout, CloneSeedMode::FreshBranch).map(drop)
 }
 
 fn create_managed_clone_with_snapshot(
     executor: &impl CommandExecutor,
     checkout: &ManagedWorktree,
-    snapshot: Option<&mj_checkpoint::snapshot::WorkspaceSnapshot>,
+    mode: CloneSeedMode<'_>,
 ) -> Result<Vec<String>> {
     let parent = checkout
         .worktree_root
@@ -2210,9 +2256,9 @@ fn create_managed_clone_with_snapshot(
         .purpose("create managed clone parent"),
     )?;
     let mut published = false;
-    let seed_from_source = match snapshot {
+    let seed_from_source = match mode.snapshot_object_format() {
         None => true,
-        Some(snapshot) => {
+        Some(expected_object_format) => {
             path_exists_on_managed_target(executor, &checkout.target, &checkout.source_repository)?
                 && executor
                     .execute(&managed_git_command(
@@ -2225,7 +2271,7 @@ fn create_managed_clone_with_snapshot(
                     .is_ok_and(|output| {
                         output.status == 0
                             && String::from_utf8_lossy(&output.stdout).trim()
-                                == snapshot.metadata.object_format
+                                == expected_object_format
                     })
         }
     };
@@ -2289,7 +2335,7 @@ fn create_managed_clone_with_snapshot(
                 ),
             }
             copy_clone_local_git_preferences(executor, checkout, &staging)?;
-            if snapshot.is_none() {
+            if mode.is_fresh_branch() {
                 execute_checked(
                     executor,
                     managed_git_command(
@@ -2343,8 +2389,8 @@ fn create_managed_clone_with_snapshot(
                 }
             }
         } else {
-            let origin = snapshot
-                .and_then(|snapshot| snapshot.metadata.origin_url.as_deref())
+            let origin = mode
+                .snapshot_origin_url()
                 .context("origin-seeded managed clone requires a snapshot origin URL")?;
             execute_checked(
                 executor,
@@ -2363,7 +2409,7 @@ fn create_managed_clone_with_snapshot(
                 .purpose("seed independent managed clone from origin"),
             )?;
         }
-        let notices = if let Some(snapshot) = snapshot {
+        let notices = if let Some(snapshot) = mode.local_snapshot() {
             let mut notices = snapshot.notices.clone();
             // Restore runs Git fetches; keep them off the async workers.
             notices.extend(mj_core::runtime::off_async_worker(|| {
@@ -2392,7 +2438,7 @@ fn create_managed_clone_with_snapshot(
             .purpose("publish managed clone checkout"),
         )?;
         published = true;
-        if let Some(snapshot) = snapshot {
+        if let Some(snapshot) = mode.local_snapshot() {
             mj_checkpoint::snapshot::repair_workspace_snapshot(
                 &mj_checkpoint::archive::SystemGit,
                 snapshot,
@@ -2607,14 +2653,13 @@ pub(super) fn restore_managed_clone_origin_delta(
     worktree: &ManagedWorktree,
     archive: &Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
-) -> Result<Vec<String>> {
+) -> Result<ManagedCloneRestoreOutcome> {
     use mj_checkpoint::archive::CheckpointPayloadReader;
     use mj_checkpoint::snapshot::WorkspaceSnapshot;
 
     ensure!(
-        worktree.kind == ManagedCheckoutKind::Clone
-            && matches!(&worktree.target, ManagedWorktreeTarget::Local),
-        "origin delta resume requires a local independent managed clone"
+        worktree.kind == ManagedCheckoutKind::Clone,
+        "origin delta resume requires an independent managed clone"
     );
     let [repository] = manifest.repositories.as_slice() else {
         bail!("origin delta resume requires exactly one repository");
@@ -2625,24 +2670,6 @@ pub(super) fn restore_managed_clone_origin_delta(
         .as_deref()
         .context("origin delta metadata is missing")?
         .clone();
-    let pack = repository
-        .origin_delta_pack_path
-        .as_ref()
-        .map(|path| -> Result<_> {
-            let descriptor = manifest
-                .payloads
-                .iter()
-                .find(|payload| &payload.path == path)
-                .context("origin delta pack descriptor is missing")?;
-            let mut pack = tempfile::NamedTempFile::new()?;
-            CheckpointPayloadReader::open(archive)?.copy_payload(descriptor, pack.as_file_mut())?;
-            Ok(pack)
-        })
-        .transpose()?;
-    let snapshot = WorkspaceSnapshot {
-        metadata,
-        pack: pack.as_ref().map(|pack| pack.path().to_owned()),
-    };
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
         && executor
             .execute(&managed_git_command(
@@ -2661,7 +2688,50 @@ pub(super) fn restore_managed_clone_origin_delta(
             worktree.kind,
         )?;
     }
-    create_managed_clone_with_snapshot(executor, worktree, Some(&snapshot))
+    match &worktree.target {
+        ManagedWorktreeTarget::Local => {
+            let pack = repository
+                .origin_delta_pack_path
+                .as_ref()
+                .map(|path| -> Result<_> {
+                    let descriptor = manifest
+                        .payloads
+                        .iter()
+                        .find(|payload| &payload.path == path)
+                        .context("origin delta pack descriptor is missing")?;
+                    let mut pack = tempfile::NamedTempFile::new()?;
+                    CheckpointPayloadReader::open(archive)?
+                        .copy_payload(descriptor, pack.as_file_mut())?;
+                    Ok(pack)
+                })
+                .transpose()?;
+            let snapshot = WorkspaceSnapshot {
+                metadata,
+                pack: pack.as_ref().map(|pack| pack.path().to_owned()),
+            };
+            let notices = create_managed_clone_with_snapshot(
+                executor,
+                worktree,
+                CloneSeedMode::LocalSnapshot(&snapshot),
+            )?;
+            Ok(ManagedCloneRestoreOutcome::RestoredLocally(notices))
+        }
+        ManagedWorktreeTarget::Ssh { .. } => {
+            // Seed the empty clone on the SSH host; `restore_into_target` then
+            // invokes `mj-worker worker restore-checkpoint` with
+            // `restore_repositories = true` so the snapshot is unpacked and
+            // applied directly on the SSH host.
+            create_managed_clone_with_snapshot(
+                executor,
+                worktree,
+                CloneSeedMode::RemoteSnapshot {
+                    object_format: &metadata.object_format,
+                    origin_url: metadata.origin_url.as_deref(),
+                },
+            )?;
+            Ok(ManagedCloneRestoreOutcome::SeededForRemoteRestore)
+        }
+    }
 }
 
 /// Upgrade a legacy linked-worktree record to a fresh independent managed clone
