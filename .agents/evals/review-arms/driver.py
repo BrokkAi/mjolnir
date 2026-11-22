@@ -166,6 +166,77 @@ def valid_usage(path):
         return False
 
 
+def codex_turn_model(usage, command, model, effort, *, pages=(), rollouts=()):
+    """Validate the pinned selection for one recorded Codex command."""
+    selection = usage["turn_selections"].get(command, {})
+    if selection.get("model") != model or "effort" not in selection:
+        raise ValueError(f"Codex usage for {command} does not identify {model}/{effort}")
+    if selection["effort"] is None:
+        context = _codex_turn_context(usage, command, pages, rollouts)
+        selected = (context.get("model"), context.get("effort"))
+    else:
+        selected = (selection["model"], selection["effort"])
+    if selected != (model, effort):
+        raise ValueError(f"Codex turn {command} selected {selected[0]}/{selected[1]}, expected {model}/{effort}")
+    return model
+
+
+def _codex_turn_context(usage, command, pages, rollouts):
+    sid = usage["session_id"]
+    turns = [row for row in usage["turns"] if row["command_id"] == command]
+    if len(turns) != 1 or not pages or any(page["session_id"] != sid for page in pages):
+        raise ValueError(f"missing or ambiguous Mjolnir turn evidence for Codex command {command}")
+    turn, = turns
+    prompts = [item for page in pages for item in page["items"]
+               if item["stable_id"] == f"user:{command}" and item["role"] == "user"
+               and item["position"] == turn["turn_start_position"]]
+    if len(prompts) != 1:
+        raise ValueError(f"missing or ambiguous transcript prompt for Codex command {command}")
+    prompt, = prompts
+    blocks = prompt["body"]["content"]
+    if len(blocks) != 1 or blocks[0]["type"] != "text":
+        raise ValueError(f"expected one text prompt for Codex command {command}")
+    start, end = prompt["created_at_ms"], turn["completed_at_ms"]
+    workspace = pathlib.PurePosixPath("/workspace") / sid
+    matches = []
+    try:
+        for path in rollouts:
+            with path.open(encoding="utf-8") as source:
+                rows = (json.loads(line) for line in source)
+                header = next(rows, {})
+                if header.get("type") != "session_meta":
+                    continue
+                meta = header["payload"]
+                cwd = pathlib.PurePosixPath(meta["cwd"])
+                thread = meta["id"]
+                if not cwd.is_relative_to(workspace) or ".." in cwd.parts or not thread:
+                    continue
+                native_turns = []
+                contexts = []
+                for row in rows:
+                    payload = row["payload"]
+                    if row["type"] == "turn_context":
+                        contexts.append(payload)
+                    elif (row["type"] == "event_msg" and payload.get("type") == "item_completed"
+                          and payload.get("thread_id") == thread
+                          and payload["item"].get("type") == "UserMessage"
+                          and start <= payload["completed_at_ms"] < end):
+                        content = payload["item"]["content"]
+                        if (len(content) == 1 and content[0]["type"] == "text"
+                                and content[0]["text"] == blocks[0]["text"]):
+                            native_turns.append(payload["turn_id"])
+                # The command identifies its transcript prompt. Exact text and the
+                # host's turn interval identify a unique native UserMessage.
+                for native_turn in native_turns:
+                    matching = [context for context in contexts if context.get("turn_id") == native_turn]
+                    matches.append(matching)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise ValueError(f"could not read the Codex rollout for {command}: {error}") from error
+    if len(matches) != 1 or len(matches[0]) != 1:
+        raise ValueError(f"missing or ambiguous Codex rollout prompt or turn_context for {command}")
+    return matches[0][0]
+
+
 def image_digest(image):
     return "sha256:" + image.removeprefix("sha256:")
 
@@ -287,9 +358,11 @@ def destroy_captured_pilot(root, d, sid, profile, model, effort, output, *, allo
         raise ValueError("pilot usage is missing or belongs to another session")
     selection = {"model": model, "effort": effort}
     settings = json.loads((d / "settings.json").read_text())
-    if (any(settings.get(key) != value for key, value in selection.items())
-            or any(usage["turn_selections"].get(json.loads(p.read_text())["command_id"]) != selection for p in commands)):
+    if any(settings.get(key) != value for key, value in selection.items()):
         raise ValueError(f"pilot usage does not identify every model prompt as {model}/{effort}")
+    for path in commands:
+        command = json.loads(path.read_text())["command_id"]
+        codex_turn_model(usage, command, model, effort, pages=pages, rollouts=rollouts)
     receipt = d / "receipt.json"
     if receipt.exists():
         previous = json.loads(receipt.read_text())

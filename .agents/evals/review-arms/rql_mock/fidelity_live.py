@@ -47,15 +47,19 @@ only if they make the same unsupported claim under the same evidence.
 """
 
 
-def model_usage(usage, command, turn, model, claude_version):
+def model_usage(usage, command, turn, model, claude_version, directory=None):
     if model == SONNET:
         return driver.provider_model(usage, command, turn, claude_version)
     turns = usage["turns"]
     if len(turns) != 1 or (turns[0]["command_id"], turns[0]["accepted_ordinal"]) != (command, turn):
         raise ValueError("usage does not identify the enumerator's turn")
-    if usage["turn_selections"].get(command) != {"model": TERRA, "effort": EFFORT}:
-        raise ValueError("usage does not identify the pinned Terra/high model")
-    return TERRA
+    pages, rollouts = (), ()
+    if directory is not None:
+        pages = json.loads((directory / f"turn-{turn}-transcript.json").read_bytes())
+        audit = json.loads((directory / f"turn-{turn}-audit.json").read_bytes())
+        if name := audit.get("rollout_directory"):
+            rollouts = sorted((directory / name).glob("rollout-*.jsonl"))
+    return driver.codex_turn_model(usage, command, TERRA, EFFORT, pages=pages, rollouts=rollouts)
 
 
 class LiveModels:
@@ -168,7 +172,9 @@ class LiveModels:
             raise RuntimeError("fidelity session failed the pilot audit")
         usage = driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
         driver.save(directory / "turn-usage.json", usage)
-        resolved = model_usage(usage, command, turn, model, self.claude_version)
+        if usage.get("session_id") != sid:
+            raise ValueError("usage belongs to a different fidelity session")
+        resolved = model_usage(usage, command, turn, model, self.claude_version, directory)
         output = runner.command("fetch", "--session", sid, "--path", f"{scratch}/output.json", "--stdout")
         record = {"session": sid, "turn": turn, "model": model, "version": resolved, "effort": EFFORT}
         return output, record

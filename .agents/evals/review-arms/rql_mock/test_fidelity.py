@@ -481,5 +481,50 @@ class ModelIdentity(unittest.TestCase):
             "turn_selections": {"call": {"model": SONNET, "effort": "high"}}}
         with self.assertRaisesRegex(ValueError, "claude-sonnet-5-5"):
             model_usage(usage, "call", 1, SONNET, "claude-sonnet-5-5")
-        with self.assertRaisesRegex(ValueError, "Terra/high"):
+        with self.assertRaisesRegex(ValueError, f"{TERRA}/high"):
             model_usage(usage, "call", 1, TERRA, "claude-sonnet-5-5")
+
+    def test_codex_null_usage_effort_requires_the_exact_native_turn_context(self):
+        sid, command, native_id = "a" * 32, "fidelity-command", "codex-turn"
+        content = [{"type": "text", "text": "The same prompt may be retried."}]
+        turn = {"command_id": command, "accepted_ordinal": 32, "turn_start_position": 33,
+                "completed_at_ms": 200}
+        usage = {"session_id": sid, "turns": [turn],
+                 "turn_selections": {command: {"model": TERRA, "effort": None}}}
+        pages = [{"session_id": sid, "items": [{"stable_id": f"user:{command}", "role": "user",
+                  "position": 33, "created_at_ms": 100, "body": {"content": content}}]}]
+        meta = {"type": "session_meta", "payload": {"id": "thread", "cwd": f"/workspace/{sid}/engine-trees"}}
+        message = {"type": "event_msg", "payload": {
+            "type": "item_completed", "thread_id": "thread", "turn_id": native_id, "completed_at_ms": 105,
+            "item": {"type": "UserMessage", "id": "item", "content": content}}}
+        context = {"type": "turn_context", "payload": {"turn_id": native_id, "model": TERRA, "effort": "high"}}
+
+        def with_payload(row, **fields):
+            return {**row, "payload": {**row["payload"], **fields}}
+
+        earlier_message = with_payload(message, turn_id="earlier", completed_at_ms=98)
+        earlier_context = with_payload(context, turn_id="earlier")
+        cases = (
+            ("matching", [earlier_message, earlier_context, message, context], None),
+            ("effort", [message, with_payload(context, effort="low")], "selected .*low"),
+            ("model", [message, with_payload(context, model="gpt-6.1-sol")], "selected .*sol"),
+            ("missing", [message], "missing or ambiguous"),
+            ("wrong context", [message, earlier_context], "missing or ambiguous"),
+            ("other turn", [earlier_message, earlier_context], "missing or ambiguous"),
+            ("ambiguous", [message, context, context], "missing or ambiguous"),
+        )
+        with TemporaryDirectory() as root:
+            directory = Path(root)
+            rollout_dir = directory / "turn-32-codex-rollout-fixture"
+            rollout_dir.mkdir()
+            (directory / "turn-32-audit.json").write_text(json.dumps({"rollout_directory": rollout_dir.name}))
+            (directory / "turn-32-transcript.json").write_text(json.dumps(pages))
+            for scenario, rows, error in cases:
+                with self.subTest(scenario=scenario):
+                    rollout = rollout_dir / "rollout-fixture.jsonl"
+                    rollout.write_text("".join(json.dumps(row) + "\n" for row in [meta, *rows]))
+                    if error:
+                        with self.assertRaisesRegex(ValueError, error):
+                            model_usage(usage, command, 32, TERRA, "unused", directory)
+                    else:
+                        self.assertEqual(model_usage(usage, command, 32, TERRA, "unused", directory), TERRA)

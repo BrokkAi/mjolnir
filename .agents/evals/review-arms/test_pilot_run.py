@@ -653,10 +653,21 @@ if not (attempt / "recover").exists():
                 if sid not in failed_export:
                     failed_export.add(sid)
                     raise subprocess.CalledProcessError(125, argv)
-                data = (json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "item": {
-                    "type": "CommandExecution", "id": "exec-captured", "command": ["/bin/bash", "-lc", "ls"],
-                    "cwd": f"file:///workspace/{sid}/repo",
-                }}}) + "\n").encode()
+                model = pilot.read_json(paths[sid] / "settings.json")["model"]
+                rows = [
+                    {"type": "session_meta", "payload": {"id": "thread", "cwd": f"/workspace/{sid}/repo"}},
+                    {"type": "turn_context", "payload": {"turn_id": "native", "model": model, "effort": "high"}},
+                    {"type": "event_msg", "payload": {
+                        "type": "item_completed", "thread_id": "thread", "turn_id": "native",
+                        "completed_at_ms": 105, "item": {"type": "UserMessage", "id": "input",
+                                                        "content": [{"type": "text", "text": "Prompt"}]},
+                    }},
+                    {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                        "type": "CommandExecution", "id": "exec-captured", "command": ["/bin/bash", "-lc", "ls"],
+                        "cwd": f"file:///workspace/{sid}/repo",
+                    }}},
+                ]
+                data = "".join(json.dumps(row) + "\n" for row in rows).encode()
                 with tarfile.open(fileobj=kwargs["stdout"], mode="w") as archive:
                     member = tarfile.TarInfo(rollout_name)
                     member.size = len(data)
@@ -683,9 +694,16 @@ if not (attempt / "recover").exists():
             path = self.captured_job(kind, sid, model, output)
             driver.save(path / "placement.json", {"container": sid, "cwd": f"/workspace/{sid}/repo"})
             driver.save(path / "transcript.json", [{"session_id": sid, "items": [
-                {"seq": 1, "role": "tool", "body": {"call": {"toolCallId": "exec-captured",
+                {"seq": 1, "position": 1, "stable_id": "user:prompt", "role": "user", "created_at_ms": 100,
+                 "body": {"content": [{"type": "text", "text": "Prompt"}]}},
+                {"seq": 2, "position": 2, "stable_id": "tool:exec-captured", "role": "tool",
+                 "body": {"call": {"toolCallId": "exec-captured",
                  "name": "exec_command", "title": "List files", "kind": "read"}}},
             ]}])
+            usage = pilot.read_json(path / "usage.json")
+            usage["turns"] = [{"command_id": "prompt", "turn_start_position": 1, "completed_at_ms": 200}]
+            usage["turn_selections"]["prompt"]["effort"] = None
+            driver.save(path / "usage.json", usage)
             paths[sid] = path
             params = {"run_root": self.root, "path": path, "inputs": {"rql_tools": []}, "model": (model, "high")}
             sha = pilot.digest((path / output).read_bytes())
