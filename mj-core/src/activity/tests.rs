@@ -242,7 +242,12 @@ fn replacement_blockers_agree_with_safe_to_replace() {
         },
     ];
     for facts in &busy_facts {
-        for harness in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Claude] {
+        for harness in [
+            HarnessKind::Codex,
+            HarnessKind::Kimi,
+            HarnessKind::Claude,
+            HarnessKind::Antigravity,
+        ] {
             assert_eq!(
                 replacement_blockers(facts, harness).is_empty(),
                 safe_to_replace(facts, harness),
@@ -513,6 +518,36 @@ fn a_disconnected_session_reports_no_silence_age() {
     assert!(unknown.is_working(), "{unknown:?}");
     assert_eq!(unknown.silent_for_ms(NOW), None);
     assert_eq!(silence_note(&unknown, NOW), None);
+}
+
+// Hard-won: #1611: worker replacement could treat unreported or inferred-idle Antigravity tasks as settled.
+#[test]
+fn antigravity_replacement_waits_for_an_authoritative_empty_task_inventory() {
+    let harness = HarnessKind::Antigravity;
+    let mut facts = ActivityFacts {
+        acp_ready: Some(true),
+        ..ActivityFacts::default()
+    };
+    // A pre-tracking worker leaves the field absent even when a job is live.
+    // An empty list from that worker cannot authorize its replacement.
+    assert!(!safe_to_replace(&facts, harness));
+
+    facts.background_work_known = Some(true);
+    facts.background_commands = 1;
+    facts.background_started_at_ms = Some(NOW);
+    facts.inferred_idle_since_ms = Some(NOW);
+    facts.background_needed = Some(false);
+    assert!(matches!(classify(&facts), ActivityState::Background { .. }));
+    assert!(has_work_in_flight(&facts));
+    assert!(!safe_to_replace(&facts, harness));
+
+    // Losing the observation is not evidence that the task finished.
+    facts.background_commands = 0;
+    facts.background_work_known = Some(false);
+    assert!(!safe_to_replace(&facts, harness));
+
+    facts.background_work_known = Some(true);
+    assert!(safe_to_replace(&facts, harness));
 }
 
 #[test]

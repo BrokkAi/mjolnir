@@ -943,9 +943,8 @@ pub struct RelayOperationalState {
     /// derived from what the relay can see now, not from the journal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_commands: Vec<BackgroundCommand>,
-    /// Whether provider-owned background work is known for this worker
-    /// process. Only Kimi needs this today; older workers and other harnesses
-    /// omit it.
+    /// Whether this worker's provider task inventory is synchronized. Kimi
+    /// and Antigravity workers report it when they support native task tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_work_known: Option<bool>,
 }
