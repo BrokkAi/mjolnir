@@ -258,6 +258,12 @@ pub(crate) fn render_picker(
         );
     let list_area = Rect::new(body.x, body.y, body.width, list_height);
     let mut widths = picker_columns(&choices);
+    if navigation.control == WizardControl::ProfileList && widths.len() == 5 {
+        // Bound the Provider column so a long custom endpoint hostname never
+        // pushes the Profile and quota columns off-screen.
+        let max_provider = (usize::from(list_area.width) / 3).max(14);
+        widths[1] = widths[1].min(max_provider);
+    }
     if navigation.control == WizardControl::TargetList && widths.len() == 6 {
         widths[0] = 0;
         widths[3] = 6;

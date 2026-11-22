@@ -1270,8 +1270,9 @@ impl DashboardState {
         candidates
             .iter()
             .copied()
-            .min_by_key(|id| self.profile_prediction_key(id))
-            .map(str::to_owned)
+            .filter_map(|id| self.profile_prediction_key(id).map(|key| (key, id)))
+            .min_by_key(|(key, _)| *key)
+            .map(|(_, id)| id.to_owned())
     }
 
     /// Preview of which profile in `provider` would be used when launching with
@@ -1298,6 +1299,16 @@ impl DashboardState {
         if choices.is_empty() {
             return None;
         }
+        let resolved_choices: Vec<(&mj_core::config::SubagentChoice, String)> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice,
+                    self.profile_capabilities
+                        .model_id(&self.config, &choice.model),
+                )
+            })
+            .collect();
         let mut candidates = Vec::new();
         for (id, profile) in self.offered_profiles() {
             let Some(entry) = self
@@ -1312,15 +1323,10 @@ impl DashboardState {
             else {
                 continue;
             };
-            let matches_primary = choices.iter().any(|choice| {
-                let identity = self
-                    .profile_capabilities
-                    .model_id(&self.config, &choice.model);
-                let Some(offer) = mj_core::model_catalog::offer(
-                    &profile_choices.models,
-                    &identity,
-                    &choice.model,
-                ) else {
+            let matches_primary = resolved_choices.iter().any(|(choice, identity)| {
+                let Some(offer) =
+                    mj_core::model_catalog::offer(&profile_choices.models, identity, &choice.model)
+                else {
                     return false;
                 };
                 match choice.effort.as_deref() {
@@ -1339,7 +1345,7 @@ impl DashboardState {
         self.predicted_profile_for_candidates(&candidates)
     }
 
-    fn profile_prediction_key<'a>(&self, id: &'a str) -> (u8, usize, u8, u8, &'a str) {
+    fn profile_prediction_key<'a>(&self, id: &'a str) -> Option<(u8, usize, u8, u8, &'a str)> {
         let prefer_rank = self
             .config
             .quota
@@ -1348,23 +1354,23 @@ impl DashboardState {
             .position(|preferred| preferred == id)
             .unwrap_or(usize::MAX);
         if self.quota_refreshing.contains(id) {
-            return (1, prefer_rank, u8::MAX, u8::MAX, id);
+            return Some((1, prefer_rank, u8::MAX, u8::MAX, id));
         }
         let Some(quota) = self.quotas.get(id) else {
-            return (1, prefer_rank, u8::MAX, u8::MAX, id);
+            return Some((1, prefer_rank, u8::MAX, u8::MAX, id));
         };
         if quota.error.is_some() {
-            return (4, prefer_rank, u8::MAX, u8::MAX, id);
+            return Some((4, prefer_rank, u8::MAX, u8::MAX, id));
         }
         if quota.is_usage_priced() {
-            return (3, prefer_rank, u8::MAX, u8::MAX, id);
+            return Some((3, prefer_rank, u8::MAX, u8::MAX, id));
         }
         let primary = quota.summary_window().and_then(quota_remaining_percent);
         let five_hour = quota.five_hour_window().and_then(quota_remaining_percent);
         if weekly_quota_exhausted(quota) || primary == Some(0) || five_hour == Some(0) {
-            return (4, prefer_rank, u8::MAX, u8::MAX, id);
+            return None;
         }
-        match primary {
+        Some(match primary {
             // Subscriptions at the 1% reserve floor rank behind unknown quota,
             // matching `profile_scheduler`'s reserve-floor tiering.
             Some(primary) if primary <= 1 || five_hour.is_some_and(|v| v <= 1) => (
@@ -1382,7 +1388,7 @@ impl DashboardState {
                 id,
             ),
             None => (1, prefer_rank, u8::MAX, u8::MAX, id),
-        }
+        })
     }
 
     /// The WEEKLY and 5H cells of a profile picker row, as percentages
