@@ -9,7 +9,7 @@ mj_core::enable_test_fixtures_on_startup!();
 use std::process::Command;
 use std::time::Duration;
 
-use mj_worker::microvm::guest_agent::{ProcessSpawner, Reaper};
+use mj_microvm::guest_agent::{ProcessSpawner, Reaper};
 
 // Hard-won: a spawn whose exec fails (a missing working directory) panicked in
 // std when the reaper had already collected the half-started child, and the

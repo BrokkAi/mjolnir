@@ -1375,6 +1375,100 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
     channels.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1611: Suspend could not reserve a legacy Antigravity worker to upgrade its suspend capability.
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_suspend_can_reserve_an_idle_legacy_antigravity_worker() {
+    if std::env::var_os(LATCH_TEST_CHILD).is_none() {
+        let test_name = format!(
+            "{}::explicit_suspend_can_reserve_an_idle_legacy_antigravity_worker",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name)
+            .env(LATCH_TEST_CHILD, "1")
+            .env("MJ_INSTANCE", "legacy-antigravity-suspend-test")
+            .env(LATCH_RELAY_MAX_PROTOCOL, "83")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.harness_kind = HarnessKind::Antigravity;
+    crate::database::save_session(&session).unwrap();
+    let mut relay =
+        mj_worker::relay::DurableRelay::open(root.path(), LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "legacy-antigravity".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    // The stand-in's internal idle reservation uses the Codex harness policy.
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "session_info_update",
+                "_meta": {"execution": {"version": 1, "status": "idle"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    drop(relay);
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            root.path(),
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    wait_until_the_actor_serves_again(&handle).await;
+    let admission = crate::controller::test_support::session_admission(handle.session_id());
+    assert!(
+        IdleWorkspaceLease::acquire_for_upgrade(&admission, &handle, HarnessKind::Antigravity)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut lease = IdleWorkspaceLease::acquire_for_replacement(
+        &admission,
+        &handle,
+        HarnessKind::Antigravity,
+        mj_core::activity::WorkerReplacement::Other,
+    )
+    .await
+    .unwrap()
+    .expect("explicit Suspend can reserve the quiet old worker");
+    assert!(lease.verify_for_upgrade().await.unwrap());
+    lease.release().await.unwrap();
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut write = IdleWorkspaceLease::acquire(&admission, &handle, HarnessKind::Antigravity)
+        .await
+        .expect("an idle legacy worker can still admit a workspace write");
+    write.verify().await.unwrap();
+    write.release().await.unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+}
+
 // Hard-won: #1498: idle goal upgrades must preserve reviewer admission and reject later native turns.
 #[cfg(unix)]
 #[tokio::test]

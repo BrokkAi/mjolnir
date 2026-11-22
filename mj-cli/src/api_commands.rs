@@ -2614,7 +2614,17 @@ pub(crate) fn format_suspend_dry_run(
                 let _ = writeln!(out, "session state: unavailable");
             }
         }
-        let _ = writeln!(out, ".mj/keep/: {}", format_human_bytes(est.keep_dir_bytes));
+        // Suspend saves only Git state, so never present the keep directory's
+        // size as kept here (#1645).
+        if est.keep_dir_bytes == 0 {
+            let _ = writeln!(out, ".mj/keep/: 0 B");
+        } else {
+            let _ = writeln!(
+                out,
+                ".mj/keep/: {}, not saved by suspend; copy out anything you need first, for example with `mj fetch`",
+                format_human_bytes(est.keep_dir_bytes)
+            );
+        }
         if let Some(route) = &est.transfer_route {
             let _ = writeln!(out, "transfer route: {route}");
         }

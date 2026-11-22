@@ -7,22 +7,21 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures::stream::{self, StreamExt};
-use mj_core::config::GithubWatchConfig;
+use mj_core::config::{GithubWatchConfig, JevConfig};
 use mj_core::github_item::{
     GithubItem, GithubItemEvidence, GithubItemKind, GithubItemVerdict, SessionContext,
 };
+use mj_core::github_rate_limit::github_rate_limit_retry_at;
 use mj_core::mailbox::{
     MAILBOX_COMMENT_BODY_LIMIT, MailboxEvent, MailboxEventBody, MailboxPullRequestChange,
 };
 use mj_core::repository::RepositoryIdentity;
-use mj_core::state::SessionRecord;
+use mj_core::state::{SessionRecord, State};
+use mj_store::database;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-
-use crate::daemon::RuntimeState;
-use mj_controller::github_rate_limit::github_rate_limit_retry_at;
 
 const MAX_CLASSIFICATIONS_PER_POLL: usize = 50;
 const ITEMS_PER_PAGE: usize = 100;
@@ -89,19 +88,42 @@ impl GithubClassifier for mj_github_relevance::github_relevance::Classifier {
     }
 }
 
+/// The daemon capabilities used by the GitHub watch service.
+pub trait GithubWatchHost: Send + Sync + 'static {
+    fn github_watch_snapshot(&self) -> GithubWatchSnapshot;
+
+    /// Check the live setting so disabling delivery stops an in-flight poll.
+    fn github_events_enabled(&self) -> bool;
+
+    fn push_public_notice(&self, text: String);
+
+    fn github_token_for_session(
+        &self,
+        session_id: &str,
+    ) -> impl Future<Output = Result<Option<String>>> + Send;
+}
+
+/// A single runtime projection of watch settings and session state.
+pub struct GithubWatchSnapshot {
+    pub enabled: bool,
+    pub config: GithubWatchConfig,
+    pub jev: JevConfig,
+    pub state: State,
+}
+
 /// Cancellable periodic poller. Poll progress lives only in the database; a
 /// replacement daemon can resume from the same repo cursors and event keys.
-pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Result<()> {
-    let notice_state = Arc::downgrade(&state);
+pub async fn run(host: Arc<impl GithubWatchHost>, stop: CancellationToken) -> Result<()> {
+    let notice_host = Arc::downgrade(&host);
     let notices = Arc::new(mj_github_relevance::github_relevance::Notices::new(
         move |text| {
-            if let Some(state) = notice_state.upgrade() {
-                state.push_public_notice("", text);
+            if let Some(host) = notice_host.upgrade() {
+                host.push_public_notice(text);
             }
         },
     ));
     let mut student = None;
-    let result = run_poll_loop(state, stop, &mut student, notices).await;
+    let result = run_poll_loop(host, stop, &mut student, notices).await;
     let shutdown = match student {
         Some(student) => student.shutdown().await,
         None => Ok(()),
@@ -113,19 +135,20 @@ pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Re
 }
 
 async fn run_poll_loop(
-    state: Arc<RuntimeState>,
+    host: Arc<impl GithubWatchHost>,
     stop: CancellationToken,
     student: &mut Option<Arc<mj_github_relevance::github_student::Student>>,
     notices: Arc<mj_github_relevance::github_relevance::Notices>,
 ) -> Result<()> {
     loop {
-        let projection = state.controller_projection();
-        let mailboxes_enabled = projection.config.github_events_enabled();
-        let config = projection.config.github.watch;
-        let delay = if mailboxes_enabled {
-            Duration::from_secs(config.interval_seconds).clamp(MIN_INTERVAL, MAX_INTERVAL)
-        } else {
-            CONFIG_RECHECK_INTERVAL
+        let delay = {
+            let snapshot = host.github_watch_snapshot();
+            if snapshot.enabled {
+                Duration::from_secs(snapshot.config.interval_seconds)
+                    .clamp(MIN_INTERVAL, MAX_INTERVAL)
+            } else {
+                CONFIG_RECHECK_INTERVAL
+            }
         };
         tokio::select! {
             _ = stop.cancelled() => return Ok(()),
@@ -134,15 +157,18 @@ async fn run_poll_loop(
         if stop.is_cancelled() {
             return Ok(());
         }
-        let projection = state.controller_projection();
-        let mailboxes_enabled = projection.config.github_events_enabled();
-        let config = projection.config.github.watch;
+        let GithubWatchSnapshot {
+            enabled,
+            config,
+            jev,
+            state,
+        } = host.github_watch_snapshot();
         if !config.local_inference
             && let Some(previous) = student.take()
         {
             previous.shutdown().await?;
         }
-        if !mailboxes_enabled {
+        if !enabled {
             continue;
         }
         if config.local_inference {
@@ -156,7 +182,6 @@ async fn run_poll_loop(
             });
             local.set_use_gpu(config.use_gpu);
         }
-        let jev = projection.config.jev;
         let fastino_key = mj_core::runtime::spawn_blocking(move || jev.resolve_fastino_key())
             .await
             .context("resolve Fastino key")?
@@ -172,12 +197,11 @@ async fn run_poll_loop(
                 notices.clone(),
                 fastino_key,
             ));
-        let sessions_by_repo = sessions_by_github_repo(&projection.state);
-        let watched_repositories = mj_core::runtime::spawn_blocking(
-            mj_controller::database::load_github_watched_repositories,
-        )
-        .await
-        .context("load watched GitHub repositories")??;
+        let sessions_by_repo = sessions_by_github_repo(&state);
+        let watched_repositories =
+            mj_core::runtime::spawn_blocking(database::load_github_watched_repositories)
+                .await
+                .context("load watched GitHub repositories")??;
         let mut repositories = sessions_by_repo;
         for key in watched_repositories {
             repositories.entry(key).or_default();
@@ -192,17 +216,20 @@ async fn run_poll_loop(
                 let config = config.clone();
                 let classifier = classifier.clone();
                 let stop = stop.clone();
-                let poll_state = state.clone();
+                let host = host.clone();
                 jobs.spawn(async move {
-                    let control = PollControl::new(move || {
-                        poll_state
-                            .controller_projection()
-                            .config
-                            .github_events_enabled()
-                    });
-                    let result =
-                        poll_repository(&owner, &repo, sessions, config, classifier, stop, control)
-                            .await;
+                    let poll_host = host.clone();
+                    let control = PollControl::new(move || poll_host.github_events_enabled());
+                    let result = poll_repository(
+                        (&owner, &repo),
+                        sessions,
+                        config,
+                        classifier,
+                        stop,
+                        control,
+                        host.as_ref(),
+                    )
+                    .await;
                     (owner, repo, result)
                 });
             }
@@ -232,9 +259,7 @@ async fn run_poll_loop(
     }
 }
 
-fn sessions_by_github_repo(
-    state: &mj_core::state::State,
-) -> BTreeMap<(String, String), Vec<SessionRecord>> {
+fn sessions_by_github_repo(state: &State) -> BTreeMap<(String, String), Vec<SessionRecord>> {
     let mut sessions_by_repo = BTreeMap::<(String, String), Vec<SessionRecord>>::new();
     for session in state.sessions.values() {
         // A session started with `--no-github-events` is never a delivery target.
@@ -270,13 +295,13 @@ fn session_github_repositories(session: &SessionRecord) -> BTreeSet<(String, Str
 }
 
 async fn poll_repository(
-    owner: &str,
-    repo: &str,
+    (owner, repo): (&str, &str),
     sessions: Vec<SessionRecord>,
     config: GithubWatchConfig,
     classifier: Arc<dyn GithubClassifier>,
     stop: CancellationToken,
     control: PollControl,
+    host: &impl GithubWatchHost,
 ) -> Result<()> {
     if stop.is_cancelled() {
         return Ok(());
@@ -285,7 +310,7 @@ async fn poll_repository(
     let watches = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || mj_controller::database::load_github_watches(&owner, &repo)
+        move || database::load_github_watches(&owner, &repo)
     })
     .await?;
     if sessions.is_empty() && watches.is_empty() {
@@ -308,9 +333,7 @@ async fn poll_repository(
             blocking_db({
                 let owner = owner.to_owned();
                 let repo = repo.to_owned();
-                move || {
-                    mj_controller::database::first_github_watch_interested_session(&owner, &repo)
-                }
+                move || database::first_github_watch_interested_session(&owner, &repo)
             })
             .await?
         }
@@ -319,13 +342,7 @@ async fn poll_repository(
         tracing::debug!(%owner, %repo, "GitHub repository has no session to take a credential from; skipping");
         return Ok(());
     };
-    let controller = mj_core::runtime::spawn_blocking(mj_controller::controller::Controller::load)
-        .await
-        .context("load controller for GitHub watch credentials")??;
-    let token = controller
-        .github_token_for_session(&token_session)
-        .await
-        .context("resolve GitHub watch credential")?;
+    let token = host.github_token_for_session(&token_session).await?;
     let api = GithubApi::new_with_control(&config.api_base, token, control)?;
     poll_repository_with_context(owner, repo, sessions, classifier, &api, stop).await
 }
@@ -341,7 +358,7 @@ async fn poll_repository_with_context(
     let cursor = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || mj_controller::database::github_repo_cursor(&owner, &repo)
+        move || database::github_repo_cursor(&owner, &repo)
     })
     .await?;
     record_repository(owner, repo, &cursor, api, &stop).await?;
@@ -372,7 +389,7 @@ async fn poll_repository_with_context(
 async fn record_repository(
     owner: &str,
     repo: &str,
-    cursor: &mj_controller::database::GithubRepoCursor,
+    cursor: &database::GithubRepoCursor,
     api: &GithubApi,
     stop: &CancellationToken,
 ) -> Result<()> {
@@ -394,7 +411,7 @@ async fn reconcile_repository(
     let cursor = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || mj_controller::database::github_repo_cursor(&owner, &repo)
+        move || database::github_repo_cursor(&owner, &repo)
     })
     .await?;
     let mut until = (now - chrono::Duration::hours(1)).to_rfc3339();
@@ -408,13 +425,7 @@ async fn reconcile_repository(
     let claimed = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || {
-            mj_controller::database::claim_github_reconciliation(
-                owner,
-                repo,
-                now.timestamp_millis(),
-            )
-        }
+        move || database::claim_github_reconciliation(owner, repo, now.timestamp_millis())
     })
     .await?;
     if !claimed {
@@ -504,14 +515,12 @@ async fn acquire_repository(
         let completed_range = until.filter(|_| reached_end || short_page);
         let through = completed_range.unwrap_or(&newest).to_owned();
         let progress = if until.is_some() {
-            mj_controller::database::GithubFeedProgress::Reconciled(through)
+            database::GithubFeedProgress::Reconciled(through)
         } else {
-            mj_controller::database::GithubFeedProgress::Main(through)
+            database::GithubFeedProgress::Main(through)
         };
-        blocking_db(move || {
-            mj_controller::database::record_github_page(item_owner, item_repo, items, progress)
-        })
-        .await?;
+        blocking_db(move || database::record_github_page(item_owner, item_repo, items, progress))
+            .await?;
         if completed_range.is_some() || short_page {
             break;
         }
@@ -538,13 +547,13 @@ async fn classify_recorded_items(
     let items = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || mj_controller::database::load_github_seen_items(&owner, &repo)
+        move || database::load_github_seen_items(&owner, &repo)
     })
     .await?;
     let failures = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || mj_controller::database::load_github_classification_failures(&owner, &repo)
+        move || database::load_github_classification_failures(&owner, &repo)
     })
     .await?;
     let now = mj_core::clock::epoch_millis();
@@ -561,9 +570,7 @@ async fn classify_recorded_items(
             let owner = owner.to_owned();
             let repo = repo.to_owned();
             let number = item.number;
-            move || {
-                mj_controller::database::load_github_item_classified_sessions(&owner, &repo, number)
-            }
+            move || database::load_github_item_classified_sessions(&owner, &repo, number)
         })
         .await?;
         for session in sessions {
@@ -686,7 +693,7 @@ async fn classify_recorded_items(
                 Err(error) => {
                     tracing::warn!(%owner, %repo, number, %session_id, attempt=attempts.saturating_add(1), %error, "GitHub classification failed; retrying with backoff");
                     let owner = owner.to_owned(); let repo = repo.to_owned();
-                    blocking_db(move || mj_controller::database::record_github_classification_failure(owner, repo, number, session_id)).await
+                    blocking_db(move || database::record_github_classification_failure(owner, repo, number, session_id)).await
                 }
             }
         }
@@ -700,7 +707,7 @@ async fn classify_recorded_items(
 async fn prepare_session_evidence(
     owner: &str,
     repo: &str,
-    item: &mj_controller::database::GithubSeenItem,
+    item: &database::GithubSeenItem,
     session: &SessionRecord,
     digest: SessionContext,
     credential_login: Option<&str>,
@@ -784,9 +791,7 @@ async fn build_session_evidence(
             Vec::new()
         } else {
             let history = mj_transcript::github_history::SessionHistory::new(&session_id, specs);
-            mj_controller::database::scan_github_history(&session_id, history, &|| {
-                stop.is_cancelled()
-            })?
+            database::scan_github_history(&session_id, history, &|| stop.is_cancelled())?
         }
         .into_iter();
         let mut scanned = scanned.into_iter().peekable();
@@ -812,7 +817,7 @@ async fn build_session_evidence(
 async fn classify_for_session(
     owner: &str,
     repo: &str,
-    item: mj_controller::database::GithubSeenItem,
+    item: database::GithubSeenItem,
     session: SessionRecord,
     evidence: Option<GithubItemEvidence>,
     classifier: Arc<dyn GithubClassifier>,
@@ -850,7 +855,7 @@ async fn classify_for_session(
     } else {
         None
     };
-    let classification = mj_controller::database::GithubItemClassification {
+    let classification = database::GithubItemClassification {
         owner: owner.to_owned(),
         repo: repo.to_owned(),
         number: item.number,
@@ -863,8 +868,7 @@ async fn classify_for_session(
         created,
     };
     blocking_db(move || {
-        mj_controller::database::commit_github_item_classification(classification, event)
-            .map(|_| ())
+        database::commit_github_item_classification(classification, event).map(|_| ())
     })
     .await
 }
@@ -885,10 +889,9 @@ async fn opened_by_session(
         return Ok(false);
     };
     let session_id = session_id.to_owned();
-    let output = blocking_db(move || {
-        mj_controller::database::load_github_session_creation_output(&session_id, at_ms)
-    })
-    .await?;
+    let output =
+        blocking_db(move || database::load_github_session_creation_output(&session_id, at_ms))
+            .await?;
     Ok(output.iter().any(|text| {
         mj_core::github_reference::github_references(text)
             .iter()
@@ -913,7 +916,7 @@ async fn opened_by_session(
 
 async fn session_digest_for_evidence(session_id: String) -> Result<SessionContext> {
     mj_core::runtime::spawn_blocking(move || {
-        Ok(mj_controller::database::load_materialized_recent_turns(
+        Ok(database::load_materialized_recent_turns(
             &session_id,
             mj_core::github_item::SESSION_TURNS,
         )?
@@ -928,8 +931,7 @@ async fn session_digest_for_evidence(session_id: String) -> Result<SessionContex
 async fn session_digest(session_id: String) -> Result<SessionContext> {
     mj_core::runtime::spawn_blocking(move || {
         const TURNS: usize = mj_core::github_item::SESSION_TURNS;
-        let Some(materialized) =
-            mj_controller::database::load_materialized_recent_turns(&session_id, TURNS)?
+        let Some(materialized) = database::load_materialized_recent_turns(&session_id, TURNS)?
         else {
             return Ok(SessionContext::default());
         };
@@ -948,7 +950,7 @@ async fn poll_repository_timelines(
     let watches = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || mj_controller::database::load_github_watches(&owner, &repo)
+        move || database::load_github_watches(&owner, &repo)
     })
     .await?;
     for watch in watches {
@@ -973,10 +975,7 @@ async fn poll_repository_timelines(
     Ok(())
 }
 
-async fn poll_item_timeline(
-    watch: mj_controller::database::GithubItemWatch,
-    api: &GithubApi,
-) -> Result<()> {
+async fn poll_item_timeline(watch: database::GithubItemWatch, api: &GithubApi) -> Result<()> {
     let fetched = async {
         let (entries, processed_at) = api
             .array_pages_observed(
@@ -1056,9 +1055,9 @@ async fn poll_item_timeline(
     }
     api.control.check_enabled()?;
     blocking_db(move || {
-        mj_controller::database::commit_github_timeline(
+        database::commit_github_timeline(
             watch,
-            mj_controller::database::GithubItemProgress {
+            database::GithubItemProgress {
                 timeline_at: mapped.cursor_at,
                 timeline_id: mapped.cursor_id,
                 review_comments_at: mapped.review_comments_at,
@@ -1073,7 +1072,7 @@ async fn poll_item_timeline(
 }
 
 struct TimelineMapping {
-    events: Vec<mj_controller::database::MappedGithubEvent>,
+    events: Vec<database::MappedGithubEvent>,
     cursor_at: String,
     cursor_id: i64,
     review_comments_at: String,
@@ -1083,7 +1082,7 @@ struct TimelineMapping {
 /// Each source owns its cursor. A later comment read cannot advance the
 /// timeline past an event that appeared after the timeline read.
 fn map_item_activity(
-    watch: &mj_controller::database::GithubItemWatch,
+    watch: &database::GithubItemWatch,
     entries: &[Value],
     comments: &[Value],
     merged_at: Option<&str>,
@@ -1166,7 +1165,7 @@ fn same_moment(left: &str, right: &str) -> bool {
 /// Entry payloads supply actors, comment text, review state and event IDs.
 /// Watch metadata supplies only the item's identity and display title.
 fn map_timeline(
-    watch: &mj_controller::database::GithubItemWatch,
+    watch: &database::GithubItemWatch,
     entries: &[Value],
     since: Option<&str>,
     merged_at: Option<&str>,
@@ -1310,25 +1309,23 @@ fn map_timeline(
                 }
                 _ => continue,
             };
-            result
-                .events
-                .push(mj_controller::database::MappedGithubEvent {
-                    key: format!(
-                        "github:{}/{}#{}:{suffix}:{id}",
-                        watch.owner, watch.repo, watch.number
-                    ),
-                    timestamp: timestamp.to_owned(),
-                    author: filter_author,
-                    body,
-                    lifecycle,
-                });
+            result.events.push(database::MappedGithubEvent {
+                key: format!(
+                    "github:{}/{}#{}:{suffix}:{id}",
+                    watch.owner, watch.repo, watch.number
+                ),
+                timestamp: timestamp.to_owned(),
+                author: filter_author,
+                body,
+                lifecycle,
+            });
         }
     }
     Ok(result)
 }
 
-fn parse_github_item(value: &Value) -> Option<mj_controller::database::GithubSeenItem> {
-    Some(mj_controller::database::GithubSeenItem {
+fn parse_github_item(value: &Value) -> Option<database::GithubSeenItem> {
+    Some(database::GithubSeenItem {
         number: value["number"].as_i64()?,
         kind: if value.get("pull_request").is_some() {
             "pull_request"
@@ -1486,6 +1483,7 @@ impl GithubApi {
             reqwest::header::ACCEPT,
             reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
         );
+        mj_targets::signing_key::install_rustls_crypto_provider();
         let mut builder = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(API_TIMEOUT)
@@ -1795,13 +1793,13 @@ mod tests {
         ) {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let mut session = mj_controller::database::test_session("disable-poll-session", "project");
+        let _writer = database::install_isolated_test_writer();
+        let mut session = database::test_session("disable-poll-session", "project");
         session.state = mj_core::state::SessionState::Running;
-        mj_controller::database::save_session(&session).unwrap();
+        database::save_session(&session).unwrap();
         // The feed returns an item newer than this cursor, so recording it
         // after the opt-out would move the cursor.
-        let before = mj_controller::database::github_repo_cursor("acme", "repo")
+        let before = database::github_repo_cursor("acme", "repo")
             .unwrap()
             .updated_at;
 
@@ -1853,7 +1851,7 @@ mod tests {
             1,
             "no request follows opt-out"
         );
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         assert_eq!(cursor.updated_at, before);
 
         server.abort();
@@ -1940,12 +1938,11 @@ mod tests {
             return true;
         }
         let root = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), test),
-        )
-        .env(CHILD, "1")
-        .isolated_store(root.path())
-        .run();
+        use mj_targets::test_isolation::{IsolatedTest, test_name};
+        IsolatedTest::new(test_name(module_path!(), test))
+            .env(CHILD, "1")
+            .isolated_store(root.path())
+            .run();
         false
     }
 
@@ -2101,17 +2098,11 @@ mod tests {
 
     /// The store keeps GitHub rows only for a session it holds.
     fn save_creator_session() {
-        mj_controller::database::save_session(&mj_controller::database::test_session(
-            "creator", "project",
-        ))
-        .unwrap();
+        database::save_session(&database::test_session("creator", "project")).unwrap();
     }
 
-    fn watch_classification(
-        number: i64,
-        created_at: &str,
-    ) -> mj_controller::database::GithubItemClassification {
-        mj_controller::database::GithubItemClassification {
+    fn watch_classification(number: i64, created_at: &str) -> database::GithubItemClassification {
+        database::GithubItemClassification {
             owner: "acme".into(),
             repo: "repo".into(),
             number,
@@ -2133,9 +2124,9 @@ mod tests {
         ) {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         save_creator_session();
-        let initial = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let initial = database::github_repo_cursor("acme", "repo").unwrap();
         let parsed = DateTime::parse_from_rfc3339(&initial.watch_started_at).unwrap();
         let start = DateTime::from_timestamp(parsed.timestamp() + 1, 0).unwrap();
         let created =
@@ -2183,25 +2174,22 @@ mod tests {
             *timeline = first_page;
         }
         for n in 1..=3 {
-            mj_controller::database::commit_github_item_classification(
-                watch_classification(n, &created),
-                None,
-            )
-            .unwrap();
+            database::commit_github_item_classification(watch_classification(n, &created), None)
+                .unwrap();
         }
-        let mut creator = mj_controller::database::test_session("creator", "project");
+        let mut creator = database::test_session("creator", "project");
         creator.created_at = initial.watch_started_at.clone();
-        mj_controller::database::save_session(&creator).unwrap();
-        mj_controller::database::seed_github_test_turns(
+        database::save_session(&creator).unwrap();
+        database::seed_github_test_turns(
             "creator",
             start.timestamp_millis() - 5000,
             start.timestamp_millis() - 1000,
             start.timestamp_millis(),
         )
         .unwrap();
-        let mut new_session = mj_controller::database::test_session("new-session", "project");
+        let mut new_session = database::test_session("new-session", "project");
         new_session.created_at = later.clone();
-        mj_controller::database::save_session(&new_session).unwrap();
+        database::save_session(&new_session).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
@@ -2243,18 +2231,18 @@ mod tests {
             "session must not classify items older than itself"
         );
         assert_eq!(
-            mj_controller::database::load_github_seen_items("acme", "repo")
+            database::load_github_seen_items("acme", "repo")
                 .unwrap()
                 .len(),
             101
         );
         assert_eq!(
-            mj_controller::database::github_repo_cursor("acme", "repo")
+            database::github_repo_cursor("acme", "repo")
                 .unwrap()
                 .updated_at,
             updated
         );
-        let watches = mj_controller::database::load_github_watches("acme", "repo").unwrap();
+        let watches = database::load_github_watches("acme", "repo").unwrap();
         assert_eq!(
             watches[0].processed_at, created,
             "failed item keeps its progress"
@@ -2270,7 +2258,7 @@ mod tests {
             (2, overlap_timestamp(&created)),
             "review comments use the stored cursor even when the timeline advances it"
         );
-        let rows = mj_controller::database::pending_mailbox_events(1000).unwrap();
+        let rows = database::pending_mailbox_events(1000).unwrap();
         assert_eq!(rows.len(), 3);
         let events = rows
             .iter()
@@ -2355,23 +2343,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            mj_controller::database::load_github_seen_items("acme", "repo")
+            database::load_github_seen_items("acme", "repo")
                 .unwrap()
                 .len(),
             102
         );
         assert_eq!(
-            mj_controller::database::pending_mailbox_events(1000).unwrap(),
+            database::pending_mailbox_events(1000).unwrap(),
             rows,
             "repeated keys preserve their original bodies"
         );
         assert_eq!(
-            mj_controller::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
             later
         );
         assert_eq!(
-            mj_controller::database::load_github_watches("acme", "repo").unwrap()[1]
-                .review_comments_at,
+            database::load_github_watches("acme", "repo").unwrap()[1].review_comments_at,
             comment_updated,
             "review comments advance only their own cursor"
         );
@@ -2442,8 +2429,8 @@ mod tests {
         if !run_isolated_child("watcher_keyset_recording_keeps_items_moving_between_pages") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::parse_from_rfc3339(&cursor.updated_at).unwrap();
         let fake = FakeGithub::default();
         {
@@ -2466,7 +2453,7 @@ mod tests {
         record_repository("acme", "repo", &cursor, &api, &CancellationToken::new())
             .await
             .unwrap();
-        let seen = mj_controller::database::load_github_seen_items("acme", "repo").unwrap();
+        let seen = database::load_github_seen_items("acme", "repo").unwrap();
         assert_eq!(seen.len(), 201);
         assert!(
             seen.iter().any(|item| item.number == 101),
@@ -2490,8 +2477,8 @@ mod tests {
         if !run_isolated_child("watcher_pages_past_a_full_page_that_straddles_two_seconds") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
                 .unwrap()
@@ -2519,7 +2506,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            mj_controller::database::load_github_seen_items("acme", "repo")
+            database::load_github_seen_items("acme", "repo")
                 .unwrap()
                 .len(),
             200
@@ -2537,7 +2524,7 @@ mod tests {
     }
 
     async fn check_reconciliation_checkpoint_recovery(scenario: ReconciliationRecovery) {
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         save_creator_session();
         let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
         let origin = now - chrono::Duration::hours(4);
@@ -2553,12 +2540,12 @@ mod tests {
                 (at(5400), at(5401), origin + chrono::Duration::hours(3), 100)
             }
         };
-        mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
-        mj_controller::database::seed_github_repo_start("acme", "repo", &at(0)).unwrap();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        database::github_repo_cursor("acme", "repo").unwrap();
+        database::seed_github_repo_start("acme", "repo", &at(0)).unwrap();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let mut watch = watch_classification(201, &tied_at);
         watch.kind = "issue".into();
-        mj_controller::database::commit_github_item_classification(watch, None).unwrap();
+        database::commit_github_item_classification(watch, None).unwrap();
         let fake = FakeGithub::default();
         {
             let mut data = fake.data.lock().await;
@@ -2596,14 +2583,14 @@ mod tests {
         record_repository("acme", "repo", &cursor, &api, &stop)
             .await
             .unwrap();
-        let seen = mj_controller::database::load_github_seen_items("acme", "repo").unwrap();
+        let seen = database::load_github_seen_items("acme", "repo").unwrap();
         assert_eq!(seen.len(), prefix_count + 400);
         assert!(!seen.iter().any(|item| item.number == 201));
         poll_repository_timelines("acme", "repo", &api, &stop)
             .await
             .unwrap();
         assert!(fake.data.lock().await.timeline_requests.is_empty());
-        let main_cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let main_cursor = database::github_repo_cursor("acme", "repo").unwrap();
         assert_eq!(main_cursor.updated_at, moved_at);
         assert_eq!(main_cursor.reconciled_through, at(0));
         if matches!(scenario, ReconciliationRecovery::FailedPass) {
@@ -2613,11 +2600,11 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(format!("{error:#}").contains("503"), "{error:#}");
-            let interrupted = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+            let interrupted = database::github_repo_cursor("acme", "repo").unwrap();
             assert_eq!(interrupted.updated_at, moved_at);
             assert_eq!(interrupted.reconciled_through, at(3699));
             assert!(
-                !mj_controller::database::load_github_seen_items("acme", "repo")
+                !database::load_github_seen_items("acme", "repo")
                     .unwrap()
                     .iter()
                     .any(|item| item.number == 201)
@@ -2635,7 +2622,7 @@ mod tests {
             .unwrap();
             assert_eq!(fake.data.lock().await.feed_queries.len(), requests);
             assert_eq!(
-                mj_controller::database::github_repo_cursor("acme", "repo")
+                database::github_repo_cursor("acme", "repo")
                     .unwrap()
                     .reconciled_through,
                 interrupted.reconciled_through
@@ -2654,10 +2641,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let seen = mj_controller::database::load_github_seen_items("acme", "repo").unwrap();
+        let seen = database::load_github_seen_items("acme", "repo").unwrap();
         assert_eq!(seen.len(), prefix_count + 401);
         assert!(seen.iter().any(|item| item.number == 201));
-        let reconciled = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let reconciled = database::github_repo_cursor("acme", "repo").unwrap();
         assert_eq!(reconciled.updated_at, moved_at);
         let expected_through = match scenario {
             ReconciliationRecovery::OldBacklog => at(10800),
@@ -2674,7 +2661,7 @@ mod tests {
         poll_repository_timelines("acme", "repo", &api, &stop)
             .await
             .unwrap();
-        let events = mj_controller::database::pending_mailbox_events(100).unwrap();
+        let events = database::pending_mailbox_events(100).unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].event_key.ends_with("#201:comment:201"));
         if matches!(scenario, ReconciliationRecovery::FailedPass) {
@@ -2686,7 +2673,7 @@ mod tests {
             reconcile_repository("acme", "repo", &api, &stop, read_at)
                 .await
                 .unwrap_err();
-            let partial_tie = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+            let partial_tie = database::github_repo_cursor("acme", "repo").unwrap();
             assert_eq!(partial_tie.reconciled_through, partial_tie.updated_at);
             let requests = fake.data.lock().await.feed_queries.len();
             fake.data.lock().await.fail_feed_request = None;
@@ -2736,9 +2723,9 @@ mod tests {
         if !run_isolated_child("watcher_source_cursors_do_not_skip_interleaved_timeline_entries") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         save_creator_session();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
                 .unwrap()
@@ -2750,11 +2737,7 @@ mod tests {
         let at = |seconds| {
             (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
         };
-        mj_controller::database::commit_github_item_classification(
-            watch_classification(1, &at(1)),
-            None,
-        )
-        .unwrap();
+        database::commit_github_item_classification(watch_classification(1, &at(1)), None).unwrap();
         let fake = FakeGithub::default();
         {
             let mut data = fake.data.lock().await;
@@ -2779,7 +2762,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let watch = mj_controller::database::load_github_watches("acme", "repo")
+        let watch = database::load_github_watches("acme", "repo")
             .unwrap()
             .remove(0);
         assert_eq!(watch.timeline_at, at(1));
@@ -2799,13 +2782,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = mj_controller::database::pending_mailbox_events(100).unwrap();
+        let rows = database::pending_mailbox_events(100).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(
             rows.iter()
                 .any(|row| row.event_key.ends_with(":comment:800"))
         );
-        let watch = mj_controller::database::load_github_watches("acme", "repo")
+        let watch = database::load_github_watches("acme", "repo")
             .unwrap()
             .remove(0);
         assert_eq!(watch.timeline_at, at(20));
@@ -2821,8 +2804,8 @@ mod tests {
         if !run_isolated_child("watcher_filters_lifecycle_activity_by_actor_and_creator_turn") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
                 .unwrap()
@@ -2834,10 +2817,10 @@ mod tests {
         let at = |seconds| {
             (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
         };
-        let mut creator = mj_controller::database::test_session("creator", "project");
+        let mut creator = database::test_session("creator", "project");
         creator.created_at = cursor.watch_started_at.clone();
-        mj_controller::database::save_session(&creator).unwrap();
-        mj_controller::database::seed_github_test_turns(
+        database::save_session(&creator).unwrap();
+        database::seed_github_test_turns(
             "creator",
             (start + chrono::Duration::seconds(2)).timestamp_millis(),
             (start + chrono::Duration::seconds(3)).timestamp_millis(),
@@ -2846,10 +2829,10 @@ mod tests {
         .unwrap();
         // A second session was told about every PR. It was working at 8 to
         // 12 s, and its own turn ends long before its next one starts.
-        let mut follower = mj_controller::database::test_session("follower", "project");
+        let mut follower = database::test_session("follower", "project");
         follower.created_at = cursor.watch_started_at.clone();
-        mj_controller::database::save_session(&follower).unwrap();
-        mj_controller::database::seed_github_test_turns(
+        database::save_session(&follower).unwrap();
+        database::seed_github_test_turns(
             "follower",
             (start + chrono::Duration::seconds(8)).timestamp_millis(),
             (start + chrono::Duration::seconds(12)).timestamp_millis(),
@@ -2862,7 +2845,7 @@ mod tests {
             let mut data = fake.data.lock().await;
             data.observed_at = Some(at(50));
             for number in 21..=26 {
-                mj_controller::database::commit_github_item_classification(
+                database::commit_github_item_classification(
                     watch_classification(number, &at(1)),
                     None,
                 )
@@ -2870,8 +2853,7 @@ mod tests {
                 let mut interested = watch_classification(number, &at(1));
                 interested.session_id = "follower".into();
                 interested.created = false;
-                mj_controller::database::commit_github_item_classification(interested, None)
-                    .unwrap();
+                database::commit_github_item_classification(interested, None).unwrap();
                 let mut item =
                     github_item(number as u64, number as u64, "synthetic PR", at(1), true);
                 item["updated_at"] = json!(at(40));
@@ -2914,7 +2896,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = mj_controller::database::pending_mailbox_events(100).unwrap();
+        let rows = database::pending_mailbox_events(100).unwrap();
         let rows_for = |session: &str| {
             let mut rows = rows
                 .iter()
@@ -2970,9 +2952,9 @@ mod tests {
         if !run_isolated_child("watcher_reports_a_close_at_the_merge_time_as_a_merge") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         save_creator_session();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
                 .unwrap()
@@ -2988,11 +2970,8 @@ mod tests {
         {
             let mut data = fake.data.lock().await;
             for n in [11, 12, 13, 14] {
-                mj_controller::database::commit_github_item_classification(
-                    watch_classification(n, &at(1)),
-                    None,
-                )
-                .unwrap();
+                database::commit_github_item_classification(watch_classification(n, &at(1)), None)
+                    .unwrap();
                 let mut item = github_item(n as u64, n as u64, "synthetic", at(1), true);
                 item["updated_at"] = json!(at(30));
                 data.items.push(item);
@@ -3022,15 +3001,11 @@ mod tests {
             // sessions. It is watched for them, and its review comments, which
             // only a creator is told about, are not read.
             for session in ["batch-a", "batch-b"] {
-                mj_controller::database::save_session(&mj_controller::database::test_session(
-                    session, "project",
-                ))
-                .unwrap();
+                database::save_session(&database::test_session(session, "project")).unwrap();
                 let mut classification = watch_classification(15, &at(1));
                 classification.session_id = session.into();
                 classification.created = false;
-                mj_controller::database::commit_github_item_classification(classification, None)
-                    .unwrap();
+                database::commit_github_item_classification(classification, None).unwrap();
             }
             let mut item = github_item(15, 15, "Merge batch", at(1), true);
             item["updated_at"] = json!(at(30));
@@ -3049,7 +3024,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = mj_controller::database::pending_mailbox_events(100).unwrap();
+        let rows = database::pending_mailbox_events(100).unwrap();
         let mut changes = rows
             .iter()
             .filter(|row| row.target_session_id == "creator")
@@ -3157,19 +3132,19 @@ mod tests {
         if !run_isolated_child("an_interested_session_is_told_of_a_merge_in_any_commit_order") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         let start = Utc::now();
         let at = |seconds| {
             (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
         };
         for id in ["creator", "creator2", "gone", "late", "between", "own"] {
-            let mut session = mj_controller::database::test_session(id, "project");
+            let mut session = database::test_session(id, "project");
             session.created_at = at(0);
-            mj_controller::database::save_session(&session).unwrap();
+            database::save_session(&session).unwrap();
         }
         // The "own" session was working when the merge happened, using the
         // shared account.
-        mj_controller::database::seed_github_test_turns(
+        database::seed_github_test_turns(
             "own",
             (start + chrono::Duration::seconds(8)).timestamp_millis(),
             (start + chrono::Duration::seconds(12)).timestamp_millis(),
@@ -3182,7 +3157,7 @@ mod tests {
             classification.created = false;
             classification
         };
-        let merged = |number: i64, id: i64| mj_controller::database::MappedGithubEvent {
+        let merged = |number: i64, id: i64| database::MappedGithubEvent {
             key: format!("github:acme/repo#{number}:merged:{id}"),
             body: MailboxEventBody::GithubPullRequestLifecycle {
                 change: MailboxPullRequestChange::Merged,
@@ -3196,7 +3171,7 @@ mod tests {
             timestamp: at(10),
             lifecycle: true,
         };
-        let progress = || mj_controller::database::GithubItemProgress {
+        let progress = || database::GithubItemProgress {
             timeline_at: at(10),
             timeline_id: 1,
             review_comments_at: at(1),
@@ -3204,21 +3179,18 @@ mod tests {
             processed_at: at(20),
         };
         for number in [41, 42, 43] {
-            mj_controller::database::commit_github_item_classification(
-                watch_classification(number, &at(1)),
-                None,
-            )
-            .unwrap();
+            database::commit_github_item_classification(watch_classification(number, &at(1)), None)
+                .unwrap();
         }
         let load = |number: i64| {
-            mj_controller::database::load_github_watches("acme", "repo")
+            database::load_github_watches("acme", "repo")
                 .unwrap()
                 .into_iter()
                 .find(|watch| watch.number == number)
                 .unwrap()
         };
         let keys_for = |session: &str| {
-            let mut keys = mj_controller::database::pending_mailbox_events(100)
+            let mut keys = database::pending_mailbox_events(100)
                 .unwrap()
                 .into_iter()
                 .filter(|row| row.target_session_id == session)
@@ -3229,14 +3201,14 @@ mod tests {
         };
 
         // The poll commits the merge first; a session is classified afterwards.
-        mj_controller::database::commit_github_timeline(
+        database::commit_github_timeline(
             load(41),
             progress(),
             vec![merged(41, 4101)],
             Some("watcher-bot".into()),
         )
         .unwrap();
-        mj_controller::database::commit_github_item_classification(
+        database::commit_github_item_classification(
             interested(41, "late"),
             Some((
                 "github:acme/repo#41:interest:late".into(),
@@ -3253,7 +3225,7 @@ mod tests {
         )
         .unwrap();
         // It hears of the PR before it hears the PR merged.
-        let delivery_order = mj_controller::database::pending_mailbox_events(100)
+        let delivery_order = database::pending_mailbox_events(100)
             .unwrap()
             .into_iter()
             .filter(|row| row.target_session_id == "late")
@@ -3269,9 +3241,8 @@ mod tests {
         // The classification lands between the poll's fetch and its commit,
         // which is built from the snapshot taken before it.
         let snapshot = load(42);
-        mj_controller::database::commit_github_item_classification(interested(42, "between"), None)
-            .unwrap();
-        mj_controller::database::commit_github_timeline(
+        database::commit_github_item_classification(interested(42, "between"), None).unwrap();
+        database::commit_github_timeline(
             snapshot,
             progress(),
             vec![merged(42, 4201)],
@@ -3281,7 +3252,7 @@ mod tests {
         // A session working in the shared account when the PR merged is still
         // told when it is classified later: an overlapping turn does not show
         // that it made the merge.
-        mj_controller::database::commit_github_timeline(
+        database::commit_github_timeline(
             load(43),
             progress(),
             vec![merged(43, 4301)],
@@ -3289,39 +3260,28 @@ mod tests {
         )
         .unwrap();
         // Hard-won: review ce48727a1: a late-classified session mid-turn in the shared account lost the recorded merge.
-        mj_controller::database::commit_github_item_classification(interested(43, "own"), None)
-            .unwrap();
+        database::commit_github_item_classification(interested(43, "own"), None).unwrap();
 
         // A watch kept for interested sessions gains its creator while a poll,
         // which did not read review comments for it, is in flight: that poll
         // must not record progress past the comments the creator is owed.
-        mj_controller::database::commit_github_item_classification(interested(44, "late"), None)
-            .unwrap();
+        database::commit_github_item_classification(interested(44, "late"), None).unwrap();
         let snapshot = load(44);
         assert_eq!(snapshot.creator_session_id, None);
-        mj_controller::database::commit_github_item_classification(
-            watch_classification(44, &at(1)),
-            None,
-        )
-        .unwrap();
-        mj_controller::database::commit_github_timeline(snapshot, progress(), vec![], None)
+        database::commit_github_item_classification(watch_classification(44, &at(1)), None)
             .unwrap();
+        database::commit_github_timeline(snapshot, progress(), vec![], None).unwrap();
         let attached = load(44);
         assert_eq!(attached.creator_session_id.as_deref(), Some("creator"));
         assert_eq!(attached.processed_at, at(1), "the poll is redone");
 
         // The creator attaches after a poll already committed progress read
         // without it: the creator is owed everything since the item's creation.
-        mj_controller::database::commit_github_item_classification(interested(45, "late"), None)
-            .unwrap();
-        mj_controller::database::commit_github_timeline(load(45), progress(), vec![], None)
-            .unwrap();
+        database::commit_github_item_classification(interested(45, "late"), None).unwrap();
+        database::commit_github_timeline(load(45), progress(), vec![], None).unwrap();
         assert_eq!(load(45).processed_at, at(20));
-        mj_controller::database::commit_github_item_classification(
-            watch_classification(45, &at(1)),
-            None,
-        )
-        .unwrap();
+        database::commit_github_item_classification(watch_classification(45, &at(1)), None)
+            .unwrap();
         let rewound = load(45);
         assert_eq!(rewound.creator_session_id.as_deref(), Some("creator"));
         assert_eq!(
@@ -3338,16 +3298,14 @@ mod tests {
         // replaced by another: the new creator is owed a full read.
         let mut first = watch_classification(46, &at(1));
         first.session_id = "gone".into();
-        mj_controller::database::commit_github_item_classification(first, None).unwrap();
-        mj_controller::database::commit_github_item_classification(interested(46, "late"), None)
-            .unwrap();
+        database::commit_github_item_classification(first, None).unwrap();
+        database::commit_github_item_classification(interested(46, "late"), None).unwrap();
         let snapshot = load(46);
-        mj_controller::database::delete_session("gone").unwrap();
+        database::delete_session("gone").unwrap();
         let mut replacement = watch_classification(46, &at(1));
         replacement.session_id = "creator2".into();
-        mj_controller::database::commit_github_item_classification(replacement, None).unwrap();
-        mj_controller::database::commit_github_timeline(snapshot, progress(), vec![], None)
-            .unwrap();
+        database::commit_github_item_classification(replacement, None).unwrap();
+        database::commit_github_timeline(snapshot, progress(), vec![], None).unwrap();
         assert_eq!(load(46).creator_session_id.as_deref(), Some("creator2"));
         assert_eq!(
             load(46).processed_at,
@@ -3357,24 +3315,21 @@ mod tests {
         // A creator attached after a poll's progress was recorded and was then
         // destroyed: the watch has no creator again, but its cursors were
         // rewound, and a poll built before the rewind must not undo that.
-        mj_controller::database::commit_github_item_classification(interested(47, "late"), None)
-            .unwrap();
-        mj_controller::database::commit_github_timeline(load(47), progress(), vec![], None)
-            .unwrap();
+        database::commit_github_item_classification(interested(47, "late"), None).unwrap();
+        database::commit_github_timeline(load(47), progress(), vec![], None).unwrap();
         let snapshot = load(47);
         assert_eq!(snapshot.processed_at, at(20));
         let mut attached = watch_classification(47, &at(1));
         attached.session_id = "creator2".into();
-        mj_controller::database::commit_github_item_classification(attached, None).unwrap();
-        mj_controller::database::delete_session("creator2").unwrap();
+        database::commit_github_item_classification(attached, None).unwrap();
+        database::delete_session("creator2").unwrap();
         assert_eq!(load(47).creator_session_id, None);
-        mj_controller::database::commit_github_timeline(snapshot, progress(), vec![], None)
-            .unwrap();
+        database::commit_github_timeline(snapshot, progress(), vec![], None).unwrap();
         assert_eq!(load(47).processed_at, at(1), "the rewind stands");
 
         // Replays change nothing.
         for number in [41, 42, 43] {
-            mj_controller::database::commit_github_timeline(
+            database::commit_github_timeline(
                 load(number),
                 progress(),
                 vec![merged(number, number * 100 + 1)],
@@ -3403,7 +3358,7 @@ mod tests {
             ],
             "the creator gets each merge exactly once"
         );
-        for row in mj_controller::database::pending_mailbox_events(100)
+        for row in database::pending_mailbox_events(100)
             .unwrap()
             .into_iter()
             .filter(|row| !row.event_key.contains(":interest:"))
@@ -3426,9 +3381,9 @@ mod tests {
         if !run_isolated_child("watcher_rechecks_same_second_updates_then_converges") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         save_creator_session();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
                 .unwrap()
@@ -3442,7 +3397,7 @@ mod tests {
         };
         let mut classification = watch_classification(1, &at(1));
         classification.kind = "issue".into();
-        mj_controller::database::commit_github_item_classification(classification, None).unwrap();
+        database::commit_github_item_classification(classification, None).unwrap();
         let fake = FakeGithub::default();
         {
             let mut data = fake.data.lock().await;
@@ -3464,7 +3419,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            mj_controller::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
             at(-20)
         );
         {
@@ -3492,12 +3447,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            mj_controller::database::pending_mailbox_events(100)
-                .unwrap()
-                .len(),
-            2
-        );
+        assert_eq!(database::pending_mailbox_events(100).unwrap().len(), 2);
         assert_eq!(
             fake.data.lock().await.timeline_requests.len(),
             2,
@@ -3515,9 +3465,9 @@ mod tests {
         ) {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
+        let _writer = database::install_isolated_test_writer();
         save_creator_session();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
                 .unwrap()
@@ -3531,7 +3481,7 @@ mod tests {
         };
         let mut watch = watch_classification(1, &at(1));
         watch.kind = "issue".into();
-        mj_controller::database::commit_github_item_classification(watch, None).unwrap();
+        database::commit_github_item_classification(watch, None).unwrap();
         let fake = FakeGithub::default();
         {
             let mut data = fake.data.lock().await;
@@ -3556,13 +3506,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            mj_controller::database::pending_mailbox_events(100)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(database::pending_mailbox_events(100).unwrap().is_empty());
         assert_eq!(
-            mj_controller::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
             at(-18)
         );
         {
@@ -3583,12 +3529,12 @@ mod tests {
         poll_repository_with_context("acme", "repo", vec![], fake_classifier(), &api, stop)
             .await
             .unwrap();
-        let events = mj_controller::database::pending_mailbox_events(100).unwrap();
+        let events = database::pending_mailbox_events(100).unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].event_key.ends_with(":comment:11"));
         assert_eq!(fake.data.lock().await.timeline_requests.len(), 2);
         assert_eq!(
-            mj_controller::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
             at(12)
         );
         server.abort();
@@ -3600,8 +3546,8 @@ mod tests {
         if !run_isolated_child("classification_builds_history_evidence_for_every_session") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let created = (DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
             + chrono::Duration::seconds(1))
         .to_rfc3339();
@@ -3610,19 +3556,19 @@ mod tests {
                 parse_github_item(&github_item(n, n, "synthetic", created.clone(), false)).unwrap()
             })
             .collect();
-        mj_controller::database::record_github_page(
+        database::record_github_page(
             "acme".into(),
             "repo".into(),
             items,
-            mj_controller::database::GithubFeedProgress::Main(created),
+            database::GithubFeedProgress::Main(created),
         )
         .unwrap();
         let sessions = ["first", "second"]
             .into_iter()
             .map(|id| {
-                let mut session = mj_controller::database::test_session(id, "project");
+                let mut session = database::test_session(id, "project");
                 session.created_at = cursor.watch_started_at.clone();
-                mj_controller::database::save_session(&session).unwrap();
+                database::save_session(&session).unwrap();
                 session
             })
             .collect::<Vec<_>>();
@@ -3639,7 +3585,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            mj_controller::database::load_github_classification_failures("acme", "repo")
+            database::load_github_classification_failures("acme", "repo")
                 .unwrap()
                 .is_empty()
         );
@@ -3651,9 +3597,9 @@ mod tests {
         if !run_isolated_child("prepared_creator_watch_rechecks_enablement_before_commit") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let session = mj_controller::database::test_session("creator", "project");
-        mj_controller::database::save_session(&session).unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let session = database::test_session("creator", "project");
+        database::save_session(&session).unwrap();
         let item = parse_github_item(&github_item(
             1,
             1,
@@ -3675,7 +3621,7 @@ mod tests {
         .unwrap_err();
         assert!(is_github_events_disabled(&error));
         assert!(
-            mj_controller::database::load_github_watches("acme", "repo")
+            database::load_github_watches("acme", "repo")
                 .unwrap()
                 .is_empty()
         );
@@ -3701,8 +3647,8 @@ mod tests {
         if !run_isolated_child("watcher_classification_backoff_does_not_starve_healthy_sessions") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let created = (DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
             + chrono::Duration::seconds(1))
         .to_rfc3339();
@@ -3711,18 +3657,18 @@ mod tests {
                 parse_github_item(&github_item(n, n, "synthetic", created.clone(), false)).unwrap()
             })
             .collect();
-        mj_controller::database::record_github_page(
+        database::record_github_page(
             "acme".into(),
             "repo".into(),
             items,
-            mj_controller::database::GithubFeedProgress::Main(created),
+            database::GithubFeedProgress::Main(created),
         )
         .unwrap();
         let mut sessions = Vec::new();
         for id in ["bad", "healthy"] {
-            let mut session = mj_controller::database::test_session(id, "project");
+            let mut session = database::test_session(id, "project");
             session.created_at = cursor.watch_started_at.clone();
-            mj_controller::database::save_session(&session).unwrap();
+            database::save_session(&session).unwrap();
             sessions.push(session);
         }
         use mj_core::state::{
@@ -3751,7 +3697,7 @@ mod tests {
             active_turn: None,
             last_turn_outcome: None,
         };
-        mj_controller::database::save_materialized_session(&materialized).unwrap();
+        database::save_materialized_session(&materialized).unwrap();
         assert!(
             session_digest("bad".into())
                 .await
@@ -3778,12 +3724,11 @@ mod tests {
             .unwrap();
         }
         assert!(
-            mj_controller::database::load_github_item_classified_sessions("acme", "repo", 51)
+            database::load_github_item_classified_sessions("acme", "repo", 51)
                 .unwrap()
                 .contains("healthy")
         );
-        let failures =
-            mj_controller::database::load_github_classification_failures("acme", "repo").unwrap();
+        let failures = database::load_github_classification_failures("acme", "repo").unwrap();
         assert_eq!(failures.len(), 51);
         let failure = &failures[&(1, "bad".into())];
         assert_eq!(failure.attempts, 1);
@@ -3793,7 +3738,7 @@ mod tests {
         );
         // Retry durable failures beyond the one-hour cap; they never give up.
         for attempt in 2..=8 {
-            mj_controller::database::seed_github_retry_due("acme", "repo", 1, "bad").unwrap();
+            database::seed_github_retry_due("acme", "repo", 1, "bad").unwrap();
             classify_recorded_items(
                 "acme",
                 "repo",
@@ -3805,15 +3750,13 @@ mod tests {
             )
             .await
             .unwrap();
-            let failures =
-                mj_controller::database::load_github_classification_failures("acme", "repo")
-                    .unwrap();
+            let failures = database::load_github_classification_failures("acme", "repo").unwrap();
             let failure = &failures[&(1, "bad".into())];
             assert_eq!(failure.attempts, attempt);
             assert!(failure.next_attempt_at_ms - failure.last_attempt_at_ms <= 3_600_000);
         }
         failing.store(false, Ordering::SeqCst);
-        mj_controller::database::seed_github_retry_due("acme", "repo", 1, "bad").unwrap();
+        database::seed_github_retry_due("acme", "repo", 1, "bad").unwrap();
         classify_recorded_items(
             "acme",
             "repo",
@@ -3826,12 +3769,12 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !mj_controller::database::load_github_classification_failures("acme", "repo")
+            !database::load_github_classification_failures("acme", "repo")
                 .unwrap()
                 .contains_key(&(1, "bad".into()))
         );
         assert!(
-            mj_controller::database::load_github_item_classified_sessions("acme", "repo", 1)
+            database::load_github_item_classified_sessions("acme", "repo", 1)
                 .unwrap()
                 .contains("bad")
         );
@@ -3843,8 +3786,8 @@ mod tests {
         if !run_isolated_child("classification_uses_opening_tool_calls_and_the_credential_author") {
             return;
         }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let cursor = mj_controller::database::github_repo_cursor("acme", "repo").unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let cursor = database::github_repo_cursor("acme", "repo").unwrap();
         let created = DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
             + chrono::Duration::seconds(1);
         let created_ms = created.timestamp_millis();
@@ -3853,27 +3796,27 @@ mod tests {
         opened["user"]["login"] = json!("Watcher-Bot");
         let mut batch = github_item(2, 2, "interesting created batch", created.clone(), true);
         batch["user"]["login"] = json!("merge-bot[bot]");
-        mj_controller::database::record_github_page(
+        database::record_github_page(
             "acme".into(),
             "repo".into(),
             vec![
                 parse_github_item(&opened).unwrap(),
                 parse_github_item(&batch).unwrap(),
             ],
-            mj_controller::database::GithubFeedProgress::Main(created),
+            database::GithubFeedProgress::Main(created),
         )
         .unwrap();
         let mut sessions = Vec::new();
         for id in ["opener", "other"] {
-            let mut session = mj_controller::database::test_session(id, "project");
+            let mut session = database::test_session(id, "project");
             session.created_at = cursor.watch_started_at.clone();
-            mj_controller::database::save_session(&session).unwrap();
+            database::save_session(&session).unwrap();
             sessions.push(session);
         }
         use mj_core::state::{
             MaterializedExecutionState, MaterializedSession, TranscriptBody, TranscriptItem,
         };
-        mj_controller::database::save_materialized_session(&MaterializedSession {
+        database::save_materialized_session(&MaterializedSession {
             session_id: "opener".into(),
             applied_event_ordinal: 1,
             applied_event_digest: "1".repeat(64),
@@ -3925,7 +3868,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let watches = mj_controller::database::load_github_watches("acme", "repo").unwrap();
+        let watches = database::load_github_watches("acme", "repo").unwrap();
         assert_eq!(
             watches
                 .iter()
@@ -3934,7 +3877,7 @@ mod tests {
             vec![(1, Some("opener")), (2, None)],
             "the opening call claims item 1; another account's batch is watched for its interested sessions, with no creator"
         );
-        let mut interest = mj_controller::database::pending_mailbox_events(1000)
+        let mut interest = database::pending_mailbox_events(1000)
             .unwrap()
             .into_iter()
             .map(|row| row.event_key)
@@ -3964,7 +3907,7 @@ mod tests {
         let mut examples = Vec::new();
         for captured in capture["items"].as_array().unwrap() {
             let item = parse_github_item(&captured["item"]).unwrap();
-            let watch = mj_controller::database::GithubItemWatch {
+            let watch = database::GithubItemWatch {
                 owner: "brokkai".into(),
                 repo: "bifrost-dev".into(),
                 number: item.number,

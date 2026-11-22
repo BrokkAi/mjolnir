@@ -41,17 +41,11 @@ pub(super) async fn enqueue_event(
     let blocking_admission = admission.clone();
     let enqueued = mj_core::runtime::spawn_blocking(move || {
         let _admission = blocking_admission;
-        mj_controller::database::enqueue_mailbox_event(
-            &event_key,
-            &target,
-            &event_json,
-            wake,
-            false,
-        )
+        mj_store::database::enqueue_mailbox_event(&event_key, &target, &event_json, wake, false)
     })
     .await
     .map_err(|error| anyhow::anyhow!("mailbox outbox write task failed: {error}"))??;
-    if enqueued == mj_controller::database::Enqueued::TargetGone {
+    if enqueued == mj_store::database::Enqueued::TargetGone {
         return Err(ApiFailure::not_found(format!(
             "session {session_id} no longer exists"
         )));

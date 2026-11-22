@@ -369,13 +369,17 @@ impl ManagedSessionHandle {
         self.lease_connection_for(None, admission).await
     }
 
-    /// Background replacement must never take a busy session's control channel.
+    /// Reserve a worker's control channel only once it is safe to replace.
     pub async fn lease_idle_connection(
         &self,
         harness: mj_core::config::HarnessKind,
+        replacement: mj_core::activity::WorkerReplacement,
         admission: &impl crate::recovery_gate::HoldsSession,
     ) -> Result<Option<ManagedSessionLease>> {
-        match self.lease_connection_for(Some(harness), admission).await {
+        match self
+            .lease_connection_for(Some((harness, replacement)), admission)
+            .await
+        {
             Ok(lease) => Ok(Some(lease)),
             Err(error) if error.is::<SessionNotIdle>() => Ok(None),
             Err(error) => Err(error),
@@ -384,7 +388,10 @@ impl ManagedSessionHandle {
 
     async fn lease_connection_for(
         &self,
-        idle_harness: Option<mj_core::config::HarnessKind>,
+        idle_replacement: Option<(
+            mj_core::config::HarnessKind,
+            mj_core::activity::WorkerReplacement,
+        )>,
         admission: &impl crate::recovery_gate::HoldsSession,
     ) -> Result<ManagedSessionLease> {
         let (reply, response) = oneshot::channel();
@@ -392,7 +399,7 @@ impl ManagedSessionHandle {
             .send(ActorCommand::Lease {
                 admission: admission.admission().lease(&self.session_id).await?,
                 returns: self.releases.clone(),
-                idle_harness,
+                idle_replacement,
                 reply,
             })
             .await

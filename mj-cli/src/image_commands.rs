@@ -64,7 +64,7 @@ fn collect(path: Option<PathBuf>) -> Result<(PathBuf, BTreeMap<String, String>)>
         .find(|ancestor| ancestor.join(".git").exists())
         .context("--path must be inside a repository")?;
     let mut files = BTreeMap::new();
-    for name in mj_core::session_image::RECIPE_FILES {
+    for name in mj_harness_install::session_image::RECIPE_FILES {
         match std::fs::read_to_string(root.join(name)) {
             Ok(text) => {
                 files.insert((*name).to_owned(), text);
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn image_build_print_golden() {
-        let base = mj_core::session_image::ImageBase {
+        let base = mj_harness_install::session_image::ImageBase {
             reference: format!(
                 "docker.io/library/buildpack-deps:noble@sha256:{}",
                 "a".repeat(64)
@@ -241,13 +241,14 @@ mod tests {
             user: "hel".into(),
             workdir: "/workspace".into(),
         };
-        let mise = mj_core::session_image::MiseArtifact { version: "2026.11.9".into(), url: "https://github.com/jdx/mise/releases/download/v2026.11.9/mise-v2026.11.9-linux-x64-musl".into(), sha256: "e55de2c37a08a9dfdb3ca95490f90f914b5ef362b62761f1bb2110e5d57210f7".into() };
+        let mise = mj_harness_install::session_image::MiseArtifact { version: "2026.11.9".into(), url: "https://github.com/jdx/mise/releases/download/v2026.11.9/mise-v2026.11.9-linux-x64-musl".into(), sha256: "e55de2c37a08a9dfdb3ca95490f90f914b5ef362b62761f1bb2110e5d57210f7".into() };
         let files = BTreeMap::from([
             (".nvmrc".into(), "24\n".into()),
             ("mise.toml".into(), "[tools]\npython = \"3.15\"\n".into()),
         ]);
         let text =
-            mj_core::session_image::containerfile(&base, "linux/amd64", &mise, &files).unwrap();
+            mj_harness_install::session_image::containerfile(&base, "linux/amd64", &mise, &files)
+                .unwrap();
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "image-build-print", &text);
     }
 

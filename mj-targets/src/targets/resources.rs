@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::state::{ResourceAllocationKind, SessionResourceAllocation};
 use mj_core::targets::SshTrafficClass;
 
 pub(super) const HOST_RESOURCE_USAGE_SCRIPT: &str = r#"
@@ -327,5 +328,25 @@ mod darwin_tests {
             );
             assert_ne!(ProcessExecutor.execute(&command).unwrap().status, 0);
         }
+    }
+}
+
+pub fn validate_resource_allocation(
+    target_kind: impl Into<ResourceAllocationKind>,
+    allocation: Option<&SessionResourceAllocation>,
+) -> Result<()> {
+    if let Some(allocation) = allocation {
+        allocation.validate()?;
+    }
+    match (target_kind.into(), allocation) {
+        (_, None)
+        | (ResourceAllocationKind::Container, Some(SessionResourceAllocation::Container { .. }))
+        | (ResourceAllocationKind::AwsEc2, Some(SessionResourceAllocation::AwsEc2 { .. })) => {
+            Ok(())
+        }
+        (ResourceAllocationKind::Fixed, Some(_)) => {
+            bail!(mj_core::state::BARE_TARGET_FIXED_RESOURCES)
+        }
+        _ => bail!("resource allocation does not match the selected target kind"),
     }
 }

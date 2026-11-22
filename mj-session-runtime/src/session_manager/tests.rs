@@ -345,7 +345,7 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
             returns: _releases_tx.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .await
         .unwrap();
@@ -1585,6 +1585,7 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
 #[tokio::test]
 async fn guardian_actor_cascades_requests_added_after_attachment() {
     use mj_core::guardian::{
+        GUARDIAN_CONFIG_INVALID_TOML, GUARDIAN_CONFIG_NEEDS_UPGRADE, GUARDIAN_CONFIG_UNREADABLE,
         GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
         WOLF_STAGE1_ALLOW_THRESHOLD,
     };
@@ -1695,7 +1696,19 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         (
             "invalid-config",
             GuardianReviewOutcome::AskPerson {
-                reason: String::new(),
+                reason: GUARDIAN_CONFIG_INVALID_TOML.into(),
+            },
+        ),
+        (
+            "newer-config",
+            GuardianReviewOutcome::AskPerson {
+                reason: GUARDIAN_CONFIG_NEEDS_UPGRADE.into(),
+            },
+        ),
+        (
+            "unreadable-config",
+            GuardianReviewOutcome::AskPerson {
+                reason: GUARDIAN_CONFIG_UNREADABLE.into(),
             },
         ),
     ] {
@@ -1704,7 +1717,15 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
             "local-disabled" => local_off_config.save().unwrap(),
             "guardian-disabled" => guardian_off_config.save().unwrap(),
             "invalid-config" => {
-                mj_core::config::atomic_write(&config_path, b"invalid TOML").unwrap();
+                mj_core::config::atomic_write(&config_path, b"invalid SECRET_DATA").unwrap();
+            }
+            "newer-config" => {
+                let config = format!("version = {}\n", mj_core::config::CONFIG_VERSION + 1);
+                mj_core::config::atomic_write(&config_path, config.as_bytes()).unwrap();
+            }
+            "unreadable-config" => {
+                std::fs::remove_file(&config_path).unwrap();
+                std::fs::create_dir(&config_path).unwrap();
             }
             _ => {
                 mj_core::config::atomic_write(&config_path, &valid_config).unwrap();
@@ -1739,15 +1760,7 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         .await
         .unwrap_or_else(|_| panic!("timed out awaiting {id}"));
         assert_eq!(result.request_id, id);
-        if id == "invalid-config" {
-            assert!(
-                matches!(result.decision, GuardianReviewOutcome::AskPerson { ref reason } if reason.contains("could not load configuration")),
-                "expected AskPerson on invalid config, got {:?}",
-                result.decision
-            );
-        } else {
-            assert_eq!(result.decision, expected, "{id}");
-        }
+        assert_eq!(result.decision, expected, "{id}");
     }
     shutdown.shutdown().await.unwrap();
 }
@@ -2944,7 +2957,7 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
             returns: releases_tx.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .await
         .unwrap();
@@ -2988,7 +3001,7 @@ async fn released_connection_can_be_leased_again_immediately() {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .unwrap();
     assert!(
@@ -3012,7 +3025,7 @@ async fn released_connection_can_be_leased_again_immediately() {
                 returns: actor.releases.clone(),
                 admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
                 reply,
-                idle_harness: None,
+                idle_replacement: None,
             })
             .unwrap();
         let mut granted = response
@@ -3070,7 +3083,7 @@ async fn cancelled_lease_request_is_skipped_before_sync() {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
             reply,
-            idle_harness: None,
+            idle_replacement: None,
         })
         .unwrap();
     let (reply, response) = oneshot::channel();
@@ -3092,7 +3105,7 @@ async fn cancelled_lease_request_is_skipped_before_sync() {
         .send(ActorCommand::Lease {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
-            idle_harness: None,
+            idle_replacement: None,
             reply,
         })
         .await
@@ -4450,7 +4463,7 @@ async fn lifecycle_lease_stops_delegation_dials_until_control_returns() {
         .send(ActorCommand::Lease {
             returns: actor.releases.clone(),
             admission: crate::database::test_fixtures::relay_admission(LEASED_RELAY_SESSION),
-            idle_harness: None,
+            idle_replacement: None,
             reply,
         })
         .await

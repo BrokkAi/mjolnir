@@ -38,8 +38,8 @@ pub fn initialize_from_parent() -> Result<()> {
 pub async fn resolve() -> Result<&'static Environment> {
     ENVIRONMENT
         .get_or_try_init(|| async {
-            let cancellation = crate::subprocess::scoped_preparation_cancellation();
-            crate::runtime::spawn_blocking(move || match cancellation {
+            let cancellation = mj_core::subprocess::scoped_preparation_cancellation();
+            mj_core::runtime::spawn_blocking(move || match cancellation {
                 Some(cancellation) => discover_cancellable(cancellation),
                 None => discover(),
             })
@@ -200,7 +200,7 @@ pub fn discover() -> Result<Environment> {
 /// spend reaching the probe on a loaded machine, so the probe deadline always
 /// fires before the startup wait would give up on a living worker. While the
 /// probe runs, the worker records the
-/// [`crate::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT`] startup step, and
+/// [`mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT`] startup step, and
 /// the startup wait defers to this deadline for exactly that step; the test
 /// `login_probe_deadline_fits_inside_the_worker_startup_ceiling` pins the
 /// ordering so the two cannot silently disagree. The probe records its own
@@ -233,7 +233,7 @@ pub fn discover() -> Result<Environment> {
 fn discover_cancellable(cancellation: tokio_util::sync::CancellationToken) -> Result<Environment> {
     #[cfg(unix)]
     {
-        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+        let executor = mj_core::targets::CancellableProcessExecutor::with_timeout(
             LOGIN_ENVIRONMENT_PROBE_TIMEOUT,
         )
         .with_cancellation(cancellation)
@@ -346,7 +346,7 @@ impl Account {
                 std::path::PathBuf::from(shell)
             };
             // Let a subprocess fixture substitute a deliberately slow shell.
-            let shell = if crate::test_hooks::test_hooks_enabled()
+            let shell = if mj_core::test_hooks::test_hooks_enabled()
                 && let Some(shell) = std::env::var_os("MJ_TEST_ACCOUNT_SHELL")
             {
                 std::path::PathBuf::from(shell)
@@ -374,14 +374,14 @@ impl Account {
 fn discover_account(account: Account, timeout: std::time::Duration) -> Result<Environment> {
     discover_account_with_executor(
         account,
-        &crate::targets::BoundedProcessExecutor::new(timeout),
+        &mj_core::targets::BoundedProcessExecutor::new(timeout),
     )
 }
 
 #[cfg(unix)]
 fn discover_account_with_executor(
     account: Account,
-    executor: &dyn crate::targets::CommandExecutor,
+    executor: &dyn mj_core::targets::CommandExecutor,
 ) -> Result<Environment> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)
@@ -415,7 +415,7 @@ fn discover_account_with_executor(
 
 #[cfg(unix)]
 struct LoginShellProbe {
-    command: crate::targets::CommandSpec,
+    command: mj_core::targets::CommandSpec,
     script_on_stdin: bool,
 }
 
@@ -426,11 +426,11 @@ fn login_shell_command(shell: &std::path::Path, script: &str) -> Result<LoginShe
         // `-c` leaves `$?prompt` unset while startup files run, even with
         // `-i`. C-shell files commonly guard terminal setup with that flag.
         Some(arg0) => (
-            crate::targets::CommandSpec::new(shell_text, ["-i", "-s"]).arg0(arg0),
+            mj_core::targets::CommandSpec::new(shell_text, ["-i", "-s"]).arg0(arg0),
             true,
         ),
         None => (
-            crate::targets::CommandSpec::new(shell_text, ["-l", "-i", "-c", script]),
+            mj_core::targets::CommandSpec::new(shell_text, ["-l", "-i", "-c", script]),
             false,
         ),
     };
@@ -483,7 +483,7 @@ fn parse(output: &[u8], marker: &[u8]) -> Result<Environment> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
+    use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
     use std::time::{Duration, Instant};
 
     // Hard-won: af22566c: rebuilding the environment from login exports dropped required container image variables
@@ -653,13 +653,20 @@ mod tests {
     #[test]
     fn shell_probe_uses_each_shell_familys_login_form() {
         let csh = login_shell_command(std::path::Path::new("/bin/tcsh"), "capture").unwrap();
-        assert_eq!(csh.command.arg0.as_deref(), Some("-tcsh"));
-        assert_eq!(csh.command.args, ["-i", "-s"]);
+        assert_eq!(
+            csh.command,
+            CommandSpec::new("/bin/tcsh", ["-i", "-s"])
+                .arg0("-tcsh")
+                .purpose("initialize target shell environment")
+        );
         assert!(csh.script_on_stdin);
 
         let posix = login_shell_command(std::path::Path::new("/bin/zsh"), "capture").unwrap();
-        assert_eq!(posix.command.arg0, None);
-        assert_eq!(posix.command.args, ["-l", "-i", "-c", "capture"]);
+        assert_eq!(
+            posix.command,
+            CommandSpec::new("/bin/zsh", ["-l", "-i", "-c", "capture"])
+                .purpose("initialize target shell environment")
+        );
         assert!(!posix.script_on_stdin);
     }
 

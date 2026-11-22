@@ -1,0 +1,24 @@
+[package]
+name = "brokk-mj-worker-review"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Worker-side Git review capture and hooks for Mjolnir"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_worker_review"
+doctest = false
+
+[lints]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+anyhow.workspace = true
+mj-checkpoint.workspace = true
+mj-core.workspace = true
+mj-review.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

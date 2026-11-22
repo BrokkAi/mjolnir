@@ -8,7 +8,7 @@ use tower::ServiceExt as _;
 
 #[tokio::test]
 async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
-    let gate = Arc::new(mj_controller::upgrade::Gate::default());
+    let gate = Arc::new(mj_store::upgrade::Gate::default());
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let app = Router::new()
@@ -2884,9 +2884,10 @@ fn in_isolated_store(test: &str) -> bool {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
-    mj_controller::controller::test_support::IsolatedTest::new(
-        mj_controller::controller::test_support::test_name(module_path!(), test),
-    )
+    mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+        module_path!(),
+        test,
+    ))
     .env(ISOLATED_STORE_CHILD, "1")
     .isolated_store(directory.path())
     .run();
@@ -3600,12 +3601,9 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     // The refusal names the target and carries the controller's reason, but
     // the wire projection still publishes ids only.
-    let reason = mj_controller::controller::resume_compatibility(
-        &state.sessions["session-1"],
-        &config,
-        "raw",
-    )
-    .unwrap_err();
+    let reason =
+        mj_client::target::resume_compatibility(&state.sessions["session-1"], &config, "raw")
+            .unwrap_err();
     assert!(error.message.contains("\"raw\""), "{}", error.message);
     assert!(error.message.contains(&reason), "{}", error.message);
     assert!(
@@ -5623,11 +5621,9 @@ async fn resume_validates_the_workspace_against_the_store_not_the_published_list
     {
         return;
     }
-    let _writer = mj_controller::database::install_isolated_test_writer();
+    let _writer = mj_store::database::install_isolated_test_writer();
     assert!(
-        mj_controller::database::list_workspaces()
-            .unwrap()
-            .is_empty(),
+        mj_store::database::list_workspaces().unwrap().is_empty(),
         "an empty `default` is not listed, so the daemon starts with no workspace"
     );
     // The snapshot the server holds was built from that empty list.
@@ -5637,9 +5633,9 @@ async fn resume_validates_the_workspace_against_the_store_not_the_published_list
         Some(Arc::new(SettingsReviewBackend)),
     );
     let cookie = login_cookie(&app).await;
-    let mut session = mj_controller::controller::test_support::checkpoint_test_session("session-1");
+    let mut session = mj_store::database::test_fixtures::checkpoint_test_session("session-1");
     session.state = SessionState::Stopped;
-    mj_controller::database::save_session(&session).unwrap();
+    mj_store::database::save_session(&session).unwrap();
 
     let resume = |workspace_id: &str| {
         serde_json::to_string(&ControllerAction::Resume {
@@ -5924,17 +5920,18 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
     const CHILD: &str = "MJ_TEST_NOTIFICATION_CARD_MESSAGE";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), NAME),
-        )
+        mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+            module_path!(),
+            NAME,
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();
         return;
     }
-    let _writer = mj_controller::database::install_isolated_test_writer();
+    let _writer = mj_store::database::install_isolated_test_writer();
     let (_, state) = sample_config_state();
-    mj_controller::database::save_session(&state.sessions["session-1"]).unwrap();
+    mj_store::database::save_session(&state.sessions["session-1"]).unwrap();
     let mut history = MaterializedSession::empty("session-1");
     history.applied_event_ordinal = 4;
     history.applied_event_digest = format!("{:064x}", 4);
@@ -5951,7 +5948,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             },
         }));
     }
-    mj_controller::database::save_materialized_session(&history).unwrap();
+    mj_store::database::save_materialized_session(&history).unwrap();
     let outcome = |name: &str, start, completed| MaterializedTurnOutcome {
         command_id: name.into(),
         accepted_ordinal: Some(start),
@@ -5966,7 +5963,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         usage: None,
         work_facts: None,
     };
-    mj_controller::database::apply_projection_event(
+    mj_store::database::apply_projection_event(
         "session-1",
         5,
         "",
@@ -5991,7 +5988,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             streaming: false,
         },
     }));
-    mj_controller::database::save_materialized_session(&history).unwrap();
+    mj_store::database::save_materialized_session(&history).unwrap();
     let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
         snapshot.sessions[0].notification_card = Some(NotificationCard {
             since_ms: 0,

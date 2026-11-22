@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! `mj-worker microvm`: the host engine that runs OCI images as Nitro
 //! Sandbox microVMs, and the guest agent that serves them.
 //!
@@ -7,6 +9,9 @@
 //! running Firecracker (`vm`), and the engine reaches into a VM over the
 //! vsock protocol (`protocol`, `client`) to a guest agent (`guest_agent`)
 //! that runs as PID 1 from an initrd the engine builds (`boot`).
+
+#[cfg(test)]
+mj_core::enable_test_fixtures_on_startup!();
 
 pub mod boot;
 pub mod cli;

@@ -1,0 +1,37 @@
+[package]
+name = "brokk-mj-github-watch"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Durable GitHub activity polling for Mjolnir sessions"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_github_watch"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+mj-github-relevance.workspace = true
+mj-store.workspace = true
+mj-targets.workspace = true
+mj-transcript.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+futures = "0.3"
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true

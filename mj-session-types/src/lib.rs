@@ -11,6 +11,9 @@
 #[cfg(test)]
 mj_core::enable_test_fixtures_on_startup!();
 
+mod viewer_move_recovery;
+pub use viewer_move_recovery::ViewerMoveRecovery;
+
 use std::path::PathBuf;
 
 use mj_core::targets::{CommandPlan, CommandSpec, TargetRecoveryPlan};
@@ -118,3 +121,58 @@ impl std::fmt::Display for HarnessPreparationFailure {
 }
 
 impl std::error::Error for HarnessPreparationFailure {}
+
+/// Trusted public guidance attached at the failing lifecycle boundary. Never
+/// derive it from an error chain, which can contain credentials and host paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleFailureReason {
+    WorkerContact,
+    Checkpoint,
+    Cleanup,
+    RetainedMoveSource,
+    UnsealedMoveSource,
+    HarnessUnavailable,
+}
+
+impl std::fmt::Display for LifecycleFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::WorkerContact => "Suspension could not contact the worker. Resume the session to repair its runtime, then retry suspension.",
+            Self::Checkpoint => "Suspension could not save its recovery checkpoint. Retry suspension; the existing environment was kept.",
+            Self::Cleanup => "Suspension could not finish removing its target. Retry suspension to finish cleanup; retained environments and recovery data were kept.",
+            Self::RetainedMoveSource => "Suspension interrupted Move before the destination was ready; the source workspace was kept. Resume the session to repair its runtime, then retry suspension.",
+            Self::UnsealedMoveSource => "Suspension could not establish a sealed Move checkpoint. Resume the session to repair its runtime, then retry suspension; existing environments and recovery data were kept.",
+            Self::HarnessUnavailable => "Suspension could not save the session without its harness, which failed to open; the environment was kept. Resume the session to retry its harness, or destroy it.",
+        })
+    }
+}
+
+impl std::error::Error for LifecycleFailureReason {}
+
+#[derive(Debug, Clone)]
+pub struct RegisterSubagentRequest {
+    pub no_github_credentials: bool,
+    pub kind: mj_core::subagent::SubagentKind,
+    pub supervisor: bool,
+    pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
+    pub parent_session_id: String,
+    pub task_name: String,
+    pub profile_id: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast_mode: bool,
+    /// Empty means the parent's working directory. An absolute path is used
+    /// as-is; a relative path is resolved against the parent's working
+    /// directory. The path is interpreted on the parent's target and must
+    /// exist there; no other restriction applies.
+    pub working_directory: PathBuf,
+    pub initial_prompt: String,
+    pub request_key: String,
+    /// The absolute directory on the parent's target that holds its
+    /// children's report directories, prepared by the controller.
+    /// `None` registers a child without one.
+    pub report_root: Option<String>,
+    /// Canonical task category stored on the accounting row: `primary`,
+    /// `straightforward`, `subtle`, `oracle`, `reviewer`, or `brief_writer`.
+    pub category: String,
+}

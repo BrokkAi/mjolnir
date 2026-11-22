@@ -12,10 +12,14 @@
 !Cargo.lock
 !rust-toolchain.toml
 !mj-core/
+!mj-harness-install/
 !mj-review/
 !mj-checkpoint/
 !mj-transcript/
 !mj-build-id/
+!mj-microvm/
+!mj-worker-mcp/
+!mj-worker-review/
 !mj-worker/
 !mj-worker-bin/
 !mj-client/
@@ -32,6 +36,7 @@
 !mj-review-host/
 !mj-profile-catalog/
 !mj-github-relevance/
+!mj-github-watch/
 !mj-controller/
 !mj-setup/
 !mj-server/

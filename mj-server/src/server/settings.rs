@@ -350,7 +350,7 @@ async fn autoconfigure_settings(
     let mut usage_priced = backend
         .reviewer_ready_candidates(String::new())
         .await
-        .map(|candidates| mj_controller::review_selection::usage_priced_profiles(&candidates))
+        .map(|candidates| mj_accounts::review_selection::usage_priced_profiles(&candidates))
         .unwrap_or_default();
     usage_priced.extend(
         config
@@ -361,7 +361,7 @@ async fn autoconfigure_settings(
             })
             .map(|(id, _)| id.to_owned()),
     );
-    let (configured, known) = mj_controller::review_selection::autoconfigure_with_efforts(
+    let (configured, known) = mj_accounts::review_selection::autoconfigure_with_efforts(
         &available,
         &usage_priced,
         |profile, model| {
@@ -514,7 +514,7 @@ async fn save_draft_settings(
         let updated =
             draft::config_from_draft(draft).map_err(|error| refused(anyhow::Error::new(error)))?;
         let updated = serde_json::to_string(&updated).map_err(|error| refused(error.into()))?;
-        let sessions = mj_controller::database::load_state().map_err(|error| {
+        let sessions = mj_store::database::load_state().map_err(|error| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("Settings could not read session state: {error:#}"),
@@ -535,8 +535,8 @@ async fn save_draft_settings(
 
 /// VAPID public material only; the private key never leaves the data directory.
 pub(super) async fn push_key() -> Result<Json<Value>, ApiError> {
-    mj_controller::web_push::blocking(|| {
-        Ok(serde_json::json!({"public_key": mj_controller::web_push::Vapid::load()?.public()}))
+    mj_store::web_push::blocking(|| {
+        Ok(serde_json::json!({"public_key": mj_store::web_push::Vapid::load()?.public()}))
     })
     .await
     .map(Json)
@@ -550,10 +550,8 @@ pub(super) struct PushDeviceQuery {
 pub(super) async fn push_device_status(
     Query(query): Query<PushDeviceQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    mj_controller::web_push::blocking(move || {
-        mj_controller::database::push_device_status(query.endpoint)
-    })
-    .await
-    .map(Json)
-    .map_err(unreadable)
+    mj_store::web_push::blocking(move || mj_store::database::push_device_status(query.endpoint))
+        .await
+        .map(Json)
+        .map_err(unreadable)
 }

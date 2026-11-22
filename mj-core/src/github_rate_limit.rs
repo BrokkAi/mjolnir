@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 /// requests exhausted), HTTP 429, and secondary limits, which GitHub signals
 /// with `Retry-After` while requests remain.
 pub fn github_rate_limit_retry_at(
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
+    status: http::StatusCode,
+    headers: &http::HeaderMap,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     let reset = headers
@@ -17,7 +17,7 @@ pub fn github_rate_limit_retry_at(
         .and_then(|value| value.parse::<i64>().ok())
         .and_then(|seconds| DateTime::from_timestamp(seconds, 0));
     let retry_after = headers
-        .get(reqwest::header::RETRY_AFTER)
+        .get(http::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| {
             value
@@ -34,7 +34,7 @@ pub fn github_rate_limit_retry_at(
         .get("x-ratelimit-remaining")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == "0");
-    (exhausted || status == reqwest::StatusCode::TOO_MANY_REQUESTS || retry_after.is_some()).then(
+    (exhausted || status == http::StatusCode::TOO_MANY_REQUESTS || retry_after.is_some()).then(
         || {
             retry_after
                 .into_iter()

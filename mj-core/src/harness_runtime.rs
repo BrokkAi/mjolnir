@@ -1,8 +1,8 @@
 //! Exact harness versions used by Mjolnir-managed installations.
 //!
-//! Installation and process ownership live in `brokk-mj-worker`; this module
-//! holds shared pin metadata and managed-install paths/manifests so the
-//! controller and worker cannot silently disagree about an installation.
+//! Installation lives in `brokk-mj-harness-install`. This module holds shared
+//! pin metadata and managed-install paths and manifests so the controller
+//! and worker agree on installations.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -20,10 +20,10 @@ const MANAGED_HARNESSES_DIR: &str = "harnesses";
 const MANAGED_NODE_DIR: &str = "node";
 
 /// The exact Node.js release Mjolnir installs when the target has no
-/// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
+/// compatible runtime. Keep this in lockstep with `mj-harness-install/assets/node/runtime.json`.
 pub const NODE_VERSION: &str = "24.22.1";
 
-/// Keep in lockstep with `assets/mise/runtime.json`. Static musl binary hashes:
+/// Keep in lockstep with `mj-harness-install/assets/mise/runtime.json`. Static musl binary hashes:
 /// https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
 pub const MISE_VERSION: &str = "2026.11.9";
 

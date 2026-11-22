@@ -1599,10 +1599,11 @@ mod tests {
     #[test]
     fn login_probe_deadline_fits_inside_the_worker_startup_ceiling() {
         assert!(
-            mj_core::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT + Duration::from_secs(60)
+            mj_harness_install::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT
+                + Duration::from_secs(60)
                 <= NATIVE_SESSION_STARTUP_TIMEOUT,
             "login probe budget {} plus 60s launch slack must fit the {} startup ceiling",
-            mj_core::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT.as_secs(),
+            mj_harness_install::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT.as_secs(),
             NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
         );
     }

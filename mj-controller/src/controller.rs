@@ -1,7 +1,7 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
 pub mod backend;
-pub use cache_host::CacheHost;
+pub use cache_host::{CacheHost, resolve_target_input_path};
 pub(crate) use mj_build_cache::cache_host;
 pub mod checkpoint;
 mod container_upgrade;
@@ -114,9 +114,11 @@ pub use mbx::install::{
 pub use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
 pub use mbx::{MBX_VERSION, preview_build_cache};
-pub use provisioning::{
-    CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
+pub use mj_client::daemon::GitIdentity;
+pub use mj_session_runtime::host_git_config::{
+    controller_git_identity, set_controller_git_identity,
 };
+pub use provisioning::CreateKind;
 pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
@@ -132,13 +134,14 @@ pub use checkpoint::{
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,
 };
+pub use mj_store::database::subagent_has_handed_back;
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub use resume::InPlaceRestartError;
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,
 };
-pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
+pub use subagents::{RegisterSubagentRequest, stopped_subagent};
 pub use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
@@ -1730,19 +1733,6 @@ fn finish_config_map_rename<T>(
         );
     }
     Ok(())
-}
-
-/// Resolve the login home on the machine that owns an editable path.
-pub fn resolve_target_input_path(
-    target: &TargetTemplate,
-    path: &Path,
-    executor: &impl CommandExecutor,
-) -> Result<PathBuf> {
-    if !mj_core::path_input::needs_home(path)? {
-        return Ok(path.to_path_buf());
-    }
-    let host = cache_host::CacheHost::for_path_target(target)?;
-    mj_core::path_input::expand_home(path, Some(&host.home(executor)?))
 }
 
 /// Resolve the login home on a configured machine, for the Settings screen's

@@ -80,7 +80,8 @@ pub fn is_preparation_cancelled(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<PreparationCancelled>())
 }
 
-pub(crate) fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
+/// Return the current preparation token if the caller is in a preparation scope.
+pub fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
     CANCELLATION.try_with(Clone::clone).ok()
 }
 

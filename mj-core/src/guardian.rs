@@ -26,7 +26,16 @@ use std::time::Duration;
 
 use crate::config::HarnessKind;
 
+/// The synchronous Codex guardian's 90-second review budget, adopted for
+/// Mjolnir permission reviews. See the Mjolnir guardian ExecPlan.
 pub const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
+/// Protocol 82's `AskPerson` also carries daemon failures. This reason
+/// identifies the explicit settings choice to continue with manual approval.
+pub const GUARDIAN_DISABLED_REASON: &str = "Mjolnir guardian is disabled in settings";
+pub const GUARDIAN_CONFIG_UNREADABLE: &str = "the daemon configuration file is unreadable";
+pub const GUARDIAN_CONFIG_INVALID_TOML: &str = "the daemon configuration contains invalid TOML";
+pub const GUARDIAN_CONFIG_NEEDS_UPGRADE: &str =
+    "the daemon configuration uses a newer schema. Upgrade Mjolnir";
 pub const MAX_PENDING_GUARDIAN_REVIEWS: usize = 8;
 
 /// Codex's security policy, inserted into the template below.
@@ -687,6 +696,44 @@ pub struct GuardianReviewResult {
     pub request_id: String,
     pub decision: GuardianReviewOutcome,
 }
+
+/// Retain the failure category carried in the preexisting `AskPerson`
+/// response. Older daemons can send configuration contents or provider text
+/// in that field. Report only known messages and fixed category names.
+pub fn safe_daemon_guardian_failure_reason(reason: &str) -> &str {
+    match reason {
+        "its daemon review timed out" | "the daemon review timed out" => {
+            "the daemon review timed out"
+        }
+        "invalid guardian assessment"
+        | "utility guardian inference failed"
+        | "utility guardian inference failed (InvalidRequest)"
+        | "utility guardian inference failed (Cancelled)"
+        | "utility guardian inference failed (Authentication)"
+        | "utility guardian inference failed (RateLimited)"
+        | "utility guardian inference failed (ContextLength)"
+        | "utility guardian inference failed (Transport)"
+        | "utility guardian inference failed (StructuredOutput)"
+        | "utility guardian inference failed (Provider)"
+        | "could not read configuration"
+        | GUARDIAN_CONFIG_UNREADABLE
+        | GUARDIAN_CONFIG_INVALID_TOML
+        | GUARDIAN_CONFIG_NEEDS_UPGRADE => reason,
+        "could not load configuration" => reason,
+        reason if reason.starts_with("could not load configuration:") => {
+            "could not load configuration"
+        }
+        reason if reason.starts_with("could not read configuration:") => {
+            "could not read configuration"
+        }
+        "could not select a utility guardian model" => reason,
+        reason if reason.starts_with("no usable utility model:") => {
+            "could not select a utility guardian model"
+        }
+        _ => "the daemon reviewer failed",
+    }
+}
+
 /// The exact action under review: the tool call the harness asked about,
 /// with each file edit as a unified patch rather than two whole-file copies.
 pub fn planned_action(

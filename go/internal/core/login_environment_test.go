@@ -1,4 +1,4 @@
-// Port of the tests in mj-core/src/login_environment.rs (Unix only).
+// Port of the tests in mj-harness-install/src/login_environment.rs (Unix only).
 
 package core
 

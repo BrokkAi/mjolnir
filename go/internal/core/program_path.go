@@ -1,4 +1,4 @@
-// Port of mj-core/src/program_path.rs.
+// Port of mj-harness-install/src/program_path.rs.
 
 // Finding a program on a PATH value the way the operating system would run
 // it.

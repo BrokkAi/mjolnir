@@ -12,8 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
-    PodmanWorkspaceLocator, ResourceAllocationKind, SessionRecord, SessionResourceAllocation,
-    TargetLocator,
+    PodmanWorkspaceLocator, SessionRecord, SessionResourceAllocation, TargetLocator,
 };
 
 use crate::targets::{
@@ -501,14 +500,7 @@ pub fn local_engine_readiness(
     })
 }
 
-/// Whether a command failed because its program is not installed.
-pub fn is_missing_command(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    })
-}
+pub use mj_targets::command_checks::is_missing_command;
 
 /// Check that a target's host and runtime can run sessions.
 pub(super) fn verify_target(
@@ -953,25 +945,7 @@ fn backend_container_with(
     }
 }
 
-pub fn validate_resource_allocation(
-    target_kind: impl Into<ResourceAllocationKind>,
-    allocation: Option<&SessionResourceAllocation>,
-) -> Result<()> {
-    if let Some(allocation) = allocation {
-        allocation.validate()?;
-    }
-    match (target_kind.into(), allocation) {
-        (_, None)
-        | (ResourceAllocationKind::Container, Some(SessionResourceAllocation::Container { .. }))
-        | (ResourceAllocationKind::AwsEc2, Some(SessionResourceAllocation::AwsEc2 { .. })) => {
-            Ok(())
-        }
-        (ResourceAllocationKind::Fixed, Some(_)) => {
-            bail!(mj_core::state::BARE_TARGET_FIXED_RESOURCES)
-        }
-        _ => bail!("resource allocation does not match the selected target kind"),
-    }
-}
+pub use mj_targets::targets::validate_resource_allocation;
 
 /// How long a freshly launched EC2 instance may take to accept SSH.
 const AWS_SSH_READY_TIMEOUT: Duration = Duration::from_secs(300);

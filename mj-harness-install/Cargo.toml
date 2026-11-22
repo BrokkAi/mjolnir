@@ -1,0 +1,67 @@
+[package]
+name = "brokk-mj-harness-install"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Managed harness installation and target login environments for Mjolnir"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+include = [
+    "src/**/*.rs",
+    "tests/fixtures/*.sh",
+    # Pinned managed harness packages and verified runtime manifests.
+    "assets/harnesses/**",
+    "assets/antigravity/runtime.json",
+    "assets/grok/runtime.json",
+    "assets/kimi/runtime.json",
+    "assets/mise/runtime.json",
+    "assets/muse/runtime.json",
+    "assets/node/runtime.json",
+    "assets/opencode/runtime.json",
+    "/LICENSE",
+]
+
+[lib]
+name = "mj_harness_install"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+mj-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+flate2.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+ruzstd.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+url.workspace = true
+
+[target.'cfg(any(unix, windows))'.dependencies]
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Security",
+    "Win32_System_Environment",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+tiny_http.workspace = true

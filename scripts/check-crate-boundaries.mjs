@@ -8,33 +8,38 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps', '--locked'], { cwd: root, encoding: 'utf8' }));
 const allowed = {
   'brokk-mj-core': [],
+  'brokk-mj-harness-install': ['brokk-mj-core'],
   'brokk-mj-build-id': ['brokk-mj-core'],
   'brokk-mj-review': ['brokk-mj-core'],
   'brokk-mj-transcript': ['brokk-mj-core'],
   'brokk-mj-checkpoint': ['brokk-mj-core'],
   'brokk-mj-client': ['brokk-mj-transcript', 'brokk-mj-core'],
-  'brokk-mj-worker-runtime': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core'],
-  'brokk-mj-worker': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-build-id', 'brokk-mj-worker-runtime'],
-  'brokk-mj-targets': ['brokk-mj-core'],
-  'brokk-mj-accounts': ['brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store'],
+  'brokk-mj-microvm': ['brokk-mj-core'],
+  'brokk-mj-worker-mcp': ['brokk-mj-core'],
+  'brokk-mj-worker-review': ['brokk-mj-core', 'brokk-mj-checkpoint', 'brokk-mj-review'],
+  'brokk-mj-worker-runtime': ['brokk-mj-worker-mcp', 'brokk-mj-worker-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-harness-install'],
+  'brokk-mj-worker': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-harness-install', 'brokk-mj-build-id', 'brokk-mj-microvm', 'brokk-mj-worker-mcp', 'brokk-mj-worker-runtime'],
+  'brokk-mj-targets': ['brokk-mj-core', 'brokk-mj-harness-install'],
+  'brokk-mj-accounts': ['brokk-mj-core', 'brokk-mj-harness-install', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store'],
   'brokk-mj-import': ['brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts'],
   'brokk-mj-sessionwiki': ['brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-import'],
   'brokk-mj-build-cache': ['brokk-mj-core', 'brokk-mj-targets', 'brokk-mj-store'],
   'brokk-mj-worker-staging': ['brokk-mj-core', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-session-types', 'brokk-mj-accounts'],
   'brokk-mj-worker-launch': ['brokk-mj-core', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-session-types', 'brokk-mj-build-cache', 'brokk-mj-worker-staging'],
-  'brokk-mj-session-runtime': ['brokk-mj-core', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-session-types', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-sessionwiki', 'brokk-mj-worker-staging', 'brokk-mj-worker-launch'],
+  'brokk-mj-session-runtime': ['brokk-mj-core', 'brokk-mj-harness-install', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-session-types', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-sessionwiki', 'brokk-mj-worker-staging', 'brokk-mj-worker-launch'],
   'brokk-mj-review-host': ['brokk-mj-core', 'brokk-mj-targets', 'brokk-mj-client', 'brokk-mj-review', 'brokk-mj-checkpoint', 'brokk-mj-store', 'brokk-mj-session-runtime', 'brokk-mj-accounts'],
   'brokk-mj-profile-catalog': ['brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-worker-staging'],
   'brokk-mj-github-relevance': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-targets'],
+  'brokk-mj-github-watch': ['brokk-mj-core', 'brokk-mj-transcript', 'brokk-mj-store', 'brokk-mj-github-relevance', 'brokk-mj-targets'],
   'brokk-mj-session-types': ['brokk-mj-core', 'brokk-mj-targets'],
   'brokk-mj-store': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets'],
   'brokk-mj-controller': ['brokk-mj-worker-launch', 'brokk-mj-session-runtime', 'brokk-mj-profile-catalog', 'brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-sessionwiki', 'brokk-mj-build-cache', 'brokk-mj-session-types', 'brokk-mj-worker-staging'],
-  'brokk-mj-setup': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-controller'],
-  'brokk-mj-server': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-github-relevance'],
-  'brokk-mj-daemon': ['brokk-mj-review-host', 'brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-server', 'brokk-mj-github-relevance', 'brokk-mj-setup'],
+  'brokk-mj-setup': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-harness-install', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-controller'],
+  'brokk-mj-server': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-harness-install', 'brokk-mj-client', 'brokk-mj-accounts', 'brokk-mj-build-cache', 'brokk-mj-import', 'brokk-mj-profile-catalog', 'brokk-mj-session-runtime', 'brokk-mj-session-types', 'brokk-mj-sessionwiki', 'brokk-mj-store', 'brokk-mj-targets', 'brokk-mj-github-relevance'],
+  'brokk-mj-daemon': ['brokk-mj-review-host', 'brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-server', 'brokk-mj-github-relevance', 'brokk-mj-github-watch', 'brokk-mj-setup'],
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],
-  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-daemon', 'brokk-mj-chat', 'brokk-mj-tui', 'brokk-mj-build-id', 'brokk-mj-setup'],
+  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-harness-install', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-daemon', 'brokk-mj-chat', 'brokk-mj-tui', 'brokk-mj-build-id', 'brokk-mj-setup'],
   'brokk-mj-voice-worker': [],
 };
 const packages = new Set(metadata.packages.map(p => p.name));
@@ -80,6 +85,7 @@ for (const pkg of metadata.packages) {
   for (const dep of pkg.dependencies.filter(d => d.kind !== 'dev')) {
     if (packages.has(dep.name)) assert(allowed[pkg.name].includes(dep.name), `${pkg.name} must not depend on ${dep.name}`);
     if (pkg.name === 'brokk-mj-core') assert(!['rusqlite', 'signal-hook'].includes(dep.name), `Controller dependency ${dep.name} leaked into core`);
+    if (pkg.name === 'brokk-mj-core') assert(!['reqwest', 'rustls'].includes(dep.name), `HTTP/TLS dependency ${dep.name} leaked into core`);
     assert(!['hel', 'hel-tui'].includes(dep.rename), `Legacy dependency alias in ${pkg.name}`);
   }
 }

@@ -619,7 +619,7 @@ fn validate_action_against(
                     "attached directories are unsupported for bare targets",
                 ));
             }
-            mj_controller::controller::validate_resource_allocation(
+            mj_targets::targets::validate_resource_allocation(
                 target.resource_allocation_kind,
                 resource_allocation.as_deref(),
             )
@@ -1096,7 +1096,7 @@ pub(super) fn require_launchable_target<'a>(
     if target.runtime_missing {
         return Err(ApiError::bad_request(format!(
             "target \"{id}\" cannot run sessions: {}. Install it or choose another target.",
-            mj_controller::targets::engine_not_installed(engine_name(&target.kind)),
+            mj_targets::targets::engine_not_installed(engine_name(&target.kind)),
         )));
     }
     Ok(target)

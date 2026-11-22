@@ -15,6 +15,7 @@ use agent_client_protocol::v1::schema::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::activity::WorkerReplacement;
 use crate::attention::NotificationStack;
 use crate::config::HarnessKind;
 use crate::elicitation::ElicitationRequest;
@@ -570,6 +571,29 @@ pub struct BackgroundCommand {
     pub can_stop: bool,
 }
 
+impl BackgroundCommand {
+    const ANTIGRAVITY_PREFIX: &'static str = "antigravity:";
+
+    pub fn antigravity(id: &str, started_at_ms: i64, command: String) -> Self {
+        Self {
+            id: format!("{}{id}", Self::ANTIGRAVITY_PREFIX),
+            started_at_ms,
+            command,
+            can_stop: false,
+        }
+    }
+
+    /// The existing relay inventory distinguishes native tasks from hosted
+    /// terminals by ID, including in snapshots from older tracking workers.
+    pub fn oldest_antigravity_task_start(commands: &[Self]) -> Option<i64> {
+        commands
+            .iter()
+            .filter(|command| command.id.starts_with(Self::ANTIGRAVITY_PREFIX))
+            .map(|command| command.started_at_ms)
+            .min()
+    }
+}
+
 /// The process owner behind one stoppable background-command id.
 ///
 /// This never crosses the relay wire. The worker resolves the opaque public id
@@ -943,9 +967,8 @@ pub struct RelayOperationalState {
     /// derived from what the relay can see now, not from the journal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_commands: Vec<BackgroundCommand>,
-    /// Whether provider-owned background work is known for this worker
-    /// process. Only Kimi needs this today; older workers and other harnesses
-    /// omit it.
+    /// Whether this worker's provider task inventory is synchronized. Kimi
+    /// and Antigravity workers report it when they support native task tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_work_known: Option<bool>,
 }
@@ -1091,6 +1114,9 @@ impl RelayOperationalState {
                 )
                 .min(),
             background_commands: self.background_commands.len() + self.native_agent_count,
+            antigravity_task_started_at_ms: BackgroundCommand::oldest_antigravity_task_start(
+                &self.background_commands,
+            ),
             expected_continuation: self.expected_continuation,
             inferred_idle_since_ms: self.inferred_idle_since_ms,
             active_user_shells: self.active_user_shells.len(),
@@ -1116,13 +1142,16 @@ impl RelayOperationalState {
         }
     }
 
-    /// What this session is doing: the worker's published answer, or the same
-    /// classification of the same facts when the worker is too old to publish
-    /// one.
+    /// What this session is doing. Older workers can publish an inferred idle
+    /// state even while their authoritative native inventory reports a task.
     #[must_use]
     pub fn activity_state(&self) -> crate::activity::ActivityState {
         self.activity
             .clone()
+            .filter(|_| {
+                BackgroundCommand::oldest_antigravity_task_start(&self.background_commands)
+                    .is_none()
+            })
             .unwrap_or_else(|| crate::activity::classify(&self.facts()))
     }
 
@@ -1147,6 +1176,15 @@ impl RelayOperationalState {
     /// Whether a controller may replace this worker without losing work.
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
+        self.safe_to_replace_for(harness, WorkerReplacement::Other)
+    }
+
+    #[must_use]
+    pub fn safe_to_replace_for(
+        &self,
+        harness: HarnessKind,
+        replacement: WorkerReplacement,
+    ) -> bool {
         if self.harness_preparation_failed() {
             // This process can never start its harness. Accepted commands stay
             // in the journal; independently running processes must still settle.
@@ -1157,7 +1195,7 @@ impl RelayOperationalState {
                 && self.native_agent_count == 0
                 && self.tools_in_flight.is_empty();
         }
-        crate::activity::safe_to_replace(&self.facts(), harness)
+        crate::activity::safe_to_replace_for(&self.facts(), harness, replacement)
     }
 
     /// Move's purpose-specific interruption decision.

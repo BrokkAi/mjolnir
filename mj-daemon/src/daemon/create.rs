@@ -766,16 +766,41 @@ impl RuntimeState {
                 {
                     let _handoff = mj_controller::upgrade::activity_unless_draining("failed launch retry admission")?;
                     ensure!(!cancelled.load(Ordering::Acquire), "launch retry cancelled before admission");
-                    let Some(operation_id) = blocking(move || mj_controller::database::begin_failed_launch_retry(record)).await? else {
+                    let Some((operation_id, first_prompt_unsent)) = blocking(move || {
+                        // Retry dismisses settled groups, so check for an unsent
+                        // first prompt before it does. This only affects the notice.
+                        let first_prompt_unsent = match mj_controller::database::load_latest_startup_group(&record.id) {
+                            Ok(steps) => steps.iter().any(|step| {
+                                step.phase == "failed"
+                                    && step.accepted_ordinal.is_none()
+                                    && matches!(
+                                        serde_json::from_str::<StartupStep>(&step.step_json),
+                                        Ok(StartupStep::ApiPrompt { .. })
+                                    )
+                            }),
+                            Err(error) => {
+                                tracing::warn!(session_id = %record.id, %error, "could not read startup steps for the retry notice");
+                                false
+                            }
+                        };
+                        mj_controller::database::begin_failed_launch_retry(record)
+                            .map(|retry| retry.map(|operation_id| (operation_id, first_prompt_unsent)))
+                    }).await? else {
                         return Err(Refusal::precondition(
                             "This session changed while Retry launch was waiting. Check its current status.",
                         ).into());
                     };
                     tracing::info!(%session_id, %operation_id, "accepted retry of failed session launch");
-                    state.push_public_notice(
-                        &session_id,
-                        "Relaunching the stored launch request. Prompts that failed with the previous launch are not resent.",
-                    );
+                    let notice = if first_prompt_unsent {
+                        let instance = mj_core::config::instance_name()
+                            .map_or_else(String::new, |name| format!(" --instance={name}"));
+                        format!(
+                            "Relaunching the stored launch request. Your first prompt is still unsent. In the dashboard, type or paste it again. From the shell, resend your original prompt file with `mj{instance} message --session {session_id} --prompt-file ORIGINAL_PROMPT_FILE` or pass your original prompt text as an argument to `mj{instance} message --session {session_id}`."
+                        )
+                    } else {
+                        "Relaunching the stored launch request. Prompts that failed with the previous launch are not resent.".to_owned()
+                    };
+                    state.push_public_notice(&session_id, notice);
                     accepted.send_replace(Some(Ok(())));
                 }
                 state.reload_controller().await?;

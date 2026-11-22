@@ -17,6 +17,7 @@ holds its accepted retry across the restart.
 import argparse
 import json
 import os
+import shlex
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -45,17 +46,18 @@ def durable_rows(lab, sql, parameters=()):
         database.close()
 
 
-def failed_launch_retry(lab, cli, record, run, command, environment):
+def failed_launch_retry(lab, cli, record, run, command, environment, instance):
     reached = lab.hooks / "create_after_target_provisioned.reached"
     continuation = lab.hooks / "create_after_target_provisioned.continue"
     (lab.hooks / "create_after_target_provisioned.fail").touch()
     old_prompt = "this startup prompt failed before the worker existed"
-    new_prompt = "this new prompt ran after retry"
+    original_prompt = lab.runtime_root / "ORIGINAL_PROMPT_FILE"
+    original_prompt.write_text(old_prompt)
     draft = "an unsent terminal draft"
     session = json.loads(cli("new", "--workspace", "Create restart", "--profile", "fake",
                              "--target", "localhost", "--project-directory", str(lab.project),
                              "--title", "Retry this launch", "--subagents", "none",
-                             "--json", old_prompt))["session_id"]
+                             "--json", "--prompt-file", str(original_prompt)))["session_id"]
     wait_for(reached.exists, "the first attempt to reach its target")
     lab.daemon_request({"action": "persist_terminal_draft", "arguments": {
         "client_id": "retry-lab", "session_id": session, "owner_pid": os.getpid(),
@@ -86,7 +88,11 @@ def failed_launch_retry(lab, cli, record, run, command, environment):
     accepted = run("resume", "--session", session, "--json")
     assert accepted.returncode == 0, (accepted.stdout, accepted.stderr)
     assert json.loads(accepted.stdout)["session_id"] == session, accepted.stdout
-    assert "Prompts that failed with the previous launch are not resent." in accepted.stderr
+    assert "Your first prompt is still unsent. In the dashboard, type or paste it again." in accepted.stderr
+    printed_command, = [part for part in accepted.stderr.split("`")
+                        if part.startswith("mj ") and " --prompt-file " in part]
+    assert printed_command == (f"mj --instance={instance} message --session {session}"
+                               f" --prompt-file {original_prompt.name}"), accepted.stderr
     assert len(durable_rows(lab, "SELECT operation_id FROM session_create_intents WHERE session_id=?",
                             (session,))) == 1
     wait_for(reached.exists, "the accepted retry to reach its target")
@@ -130,13 +136,22 @@ def failed_launch_retry(lab, cli, record, run, command, environment):
     assert waited["outcome"] == "finished", waited
     assert not durable_rows(lab, "SELECT operation_id FROM session_create_intents WHERE session_id=?",
                             (session,))
-    assert durable_rows(lab, "SELECT text FROM detached_drafts WHERE session_id=? AND source='retry-lab'",
-                        (session,)) == [(draft,)]
-    cli("prompt", "--session", session, "--json", "--timeout", str(WAIT), new_prompt)
-    harness = [json.loads(line) for line in (lab.runtime_root / "fake-acp.log").read_text().splitlines()]
-    prompts = [message for message in harness if message.get("method") == "session/prompt"]
-    assert len(prompts) == 1 and new_prompt in json.dumps(prompts[0]), prompts
-    assert old_prompt not in json.dumps(prompts) and draft not in json.dumps(prompts), prompts
+    assert durable_rows(lab, "SELECT source,text FROM detached_drafts WHERE session_id=?",
+                        (session,)) == [("retry-lab", draft)]
+
+    def harness_prompts():
+        harness = [json.loads(line) for line in (lab.runtime_root / "fake-acp.log").read_text().splitlines()]
+        return [message for message in harness if message.get("method") == "session/prompt"]
+
+    assert not harness_prompts()
+    shell_env = environment()
+    del shell_env["MJ_INSTANCE"]
+    resend = [str(lab.hel), *shlex.split(printed_command)[1:]]
+    sent = subprocess.run(resend, cwd=lab.runtime_root, env=shell_env,
+                          capture_output=True, text=True, timeout=WAIT)
+    assert sent.returncode == 0, (sent.stdout, sent.stderr)
+    prompts = wait_for(harness_prompts, "the explicitly resent first prompt to reach the harness")
+    assert len(prompts) == 1 and old_prompt in json.dumps(prompts[0]), prompts
 
     # A new failed row gives Resume and Destroy the same starting state.
     # Destroy can preempt an owned Create, but it must also retire its intent
@@ -152,7 +167,9 @@ def failed_launch_retry(lab, cli, record, run, command, environment):
     reached.unlink()
     continuation.unlink()
     (lab.hooks / "create_after_target_provisioned.fail").touch()
-    cli("resume", "--session", doomed, "--json")
+    without_prompt = run("resume", "--session", doomed, "--json")
+    assert without_prompt.returncode == 0, (without_prompt.stdout, without_prompt.stderr)
+    assert "Prompts that failed with the previous launch are not resent." in without_prompt.stderr
     wait_for(reached.exists, "the next failed attempt to reach its target")
     continuation.touch()
     wait_for(lambda: durable_rows(
@@ -215,7 +232,7 @@ def main():
 
         cli("workspaces", "create", "Create restart")
         if args.failed_launch_retry:
-            failed_launch_retry(lab, cli, record, run, command, environment)
+            failed_launch_retry(lab, cli, record, run, command, environment, args.instance)
             return
         session = json.loads(cli("new", "--workspace", "Create restart", "--profile", "fake",
                                  "--target", "localhost", "--project-directory", str(lab.project),

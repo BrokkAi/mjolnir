@@ -1,4 +1,4 @@
-// Port of mj-core/src/login_environment.rs.
+// Port of mj-harness-install/src/login_environment.rs.
 
 // Target-account shell exports, isolated from the process that launched
 // Mjolnir.
