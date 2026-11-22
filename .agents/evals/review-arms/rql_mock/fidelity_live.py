@@ -11,7 +11,7 @@ import driver
 
 from .engine import CONFIG, RepairStalled, load_engine, locked, repair_answer
 from .engine.evidence import sync_directory
-from .engine.normalization import validate
+from .engine.normalization import validate, validate_staged
 from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_prompt
 from .engine.runner import EngineRunner, LaunchPreflightFailure, SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
@@ -50,9 +50,10 @@ only if they make the same unsupported claim under the same evidence.
 
 
 class TerraEvidenceError(ValueError):
-    def __init__(self, directory, errors):
+    def __init__(self, directory, errors, stage="model-answer"):
         super().__init__(f"{directory}: invalid Terra evidence: {'; '.join(errors)}")
         self.errors = errors
+        self.stage = stage
 
 
 def model_usage(usage, command, turn, model, claude_version, directory=None):
@@ -159,16 +160,16 @@ class LiveModels:
                     try:
                         checked = check_output(output, read)
                     except TerraEvidenceError as error:
-                        diagnostics = error.errors
+                        diagnostics, stage = error.errors, error.stage
                         keys = {issue.key if isinstance(issue, ValidationIssue) else ("invalid-json",)
                                 for issue in diagnostics}
                     else:
-                        diagnostics, keys = [], set()
+                        diagnostics, keys, stage = [], set(), "normalized-answer"
                     if not restricted:
                         driver.save(directory / f"turn-{record['turn']}-validation.json", {"errors": diagnostics})
                     if diagnostics:
-                        return None, diagnostics, keys, "model-answer"
-                    return (checked, record), diagnostics, keys, "model-answer"
+                        return None, diagnostics, keys, stage
+                    return (checked, record), diagnostics, keys, stage
 
                 checked, record = repair_answer(assess)
                 if restricted:
@@ -258,9 +259,9 @@ class LiveModels:
             return rendered
 
         def check_output(output, read):
-            rows, coverage, errors = validate(output, read)
+            rows, coverage, errors, stage = validate_staged(output, read)
             if errors:
-                raise TerraEvidenceError(directory, errors)
+                raise TerraEvidenceError(directory, errors, stage)
             return rows, coverage
 
         assert_blind((*files.values(), prompt(".scratch")), self.manifest)

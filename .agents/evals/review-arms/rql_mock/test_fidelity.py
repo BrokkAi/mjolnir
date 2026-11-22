@@ -478,6 +478,13 @@ class TerraOutput(unittest.TestCase):
             }).encode()
 
         good, bad = answer(operand), answer({**operand, "extra": True})
+        # Normalizes cleanly but fails answer validation with three errors.
+        staged = json.dumps({
+            "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": operand}}],
+            "coverage": {"complete": True, "open": [{"reason": 3}, {"reason": 4}]}, "excluded": [],
+        }).encode()
+        errors_named = {bad: "written evidence must contain only site and verbatim",
+                        staged: "coverage.complete must be true exactly when coverage.open is empty"}
         orphan = "c" * 40
         model_usage = fidelity_live.model_usage
         sessions, checks, destroyed = {}, [], []
@@ -564,7 +571,8 @@ class TerraOutput(unittest.TestCase):
                 (SealedRunner, "command", transport),
             ):
                 stack.enter_context(patch.object(target, name, new=fake))
-            for schedule in (((bad, good),), ((bad, bad), (good,)), ((bad, bad), (bad, bad))):
+            # Hard-won: 2da79e863: fixing normalization exposed more validation errors and counted as a stall
+            for schedule in (((bad, good),), ((bad, staged, good),), ((bad, bad), (good,)), ((bad, bad), (bad, bad))):
                 with self.subTest(rounds=[len(turns) for turns in schedule]), TemporaryDirectory() as root:
                     sessions.clear()
                     checks.clear()
@@ -603,7 +611,7 @@ class TerraOutput(unittest.TestCase):
                             self.assertTrue((evidence / audit["rollout_directory"]).is_dir())
                             self.assertEqual("failed mechanical verification" in prompt, n > 1)
                             if n > 1:
-                                self.assertIn("written evidence must contain only site and verbatim", prompt)
+                                self.assertIn(errors_named[schedule[index][n - 2]], prompt)
 
 
 class ModelIdentity(unittest.TestCase):
