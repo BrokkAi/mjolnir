@@ -275,6 +275,31 @@ impl NewWizard {
         present.then(|| focused.clone())
     }
 
+    pub(crate) fn is_resolving_provider(provider: &QuotaProvider) -> bool {
+        matches!(provider, QuotaProvider::Other(name) if name.ends_with(" (resolving)"))
+    }
+
+    pub(crate) fn selected_provider(&self, dashboard: &DashboardState) -> Option<QuotaProvider> {
+        self.effective_focused_provider(dashboard)
+            .filter(|provider| !Self::is_resolving_provider(provider))
+    }
+
+    pub(crate) fn selected_profile_id(&self, dashboard: &DashboardState) -> Option<String> {
+        if self.selected_provider(dashboard).is_some() {
+            Some(String::new())
+        } else {
+            dashboard.new_wizard_profile_id(self.profile)
+        }
+    }
+
+    pub(crate) fn selected_profile_label(&self, dashboard: &DashboardState) -> String {
+        if let Some(provider) = self.selected_provider(dashboard) {
+            format!("Auto ({})", provider.display_name())
+        } else {
+            dashboard.new_wizard_profile_label(self.profile)
+        }
+    }
+
     /// Expanded provider groups for rendering and event handling. Whenever
     /// focus is on a concrete profile rather than a provider header, its
     /// current provider is expanded so the selected profile is never hidden

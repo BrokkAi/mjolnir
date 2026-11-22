@@ -347,6 +347,7 @@ impl RuntimeState {
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,
+                provider: None,
                 bundle_id,
                 project_directory: Some(project_directory),
                 target_template_id: request.target_template_id,

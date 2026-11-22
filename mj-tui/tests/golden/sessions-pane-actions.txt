@@ -26,8 +26,8 @@ Background work finished
   ╭ × New session · 1/4 profile ─────────────────────────────────────────────╮
   │                                                                          │
   │   PROFILE      HARNESS  WEEKLY      5H                                   │
-  │   ▸ ANTHROPIC                                                            │
-  │   ▾ OPENAI                                                               │
+  │   ▸ ANTHROPIC  auto                                                      │
+  │   ▾ OPENAI     auto                                                      │
   │     codex-1    Codex    refreshing                                       │
   │     codex-2    Codex    refreshing                                       │
   │                                                                          │
@@ -98,8 +98,8 @@ Background work finished
 ╰─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮       │
 ╭ Sess  │                                                                                  │       │
 │ Crea  │   PROFILE      HARNESS  WEEKLY      5H                                           │       │
-│hel ─  │   ▸ ANTHROPIC                                                                    │       │
-│› · A  │   ▾ OPENAI                                                                       │       │
+│hel ─  │   ▸ ANTHROPIC  auto                                                              │       │
+│› · A  │   ▾ OPENAI     auto                                                              │       │
 │  Idl  │     codex-1    Codex    refreshing                                               │       │
 │  │ N  │     codex-2    Codex    refreshing                                               │       │
 │  │    │                                                                                  │       │
@@ -185,8 +185,8 @@ Background work finished
 ╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
 │ Create   Open   │                                                                                  │                 │
 │hel ───────────  │   PROFILE      HARNESS  WEEKLY      5H                                           │                 │
-│› · ACP pretty   │   ▸ ANTHROPIC                                                                    │                 │
-│  Idle  podman   │   ▾ OPENAI                                                                       │                 │
+│› · ACP pretty   │   ▸ ANTHROPIC  auto                                                              │                 │
+│  Idle  podman   │   ▾ OPENAI     auto                                                              │                 │
 │  │ No messages  │     codex-1    Codex    refreshing                                               │                 │
 │  │              │     codex-2    Codex    refreshing                                               │                 │
 │                 │                                                                                  │                 │
@@ -298,8 +298,8 @@ Background work finished
 │  │ No messages yet        ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
 │                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
-│                           │   ▸ ANTHROPIC                                                                    │                           │
-│                           │   ▾ OPENAI                                                                       │                           │
+│                           │   ▸ ANTHROPIC  auto                                                              │                           │
+│                           │   ▾ OPENAI     auto                                                              │                           │
 │                           │     codex-1    Codex    refreshing                                               │                           │
 │                           │     codex-2    Codex    refreshing                                               │                           │
 │                           │                                                                                  │                           │
@@ -456,8 +456,8 @@ Background work finished
 │                                                         ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                                                         │
 │                                                         │                                                                                  │                                                         │
 │                                                         │   PROFILE      HARNESS  WEEKLY      5H                                           │                                                         │
-│                                                         │   ▸ ANTHROPIC                                                                    │                                                         │
-│                                                         │   ▾ OPENAI                                                                       │                                                         │
+│                                                         │   ▸ ANTHROPIC  auto                                                              │                                                         │
+│                                                         │   ▾ OPENAI     auto                                                              │                                                         │
 │                                                         │     codex-1    Codex    refreshing                                               │                                                         │
 │                                                         │     codex-2    Codex    refreshing                                               │  versation.                                             │
 │                                                         │                                                                                  │                                                         │

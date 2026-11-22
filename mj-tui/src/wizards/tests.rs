@@ -1586,6 +1586,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
+            provider: None,
             bundle_id: raw_project_context_id("/srv/repaired"),
             project_directory: Some("/srv/repaired".into()),
             target_template_id: "machine".into(),
@@ -1653,7 +1654,7 @@ fn new_session_profile_step_aligns_its_columns() {
     // MOONSHOT too so both providers' rows are visible for column alignment.
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Right));
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -1750,18 +1751,27 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
     assert!(!joined.contains("codex-1"));
     assert!(!joined.contains("kimi-1"));
 
-    // Down moves past the blank spacer onto ANTHROPIC: Next is disabled and
-    // Enter toggles expansion without advancing.
+    // Down moves past the blank spacer onto ANTHROPIC: Next is enabled because
+    // a provider is selectable to load-balance across its profiles; Space and
+    // Right/Left toggle expansion without advancing.
     ready_key(&mut dashboard, key(KeyCode::Down));
-    assert!(!new_wizard(&dashboard).profile_advance_enabled(&dashboard));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::Anthropic)
+    );
+    assert_eq!(
+        new_wizard(&dashboard).selected_profile_label(&dashboard),
+        "Auto (Anthropic)"
+    );
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
     let expanded = draw_lines(&mut dashboard, &mut terminal).join("\n");
     assert!(expanded.contains("▾ ANTHROPIC"));
     assert!(expanded.contains("claude-1"));
 
     // Space collapses ANTHROPIC; Right expands it and a second Right enters its
-    // first profile, re-enabling Next; Left collapses back to the provider row.
+    // first profile; Left collapses back to the provider row.
     ready_key(&mut dashboard, key(KeyCode::Char(' ')));
     assert!(
         !draw_lines(&mut dashboard, &mut terminal)
@@ -1776,6 +1786,7 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
     );
     ready_key(&mut dashboard, key(KeyCode::Right));
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(new_wizard(&dashboard).selected_provider(&dashboard), None);
     assert_eq!(
         dashboard
             .new_wizard_profile_id(new_wizard(&dashboard).profile)
@@ -1783,31 +1794,50 @@ fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
         Some("claude-1")
     );
     ready_key(&mut dashboard, key(KeyCode::Left));
-    assert!(!new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::Anthropic)
+    );
     assert!(
         !draw_lines(&mut dashboard, &mut terminal)
             .join("\n")
             .contains("claude-1")
     );
 
-    // Clicking a collapsed provider expands it; clicking a profile selects it
-    // and Enter advances to Target.
+    // Clicking the arrow on a collapsed provider expands it; clicking the
+    // provider name selects it without collapsing, and Enter advances with that
+    // provider selected for load-balancing.
     click_project_text(&mut dashboard, &mut terminal, "▸ OPENAI");
     assert!(
         draw_lines(&mut dashboard, &mut terminal)
             .join("\n")
             .contains("codex-1")
     );
-    click_project_text(&mut dashboard, &mut terminal, "codex-1");
-    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    click_project_text(&mut dashboard, &mut terminal, "OPENAI");
+    assert!(
+        draw_lines(&mut dashboard, &mut terminal)
+            .join("\n")
+            .contains("codex-1")
+    );
     assert_eq!(
-        dashboard
-            .new_wizard_profile_id(new_wizard(&dashboard).profile)
-            .as_deref(),
-        Some("codex-1")
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::OpenAI)
     );
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::OpenAI)
+    );
+    let action = dashboard.create_session_action_without_closing(new_wizard(&dashboard));
+    assert!(matches!(
+        action,
+        DashboardAction::CreateSession {
+            ref profile_id,
+            provider: Some(mj_core::config::QuotaProvider::OpenAI),
+            ..
+        } if profile_id.is_empty()
+    ));
 }
 
 #[test]
@@ -1888,7 +1918,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
     // expand it so claude-1's quota columns are shown.
     ready_key(&mut dashboard, key(KeyCode::Up));
     ready_key(&mut dashboard, key(KeyCode::Up));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Right));
     let lines = captured_drawn(&mut dashboard, 120, 30);
 
     let heading_index = lines
@@ -1972,6 +2002,7 @@ fn raw_localhost_uses_local_project_history() {
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
+            provider: None,
             bundle_id: raw_project_context_id("/home/me/project"),
             project_directory: Some("/home/me/project".into()),
             target_template_id: "localhost".into(),
@@ -1990,7 +2021,7 @@ fn dashboard_at_mount_editor(source: &str) -> DashboardState {
     ready_open_new_wizard(&mut dashboard);
     // Move to the collapsed OPENAI provider, expand it, select codex-1, and advance.
     ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Right));
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));

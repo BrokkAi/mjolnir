@@ -162,7 +162,7 @@ fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Ve
                         format!("{arrow} {}", provider.display_name().to_uppercase()),
                         heading_style,
                     ),
-                    PickerCell::blank(),
+                    PickerCell::styled("auto", theme::muted()),
                     PickerCell::blank(),
                     PickerCell::blank(),
                 ]));
@@ -304,7 +304,7 @@ pub(crate) fn render_new_wizard(
                             .is_some_and(|options| options.available),
                     )
                 }),
-                profile_id: &dashboard.new_wizard_profile_label(wizard.profile),
+                profile_id: &wizard.selected_profile_label(dashboard),
                 project_label: if raw_project {
                     "Project directory"
                 } else {

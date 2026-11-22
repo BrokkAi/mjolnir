@@ -328,7 +328,7 @@ impl WizardDraft for NewWizard {
     }
 
     fn review_harness(&self, dashboard: &DashboardState) -> Option<HarnessKind> {
-        let id = dashboard.new_wizard_profile_id(self.profile)?;
+        let id = self.selected_profile_id(dashboard)?;
         if id.is_empty() {
             return None;
         }
@@ -381,16 +381,10 @@ impl WizardDraft for NewWizard {
         dashboard: &mut DashboardState,
         id: WizardControl,
     ) -> Result<DashboardAction, Self> {
-        if self.step == WizardStep::Profile && id == WizardControl::ProfileList {
-            if let Some(provider) = self.focused_provider.clone() {
-                self.toggle_provider(provider);
-                return Ok(dashboard.keep(self));
-            }
-            return Err(self);
-        }
         if self.step == WizardStep::Profile
-            && id == WizardControl::Next
-            && self.focused_provider.is_some()
+            && matches!(id, WizardControl::ProfileList | WizardControl::Next)
+            && let Some(provider) = self.effective_focused_provider(dashboard)
+            && Self::is_resolving_provider(&provider)
         {
             return Ok(dashboard.keep(self));
         }
@@ -658,7 +652,9 @@ impl WizardDraft for NewWizard {
     }
 
     fn profile_advance_enabled(&self, dashboard: &DashboardState) -> bool {
-        self.effective_focused_provider(dashboard).is_none()
+        !self
+            .effective_focused_provider(dashboard)
+            .is_some_and(|provider| Self::is_resolving_provider(&provider))
     }
 
     fn select_profile_row(

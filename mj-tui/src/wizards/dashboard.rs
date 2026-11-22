@@ -215,8 +215,19 @@ impl DashboardState {
         };
         let action = wizard.route_extra_interaction(action);
         if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
-            let is_click = matches!(event, Event::Mouse(mouse) if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left)));
-            return self.apply_wizard_interaction(wizard, interaction, is_click);
+            let toggle_provider = matches!(
+                &event,
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left)
+                    ) && wizard
+                        .form()
+                        .borrow()
+                        .control_area(WizardControl::ProfileList)
+                        .is_some_and(|area| mouse.column < area.x.saturating_add(4))
+            );
+            return self.apply_wizard_interaction(wizard, interaction, toggle_provider);
         }
         if result.consumed {
             return self.keep(wizard);

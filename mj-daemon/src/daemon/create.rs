@@ -47,12 +47,8 @@ impl RuntimeState {
         self: &Arc<Self>,
         mut request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        let selection = if request.profile_id.is_empty() {
+        let (primary_selection, provider_reservation) = if request.profile_id.is_empty() {
             let config = self.owner().controller().config.clone();
-            anyhow::ensure!(
-                config.subagents.primary_configured(),
-                "Auto (Primary) requires at least one entry in [[subagents.primary]]"
-            );
             let execution_policy = if config
                 .targets
                 .get(&request.target_template_id)
@@ -65,38 +61,61 @@ impl RuntimeState {
             let backend: Arc<dyn crate::server::api::SubagentBackend> = self
                 .quota_report_backend()
                 .ok_or_else(|| anyhow::anyhow!("session selection backend is unavailable"))?;
-            let selected = crate::server::api::resolve_primary_session_selection(
-                &backend,
-                None,
-                config.subagents.primary_choices(),
-                execution_policy,
-            )
-            .await
-            .map_err(|failure| anyhow::anyhow!(failure.message))?;
             let default_empty_title = mj_core::state::default_session_title(
                 request.project_directory.as_deref(),
                 &request.bundle_id,
                 "",
             );
-            if request.title.trim().is_empty()
-                || request.title.ends_with(" ()")
-                || request.title == default_empty_title
-            {
-                request.title = mj_core::state::default_session_title(
-                    request.project_directory.as_deref(),
-                    &request.bundle_id,
-                    &selected.profile_id,
+            let apply_chosen_profile = |request: &mut CreateSessionRequest, profile_id: &str| {
+                if request.title.trim().is_empty()
+                    || request.title.ends_with(" ()")
+                    || request.title == default_empty_title
+                {
+                    request.title = mj_core::state::default_session_title(
+                        request.project_directory.as_deref(),
+                        &request.bundle_id,
+                        profile_id,
+                    );
+                }
+                request.profile_id = profile_id.to_owned();
+            };
+            if let Some(provider) = request.provider.clone() {
+                let selected = crate::server::api::resolve_provider_session_selection(
+                    &backend,
+                    &config,
+                    &provider,
+                    execution_policy,
+                )
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                apply_chosen_profile(&mut request, &selected.profile_id);
+                (None, Some(selected.reservation))
+            } else {
+                anyhow::ensure!(
+                    config.subagents.primary_configured(),
+                    "Auto (Primary) requires at least one entry in [[subagents.primary]]"
                 );
+                let selected = crate::server::api::resolve_primary_session_selection(
+                    &backend,
+                    None,
+                    config.subagents.primary_choices(),
+                    execution_policy,
+                )
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                apply_chosen_profile(&mut request, &selected.profile_id);
+                (Some((selected, backend)), None)
             }
-            request.profile_id = selected.profile_id.clone();
-            Some((selected, backend))
         } else {
-            None
+            (None, None)
         };
         let (registered, _, warning) = self
             .start_create_session_inner(request, LifecycleControl::default(), None)
             .await?;
-        if let Some((selected, backend)) = selection {
+        if let Some(reservation) = provider_reservation {
+            reservation.commit(Some(registered.session.id.clone()));
+        }
+        if let Some((selected, backend)) = primary_selection {
             selected
                 .reservation
                 .commit(Some(registered.session.id.clone()));
@@ -1110,6 +1129,7 @@ mod delegation_replay_tests {
                 initial_prompt: None,
                 workspace_id: workspace.id.clone(),
                 profile_id: "codex".into(),
+                provider: None,
                 bundle_id: mj_core::config::raw_project_context_id(
                     &project.path().to_string_lossy(),
                 ),
@@ -1288,6 +1308,7 @@ mod delegation_replay_tests {
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),
+            provider: None,
             bundle_id: "missing-bundle".into(),
             project_directory: None,
             target_template_id: "missing-target".into(),

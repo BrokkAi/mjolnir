@@ -125,6 +125,12 @@ pub struct SubagentSelection {
     pub reservation: ReservationSlot,
 }
 
+/// Profile chosen by load-balancing across a single quota provider.
+pub struct ProviderSessionSelection {
+    pub profile_id: String,
+    pub reservation: ReservationSlot,
+}
+
 #[derive(Debug, Clone)]
 struct ModelCandidate {
     candidate: SubagentCandidate,
@@ -276,6 +282,140 @@ pub async fn resolve_primary_session_selection(
         Some("primary"),
     )
     .await
+}
+
+/// Load-balance across enabled profiles belonging to `provider` using the
+/// shared quota-weighted profile scheduler.
+pub async fn resolve_provider_session_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    config: &mj_core::config::Config,
+    provider: &mj_core::config::QuotaProvider,
+    execution_policy: ExecutionPolicy,
+) -> Result<ProviderSessionSelection, ApiFailure> {
+    let matching_ids: std::collections::BTreeSet<String> = {
+        let profiles: Vec<(String, mj_core::config::HarnessProfile)> = config
+            .enabled_profiles()
+            .map(|(id, profile)| (id.to_owned(), profile.clone()))
+            .collect();
+        let target = provider.clone();
+        mj_core::runtime::spawn_blocking(move || {
+            profiles
+                .into_iter()
+                .filter(|(_, profile)| profile.quota_provider() == target)
+                .map(|(id, _)| id)
+                .collect()
+        })
+        .await
+        .map_err(|error| ApiFailure::from(anyhow::anyhow!("resolve provider profiles: {error}")))?
+    };
+    if matching_ids.is_empty() {
+        return Err(ApiFailure::bad_request(format!(
+            "no enabled profile belongs to provider {}",
+            provider.display_name()
+        )));
+    }
+    let SubagentCandidates {
+        offered,
+        unavailable,
+    } = backend.session_profile_candidates().await?;
+    let now = now_epoch_seconds();
+    let mut matched_any = false;
+    let mut excluded = Vec::new();
+    let mut eligible = Vec::new();
+    for candidate in &offered {
+        if !matching_ids.contains(&candidate.profile_id) {
+            continue;
+        }
+        matched_any = true;
+        if !guardian_eligible(candidate.harness, execution_policy) {
+            excluded.push(format!(
+                "profile {} ({}) does not support native guardian approvals on this target",
+                candidate.profile_id,
+                candidate.harness.display_name()
+            ));
+            continue;
+        }
+        let default_model = candidate
+            .choices
+            .models
+            .first()
+            .map(|choice| choice.value.as_str())
+            .unwrap_or("");
+        if let Some(reason) =
+            mj_controller::profile_scheduler::ineligibility(candidate, default_model, now)
+        {
+            excluded.push(reason.describe(&candidate.profile_id, default_model));
+            continue;
+        }
+        let scheduled = scheduled_candidate(candidate, default_model, None);
+        eligible.push((candidate.clone(), default_model.to_owned(), scheduled));
+    }
+    if !matched_any {
+        let reasons: Vec<String> = unavailable
+            .into_iter()
+            .filter(|(id, _)| matching_ids.contains(id))
+            .map(|(id, reason)| format!("{id}: {reason}"))
+            .collect();
+        let detail = if reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", reasons.join("; "))
+        };
+        return Err(ApiFailure::conflict(format!(
+            "no profile in provider {} is currently available{detail}",
+            provider.display_name()
+        )));
+    }
+    if eligible.is_empty() {
+        return Err(ApiFailure::conflict(format!(
+            "every {} profile is ineligible: {}",
+            provider.display_name(),
+            excluded.join("; ")
+        )));
+    }
+    let mut unhealthy = Vec::new();
+    eligible.retain(|(candidate, model, _)| {
+        if let Some(note) = unhealthy_note(candidate, model) {
+            unhealthy.push(note);
+            false
+        } else {
+            true
+        }
+    });
+    if eligible.is_empty() {
+        return Err(ApiFailure::conflict(format!(
+            "every eligible {} profile is marked unhealthy: {}",
+            provider.display_name(),
+            unhealthy.join("; ")
+        )));
+    }
+    let prefer = backend.quota_preferences().await?;
+    let power_ranking = backend.power_ranking().await?;
+    let telemetry_store = backend.quota_telemetry_store();
+    let mut draw_pool: Vec<ScheduledCandidate> = eligible
+        .into_iter()
+        .map(|(_, _, scheduled)| scheduled)
+        .collect();
+    let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
+        &mut draw_pool,
+        execution_policy,
+        Placement::TopLevel,
+        None,
+        None,
+        &prefer,
+        &power_ranking,
+        now_epoch_seconds(),
+    )?);
+    let Some(chosen) = draw_pool.into_iter().next() else {
+        return Err(ApiFailure::conflict(format!(
+            "no eligible {} profile has available quota",
+            provider.display_name()
+        )));
+    };
+    Ok(ProviderSessionSelection {
+        profile_id: chosen.profile_id,
+        reservation,
+    })
 }
 
 async fn resolve_choices_selection(
@@ -1880,6 +2020,11 @@ mod tests {
     }
 
     impl SubagentBackend for FakeSelectionBackend {
+        fn session_profile_candidates(&self) -> BoxFuture<'_, anyhow::Result<SubagentCandidates>> {
+            let candidates = self.candidates.clone();
+            Box::pin(async move { Ok(candidates) })
+        }
+
         fn cached_model_efforts(
             &self,
             profile: &str,
@@ -2911,5 +3056,77 @@ mod tests {
         .expect("healthy sibling model on the same pool must still be selected");
         assert_eq!(selected.profile_id, "codex1");
         assert_eq!(selected.model, "gpt-6.1-sol");
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_session_selection_filters_to_provider_and_load_balances() {
+        let mut config = mj_core::config::Config::default();
+        config.profiles.insert(
+            "claude-low".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                std::path::PathBuf::from("/profiles/claude-low"),
+            ),
+        );
+        config.profiles.insert(
+            "claude-high".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                std::path::PathBuf::from("/profiles/claude-high"),
+            ),
+        );
+        config.profiles.insert(
+            "kimi-full".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Kimi,
+                std::path::PathBuf::from("/profiles/kimi-full"),
+            ),
+        );
+
+        let make_candidate = |id: &str, harness: mj_core::config::HarnessKind, remaining: u8| {
+            let mut c = candidate(id, Some(remaining), &["default-model"]);
+            c.harness = harness;
+            c
+        };
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: None,
+            discovery_fails: false,
+            telemetry_store: None,
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: vec![
+                    make_candidate("claude-low", mj_core::config::HarnessKind::Claude, 0),
+                    make_candidate("claude-high", mj_core::config::HarnessKind::Claude, 80),
+                    make_candidate("kimi-full", mj_core::config::HarnessKind::Kimi, 100),
+                ],
+                unavailable: Vec::new(),
+            },
+        });
+
+        let selected = resolve_provider_session_selection(
+            &backend,
+            &config,
+            &mj_core::config::QuotaProvider::Anthropic,
+            ExecutionPolicy::Unconstrained,
+        )
+        .await
+        .expect("Anthropic should pick the non-exhausted Claude profile");
+        assert_eq!(selected.profile_id, "claude-high");
+
+        let missing = resolve_provider_session_selection(
+            &backend,
+            &config,
+            &mj_core::config::QuotaProvider::Google,
+            ExecutionPolicy::Unconstrained,
+        )
+        .await
+        .err()
+        .expect("provider with no enabled profiles must fail");
+        assert!(
+            missing.message.contains("Google"),
+            "unexpected error: {}",
+            missing.message
+        );
     }
 }

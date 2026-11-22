@@ -194,6 +194,7 @@ impl DashboardState {
             remember_container_size: false,
             workspace_id,
             profile_id: recipe.profile_id,
+            provider: None,
             target_template_id: recipe.target_id,
             bundle_id: recipe.bundle_id.unwrap_or_else(|| {
                 raw_project_context_id(

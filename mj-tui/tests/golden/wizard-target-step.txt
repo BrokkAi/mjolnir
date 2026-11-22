@@ -151,8 +151,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages yet        ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
 │                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
-│                           │   ▸ ANTHROPIC                                                                    │                           │
-│                           │   ▾ OPENAI                                                                       │                           │
+│                           │   ▸ ANTHROPIC  auto                                                              │                           │
+│                           │   ▾ OPENAI     auto                                                              │                           │
 │                           │     codex-1    Codex    refreshing                                               │                           │
 │                           │     codex-2    Codex    refreshing                                               │                           │
 │                           │                                                                                  │                           │
@@ -473,8 +473,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   ╭ × New session · 1/4 profile ─────────────────────────╮
   │                                                      │
   │   PROFILE      HARNESS  WEEKLY      5H               │
-  │   ▸ ANTHROPIC                                        │
-  │   ▾ OPENAI                                           │
+  │   ▸ ANTHROPIC  auto                                  │
+  │   ▾ OPENAI     auto                                  │
   │     codex-1    Codex    refreshing                   │
   │     codex-2    Codex    refreshing                   │
   │                                                      │
@@ -663,9 +663,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
-│                           │   ▾ ANTHROPIC                                                                    │                           │
+│                           │   ▾ ANTHROPIC  auto                                                              │                           │
 │                           │     claude-1   Claude Code  refreshing                                           │                           │
-│                           │   ▸ OPENAI                                                                       │                           │
+│                           │   ▸ OPENAI     auto                                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -744,11 +744,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                          │
 │                           ╭ × New session · 1/3 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE      HARNESS  WEEKLY  5H                                               │                           │
-│                           │   ▸ ANTHROPIC                                                                    │                           │
-│                           │   ▸ OPENAI                                                                       │                           │
-│                           │                                                                                  │                           │
-│                           │                                                                                  │                           │
+│                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
+│                           │   ▸ ANTHROPIC  auto                                                              │                           │
+│                           │   ▾ OPENAI     auto                                                              │                           │
+│                           │     codex-1    Codex    refreshing                                               │                           │
+│                           │     codex-2    Codex    refreshing                                               │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -910,9 +910,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
-│                           │   ▾ ANTHROPIC                                                                    │                           │
+│                           │   ▾ ANTHROPIC  auto                                                              │                           │
 │                           │     claude-1   Claude Code  refreshing                                           │                           │
-│                           │   ▸ OPENAI                                                                       │                           │
+│                           │   ▸ OPENAI     auto                                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -992,9 +992,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
-│                           │   ▾ ANTHROPIC                                                                    │                           │
+│                           │   ▾ ANTHROPIC  auto                                                              │                           │
 │                           │     claude-1   Claude Code  refreshing                                           │                           │
-│                           │   ▸ OPENAI                                                                       │                           │
+│                           │   ▸ OPENAI     auto                                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
