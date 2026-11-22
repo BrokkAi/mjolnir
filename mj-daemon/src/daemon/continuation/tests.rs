@@ -2886,7 +2886,8 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
 }
 
 #[tokio::test]
-async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_cursor() {
+async fn failed_move_publishes_notice_on_disconnect_and_releases_refused_wait() {
+    use futures::FutureExt;
     let mut remote = spawn_remote_session_manager().unwrap();
     remote.targets.send_replace(vec![RelaySessionTarget {
         session_id: "one".into(),
@@ -2900,7 +2901,6 @@ async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_curso
     };
     let runtime = super::super::tests::test_runtime_state_with(controller);
     let gate = Arc::new(mj_controller::upgrade::Gate::default());
-    let move_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let environment = Environment {
         child_switch_runtime: Some(runtime.clone()),
         session_gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
@@ -2912,23 +2912,19 @@ async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_curso
         review: Arc::new(|_, _| {}),
         profile: Arc::new(|_| Some("test".into())),
         quota: Arc::new(|_, _| unreachable!("test drives quota::schedule directly")),
-        start_quota_move: {
-            let move_attempts = move_attempts.clone();
-            Arc::new(move |_, _, _, _| {
-                move_attempts.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async {
-                    Ok(mj_core::state::MoveOutcome {
-                        session_id: "one".into(),
-                        operation_id: "op-move-1".into(),
-                        outcome: "failed".into(),
-                        error: Some("internal path leaked".into()),
-                        recovery: Some("Retry the Move to restore the checkpoint.".into()),
-                        profile_id: "test".into(),
-                        target_template_id: "localhost".into(),
-                    })
+        start_quota_move: Arc::new(|_, _, _, _| {
+            Box::pin(async {
+                Ok(mj_core::state::MoveOutcome {
+                    session_id: "one".into(),
+                    operation_id: "op-move-1".into(),
+                    outcome: "failed".into(),
+                    error: Some("internal path leaked".into()),
+                    recovery: Some("Retry the Move to restore the checkpoint.".into()),
+                    profile_id: "test".into(),
+                    target_template_id: "localhost".into(),
                 })
             })
-        },
+        }),
     };
 
     // 1. Failed Move while source is disconnected must publish the sanitized
@@ -2983,8 +2979,9 @@ async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_curso
         );
     }
 
-    // 2. When connected, a stale-cursor refusal on the post-Move Wait syncs and
-    // retries directly with the updated cursor without starting a second Move.
+    // 2. A stale-cursor refusal on the post-Move Wait releases admission
+    // immediately (does not loop under the same upgrade hold) and leaves the
+    // turn un-finished so the next attempt can run with a fresh cursor.
     let mut connected = view("one", true);
     quota_assessed(&mut connected);
     remote
@@ -2992,7 +2989,6 @@ async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_curso
         .publish("one".into(), connected.clone())
         .await
         .unwrap();
-    move_attempts.store(0, Ordering::SeqCst);
     let work = gate.enter_unless_draining("quota assessment").unwrap();
     let schedule_task = mj_core::runtime::spawn({
         let env = environment.clone();
@@ -3016,24 +3012,13 @@ async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_curso
             .await
         }
     });
-    let RemoteSessionRequest::Submit {
-        command_id: first_id,
-        command: first_cmd,
-        reply,
-        ..
-    } = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
-        .await
-        .unwrap()
-        .unwrap()
+    let RemoteSessionRequest::Submit { reply, .. } =
+        tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
     else {
         panic!("expected initial Wait submit")
-    };
-    let RelayCommand::SetQuotaRecovery {
-        expected: first_cursor,
-        ..
-    } = first_cmd
-    else {
-        panic!("expected SetQuotaRecovery")
     };
     reply
         .send(Err(mj_client::session::SubmitFailure {
@@ -3042,75 +3027,15 @@ async fn failed_move_publishes_notice_on_disconnect_and_retries_stale_wait_curso
             refused: true,
         }))
         .unwrap();
-    let RemoteSessionRequest::Sync { reply, .. } =
-        tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    else {
-        panic!("expected sync after stale cursor refusal")
-    };
-    connected
-        .snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .latest_ordinal += 1;
-    connected
-        .snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .latest_digest = "advanced-cursor".into();
-    remote
-        .publisher
-        .publish("one".into(), connected.clone())
-        .await
-        .unwrap();
-    reply.send(Ok(())).unwrap();
-    let RemoteSessionRequest::Submit {
-        command_id: retry_id,
-        command: retry_cmd,
-        reply,
-        ..
-    } = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
-        .await
-        .unwrap()
-        .unwrap()
-    else {
-        panic!("expected fresh-cursor Wait retry")
-    };
-    assert_eq!(retry_id, first_id);
-    let RelayCommand::SetQuotaRecovery {
-        expected: retry_cursor,
-        recovery: Some(record),
-    } = retry_cmd
-    else {
-        panic!("expected SetQuotaRecovery retry")
-    };
-    assert_ne!(retry_cursor, first_cursor);
     assert!(
-        record
-            .notice
-            .contains("Retry the Move to restore the checkpoint."),
-        "{}",
-        record.notice
+        schedule_task.await.unwrap().is_err(),
+        "stale cursor refusal must end the admitted attempt and release upgrade work"
     );
-    reply.send(Ok(5)).unwrap();
-    let RemoteSessionRequest::Sync { reply, .. } =
-        tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    else {
-        panic!("expected post-accept sync")
-    };
-    reply.send(Ok(())).unwrap();
-    schedule_task.await.unwrap().unwrap().unwrap();
-    assert_eq!(
-        move_attempts.load(Ordering::SeqCst),
-        1,
-        "stale cursor on fallback Wait must not start another Move"
+    assert!(!quota::unanswered(&environment, "one"));
+    assert!(!quota::finished(&environment, "one", &connected));
+    assert!(
+        remote.requests.recv().now_or_never().is_none(),
+        "stale refusal must not loop under the same daemon admission"
     );
     remote.shutdown.shutdown().await.unwrap();
 }

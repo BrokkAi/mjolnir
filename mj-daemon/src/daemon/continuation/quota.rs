@@ -706,7 +706,7 @@ pub(super) async fn wait(
         !admission.load(Ordering::Acquire),
         "quota scheduling preempted"
     );
-    while schedule.state == ScheduleState::Unconfirmed {
+    if schedule.state == ScheduleState::Unconfirmed {
         // Keep the exact request until the worker acknowledges or refuses it.
         env.schedules
             .lock()
@@ -743,40 +743,6 @@ pub(super) async fn wait(
                 let current_view = handle.view();
                 if wait_command_id(&current_view).as_deref() != Some(schedule.command_id.as_str()) {
                     return Ok(Box::new(current_view));
-                }
-                // A benign relay event can advance the cursor without changing
-                // the quota-stopped turn. Refresh once per cursor advance so we
-                // record the Wait directly instead of re-entering Move planning.
-                handle.sync_now().await?;
-                ensure!(
-                    !admission.load(Ordering::Acquire),
-                    "quota scheduling preempted"
-                );
-                let fresh = handle.view();
-                if wait_command_id(&fresh).as_deref() != Some(schedule.command_id.as_str()) {
-                    return Ok(Box::new(fresh));
-                }
-                if let RelayCommand::SetQuotaRecovery {
-                    expected,
-                    recovery: Some(record),
-                } = &mut schedule.command
-                {
-                    if fresh
-                        .snapshot
-                        .as_ref()
-                        .and_then(|s| s.operational.continuation.quota_recovery.as_ref())
-                        .is_some_and(|r| r.completed_command_id == record.completed_command_id)
-                    {
-                        return Ok(Box::new(fresh));
-                    }
-                    if (env.claim)(id) == Claim::Allowed
-                        && same_wait_frontier(env, id, view, &fresh, record)
-                        && let Ok(fresh_cursor) = cursor(&fresh)
-                        && fresh_cursor != *expected
-                    {
-                        *expected = fresh_cursor;
-                        continue;
-                    }
                 }
                 return Err(error);
             }
