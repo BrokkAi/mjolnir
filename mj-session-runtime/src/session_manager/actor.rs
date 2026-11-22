@@ -813,7 +813,7 @@ pub async fn run_session_actor(
                     && !matches!(
                         command,
                         ActorCommand::Lease {
-                            idle_harness: None,
+                            idle_replacement: None,
                             ..
                         }
                     )
@@ -1211,7 +1211,7 @@ pub async fn run_session_actor(
                     ActorCommand::Lease {
                         admission,
                         returns,
-                        idle_harness,
+                        idle_replacement,
                         reply,
                     } => {
                         // Cancelled callers must not create relay work behind
@@ -1219,7 +1219,7 @@ pub async fn run_session_actor(
                         if reply.is_closed() {
                             continue;
                         }
-                        if idle_harness.is_some()
+                        if idle_replacement.is_some()
                             && !lifecycle.is_leased()
                             && !reviewer_tasks.is_empty()
                         {
@@ -1271,13 +1271,13 @@ pub async fn run_session_actor(
                         }
                         // Decide before taking the control channel or cancelling
                         // reviewers. A stale idle observation must not hold steering.
-                        if idle_harness.is_some_and(|harness| {
+                        if idle_replacement.is_some_and(|(harness, replacement)| {
                             !connection
                                 .as_ref()
                                 .expect("synced connection")
                                 .snapshot()
                                 .operational
-                                .safe_to_replace(harness)
+                                .safe_to_replace_for(harness, replacement)
                         }) {
                             if reply
                                 .send(Err(super::handle::SessionNotIdle.into()))

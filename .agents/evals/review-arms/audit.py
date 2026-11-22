@@ -142,7 +142,7 @@ def scan(pages, own_workspace, *, commits=None, allow_rql=False, single_commit=F
                                   own_workspace, engine)
     hits, calls = [], 0
     audited_engine_calls = {}
-    scripts, written = ScriptEvidence(checkout, tracked_paths), set()
+    scripts, written = ScriptEvidence(checkout, tracked_paths, tracked_symlinks), set()
     # Older transcript pages lack harness metadata. Use native card evidence
     # from any page so an opaque card cannot bypass the session's catalogue.
     antigravity = antigravity or any(
@@ -1647,7 +1647,7 @@ def command_hits(words, own_workspace, commits, single_commit, *, scripts=None, 
         yield from interpreter_hits(program, inline[1], own_workspace, commits, single_commit, cwd, written,
                                     edit_paths=edit_paths)
         if scripts is not None:
-            interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]])
+            yield from interpreter_writes(scripts, program, inline[1], cwd, [inline[0], *inline[2:]], own_workspace)
     elif program in SEARCH:
         files, operands, trailing = search_operands(program, args)
         for path in files + operands + trailing:
@@ -1716,10 +1716,16 @@ def interpreter_arguments(program, args):
 class ScriptEvidence(dict):
     """Confirmed contents and screened writes whose destinations started empty."""
 
-    def __init__(self, checkout=None, tracked=None):
+    def __init__(self, checkout=None, tracked=None, symlinks=None):
         super().__init__()
         self.checkout = checkout if isinstance(checkout, str) and posixpath.isabs(checkout) else None
         self.tracked = set(tracked) if isinstance(tracked, list) else None
+        self.symlinks = None
+        if isinstance(symlinks, list) and all(
+            isinstance(path, str) and "\0" not in path
+            and all(part not in {"", ".", ".."} for part in path.split("/")) for path in symlinks
+        ):
+            self.symlinks = frozenset(symlinks)
         self.fresh = {}
         self.opaque_paths = set()
         self.opaque = False
@@ -1743,25 +1749,42 @@ class ScriptEvidence(dict):
         if not paths:
             return False
         prefix = self.checkout.rstrip("/") + "/"
+        blocked = self.tracked | (self.symlinks or frozenset())
         for filename in paths:
             if not filename.startswith(prefix) or any(
                 filename == path or filename.startswith(path.rstrip("/") + "/") for path in self.opaque_paths
             ):
                 return False
             relative = filename.removeprefix(prefix)
-            if relative in self.tracked or any(
-                str(parent) in self.tracked for parent in pathlib.PurePosixPath(relative).parents
+            if relative in blocked or any(
+                str(parent) in blocked for parent in pathlib.PurePosixPath(relative).parents
             ):
                 return False
         return True
 
     def opaque_write(self, path, cwd):
         paths = resolve_paths(path, cwd)
-        if not paths or re.search(r"[*?\[]", path) or self.tracked is not None and any(
-            not posixpath.isabs(filename) for filename in paths
-        ):
+        if not paths or re.search(r"[*?\[]", path) or ".." in path.split("/"):
             self.clear()
             return
+        links = self.symlinks if self.symlinks is not None else self.tracked
+        if links is not None:
+            if not self.checkout:
+                self.clear()
+                return
+            prefix = self.checkout.rstrip("/") + "/"
+            for filename in paths:
+                if filename == "/dev/null":
+                    continue
+                if not posixpath.isabs(filename) or not filename.startswith(prefix):
+                    self.clear()
+                    return
+                relative = filename.removeprefix(prefix)
+                if relative in links or any(
+                    str(parent) in links for parent in pathlib.PurePosixPath(relative).parents
+                ):
+                    self.clear()
+                    return
         self.opaque_paths.update(paths)
         for key in tuple(self.fresh):
             locations = {key} if isinstance(key, str) else resolve_paths(key[1], key[0])
@@ -1893,7 +1916,16 @@ def record_script_write(scripts, written, words, redirections, source, cwd, stag
     return visible
 
 
-def interpreter_writes(scripts, program, source, cwd, argv):
+NAMED_BINDING_NODES = tuple(
+    cls for name in (
+        "FunctionDef", "AsyncFunctionDef", "ClassDef", "ExceptHandler",
+        "MatchAs", "MatchStar", "TypeVar", "ParamSpec", "TypeVarTuple",
+    ) if (cls := getattr(ast, name, None)) is not None
+)
+MATCH_MAPPING_NODES = tuple(cls for cls in (getattr(ast, "MatchMapping", None),) if cls is not None)
+
+
+def interpreter_writes(scripts, program, source, cwd, argv, own_workspace):
     # Preserve only the empty-at-start history when the interpreter's
     # possible mutations can be assigned to specific paths.
     if scripts.tracked is None or program not in PYTHON:
@@ -1906,8 +1938,17 @@ def interpreter_writes(scripts, program, source, cwd, argv):
         scripts.clear()
         return
 
-    stores = Counter(node.id for node in nodes if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
-    stores.update(node.arg for node in nodes if isinstance(node, ast.arg))
+    stores = Counter()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            stores[node.id] += 1
+        elif isinstance(node, ast.arg):
+            stores[node.arg] += 1
+        elif isinstance(node, NAMED_BINDING_NODES):
+            if node.name is not None:
+                stores[node.name] += 1
+        elif isinstance(node, MATCH_MAPPING_NODES) and node.rest is not None:
+            stores[node.rest] += 1
     bindings = {target.id: node.value for node in nodes if isinstance(node, ast.Assign)
                 for target in node.targets if isinstance(target, ast.Name) and stores[target.id] == 1}
     imports = {}
@@ -1920,13 +1961,26 @@ def interpreter_writes(scripts, program, source, cwd, argv):
                 if module not in understood:
                     scripts.clear()
                     return
-                imports[alias.asname or module] = alias.name if alias.asname else module
+                bound_name = alias.asname or module
+                target_name = alias.name if alias.asname else module
+                if bound_name in imports and imports[bound_name] != target_name:
+                    scripts.clear()
+                    return
+                imports[bound_name] = target_name
         elif isinstance(node, ast.ImportFrom):
             if node.level or not node.module or node.module.split(".")[0] not in understood:
                 scripts.clear()
                 return
             for alias in node.names:
-                imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+                if alias.name == "*":
+                    scripts.clear()
+                    return
+                bound_name = alias.asname or alias.name
+                target_name = f"{node.module}.{alias.name}"
+                if bound_name in imports and imports[bound_name] != target_name:
+                    scripts.clear()
+                    return
+                imports[bound_name] = target_name
 
     if stores.keys() & imports.keys() or any(
         isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del))
@@ -1938,20 +1992,26 @@ def interpreter_writes(scripts, program, source, cwd, argv):
 
     def value(node, seen=frozenset()):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            return "str", node.value
         if isinstance(node, ast.Name) and node.id in bindings and node.id not in seen:
             return value(bindings[node.id], seen | {node.id})
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left, right = value(node.left, seen), value(node.right, seen)
-            if left is not None and right is not None:
-                return left + right
+            if left is not None and right is not None and left[0] == right[0] == "str":
+                return "str", left[1] + right[1]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left, right = value(node.left, seen), value(node.right, seen)
+            if left is not None and right is not None and "path" in (left[0], right[0]):
+                return "path", posixpath.join(left[1], right[1])
         if (isinstance(node, ast.Subscript) and python_name(node.value, imports) == "sys.argv"
                 and isinstance(node.slice, ast.Constant) and type(node.slice.value) is int
                 and 0 <= node.slice.value < len(argv)):
-            return argv[node.slice.value]
+            return "str", argv[node.slice.value]
         if (isinstance(node, ast.Call) and python_name(node.func, imports) == "pathlib.Path"
-                and len(node.args) == 1 and not node.keywords):
-            return value(node.args[0], seen)
+                and node.args and not node.keywords):
+            parts = [value(arg, seen) for arg in node.args]
+            if all(part is not None for part in parts):
+                return "path", posixpath.join(*(part[1] for part in parts))
         return None
 
     def argument(node, index, keyword):
@@ -1970,26 +2030,33 @@ def interpreter_writes(scripts, program, source, cwd, argv):
                 scripts.clear()
                 return
             mode = argument(node, 0 if bound else 1, "mode")
-            if mode is None or value(mode) in {"r", "rb", "rt", "U", "rU"}:
+            resolved_mode = None if mode is None else value(mode)
+            if (mode is None or resolved_mode is not None and resolved_mode[0] == "str"
+                    and resolved_mode[1] in {"r", "rb", "rt", "U", "rU"}):
                 continue
             target = node.func.value if bound else argument(node, 0, "file")
         elif name in {"os.open", "os.remove", "os.unlink", "os.rmdir", "sqlite3.connect"}:
             target = argument(node, 0, "path")
         elif method in {"write_text", "write_bytes", "touch", "unlink", "rmdir"}:
             target = node.func.value
-        elif name in PROCESS_CALLS | OPAQUE_CALLS | {"getattr", "globals", "locals", "__import__"} or (
-                python_may_relocate_links(node, name)
+        elif name in PROCESS_CALLS | OPAQUE_CALLS | {"getattr", "globals", "locals", "vars", "setattr", "__import__"} or (
+                python_may_relocate_links(node, name) or method == "hardlink_to"
                 or name.startswith(("builtins.", "io.", "shutil.", "tempfile.", "importlib.", "sys.argv.", "sys.path."))
                 or name.startswith(("os.", "posix.")) and not name.startswith("os.path.")):
             scripts.clear()
             return
         else:
             continue
-        path = value(target)
-        if path is None:
+        resolved = value(target)
+        if resolved is None:
             scripts.clear()
             return
-        scripts.opaque_write(path, cwd)
+        hits = list(path_hits(resolved[1], own_workspace, cwd))
+        yield from hits
+        if hits:
+            scripts.clear()
+        else:
+            scripts.opaque_write(resolved[1], cwd)
 
 
 def screen_script_writes(scripts, visible, own_workspace, commits, single_commit, cwd):
@@ -2118,7 +2185,8 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                             for script_source in script_sources:
                                 yield from interpreter_hits(program, script_source, own_workspace, commits, single_commit,
                                                             start_dir, written, edit_paths=edit_paths)
-                                interpreter_writes(scripts, program, script_source, start_dir, [path, *arguments])
+                                yield from interpreter_writes(scripts, program, script_source, start_dir,
+                                                              [path, *arguments], own_workspace)
                 else:
                     visible = record_script_write(scripts, written, words, redirections, source, start_dir, new_writes)
                     yield from screen_script_writes(scripts, visible, own_workspace, commits, single_commit, start_dir)
@@ -2137,7 +2205,8 @@ def shell_hits(command, own_workspace, commits, single_commit, *, scripts=None, 
                         yield from source_literal_hits(arg, own_workspace, start_dir)
                     yield from interpreter_hits(program, source, own_workspace, commits, single_commit,
                                                         start_dir, written, edit_paths=edit_paths)
-                    interpreter_writes(scripts, program, source, start_dir, ["-", *arguments[1:]])
+                    yield from interpreter_writes(scripts, program, source, start_dir,
+                                                  ["-", *arguments[1:]], own_workspace)
             except InspectionRequired as error:
                 scripts.clear()
                 yield "needs-inspection", f"{error}: {shlex.join(words)[:400]}"

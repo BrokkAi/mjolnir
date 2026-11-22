@@ -49,6 +49,20 @@ jobs:
       run: MJ_CHAOS_ISOLATED=1 MJ_CHAOS_ARTIFACT_DIR=target/reliability-artifacts/worker-topology tests/e2e/session_restart_chaos.sh ./target/worker/x86_64-unknown-linux-musl/debug/mj-worker
     - name: Stop and recover an active turn without a barrier wait
       run: tests/e2e/run-reliability.sh --scenario active-stop --seed "$RELIABILITY_SEED" ./target/debug/mj
+    - name: Run top-level quota automove with GLiDE unavailable
+      run: >-
+        python3 tests/e2e/delegation.py
+        --mj ./target/debug/mj
+        --worker ./target/worker/x86_64-unknown-linux-musl/debug/mj-worker
+        --instance reliability-top-level-quota
+        --top-level-quota-only
+    - name: Run child quota automove
+      run: >-
+        python3 tests/e2e/delegation.py
+        --mj ./target/debug/mj
+        --worker ./target/worker/x86_64-unknown-linux-musl/debug/mj-worker
+        --instance reliability-child-quota
+        --child-quota-only
     - name: Upload crash evidence
       if: always()
       uses: actions/upload-artifact@v7

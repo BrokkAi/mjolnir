@@ -52,17 +52,17 @@ impl AntigravityWorkState {
             } else {
                 ("pending", "Antigravity background task")
             };
-            commands.push(BackgroundCommand {
-                id: background_task_id("antigravity", id),
-                command: command.into(),
-                started_at_ms: self
-                    .pending_stop_work
-                    .as_ref()
-                    .map(|pending| pending.started_at_ms)
-                    .or(self.summary_busy_started_at_ms)
-                    .expect("background evidence has a start time"),
-                can_stop: false,
-            });
+            let started_at_ms = self
+                .pending_stop_work
+                .as_ref()
+                .map(|pending| pending.started_at_ms)
+                .or(self.summary_busy_started_at_ms)
+                .expect("background evidence has a start time");
+            commands.push(BackgroundCommand::antigravity(
+                id,
+                started_at_ms,
+                command.into(),
+            ));
         }
     }
 }
@@ -822,12 +822,11 @@ impl DurableRelay {
                 .task_first_seen_ms
                 .entry(task.step_index)
                 .or_insert_with(epoch_millis);
-            work.running_tasks.push(BackgroundCommand {
-                id: background_task_id("antigravity", &task.id),
-                started_at_ms: task.started_at_ms.unwrap_or(*first_seen),
-                command: task.command,
-                can_stop: false,
-            });
+            work.running_tasks.push(BackgroundCommand::antigravity(
+                &task.id,
+                task.started_at_ms.unwrap_or(*first_seen),
+                task.command,
+            ));
         }
 
         if let Some(summary) = &snapshot.summary {

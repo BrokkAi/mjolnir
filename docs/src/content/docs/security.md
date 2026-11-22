@@ -192,16 +192,15 @@ Kimi Code and DSH report the refusal to the agent, which carries on; OpenCode
 ends the agent's turn on a refusal. To let the agent proceed, tell it so in the
 conversation: a later review sees your message.
 
-The person decides instead when the guardian cannot:
+If a review fails or reaches its 90-second deadline, the ordinary permission
+form opens and explains why the guardian could not decide. The relay review's
+deadline includes collecting project instructions. The ACP reviewer can make
+up to three attempts within its review deadline.
 
-- The review failed or reached its 90-second deadline. The ACP reviewer can
-  make up to three attempts within its deadline. The worker log names any
-  review failure, including the reviewer's stderr if its bridge stopped.
-- The guardian denied three actions in a row, or ten of its last fifty, in the
-  current turn. The rest of that turn's requests go to you.
-
-Either way the ordinary permission form opens, headed by the reason. When you
-are away, Mjolnir's away handling answers it with Skip, which refuses the call.
+When the guardian denies three actions in a row, or ten of its last fifty
+in the current turn, the rest of that turn's requests open the ordinary
+permission form with the reason. When you are away, Mjolnir's away handling
+answers the form with Skip, which refuses the call.
 Cancelling the turn withdraws a review in flight, as it withdraws an open form,
 and a request that arrives later in the cancelled turn is refused. `/clear`
 waits while a review runs and says so.

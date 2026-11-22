@@ -60,6 +60,9 @@ pub struct ActivityFacts {
     /// Oldest start among background commands and user shells.
     pub background_started_at_ms: Option<i64>,
     pub background_commands: usize,
+    /// Oldest live task reported by Antigravity's native task tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_task_started_at_ms: Option<i64>,
     #[serde(default)]
     pub expected_continuation: Option<i64>,
     /// A generation-checked Jev inference; does not discharge owned work.
@@ -72,7 +75,8 @@ pub struct ActivityFacts {
     pub goal_pending_resume: bool,
     pub goal_decision: bool,
     pub goal_synchronized: bool,
-    /// Whether provider-owned background work is known. Only Kimi reports it.
+    /// Whether the provider's task inventory is synchronized. Omitted when
+    /// the worker does not track native background work for this harness.
     pub background_work_known: Option<bool>,
     /// Whether the worker has finished opening its ACP session. A worker too
     /// old to report it leaves this empty and is treated as ready.
@@ -122,6 +126,7 @@ impl Default for ActivityFacts {
             tools_in_flight: Vec::new(),
             background_started_at_ms: None,
             background_commands: 0,
+            antigravity_task_started_at_ms: None,
             expected_continuation: None,
             inferred_idle_since_ms: None,
             active_user_shells: 0,
@@ -159,13 +164,6 @@ pub fn turn_imminent(facts: &ActivityFacts, now_ms: i64) -> bool {
         && facts.task_settled_at_ms.is_some_and(|settled| {
             (0..=IMMINENT_TURN_WINDOW_MS).contains(&now_ms.saturating_sub(settled))
         })
-}
-
-/// Whether the background commands and agent terminals still count as work.
-/// A user's own shell always counts; Jev is never asked about it.
-fn leftover_processes_count(facts: &ActivityFacts) -> bool {
-    facts.background_needed != Some(false)
-        && (facts.background_commands > 0 || facts.active_agent_terminals > 0)
 }
 
 /// What a session is doing, at the granularity every part of Mjolnir agrees on.
@@ -451,6 +449,12 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
             last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
+    // A verdict about leftover processes cannot settle a native task.
+    if let Some(started_at_ms) = facts.antigravity_task_started_at_ms {
+        return ActivityState::Background {
+            started_at_ms: Some(started_at_ms),
+        };
+    }
     if let Some(since_ms) = facts.inferred_idle_since_ms
         && facts.active_user_shells == 0
         && facts.queued_commands == 0
@@ -577,8 +581,12 @@ pub fn quiet_at(facts: &ActivityFacts, now_ms: i64) -> Quiet {
     if facts.active_user_shells > 0 {
         return Quiet::No("user shell open");
     }
-    // Layers 2 and 3: leftover processes, unless Jev judged them unneeded.
-    if leftover_processes_count(facts) {
+    // Only the provider can settle work it owns. For leftover processes we
+    // also take Jev's judgment into account.
+    if matches!(state, ActivityState::Background { .. })
+        || (facts.background_needed != Some(false)
+            && (facts.background_commands > 0 || facts.active_agent_terminals > 0))
+    {
         return Quiet::No("background work");
     }
     if state.has_work_in_flight() {
@@ -663,13 +671,61 @@ pub fn is_quiet(facts: &ActivityFacts) -> bool {
 
 /// Whether a controller may replace this worker without losing work.
 ///
-/// Older Codex and Kimi workers cannot prove that native goals or background
-/// agents are absent, even when their snapshots look quiet.
+/// Older workers can appear quiet even when they cannot report native work.
 #[must_use]
 pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
-    is_quiet(facts)
-        && (harness != HarnessKind::Codex || facts.goal_synchronized)
-        && (harness != HarnessKind::Kimi || facts.background_work_known == Some(true))
+    safe_to_replace_for(facts, harness, WorkerReplacement::Other)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerReplacement {
+    AutomaticUpgrade,
+    /// An explicit replacement or another operation that needs idle admission.
+    Other,
+}
+
+#[must_use]
+pub fn safe_to_replace_for(
+    facts: &ActivityFacts,
+    harness: HarnessKind,
+    replacement: WorkerReplacement,
+) -> bool {
+    is_quiet(facts) && replacement_provider_blocker(facts, harness, replacement).is_none()
+}
+
+/// A worker that predates Antigravity task tracking cannot synchronize its inventory.
+#[must_use]
+pub fn legacy_antigravity_worker(
+    harness: HarnessKind,
+    background_work_known: Option<bool>,
+) -> bool {
+    harness == HarnessKind::Antigravity && background_work_known.is_none()
+}
+
+fn replacement_provider_blocker(
+    facts: &ActivityFacts,
+    harness: HarnessKind,
+    replacement: WorkerReplacement,
+) -> Option<&'static str> {
+    match harness {
+        HarnessKind::Codex if !facts.goal_synchronized => Some(
+            "the Codex adapter has not reported goal and execution state since the worker or adapter last restarted",
+        ),
+        HarnessKind::Kimi if facts.background_work_known != Some(true) => {
+            Some("Kimi background-agent state is not synchronized")
+        }
+        _ if replacement == WorkerReplacement::AutomaticUpgrade
+            && legacy_antigravity_worker(harness, facts.background_work_known) =>
+        {
+            Some(
+                "this legacy Antigravity worker has no native task tracking and cannot upgrade automatically",
+            )
+        }
+        HarnessKind::Antigravity if facts.background_work_known == Some(false) => {
+            Some("Antigravity background-task state is not synchronized")
+        }
+        _ => None,
+    }
 }
 
 /// Why a Move is being admitted. Checkpoint callers use this to select
@@ -690,7 +746,11 @@ pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, _purpose: MoveP
 /// declines to replace a worker can say why. Empty exactly when
 /// [`safe_to_replace`] is true.
 #[must_use]
-pub fn replacement_blockers(facts: &ActivityFacts, harness: HarnessKind) -> Vec<&'static str> {
+pub fn replacement_blockers(
+    facts: &ActivityFacts,
+    harness: HarnessKind,
+    replacement: WorkerReplacement,
+) -> Vec<&'static str> {
     let mut blockers = Vec::new();
     if facts.checkpoint_barrier {
         blockers.push("a checkpoint barrier is held");
@@ -711,14 +771,7 @@ pub fn replacement_blockers(facts: &ActivityFacts, harness: HarnessKind) -> Vec<
             blockers.push("work is in flight");
         }
     }
-    if harness == HarnessKind::Codex && !facts.goal_synchronized {
-        blockers.push(
-            "the Codex adapter has not reported goal and execution state since the worker or adapter last restarted",
-        );
-    }
-    if harness == HarnessKind::Kimi && facts.background_work_known != Some(true) {
-        blockers.push("Kimi background-agent state is not synchronized");
-    }
+    blockers.extend(replacement_provider_blocker(facts, harness, replacement));
     blockers
 }
 
