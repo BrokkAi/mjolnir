@@ -14,7 +14,7 @@ use std::{
 };
 use tokenizers::Tokenizer;
 use tokio::{
-    sync::{Notify, Semaphore},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore},
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
@@ -109,8 +109,9 @@ impl GuardianClassifier {
                 failures: 0,
             }),
             wake: Notify::new(),
-            // ORT requires exclusive access to Run on this session. Admit one
-            // blocking task and leave waiting reviews on the async runtime.
+            // ORT requires exclusive access to Run on this session. Never queue
+            // behind an active inference: a busy collision escalates immediately
+            // to Stage 2 so slot-wait time never counts against a review deadline.
             permits: Arc::new(Semaphore::new(1)),
         });
         let cancellation = CancellationToken::new();
@@ -134,36 +135,14 @@ impl GuardianClassifier {
         if wolf_action_exceeds_stage1_limit(request) {
             return Verdict::EscalatedActionTooLong;
         }
-        if self.cancellation.is_cancelled() {
-            return Verdict::Unavailable { reason: "stopped" };
-        }
-        let readiness = self
-            .inner
-            .machine
-            .lock()
-            .expect("Wolf classifier state poisoned")
-            .request(&self.inner.wake);
-        if let Err(reason) = readiness {
-            return Verdict::Unavailable { reason };
-        }
-        let permit = tokio::select! {
-            biased;
-            _ = self.cancellation.cancelled() => return Verdict::Unavailable { reason: "stopped" },
-            permit = self.inner.permits.clone().acquire_owned() => {
-                permit.expect("Wolf inference semaphore is never closed")
-            }
-        };
-        // Waiting reviews never retain native weights during shutdown.
-        let engine = {
-            let machine = self
-                .inner
-                .machine
-                .lock()
-                .expect("Wolf classifier state poisoned");
-            let State::Ready(engine) = &machine.state else {
-                return Verdict::Unavailable { reason: "stopped" };
-            };
-            engine.clone()
+        let (permit, engine) = match admit_inference(
+            &self.inner.machine,
+            &self.inner.wake,
+            &self.inner.permits,
+            &self.cancellation,
+        ) {
+            Ok(admitted) => admitted,
+            Err(reason) => return Verdict::Unavailable { reason },
         };
         let request = request.clone();
         let cancellation = self.cancellation.clone();
@@ -230,6 +209,24 @@ impl Drop for GuardianClassifier {
         self.cancellation.cancel();
         self.release_engine();
     }
+}
+
+fn admit_inference<E>(
+    machine: &Mutex<Machine<E>>,
+    wake: &Notify,
+    permits: &Arc<Semaphore>,
+    cancellation: &CancellationToken,
+) -> Result<(OwnedSemaphorePermit, Arc<E>), &'static str> {
+    let mut machine = machine.lock().expect("Wolf classifier state poisoned");
+    if cancellation.is_cancelled() {
+        return Err("stopped");
+    }
+    machine.request(wake)?;
+    let State::Ready(engine) = &machine.state else {
+        return Err("loading");
+    };
+    let permit = permits.clone().try_acquire_owned().map_err(|_| "busy")?;
+    Ok((permit, engine.clone()))
 }
 
 async fn supervise(
@@ -643,11 +640,44 @@ mod tests {
         assert!(!wolf_action_exceeds_stage1_limit(&request(
             &"α".repeat(WOLF_STAGE1_MAX_ACTION_CHARS)
         )));
+        let mut truncated = request("git status");
+        truncated.action = serde_json::json!({
+            "tool": "Edit",
+            "content": [{"path": "a.rs", "patch": "@@\n-a\n+b", "patch_truncated": true}]
+        });
+        assert_eq!(
+            classifier.classify(&truncated).await,
+            GuardianStage1Result::EscalatedActionTooLong
+        );
         assert!(matches!(
             classifier.inner.machine.lock().unwrap().state,
             State::Dormant
         ));
         classifier.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn busy_inference_slot_escalates_immediately_without_queuing() {
+        let machine = Mutex::new(Machine {
+            state: State::Ready(Arc::new(())),
+            failures: 0,
+        });
+        let wake = Notify::new();
+        let permits = Arc::new(Semaphore::new(1));
+        let cancellation = CancellationToken::new();
+
+        let (permit, _) = admit_inference(&machine, &wake, &permits, &cancellation).unwrap();
+        assert_eq!(
+            admit_inference(&machine, &wake, &permits, &cancellation).unwrap_err(),
+            "busy"
+        );
+        drop(permit);
+        assert!(admit_inference(&machine, &wake, &permits, &cancellation).is_ok());
+        cancellation.cancel();
+        assert_eq!(
+            admit_inference(&machine, &wake, &permits, &cancellation).unwrap_err(),
+            "stopped"
+        );
     }
 
     #[test]

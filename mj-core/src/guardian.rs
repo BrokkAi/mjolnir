@@ -330,7 +330,24 @@ pub const WOLF_STAGE1_MAX_ACTION_CHARS: usize = 1_024;
 pub const WOLF_STAGE1_MAX_CASE_TOKENS: usize = 6_144;
 
 pub fn wolf_action_exceeds_stage1_limit(request: &GuardianReviewRequest) -> bool {
-    wolf_action_text(&request.action).chars().count() > WOLF_STAGE1_MAX_ACTION_CHARS
+    action_has_truncated_patch(&request.action)
+        || wolf_action_text(&request.action).chars().count() > WOLF_STAGE1_MAX_ACTION_CHARS
+}
+
+fn action_has_truncated_patch(action: &Value) -> bool {
+    if action.get("patch_truncated").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    ["changes", "content"].into_iter().any(|key| {
+        action
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("patch_truncated").and_then(Value::as_bool) == Some(true)
+                })
+            })
+    })
 }
 
 pub fn wolf_scene_packet(request: &GuardianReviewRequest) -> String {
@@ -376,23 +393,29 @@ pub fn wolf_scene_packet_with_budget(
 }
 
 fn wolf_action_text(action: &Value) -> String {
-    match action.get("type").and_then(Value::as_str) {
-        Some("command") => {
-            if let Some(command) = action.get("command").and_then(Value::as_str) {
-                return unwrap_shell_command(command);
-            }
-        }
-        Some("applyPatch") => {
-            if let Some(files) = action.get("files").and_then(Value::as_array) {
-                return format!(
-                    "apply_patch files={}",
-                    serde_json::to_string(files).expect("planned action files serialize")
-                );
-            }
-        }
-        _ => {}
+    let Some(object) = action.as_object() else {
+        return action.to_string();
+    };
+    let only_keys = |allowed: &[&str]| object.keys().all(|key| allowed.contains(&key.as_str()));
+
+    if only_keys(&["type", "command", "cwd", "source"])
+        && object.get("type").and_then(Value::as_str) == Some("command")
+        && let Some(command) = object.get("command").and_then(Value::as_str)
+    {
+        return unwrap_shell_command(command);
     }
-    if let Some(message) = action.get("permission_request").and_then(Value::as_str) {
+    if only_keys(&["type", "files", "cwd", "source"])
+        && object.get("type").and_then(Value::as_str) == Some("applyPatch")
+        && let Some(files) = object.get("files").and_then(Value::as_array)
+    {
+        return format!(
+            "apply_patch files={}",
+            serde_json::to_string(files).expect("planned action files serialize")
+        );
+    }
+    if only_keys(&["permission_request"])
+        && let Some(message) = object.get("permission_request").and_then(Value::as_str)
+    {
         let message = message
             .split_once('\n')
             .filter(|(header, _)| {
@@ -403,43 +426,112 @@ fn wolf_action_text(action: &Value) -> String {
             .map_or(message, |(_, command)| command);
         return unwrap_shell_command(message);
     }
-    // Live ACP actions put diffs alongside any tool previews in `content`.
-    for key in ["changes", "content"] {
-        let Some(changes) = action.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        let mut patches = changes.iter().filter_map(|change| {
-            Some((
-                change.get("path")?.as_str()?,
-                change.get("patch")?.as_str()?,
-            ))
-        });
-        if let Some((path, patch)) = patches.next() {
-            let mut text = action
-                .get("tool")
-                .and_then(Value::as_str)
-                .unwrap_or("tool")
-                .to_owned();
-            for (path, patch) in std::iter::once((path, patch)).chain(patches) {
-                text.push_str("\n\n");
-                text.push_str(path);
-                text.push('\n');
-                text.push_str(patch);
-            }
-            return text;
-        }
+
+    // Live ACP actions from `planned_action` may carry `input`, `content`/`changes`
+    // (both diffs and non-diff previews), and `locations`. Preserve every payload
+    // field so Stage 1 never scores or measures an incomplete action.
+    if !only_keys(&[
+        "harness",
+        "tool",
+        "kind",
+        "cwd",
+        "native_agent_session",
+        "input",
+        "changes",
+        "content",
+        "locations",
+    ]) {
+        return action.to_string();
     }
-    if let Some(input) = action.get("input") {
-        if let Some(command) = ["command", "cmd"]
-            .into_iter()
-            .find_map(|key| input.get(key).and_then(Value::as_str))
+
+    let has_non_empty = |key: &str| match object.get(key) {
+        None => false,
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(_) => true,
+    };
+    let has_extra_sections =
+        has_non_empty("changes") || has_non_empty("content") || has_non_empty("locations");
+
+    if !has_extra_sections && let Some(input) = object.get("input") {
+        let is_execute = match object.get("kind").and_then(Value::as_str) {
+            Some("execute") => true,
+            None => object.get("tool").is_none(),
+            Some(_) => false,
+        };
+        if is_execute
+            && let Some(input_obj) = input.as_object()
+            && let Some((cmd_key, command)) = ["command", "cmd"]
+                .into_iter()
+                .find_map(|key| Some((key, input_obj.get(key)?.as_str()?)))
         {
-            return unwrap_shell_command(command);
+            let unwrapped = unwrap_shell_command(command);
+            if input_obj.len() == 1 {
+                return unwrapped;
+            }
+            let rest: serde_json::Map<String, Value> = input_obj
+                .iter()
+                .filter(|(key, _)| key.as_str() != cmd_key)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            return format!("{unwrapped}\n{}", Value::Object(rest));
         }
-        if let Some(tool) = action.get("tool").and_then(Value::as_str) {
+        if let Some(tool) = object.get("tool").and_then(Value::as_str) {
             return format!("{tool}: {input}");
         }
+        return action.to_string();
     }
+
+    if has_extra_sections {
+        let mut text = object
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_owned();
+        if let Some(input) = object.get("input") {
+            text.push_str("\n\ninput: ");
+            text.push_str(&input.to_string());
+        }
+        for key in ["changes", "content"] {
+            let Some(value) = object.get(key) else {
+                continue;
+            };
+            match value {
+                Value::Array(entries) => {
+                    for entry in entries {
+                        if let Some(obj) = entry.as_object()
+                            && obj.len() == 2
+                            && let (Some(path), Some(patch)) = (
+                                obj.get("path").and_then(Value::as_str),
+                                obj.get("patch").and_then(Value::as_str),
+                            )
+                        {
+                            text.push_str("\n\n");
+                            text.push_str(path);
+                            text.push('\n');
+                            text.push_str(patch);
+                        } else {
+                            text.push_str("\n\n");
+                            text.push_str(&entry.to_string());
+                        }
+                    }
+                }
+                other => {
+                    text.push_str("\n\n");
+                    text.push_str(key);
+                    text.push_str(": ");
+                    text.push_str(&other.to_string());
+                }
+            }
+        }
+        if let Some(locations) = object.get("locations")
+            && !matches!(locations, Value::Array(items) if items.is_empty())
+        {
+            text.push_str("\n\nlocations: ");
+            text.push_str(&locations.to_string());
+        }
+        return text;
+    }
+
     action.to_string()
 }
 
@@ -942,7 +1034,40 @@ mod tests {
             ),
             (
                 json!({"tool": "Edit", "content": [{"type": "text"}, {"path": "a.rs", "patch": "@@\n-old\n+new"}]}),
-                "Edit\n\na.rs\n@@\n-old\n+new",
+                "Edit\n\n{\"type\":\"text\"}\n\na.rs\n@@\n-old\n+new",
+            ),
+            (
+                json!({
+                    "harness": "Kimi Code",
+                    "tool": "Edit",
+                    "kind": "edit",
+                    "cwd": "/work",
+                    "input": {"path": "/etc/passwd", "command": "rm -rf ~"},
+                    "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}],
+                    "locations": [{"path": "/etc/passwd"}]
+                }),
+                concat!(
+                    "Edit\n\n",
+                    "input: {\"path\":\"/etc/passwd\",\"command\":\"rm -rf ~\"}\n\n",
+                    "a.rs\n@@\n-old\n+new\n\n",
+                    "locations: [{\"path\":\"/etc/passwd\"}]"
+                ),
+            ),
+            (
+                json!({
+                    "tool": "Bash",
+                    "kind": "execute",
+                    "input": {"command": "/bin/bash -lc 'git status'", "env": {"LD_PRELOAD": "/tmp/x.so"}}
+                }),
+                "git status\n{\"env\":{\"LD_PRELOAD\":\"/tmp/x.so\"}}",
+            ),
+            (
+                json!({
+                    "tool": "mcp_ssh",
+                    "kind": "other",
+                    "input": {"command": "git status"}
+                }),
+                "mcp_ssh: {\"command\":\"git status\"}",
             ),
         ] {
             assert_eq!(
@@ -950,6 +1075,43 @@ mod tests {
                 format!("[USER GOAL]\n(no user goal)\n\n[PROPOSED ACTION | agent]\n{expected}")
             );
         }
+    }
+
+    #[test]
+    fn guardian_wolf_stage1_escalates_truncated_diffs_and_oversized_input_alongside_short_preview()
+    {
+        for action in [
+            json!({
+                "tool": "Edit",
+                "content": [{
+                    "path": "a.rs",
+                    "patch": "--- a/a.rs\n+++ b/a.rs\n[dropped]",
+                    "patch_truncated": true
+                }]
+            }),
+            json!({
+                "tool": "Edit",
+                "changes": [{
+                    "path": "a.rs",
+                    "patch": "--- a/a.rs\n+++ b/a.rs\n[dropped]",
+                    "patch_truncated": true
+                }]
+            }),
+            json!({
+                "tool": "Edit",
+                "input": {"payload": "x".repeat(WOLF_STAGE1_MAX_ACTION_CHARS)},
+                "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}]
+            }),
+        ] {
+            assert!(
+                wolf_action_exceeds_stage1_limit(&review_request(action)),
+                "incomplete or oversized ACP action must escalate past Stage 1"
+            );
+        }
+        assert!(!wolf_action_exceeds_stage1_limit(&review_request(json!({
+            "tool": "Edit",
+            "content": [{"path": "a.rs", "patch": "@@\n-old\n+new"}]
+        }))));
     }
 
     #[test]
