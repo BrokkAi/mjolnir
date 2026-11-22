@@ -1198,6 +1198,7 @@ mod history_tests {
             action: serde_json::json!({"input": "x".repeat(70_000)}),
             user_instructions: vec![],
             user_instructions_omitted: false,
+            project_instructions: None,
             transcript: String::new(),
         };
         let pending = || {

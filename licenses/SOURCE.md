@@ -23,8 +23,8 @@ and included alongside this file in release archives, not stored in the source
 checkout. The license-policy configuration and audited upstream texts remain
 source inputs.
 
-The local GitHub relevance model's native ONNX Runtime is downloaded from the
-official pinned upstream artifacts rather than bundled with the application.
+The local GitHub relevance and Guardian models share a native ONNX Runtime,
+downloaded from official pinned upstream artifacts.
 The verified runtime cache contains its upstream license and third-party notice
 texts; Windows also retains the DirectML redistribution licenses beside its DLL.
 The source URLs, versions and checksums are in

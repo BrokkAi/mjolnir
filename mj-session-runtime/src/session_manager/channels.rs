@@ -339,6 +339,7 @@ pub struct CoalescedUpdateSender {
     pub session_gate: Arc<crate::recovery_gate::RecoveryGate>,
     pub credential_wakes: Arc<crate::worker_client::CredentialWakes>,
     pub harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
+    pub guardian_stage1: Arc<std::sync::OnceLock<Arc<dyn GuardianStage1>>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
     pub pending_observations:
         Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
@@ -570,6 +571,7 @@ pub fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdat
             session_gate: Arc::default(),
             credential_wakes: Arc::default(),
             harness_failure: Default::default(),
+            guardian_stage1: Default::default(),
             pending_observations: Default::default(),
             last_raw_options: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,

@@ -204,7 +204,9 @@ pub const RELAY_NATIVE_USE_EVIDENCE_PROTOCOL: u32 = 80;
 pub const RELAY_IN_PLACE_MOVE_PROTOCOL: u32 = 81;
 /// 82 adds connection-only guardian review requests.
 pub const RELAY_GUARDIAN_REVIEW_PROTOCOL: u32 = 82;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_REVIEW_PROTOCOL;
+/// 83 includes optional repository instructions in guardian review requests.
+pub const RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL: u32 = 83;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

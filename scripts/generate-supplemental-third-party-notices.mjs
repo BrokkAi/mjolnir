@@ -308,7 +308,7 @@ async function main() {
       "statically linked into the GitHub relevance tokenizer",
     ),
     {
-      component: "Downloaded GitHub relevance inference runtime",
+      component: "Downloaded ONNX inference runtime",
       source: "mj-github-relevance/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
       scope: "downloaded, verified and atomically cached at first preparation; not bundled in release archives",
       text: [
@@ -316,6 +316,12 @@ async function main() {
         "GPU-eligible Windows hosts additionally download Microsoft.ML.OnnxRuntime.DirectML 1.23.0 and Microsoft.AI.DirectML 1.15.4. Their LICENSE, ThirdPartyNotices.txt, DirectML-LICENSE.txt and DirectML-LICENSE-CODE.txt accompany the cached DLLs.",
         "Only the official URL, size and SHA-256 pinned in runtime.json are accepted. The ORT main library is never selected from the system or PATH. Linux CUDA uses administrator-installed CUDA 12 and cuDNN 9 dependencies.",
       ].join("\n"),
+    },
+    {
+      component: "Patronus Wolf Defender Jev",
+      source: "https://huggingface.co/patronus-studio/wolf-defender-jev/blob/8cd431a3b997cce58d67e3512257ded01258000f/LICENSE",
+      scope: "the Guardian downloads the pinned model on demand",
+      text: (await readFile(path.join(repositoryRoot, "licenses/native/PATRONUS_WOLF_DEFENDER_JEV_LICENSE.txt"), "utf8")).trimEnd(),
     },
     await sqliteNativePayload(metadata),
     await embeddedFontsNotice(),

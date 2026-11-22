@@ -16698,3 +16698,47 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         "pre-acceptance suspend refusal must not stamp last_error onto a live session"
     );
 }
+
+// Hard-won: c9cb0752f: SuspendPreflight was marked as a cancellable machine action without a machine::execute arm.
+#[tokio::test]
+async fn suspend_preflight_runs_through_cancellable_machine_action_dispatch() {
+    const CHILD: &str = "MJ_TEST_SUSPEND_PREFLIGHT_MACHINE_DISPATCH";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "suspend_preflight_runs_through_cancellable_machine_action_dispatch",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let session_id = "daemon-suspend-preflight-machine";
+    let record = runtime_test_session(session_id, "default", SessionState::Running);
+    mj_controller::database::save_session(&record).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let cancellation = CancellationToken::new();
+    let server = mj_core::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, cancellation).await
+    });
+
+    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+        .await
+        .unwrap();
+    let preflight = client
+        .suspend_preflight(session_id.into(), false, false)
+        .await
+        .expect("suspend preflight must succeed over the cancellable machine dispatch path");
+    assert_eq!(preflight.session_id, session_id);
+    drop(client);
+    server.await.unwrap().unwrap();
+}

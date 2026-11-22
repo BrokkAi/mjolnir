@@ -188,9 +188,12 @@ configured approvals, since OpenCode's own default asks for nothing), and DSH
 asks before every write, command, and MCP tool call other than Mjolnir's own,
 but all three run commands on the host without a sandbox. On a raw target the
 [Mjolnir guardian](/security/#the-mjolnir-guardian) answers permission requests
-that reach Mjolnir from any harness. It uses a configured direct utility model
-or falls back to a separate review on the session's harness and model when
-none is configured. Any profile can [turn it off](#turn-off-the-mjolnir-guardian).
+that reach Mjolnir from any harness. A local Wolf Defender Jev model can
+approve short actions it scores as strongly aligned with your task. Other
+actions go to the configured direct utility model, or to a separate review
+on the session's harness and model when none is configured. These reviewers
+receive bounded project instructions from `AGENTS.md`. Any profile can
+[turn it off](#turn-off-the-mjolnir-guardian).
 Muse's native guardian is
 muse-acp's auto-review; see [Harness limitations](#harness-limitations).
 Container runtimes and EC2
