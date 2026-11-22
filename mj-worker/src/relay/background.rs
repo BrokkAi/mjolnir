@@ -3,6 +3,7 @@ use crate::acp::antigravity_tasks::{AntigravityRunStatus, AntigravitySnapshot};
 
 #[derive(Default)]
 pub(super) struct AntigravityWorkState {
+    hook_epoch: u64,
     acp_epoch_active: bool,
     stale_step_indices: Option<BTreeSet<i64>>,
     summary_commit_gen: u64,
@@ -628,7 +629,11 @@ impl DurableRelay {
     }
 
     pub(super) fn forget_antigravity_state(&mut self) {
-        self.antigravity_work = AntigravityWorkState::default();
+        let hook_epoch = self.antigravity_work.hook_epoch.wrapping_add(1);
+        self.antigravity_work = AntigravityWorkState {
+            hook_epoch,
+            ..Default::default()
+        };
         if self.background_work == BackgroundWorkPolicy::AntigravityTasks {
             self.background_work_known = Some(false);
         }
@@ -647,8 +652,13 @@ impl DurableRelay {
     }
 
     pub(super) fn antigravity_prompt_started(&mut self) {
+        self.antigravity_work.hook_epoch = self.antigravity_work.hook_epoch.wrapping_add(1);
         if self.harness_turns == HarnessTurnPolicy::Antigravity {
+            let was_active = self.antigravity_work.acp_epoch_active;
             self.antigravity_work.acp_epoch_active = true;
+            if !was_active {
+                self.background_work_known = Some(false);
+            }
         }
     }
 
@@ -659,7 +669,12 @@ impl DurableRelay {
         if !self.matches_antigravity_conversation(conversation_id) {
             return Ok(());
         }
+        let was_active = self.antigravity_work.acp_epoch_active;
         self.antigravity_work.acp_epoch_active = true;
+        self.antigravity_work.hook_epoch = self.antigravity_work.hook_epoch.wrapping_add(1);
+        if !was_active {
+            self.background_work_known = Some(false);
+        }
         self.antigravity_work.hook_idle_gen = None;
         if self.can_open_harness_turn() {
             self.antigravity_work.harness_turn_saw_running = false;
@@ -683,7 +698,12 @@ impl DurableRelay {
         }
 
         let work = &mut self.antigravity_work;
+        work.hook_epoch = work.hook_epoch.wrapping_add(1);
+        let was_active = work.acp_epoch_active;
         work.acp_epoch_active = true;
+        if !was_active {
+            self.background_work_known = Some(false);
+        }
         if fully_idle == Some(true) {
             work.hook_not_fully_idle_gen = None;
             work.hook_not_fully_idle_started_at_ms = None;
@@ -719,22 +739,42 @@ impl DurableRelay {
         Ok(())
     }
 
-    pub fn antigravity_snapshot_changed(&mut self, snapshot: AntigravitySnapshot) -> Result<()> {
+    pub fn antigravity_hook_epoch(&self) -> u64 {
+        self.antigravity_work.hook_epoch
+    }
+
+    pub fn antigravity_snapshot_changed(
+        &mut self,
+        snapshot: AntigravitySnapshot,
+        scan_hook_epoch: u64,
+    ) -> Result<bool> {
         if self.background_work != BackgroundWorkPolicy::AntigravityTasks {
-            return Ok(());
+            return Ok(true);
         }
-        self.background_work_known = Some(true);
         let work = &mut self.antigravity_work;
         work.summary_commit_gen += u64::from(snapshot.summary_commit_changed);
+        if scan_hook_epoch != work.hook_epoch {
+            if work.hook_not_fully_idle_gen.is_some() {
+                work.hook_not_fully_idle_gen = Some(work.summary_commit_gen);
+            }
+            if work.hook_idle_gen.is_some() {
+                work.hook_idle_gen = Some(work.summary_commit_gen);
+            }
+            return Ok(false);
+        }
         let indices: BTreeSet<_> = snapshot
             .running_tasks
             .iter()
             .map(|task| task.step_index)
             .collect();
         if !work.acp_epoch_active {
+            self.background_work_known = Some(true);
             work.stale_step_indices.get_or_insert(indices);
-            return self.persist_activity_transition();
+            self.persist_activity_transition()?;
+            return Ok(true);
         }
+        self.background_work_known =
+            Some(snapshot.summary.is_some() && snapshot.conversation_db_present);
 
         if let Some(stale) = &mut work.stale_step_indices {
             stale.retain(|index| indices.contains(index));
@@ -785,6 +825,7 @@ impl DurableRelay {
                 && work.summary_status == Some(AntigravityRunStatus::Idle)
                 && !work.summary_not_fully_idle
                 && work.running_tasks.is_empty()
+                && snapshot.conversation_db_present
             {
                 work.hook_not_fully_idle_gen = None;
                 work.hook_not_fully_idle_started_at_ms = None;
@@ -804,7 +845,8 @@ impl DurableRelay {
             }
         }
         self.note_background_work()?;
-        self.persist_activity_transition()
+        self.persist_activity_transition()?;
+        Ok(true)
     }
 
     pub fn antigravity_tasks_unavailable(&mut self) -> Result<()> {

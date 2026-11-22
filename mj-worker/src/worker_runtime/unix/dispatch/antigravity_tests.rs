@@ -1,4 +1,5 @@
 use super::*;
+use crate::acp::antigravity_tasks::AntigravityStateFollower;
 use crate::relay::{BackgroundWorkPolicy, HarnessTurnPolicy};
 use mj_core::activity::ActivityState;
 use mj_core::relay::{
@@ -439,6 +440,102 @@ async fn antigravity_sqlite_recovery_fences_stale_steps_and_stop_generations() {
             .command,
         "Build validation"
     );
+}
+
+#[tokio::test]
+async fn antigravity_stale_scan_cannot_clear_a_concurrent_stop() {
+    let temp = tempfile::tempdir().unwrap();
+    let databases = Databases::create(temp.path());
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let _monitor = attach_monitor(temp.path(), &relay).await;
+    {
+        let mut state = relay.lock().unwrap();
+        pre_invocation(&mut state, Some(NATIVE));
+    }
+    let mut follower = AntigravityStateFollower::new(temp.path().to_owned(), NATIVE.into());
+    let scan_epoch = relay.lock().unwrap().antigravity_hook_epoch();
+    let old_snapshot = follower.refresh().unwrap();
+    {
+        let mut state = relay.lock().unwrap();
+        stop(&mut state, Some(NATIVE), Some(false), "NO_TOOL_CALL");
+        assert!(state.settle_pending_antigravity_harness_turn().unwrap());
+        assert!(
+            !state
+                .antigravity_snapshot_changed(old_snapshot, scan_epoch)
+                .unwrap()
+        );
+        assert!(!state.operational_state().background_commands.is_empty());
+        assert!(!reserve_idle(&mut state));
+    }
+    databases
+        .summary
+        .execute(
+            "UPDATE conversation_summaries SET status=?1,not_fully_idle=0,step_count=step_count+1 WHERE conversation_id=?2",
+            params![IDLE, NATIVE],
+        )
+        .unwrap();
+    let epoch = relay.lock().unwrap().antigravity_hook_epoch();
+    let fresh = follower.refresh().unwrap();
+    let mut state = relay.lock().unwrap();
+    assert!(state.antigravity_snapshot_changed(fresh, epoch).unwrap());
+    assert!(state.operational_state().background_commands.is_empty());
+    assert!(reserve_idle(&mut state));
+}
+
+#[tokio::test]
+async fn antigravity_missing_native_databases_fail_closed_after_activation() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = antigravity_relay(&temp.path().join("relay"));
+    let mut monitor = attach_monitor(temp.path(), &relay).await;
+
+    // Before any prompt or hook in this ACP epoch, absent DB files are expected
+    // for a brand-new conversation and must not wedge idle replacement.
+    {
+        let state = relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_work_known, Some(true));
+        assert!(
+            state
+                .operational_state()
+                .safe_to_replace(HarnessKind::Antigravity)
+        );
+    }
+
+    let databases = Databases::create(temp.path());
+    let steps = temp
+        .path()
+        .join("antigravity-cli/conversations/conversation.db");
+    let summary = temp
+        .path()
+        .join("antigravity-cli/conversation_summaries.db");
+    {
+        let mut state = relay.lock().unwrap();
+        stop(&mut state, Some(NATIVE), Some(true), "NO_TOOL_CALL");
+        assert_eq!(state.operational_state().background_work_known, Some(false));
+        assert!(!reserve_idle(&mut state));
+    }
+
+    std::fs::remove_file(&steps).unwrap();
+    monitor.refresh(&relay, true).await.unwrap();
+    {
+        let mut state = relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_work_known, Some(false));
+        assert!(!reserve_idle(&mut state));
+    }
+
+    std::fs::remove_file(&summary).unwrap();
+    monitor.refresh(&relay, true).await.unwrap();
+    {
+        let mut state = relay.lock().unwrap();
+        assert_eq!(state.operational_state().background_work_known, Some(false));
+        assert!(!reserve_idle(&mut state));
+    }
+
+    drop(databases);
+    let _restored = Databases::create(temp.path());
+    monitor.refresh(&relay, true).await.unwrap();
+    let mut state = relay.lock().unwrap();
+    assert_eq!(state.operational_state().background_work_known, Some(true));
+    assert!(reserve_idle(&mut state));
 }
 
 #[tokio::test]

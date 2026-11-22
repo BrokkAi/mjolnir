@@ -47,6 +47,7 @@ pub struct AntigravityBackgroundTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravitySnapshot {
     pub summary: Option<AntigravitySummarySnapshot>,
+    pub conversation_db_present: bool,
     pub summary_commit_changed: bool,
     pub running_tasks: Vec<AntigravityBackgroundTask>,
 }
@@ -120,13 +121,13 @@ impl AntigravityStateFollower {
         let task_path = dir
             .join("conversations")
             .join(format!("{}.db", self.conversation_id));
-        let running_tasks = if task_path
+        let (conversation_db_present, running_tasks) = if task_path
             .try_exists()
             .context("locate Antigravity steps database")?
         {
-            read_tasks(&task_path)?
+            (true, read_tasks(&task_path)?)
         } else {
-            Vec::new()
+            (false, Vec::new())
         };
         let summary_path = dir.join("conversation_summaries.db");
         if summary_path
@@ -193,6 +194,7 @@ impl AntigravityStateFollower {
         };
         Ok(AntigravitySnapshot {
             summary,
+            conversation_db_present,
             summary_commit_changed,
             running_tasks,
         })
