@@ -380,6 +380,23 @@ pub(crate) async fn deliver_mailbox_event(
             record.state
         )));
     }
+    if matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::SessionMessage { .. }
+    ) {
+        let target_id = session_id.to_owned();
+        let moving = mj_core::runtime::spawn_blocking(move || {
+            Ok::<_, anyhow::Error>(
+                mj_controller::database::load_move_operation(&target_id)?
+                    .is_some_and(|operation| operation.is_active()),
+            )
+        })
+        .await
+        .context("move status check task failed")??;
+        if moving {
+            return Ok(pending("the session is moving"));
+        }
+    }
     let Some(handle) = sessions.find_session(session_id.to_owned()).await? else {
         return Ok(pending("the session manager does not hold the session"));
     };

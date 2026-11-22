@@ -5059,8 +5059,107 @@ async fn send_message_queues_in_mailbox_while_target_is_moving_instead_of_refusi
         ]
     );
 
+    // Retrying a request that already took the startup queue route keeps its
+    // startup receipt instead of creating a duplicate mailbox row while moving.
+    let startup_cmd =
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("startup-first");
+    mj_controller::database::enqueue_startup_deliveries(vec![
+        mj_controller::database::StartupDelivery {
+            session_id: MOVING_PEER.into(),
+            command_id: startup_cmd,
+            step_json: serde_json::to_string(&crate::daemon::StartupStep::SessionMessage {
+                sender_id: CALLER.into(),
+                sender_title: caller.message_name(),
+                text: "schema coordination notice".into(),
+                created_at_ms: 1,
+                waited_on_group: None,
+            })
+            .unwrap(),
+            phase: "pending".into(),
+            group_id: None,
+            accepted_ordinal: None,
+            error: None,
+        },
+    ])
+    .unwrap();
+    let startup_retry = backend
+        .execute_subagent_tool(CALLER.into(), send("startup-first", MOVING_PEER))
+        .await;
+    assert!(!startup_retry.is_error, "{}", startup_retry.message);
+    let startup_body: serde_json::Value = serde_json::from_str(&startup_retry.message).unwrap();
+    assert_eq!(startup_body["via"], "queued");
+    assert_eq!(
+        startup_body["note"],
+        super::subagent_input::QUEUED_UNTIL_STARTUP_NOTE
+    );
+    assert_eq!(
+        mj_controller::database::pending_mailbox_events(10)
+            .unwrap()
+            .len(),
+        2,
+        "startup retry must not insert a duplicate mailbox_outbox row"
+    );
+
+    // While a Move is active and the source worker is still connected on an
+    // older relay protocol, mailbox delivery defers the event as Pending
+    // instead of permanently failing it before the destination worker attaches.
+    moving.state = SessionState::Running;
+    mj_controller::database::save_session(&moving).unwrap();
+    let legacy_exports = ParkingExports::with_modern_worker(SessionState::Running, None, false);
+    legacy_exports
+        .records
+        .lock()
+        .unwrap()
+        .insert(MOVING_PEER.into(), moving.clone());
+    let legacy_remote = mj_controller::session_manager::spawn_remote_session_manager().unwrap();
+    legacy_remote
+        .targets
+        .send_replace(vec![mj_controller::session_manager::RelaySessionTarget {
+            session_id: MOVING_PEER.into(),
+            spec: mj_controller::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    let mut legacy_view = ready_view("model");
+    let legacy_snapshot = legacy_view.snapshot.as_mut().unwrap();
+    legacy_snapshot.materialized.session_id = MOVING_PEER.into();
+    legacy_snapshot.operational.session_id = MOVING_PEER.into();
+    legacy_snapshot.operational.relay_protocol_version =
+        Some(mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL - 1);
+    legacy_remote
+        .publisher
+        .publish(MOVING_PEER.into(), legacy_view)
+        .await
+        .unwrap();
+    legacy_remote
+        .control
+        .wait_for_session(MOVING_PEER, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let queued_event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    let held = crate::daemon::mailbox_delivery::deliver_mailbox_event(
+        legacy_exports,
+        &legacy_remote.control,
+        MOVING_PEER,
+        queued_event,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            held,
+            mj_controller::mailbox_outbox::MailboxEventDelivery::Pending(_)
+        ),
+        "expected Pending while Move is active on a legacy source worker, got {held:?}"
+    );
+    legacy_remote.shutdown.shutdown().await.unwrap();
+
     // Once the Move is no longer active (Failed) and the session stays Stopped,
     // new sends are refused as stopped.
+    moving.state = SessionState::Stopped;
+    mj_controller::database::save_session(&moving).unwrap();
     move_op.phase = mj_core::state::MovePhase::Failed;
     mj_controller::database::save_move_operation(&move_op).unwrap();
     let after_failure = backend

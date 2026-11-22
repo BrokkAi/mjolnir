@@ -774,7 +774,9 @@ impl RuntimeState {
                 self,
                 session_id,
             );
-            mj_core::runtime::block_on(Box::pin(work(controller, executor, manager)))?
+            let result = mj_core::runtime::block_on(Box::pin(work(controller, executor, manager)));
+            mj_controller::mailbox_outbox::notify_mailbox_outbox_changed();
+            result?
         })
         .await
         .context("Move controller task failed")?

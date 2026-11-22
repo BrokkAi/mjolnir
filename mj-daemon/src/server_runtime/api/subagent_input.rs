@@ -226,6 +226,19 @@ impl ApiBackend {
             });
         }
 
+        let (sender_id, message_text) = session_message_identity(&event)?;
+        if let Some(response) = self
+            .session_message_startup_receipt(
+                &target_session_id,
+                &command_id,
+                sender_id,
+                message_text,
+            )
+            .await?
+        {
+            return Ok(response);
+        }
+
         // A session with an active Move may temporarily be Closing, Stopped, or
         // disconnected while transitioning to its destination worker. Queue the
         // message durably in its mailbox instead of reporting Closing (#1341).
@@ -390,8 +403,8 @@ impl ApiBackend {
     }
 
     /// Queue `event` when `target` cannot take it yet. `None` means deliver now.
-    /// An existing step for `command_id` is the retry: the first sender, text,
-    /// and timestamp win, and a failed step stays failed.
+    /// Existing startup receipts are checked before routing in
+    /// `deliver_session_message`; this handles the remaining new-step race.
     async fn queue_session_message_until_startup(
         &self,
         target: &str,
@@ -401,12 +414,6 @@ impl ApiBackend {
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<Option<crate::server::api::SessionMessageResponse>> {
         let (sender_id, message_text) = session_message_identity(event)?;
-        if let Some(response) = self
-            .session_message_startup_receipt(target, command_id, sender_id, message_text)
-            .await?
-        {
-            return Ok(Some(response));
-        }
         let eligible = matches!(
             target_state,
             SessionState::Provisioning
