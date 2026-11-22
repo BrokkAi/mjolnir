@@ -439,8 +439,9 @@ async fn resolve_choices_selection(
     let telemetry_store = backend.quota_telemetry_store();
     let mut selection_errors = Vec::new();
     while !eligible.is_empty() {
+        let mut draw_pool = eligible.clone();
         let reservation = ReservationSlot::new(telemetry_store.draw_and_reserve(
-            &mut eligible,
+            &mut draw_pool,
             execution_policy,
             placement,
             category,
@@ -449,10 +450,15 @@ async fn resolve_choices_selection(
             &power_ranking,
             now_epoch_seconds(),
         )?);
-        if eligible.is_empty() {
+        if draw_pool.is_empty() {
             break;
         }
-        let entry = eligible.remove(0);
+        let entry = draw_pool.remove(0);
+        eligible.retain(|item| {
+            !(item.candidate.profile_id == entry.candidate.profile_id
+                && item.model.value == entry.model.value
+                && item.choice_effort == entry.choice_effort)
+        });
         let efforts = match model_efforts(backend, &entry.candidate, &entry.model.value).await {
             Ok(efforts) => efforts,
             Err(error) => {

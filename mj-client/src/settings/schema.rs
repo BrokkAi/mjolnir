@@ -616,6 +616,13 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
             value.to_string()
         };
     };
+    if value.is_empty()
+        && path.last().is_some_and(|key| key == "model")
+        && (subagent_options_path(path).is_some()
+            || (path.len() == 4 && path[0] == "review" && path[1] == "reviewers"))
+    {
+        return "Select a model".to_owned();
+    }
     // Only the theme field: `auto` is also an image pull policy.
     if super::draft::storage_path(path) == ["theme"]
         && let Ok(choice) = serde_json::from_value::<ThemeChoice>(Value::String(value.into()))
@@ -738,7 +745,15 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let reviewer = path.len() == 4 && path[0] == "review" && path[1] == "reviewers";
     if (subagent.is_some() || reviewer) && matches!(key, "model" | "effort") {
         let mut choices = if key == "model" {
-            Vec::new()
+            if draft
+                .pointer(&super::draft::pointer(path))
+                .and_then(Value::as_str)
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                vec![Value::String(String::new())]
+            } else {
+                Vec::new()
+            }
         } else {
             vec![Value::Null]
         };
