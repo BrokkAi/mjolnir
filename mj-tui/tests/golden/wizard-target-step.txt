@@ -150,11 +150,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Stopped  podman  codex-                                                                                                                 │
 │  │ No messages yet        ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │  │                        │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
-│                           │                                                                                  │                           │
+│                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
+│                           │   ▸ ANTHROPIC  auto                                                              │                           │
+│                           │   ▾ OPENAI     auto                                                              │                           │
+│                           │     codex-1    Codex    refreshing                                               │                           │
+│                           │     codex-2    Codex    refreshing                                               │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -364,8 +364,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │ Sub-agents Native ▾                                                              │                           │
-│                           │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
-│                           │ subagents on all targets")                                                       │                           │
+│                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ─────────────────────────╮
 │                           │                                                                                  │                           │
@@ -472,11 +472,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
   ╭ × New session · 1/4 profile ─────────────────────────╮
   │                                                      │
-  │   PROFILE   HARNESS      WEEKLY      5H              │
-  │   claude-1  Claude Code  refreshing                  │
-  │   codex-1   Codex        refreshing                  │
-  │   codex-2   Codex        refreshing                  │
-  │                                                      │
+  │   PROFILE      HARNESS  WEEKLY      5H               │
+  │   ▸ ANTHROPIC  auto                                  │
+  │   ▾ OPENAI     auto                                  │
+  │     codex-1    Codex    refreshing                   │
+  │     codex-2    Codex    refreshing                   │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -596,9 +596,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                      │
   │                                                      │
   │ Sub-agents Native ▾                                  │
-  │ Set up YOLO target sub-agents in Settings ->         │
-  │ Sub-agents (uncheck "Use the same subagents on all   │
-  │ targets")                                            │
+  │ Set up Mjolnir sub-agents in Settings -> Sub-agents  │
+  │                                                      │
+  │                                                      │
   │                                                      │
   │                                                      │
   │   Cancel     Back     Add directory…     Create      │
@@ -662,10 +662,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                          │
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
+│                           │   ▾ ANTHROPIC  auto                                                              │                           │
+│                           │     claude-1   Claude Code  refreshing                                           │                           │
+│                           │   ▸ OPENAI     auto                                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -744,11 +744,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                                          │
 │                           ╭ × New session · 1/3 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
-│                           │                                                                                  │                           │
+│                           │   PROFILE      HARNESS  WEEKLY      5H                                           │                           │
+│                           │   ▸ ANTHROPIC  auto                                                              │                           │
+│                           │   ▾ OPENAI     auto                                                              │                           │
+│                           │     codex-1    Codex    refreshing                                               │                           │
+│                           │     codex-2    Codex    refreshing                                               │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -840,8 +840,8 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │ Sub-agents Native ▾                                                              │  ─────────────────────────╮
-│                           │ Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck "Use the same   │                           │
-│                           │ subagents on all targets")                                                       │                           │
+│                           │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │  ─────────────────────────╯
 │                           │                                                                                  │  ────────────────── ▁   ▄ ╮
 │                           │                                                                                  │                           │
@@ -909,10 +909,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
+│                           │   ▾ ANTHROPIC  auto                                                              │                           │
+│                           │     claude-1   Claude Code  refreshing                                           │                           │
+│                           │   ▸ OPENAI     auto                                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -991,10 +991,10 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                                                                                                                          │
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
-│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
-│                           │   claude-1  Claude Code  refreshing                                              │                           │
-│                           │   codex-1   Codex        refreshing                                              │                           │
-│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │   PROFILE      HARNESS      WEEKLY      5H                                       │                           │
+│                           │   ▾ ANTHROPIC  auto                                                              │                           │
+│                           │     claude-1   Claude Code  refreshing                                           │                           │
+│                           │   ▸ OPENAI     auto                                                              │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -1312,7 +1312,7 @@ action: None
 │                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-action: MoveSession { subagents: None, oracle: None, oracle_choice: None, consent: SuspendConsent { discard_untracked: None, abort_operations: None, without_checkpoint: false, confirm_no_checkpoint: false }, skip_keep_paths: [], session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
+action: MoveSession { subagents: None, oracle: None, supervisors: None, oracle_choice: None, consent: SuspendConsent { discard_untracked: None, abort_operations: None, without_checkpoint: false, confirm_no_checkpoint: false }, skip_keep_paths: [], session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │

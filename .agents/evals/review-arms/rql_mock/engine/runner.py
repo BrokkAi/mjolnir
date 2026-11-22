@@ -275,15 +275,15 @@ class SealedRunner:
                         raise
                     self.driver.wait_idle(sid)
                     time.sleep(5)
-        self.verify(sid)
+        return self.verify(sid)
 
     def start(self, snapshot, record_id):
         self.check_quota()
         return SealedRunner.launch_session(self, snapshot, record_id)
 
-    def launch_session(self, snapshot, record_id):
+    def launch_session(self, snapshot, record_id, *, title=None):
         sid = self.launch(self.config["bundle"], snapshot["orphan"], self.config["profile"],
-                          f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
+                          title or f"RQL pilot engine {record_id[:12]}", base=snapshot["orphan"], effort=EFFORT)
         if not SESSION_ID.fullmatch(sid):
             raise RuntimeError("unexpected engine session id")
         return sid
@@ -409,9 +409,29 @@ class SealedRunner:
         return {"expected_provider_model": expected_model,
                 "reported_provider_models": models, "pages": pages}
 
-    def retire(self, directory, record, *, require_clean_audit=False):
-        from audit import audit_pilot
+    def audit_transcript(self, path, sid, session, *, capture_label):
+        from audit import ROLLOUT_DIRECTORY, audit_pilot
 
+        rollout_paths = ()
+        rollout_dir = None
+        captured = False
+        if session.get("harness_kind") == "codex":
+            # Each audit gets an atomically published snapshot, including retries of the same turn.
+            rollout_dir = path.parent / f"{capture_label}-{ROLLOUT_DIRECTORY}-{uuid4().hex}"
+            captured = self.driver.capture_pilot_rollouts(
+                path.parent, sid, reuse_existing=False, directory_name=rollout_dir.name)
+            if captured:
+                rollout_paths = sorted(rollout_dir.glob("rollout-*.jsonl"))
+        result = audit_pilot(path, sid, commits=(session["at"],), single_commit=True,
+                             engine=self.engine_only, rollout_paths=rollout_paths)
+        if captured:
+            result["rollout_directory"] = rollout_dir.name
+        elif rollout_dir is not None:
+            result["passed"] = False
+            result["hits"].append({"kind": "missing-codex-rollout", "snippet": "see rollout-capture-error.json"})
+        return result
+
+    def retire(self, directory, record, *, require_clean_audit=False, failed_turn=False):
         sid = record["session_id"]
         if not SESSION_ID.fullmatch(sid):
             raise RuntimeError("invalid session id in engine record")
@@ -420,7 +440,7 @@ class SealedRunner:
         sent = directory / "destroy-request.json"
         receipt = directory / "destroy-receipt.json"
         if receipt.exists():
-            return
+            return json.loads((directory / "audit.json").read_bytes())["passed"]
         if sent.exists():
             raise DestroyUncertain(f"destroy status for {sid} is uncertain; inspect {sent}")
 
@@ -428,10 +448,17 @@ class SealedRunner:
             expected_model = record.get("model_version") or self.config.get("model_version")
             if not expected_model:
                 raise RuntimeError("the engine record has no pinned provider model")
-            s = self.driver.wait_idle(sid)
+            s = self.driver.session(sid) if failed_turn else self.driver.wait_idle(sid)
             if (s.get("id") != sid or s.get("at") != record["orphan"] or s.get("base") != record["orphan"]
                     or s.get("no_later_history") is not True):
                 raise RuntimeError("live engine session does not match the recorded identity")
+            if failed_turn and (s.get("activity_state") or {}).get("state") == "turn":
+                try:
+                    self.driver.mj("interrupt-turn", "--session", sid)
+                except RuntimeError as error:
+                    if "no turn to cancel" not in str(error):
+                        raise
+                self.driver.wait_idle(sid)
             self.capture_pending(sid, directory)
             pages = self.driver.transcript(sid)
             if not pages or any(page["session_id"] != sid for page in pages):
@@ -441,11 +468,15 @@ class SealedRunner:
             transcript = directory / "transcript.json"
             save_json(transcript, pages)
             save_json(directory / "usage.json", self.capture_usage(sid, expected_model))
-            result = audit_pilot(transcript, sid, commits=(record["orphan"],), single_commit=True,
-                                 engine=self.engine_only)
+            result = self.audit_transcript(transcript, sid, s, capture_label="final")
             save_json(directory / "audit.json", result)
-            if any(hit["kind"] == "missing-or-unreadable-transcript" for hit in result["hits"]):
-                raise RuntimeError("the audit could not read the captured transcript")
+            capture_failure_kinds = {"missing-codex-rollout"}
+            # A failed turn can have a complete transcript with zero items.
+            if not (failed_turn and not any(page["items"] for page in pages)):
+                capture_failure_kinds.add("missing-or-unreadable-transcript")
+            capture_failures = capture_failure_kinds.intersection(hit["kind"] for hit in result["hits"])
+            if capture_failures:
+                raise RuntimeError(f"audit evidence capture failed: {', '.join(sorted(capture_failures))}")
             if require_clean_audit and not result["passed"]:
                 raise RuntimeError("the stored transcript did not pass the audit")
             hashes = file_digests(directory)
@@ -466,6 +497,7 @@ class SealedRunner:
             save_json(receipt, accepted)
         except RUN_ERRORS as error:
             raise DestroyUncertain(f"destroy was not confirmed for {sid}; inspect {sent}: {error}") from error
+        return result["passed"]
 
     def turn(self, sid, query, catalogue, menu, errors, directory_on_host):
         self.verify(sid)
@@ -512,15 +544,11 @@ class SealedRunner:
         return output, record, errors
 
     def audit_turn(self, sid, turn, directory):
-        from audit import audit_pilot
-
         # The existing audit considers only tool and terminal events. Retain
         # the host-only collection so a voided answer remains inspectable.
         path = directory / f"turn-{turn}-transcript.json"
         self.driver.save(path, self.driver.transcript(sid))
-        s = self.driver.session(sid)
-        snapshot = s["at"]
-        result = audit_pilot(path, sid, commits=(snapshot,), single_commit=True, engine=self.engine_only)
+        result = self.audit_transcript(path, sid, self.driver.session(sid), capture_label=f"turn-{turn}")
         self.driver.save(directory / f"turn-{turn}-audit.json", result)
         return result["passed"]
 
@@ -709,15 +737,15 @@ class EngineRunner(SealedRunner):
         return (record.get("outcome") == "error"
                 and record["diagnostic"].get("code") == "Authentication required")
 
-    def start(self, snapshot, record_id):
+    def start(self, snapshot, record_id, *, title=None):
         try:
             self.seed_login()
         except RUN_ERRORS as error:
             raise LaunchPreflightFailure(str(error)) from error
-        return self.launch_session(snapshot, record_id)
+        return self.launch_session(snapshot, record_id, title=title)
 
     def prepare(self, sid, snapshot, directory):
-        super().prepare(sid, snapshot, directory)
+        configured = super().prepare(sid, snapshot, directory)
         container = self.driver.container(sid)["container"]
         proc = subprocess.run(
             ["podman", "exec", container, "cat", str(SESSION_PROFILE_ROOT / sid / "settings.json")],
@@ -740,3 +768,4 @@ class EngineRunner(SealedRunner):
             capture_output=True, text=True, check=True, timeout=300,
         ).stdout.strip()
         save_json(directory / "engine-runtime.json", {"session_id": sid, "claude_code_version": version})
+        return configured

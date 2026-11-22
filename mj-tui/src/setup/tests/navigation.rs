@@ -40,12 +40,54 @@ fn one_click_opens_a_page_and_a_real_dropdown() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert_eq!(dialog.path, ["interface"], "one click opens a page");
 
-    for (section, label) in [
-        ("interface", "Theme"),
-        ("subagents", "Straightforward model"),
+    for (section, open_children, label, expected_path) in [
+        ("interface", &[][..], "Theme", vec!["interface", "theme"]),
+        (
+            "subagents",
+            &["straightforward"][..],
+            "opus",
+            vec!["subagents", "straightforward", "0", "model"],
+        ),
     ] {
         let mut dashboard = dashboard_with_session(stopped_session());
+        if section == "subagents" {
+            use mj_core::profile_capabilities::{
+                CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
+            };
+            use mj_core::worker_launch::ProfileConfig;
+            let choice = mj_core::acp::SessionConfigChoice {
+                value: "opus".into(),
+                name: "opus".into(),
+                description: None,
+            };
+            let profiles = dashboard
+                .config
+                .enabled_profiles()
+                .map(|(id, profile)| {
+                    (
+                        profile.capabilities_key(id),
+                        ProfileCapabilities {
+                            choices: CapabilityState::Ready(ProfileConfig {
+                                model: Some("opus".into()),
+                                models: vec![choice.clone()],
+                                efforts: vec![],
+                                observed_at: 1,
+                            }),
+                            efforts: std::collections::BTreeMap::new(),
+                        },
+                    )
+                })
+                .collect();
+            dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot { profiles });
+            dashboard.config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
+                model: "opus".into(),
+                effort: None,
+            }];
+        }
         dashboard.begin_settings_section(section, None);
+        for child in open_children {
+            choose(&mut dashboard, child);
+        }
         let lines = drawn(&mut dashboard, 140, 40);
         let (_, row) = point(&lines, label);
         let column = cell_column(&lines[usize::from(row)], "▾");
@@ -66,10 +108,8 @@ fn one_click_opens_a_page_and_a_real_dropdown() {
             dialog.combo.open_id().is_some(),
             "one click opens the dropdown"
         );
-        if section == "subagents" {
-            let control = dialog.descriptor(dialog.combo.open_id().unwrap()).unwrap();
-            assert_eq!(control.path, ["subagents", "straightforward", "model"]);
-        }
+        let control = dialog.descriptor(dialog.combo.open_id().unwrap()).unwrap();
+        assert_eq!(control.path, expected_path);
     }
 }
 

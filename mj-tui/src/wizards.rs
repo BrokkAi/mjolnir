@@ -14,8 +14,9 @@ use resources::{
 
 use mj_chat::path_input::PathInput;
 
+use mj_core::config::QuotaProvider;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mj_client::runtime_feed::LaunchRecency;
 use std::time::{Duration, Instant};
@@ -105,6 +106,7 @@ pub(crate) enum WizardControl {
     ReviewAttachments,
     Subagents,
     Oracle,
+    Supervisors,
     CreateManagedWorktree,
     UseSandboxedTarget,
     DiscardQueue,
@@ -150,6 +152,8 @@ pub(crate) struct NewWizard {
     pub(crate) step: WizardStep,
 
     pub(crate) profile: usize,
+    pub(crate) expanded_providers: BTreeSet<QuotaProvider>,
+    pub(crate) focused_provider: Option<QuotaProvider>,
     bundle: usize,
     pub(crate) target: usize,
     /// Whether the draft passed the target step without showing it, because
@@ -187,6 +191,140 @@ pub(crate) struct NewWizard {
     pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProfilePickerItem {
+    Auto,
+    Provider(QuotaProvider),
+    Profile {
+        profile_index: usize,
+        id: String,
+        harness: HarnessKind,
+    },
+}
+
+pub(crate) fn new_wizard_profile_items(
+    dashboard: &DashboardState,
+    expanded: &BTreeSet<QuotaProvider>,
+) -> Vec<ProfilePickerItem> {
+    let has_auto = dashboard.new_wizard_has_auto_primary();
+    let mut items = Vec::new();
+    if has_auto {
+        items.push(ProfilePickerItem::Auto);
+    }
+    let mut groups =
+        BTreeMap::<QuotaProvider, Vec<(usize, &str, &mj_core::config::HarnessProfile)>>::new();
+    for (idx, (id, profile)) in dashboard.offered_profiles().enumerate() {
+        let provider =
+            crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers);
+        groups
+            .entry(provider)
+            .or_default()
+            .push((idx + usize::from(has_auto), id, profile));
+    }
+    for (provider, members) in groups {
+        items.push(ProfilePickerItem::Provider(provider.clone()));
+        if expanded.contains(&provider) {
+            items.extend(members.into_iter().map(|(profile_index, id, profile)| {
+                ProfilePickerItem::Profile {
+                    profile_index,
+                    id: id.to_owned(),
+                    harness: profile.kind,
+                }
+            }));
+        }
+    }
+    items
+}
+
+impl NewWizard {
+    pub(crate) fn toggle_provider(&mut self, provider: QuotaProvider) {
+        if !self.expanded_providers.remove(&provider) {
+            self.expanded_providers.insert(provider);
+        }
+    }
+
+    pub(crate) fn provider_for_profile(
+        dashboard: &DashboardState,
+        profile_index: usize,
+    ) -> Option<QuotaProvider> {
+        let has_auto = dashboard.new_wizard_has_auto_primary();
+        if has_auto && profile_index == 0 {
+            return None;
+        }
+        let offered_idx = profile_index.checked_sub(usize::from(has_auto))?;
+        let (id, profile) = dashboard.offered_profiles().nth(offered_idx)?;
+        Some(crate::render::quota_pools::profile_provider(
+            id,
+            profile,
+            &dashboard.quota_providers,
+        ))
+    }
+
+    /// The focused provider header if it still exists among offered profiles.
+    /// Asynchronous provider discovery can replace a `(resolving)` group with
+    /// the resolved provider; clearing a stale focus keeps the picker in sync.
+    pub(crate) fn effective_focused_provider(
+        &self,
+        dashboard: &DashboardState,
+    ) -> Option<QuotaProvider> {
+        let focused = self.focused_provider.as_ref()?;
+        let present = dashboard.offered_profiles().any(|(id, profile)| {
+            &crate::render::quota_pools::profile_provider(id, profile, &dashboard.quota_providers)
+                == focused
+        });
+        present.then(|| focused.clone())
+    }
+
+    pub(crate) fn is_resolving_provider(provider: &QuotaProvider) -> bool {
+        matches!(provider, QuotaProvider::Other(name) if name.ends_with(" (resolving)"))
+    }
+
+    pub(crate) fn selected_provider(&self, dashboard: &DashboardState) -> Option<QuotaProvider> {
+        // On later steps, retain the explicit provider choice even if its last
+        // profile disappears so creation reports the unavailability rather than
+        // silently falling back to another profile.
+        let focused = if self.step == WizardStep::Profile {
+            self.effective_focused_provider(dashboard)
+        } else {
+            self.focused_provider.clone()
+        };
+        focused.filter(|provider| !Self::is_resolving_provider(provider))
+    }
+
+    pub(crate) fn selected_profile_id(&self, dashboard: &DashboardState) -> Option<String> {
+        if self.selected_provider(dashboard).is_some() {
+            Some(String::new())
+        } else {
+            dashboard.new_wizard_profile_id(self.profile)
+        }
+    }
+
+    pub(crate) fn selected_profile_label(&self, dashboard: &DashboardState) -> String {
+        if let Some(provider) = self.selected_provider(dashboard) {
+            format!("Auto ({})", provider.display_name())
+        } else {
+            dashboard.new_wizard_profile_label(self.profile)
+        }
+    }
+
+    /// Expanded provider groups for rendering and event handling. Whenever
+    /// focus is on a concrete profile rather than a provider header, its
+    /// current provider is expanded so the selected profile is never hidden
+    /// after asynchronous provider resolution.
+    pub(crate) fn effective_expanded_providers(
+        &self,
+        dashboard: &DashboardState,
+    ) -> BTreeSet<QuotaProvider> {
+        let mut expanded = self.expanded_providers.clone();
+        if self.effective_focused_provider(dashboard).is_none()
+            && let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+        {
+            expanded.insert(provider);
+        }
+        expanded
+    }
+}
+
 impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
         self.subagents == other.subagents
@@ -195,6 +333,8 @@ impl PartialEq for NewWizard {
             && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile
+            && self.expanded_providers == other.expanded_providers
+            && self.focused_provider == other.focused_provider
             && self.bundle == other.bundle
             && self.target == other.target
             && self.profile_step_skipped == other.profile_step_skipped

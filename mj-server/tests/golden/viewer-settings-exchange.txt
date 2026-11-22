@@ -108,7 +108,7 @@
                   "subagents"
                 ],
                 "label": "Sub-agents",
-                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+                "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
                 "control": "page",
                 "summary": "Up to 6 at once"
               },
@@ -375,54 +375,10 @@
         ]
       },
       "subagent_options": {
-        "straightforward": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "subtle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "oracle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        }
+        "primary": {},
+        "straightforward": {},
+        "subtle": {},
+        "oracle": {}
       }
     }
   },
@@ -507,7 +463,7 @@
                   "subagents"
                 ],
                 "label": "Sub-agents",
-                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+                "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
                 "control": "page",
                 "summary": "Up to 6 at once"
               },
@@ -603,54 +559,10 @@
         "removable": false
       },
       "subagent_options": {
-        "straightforward": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "subtle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "oracle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        }
+        "primary": {},
+        "straightforward": {},
+        "subtle": {},
+        "oracle": {}
       }
     }
   },
@@ -732,54 +644,10 @@
         "removable": false
       },
       "subagent_options": {
-        "straightforward": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "subtle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "oracle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        }
+        "primary": {},
+        "straightforward": {},
+        "subtle": {},
+        "oracle": {}
       }
     }
   },
@@ -965,7 +833,7 @@
                   "subagents"
                 ],
                 "label": "Sub-agents",
-                "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+                "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
                 "control": "page",
                 "summary": "Up to 6 at once"
               },
@@ -1061,54 +929,10 @@
         "removable": false
       },
       "subagent_options": {
-        "straightforward": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "subtle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "oracle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        }
+        "primary": {},
+        "straightforward": {},
+        "subtle": {},
+        "oracle": {}
       }
     }
   },
@@ -1129,7 +953,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
         "groups": [
           {
             "rows": [
@@ -1147,84 +971,42 @@
               {
                 "path": [
                   "subagents",
-                  "straightforward",
-                  "model"
+                  "primary"
                 ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Primary and supervisor",
+                "help": "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+                "control": "page",
+                "summary": "0 entries"
               },
               {
                 "path": [
                   "subagents",
-                  "subtle",
-                  "model"
+                  "straightforward"
                 ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Straightforward",
+                "help": "Work with a clear method. Add one or more (model, effort) pairs.",
+                "control": "page",
+                "summary": "0 entries"
               },
               {
                 "path": [
                   "subagents",
-                  "oracle",
-                  "model"
+                  "subtle"
                 ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "0 entries"
               },
               {
                 "path": [
                   "subagents",
-                  "use_same_on_all_targets"
+                  "oracle"
                 ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": true
+                "label": "Oracle",
+                "help": "For read-only tricky questions that the primary agent isn't sure about.",
+                "control": "page",
+                "summary": "0 entries"
               }
             ]
           }
@@ -1232,54 +1014,10 @@
         "removable": false
       },
       "subagent_options": {
-        "straightforward": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "subtle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        },
-        "oracle": {
-          "models": [
-            {
-              "value": "opus",
-              "name": "Opus",
-              "description": null
-            },
-            {
-              "value": "sonnet",
-              "name": "Sonnet",
-              "description": null
-            }
-          ],
-          "efforts": [],
-          "unavailable": []
-        }
+        "primary": {},
+        "straightforward": {},
+        "subtle": {},
+        "oracle": {}
       }
     }
   },
@@ -1323,7 +1061,7 @@
           "Settings",
           "Sub-agents"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
         "groups": [
           {
             "rows": [
@@ -1341,84 +1079,42 @@
               {
                 "path": [
                   "subagents",
-                  "straightforward",
-                  "model"
+                  "primary"
                 ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Primary and supervisor",
+                "help": "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+                "control": "page",
+                "summary": "0 entries"
               },
               {
                 "path": [
                   "subagents",
-                  "subtle",
-                  "model"
+                  "straightforward"
                 ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Straightforward",
+                "help": "Work with a clear method. Add one or more (model, effort) pairs.",
+                "control": "page",
+                "summary": "0 entries"
               },
               {
                 "path": [
                   "subagents",
-                  "oracle",
-                  "model"
+                  "subtle"
                 ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "0 entries"
               },
               {
                 "path": [
                   "subagents",
-                  "use_same_on_all_targets"
+                  "oracle"
                 ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": true
+                "label": "Oracle",
+                "help": "For read-only tricky questions that the primary agent isn't sure about.",
+                "control": "page",
+                "summary": "0 entries"
               }
             ]
           }
@@ -1429,16 +1125,148 @@
     }
   },
   {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents",
+        "subtle"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents",
+          "subtle"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Subtle"
+        ],
+        "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+        "groups": [],
+        "add": {
+          "label": "Add",
+          "named": false
+        },
+        "removable": false
+      },
+      "subagent_options": {
+        "primary": {},
+        "straightforward": {},
+        "subtle": {},
+        "oracle": {}
+      }
+    }
+  },
+  {
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "subtle"
+      ],
+      "edit": {
+        "kind": "add",
+        "path": [
+          "subagents",
+          "subtle"
+        ]
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents",
+          "subtle",
+          "0"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Subtle",
+          "Item 1"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "0",
+                  "model"
+                ],
+                "label": "Model",
+                "control": "choice",
+                "value": "",
+                "choices": [
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle",
+                  "0",
+                  "effort"
+                ],
+                "label": "Effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": true
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "subagents",
+        "subtle",
+        "0"
       ],
       "edit": {
         "kind": "set",
         "path": [
           "subagents",
           "subtle",
+          "0",
           "model"
         ],
         "choice": "opus"
@@ -1463,66 +1291,32 @@
       },
       "page": {
         "path": [
-          "subagents"
+          "subagents",
+          "subtle",
+          "0"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Subtle",
+          "Item 1"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Changes stay in this draft until you save.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
                   "subtle",
+                  "0",
                   "model"
                 ],
-                "label": "Subtle model",
+                "label": "Model",
                 "control": "choice",
                 "value": "opus",
                 "choices": [
                   {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
                     "value": "opus",
                     "label": "opus"
                   },
@@ -1536,9 +1330,10 @@
                 "path": [
                   "subagents",
                   "subtle",
+                  "0",
                   "effort"
                 ],
-                "label": "Subtle effort",
+                "label": "Effort",
                 "control": "choice",
                 "value": null,
                 "choices": [
@@ -1555,45 +1350,11 @@
                     "label": "max"
                   }
                 ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": true
               }
             ]
           }
         ],
-        "removable": false
+        "removable": true
       }
     }
   },
@@ -1601,7 +1362,9 @@
     "uri": "/api/settings/save",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "subtle",
+        "0"
       ]
     },
     "status": 400,
@@ -1610,16 +1373,289 @@
     }
   },
   {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents"
+        ],
+        "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "max_concurrent"
+                ],
+                "label": "Maximum concurrent children",
+                "control": "text",
+                "value": "6",
+                "placeholder": "6 (default)",
+                "number": true
+              },
+              {
+                "path": [
+                  "subagents",
+                  "primary"
+                ],
+                "label": "Primary and supervisor",
+                "help": "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+                "control": "page",
+                "summary": "0 entries"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward"
+                ],
+                "label": "Straightforward",
+                "help": "Work with a clear method. Add one or more (model, effort) pairs.",
+                "control": "page",
+                "summary": "0 entries"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "subtle"
+                ],
+                "label": "Subtle",
+                "help": "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.",
+                "control": "page",
+                "summary": "1 entry"
+              },
+              {
+                "path": [
+                  "subagents",
+                  "oracle"
+                ],
+                "label": "Oracle",
+                "help": "For read-only tricky questions that the primary agent isn't sure about.",
+                "control": "page",
+                "summary": "0 entries"
+              }
+            ]
+          }
+        ],
+        "removable": false
+      },
+      "subagent_options": {
+        "primary": {},
+        "straightforward": {},
+        "subtle": {
+          "0": {
+            "models": [
+              {
+                "value": "opus",
+                "name": "Opus",
+                "description": null
+              },
+              {
+                "value": "sonnet",
+                "name": "Sonnet",
+                "description": null
+              }
+            ],
+            "efforts": [
+              {
+                "value": "high",
+                "name": "High",
+                "description": null
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": null
+              }
+            ],
+            "unavailable": []
+          }
+        },
+        "oracle": {}
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents",
+        "straightforward"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents",
+          "straightforward"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Straightforward"
+        ],
+        "help": "Work with a clear method. Add one or more (model, effort) pairs.",
+        "groups": [],
+        "add": {
+          "label": "Add",
+          "named": false
+        },
+        "removable": false
+      },
+      "subagent_options": {
+        "primary": {},
+        "straightforward": {},
+        "subtle": {
+          "0": {
+            "models": [
+              {
+                "value": "opus",
+                "name": "Opus",
+                "description": null
+              },
+              {
+                "value": "sonnet",
+                "name": "Sonnet",
+                "description": null
+              }
+            ],
+            "efforts": [
+              {
+                "value": "high",
+                "name": "High",
+                "description": null
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": null
+              }
+            ],
+            "unavailable": []
+          }
+        },
+        "oracle": {}
+      }
+    }
+  },
+  {
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "straightforward"
+      ],
+      "edit": {
+        "kind": "add",
+        "path": [
+          "subagents",
+          "straightforward"
+        ]
+      }
+    },
+    "status": 200,
+    "response": {
+      "draft_environments": {
+        "profiles.claude": {
+          "ANTHROPIC_API_KEY": {
+            "mj_hidden_value": true
+          },
+          "PROXY_TOKEN": {
+            "from_secret": "PROXY_TOKEN"
+          }
+        },
+        "targets.lab": {
+          "LAB_TOKEN": {
+            "mj_hidden_value": true
+          }
+        }
+      },
+      "page": {
+        "path": [
+          "subagents",
+          "straightforward",
+          "0"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Straightforward",
+          "Item 1"
+        ],
+        "help": "Changes stay in this draft until you save.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "0",
+                  "model"
+                ],
+                "label": "Model",
+                "control": "choice",
+                "value": "",
+                "choices": [
+                  {
+                    "value": "opus",
+                    "label": "opus"
+                  },
+                  {
+                    "value": "sonnet",
+                    "label": "sonnet"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "0",
+                  "effort"
+                ],
+                "label": "Effort",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Harness default)"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "removable": true
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/edit",
+    "request": {
+      "page": [
+        "subagents",
+        "straightforward",
+        "0"
       ],
       "edit": {
         "kind": "set",
         "path": [
           "subagents",
           "straightforward",
+          "0",
           "model"
         ],
         "choice": "opus"
@@ -1644,41 +1680,31 @@
       },
       "page": {
         "path": [
-          "subagents"
+          "subagents",
+          "straightforward",
+          "0"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Straightforward",
+          "Item 1"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Changes stay in this draft until you save.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
+                  "0",
                   "model"
                 ],
-                "label": "Straightforward model",
+                "label": "Model",
                 "control": "choice",
                 "value": "opus",
                 "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
                   {
                     "value": "opus",
                     "label": "opus"
@@ -1693,9 +1719,10 @@
                 "path": [
                   "subagents",
                   "straightforward",
+                  "0",
                   "effort"
                 ],
-                "label": "Straightforward effort",
+                "label": "Effort",
                 "control": "choice",
                 "value": null,
                 "choices": [
@@ -1712,93 +1739,11 @@
                     "label": "max"
                   }
                 ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": true
               }
             ]
           }
         ],
-        "removable": false
+        "removable": true
       }
     }
   },
@@ -1806,13 +1751,16 @@
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "straightforward",
+        "0"
       ],
       "edit": {
         "kind": "set",
         "path": [
           "subagents",
           "straightforward",
+          "0",
           "effort"
         ],
         "choice": "high"
@@ -1837,41 +1785,31 @@
       },
       "page": {
         "path": [
-          "subagents"
+          "subagents",
+          "straightforward",
+          "0"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Straightforward",
+          "Item 1"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Changes stay in this draft until you save.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
+                  "0",
                   "model"
                 ],
-                "label": "Straightforward model",
+                "label": "Model",
                 "control": "choice",
                 "value": "opus",
                 "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
                   {
                     "value": "opus",
                     "label": "opus"
@@ -1886,9 +1824,10 @@
                 "path": [
                   "subagents",
                   "straightforward",
+                  "0",
                   "effort"
                 ],
-                "label": "Straightforward effort",
+                "label": "Effort",
                 "control": "choice",
                 "value": "high",
                 "choices": [
@@ -1905,93 +1844,118 @@
                     "label": "max"
                   }
                 ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": true
               }
             ]
           }
         ],
+        "removable": true
+      }
+    }
+  },
+  {
+    "uri": "/api/settings/page",
+    "request": {
+      "path": [
+        "subagents",
+        "straightforward"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "page": {
+        "path": [
+          "subagents",
+          "straightforward"
+        ],
+        "breadcrumb": [
+          "Settings",
+          "Sub-agents",
+          "Straightforward"
+        ],
+        "help": "Work with a clear method. Add one or more (model, effort) pairs.",
+        "groups": [
+          {
+            "rows": [
+              {
+                "path": [
+                  "subagents",
+                  "straightforward",
+                  "0"
+                ],
+                "label": "Item 1",
+                "control": "page",
+                "summary": "2 settings"
+              }
+            ]
+          }
+        ],
+        "add": {
+          "label": "Add",
+          "named": false
+        },
         "removable": false
+      },
+      "subagent_options": {
+        "primary": {},
+        "straightforward": {
+          "0": {
+            "models": [
+              {
+                "value": "opus",
+                "name": "Opus",
+                "description": null
+              },
+              {
+                "value": "sonnet",
+                "name": "Sonnet",
+                "description": null
+              }
+            ],
+            "efforts": [
+              {
+                "value": "high",
+                "name": "High",
+                "description": null
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": null
+              }
+            ],
+            "unavailable": []
+          }
+        },
+        "subtle": {
+          "0": {
+            "models": [
+              {
+                "value": "opus",
+                "name": "Opus",
+                "description": null
+              },
+              {
+                "value": "sonnet",
+                "name": "Sonnet",
+                "description": null
+              }
+            ],
+            "efforts": [
+              {
+                "value": "high",
+                "name": "High",
+                "description": null
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": null
+              }
+            ],
+            "unavailable": []
+          }
+        },
+        "oracle": {}
       }
     }
   },
@@ -1999,13 +1963,14 @@
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "straightforward"
       ],
       "edit": {
-        "kind": "toggle",
+        "kind": "add",
         "path": [
           "subagents",
-          "use_same_on_all_targets"
+          "straightforward"
         ]
       }
     },
@@ -2028,41 +1993,31 @@
       },
       "page": {
         "path": [
-          "subagents"
+          "subagents",
+          "straightforward",
+          "1"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Straightforward",
+          "Item 2"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Changes stay in this draft until you save.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
+                  "1",
                   "model"
                 ],
-                "label": "Straightforward model",
+                "label": "Model",
                 "control": "choice",
-                "value": "opus",
+                "value": "",
                 "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
                   {
                     "value": "opus",
                     "label": "opus"
@@ -2077,192 +2032,23 @@
                 "path": [
                   "subagents",
                   "straightforward",
+                  "1",
                   "effort"
                 ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
+                "label": "Effort",
                 "control": "choice",
                 "value": null,
                 "choices": [
                   {
                     "value": null,
                     "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": false
-              }
-            ]
-          },
-          {
-            "heading": "YOLO Target Subagents",
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
                   }
                 ]
               }
             ]
           }
         ],
-        "removable": false
+        "removable": true
       }
     }
   },
@@ -2270,17 +2056,19 @@
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "straightforward",
+        "1"
       ],
       "edit": {
         "kind": "set",
         "path": [
           "subagents",
-          "yolo",
           "straightforward",
+          "1",
           "model"
         ],
-        "choice": "opus"
+        "choice": "sonnet"
       }
     },
     "status": 200,
@@ -2302,340 +2090,31 @@
       },
       "page": {
         "path": [
-          "subagents"
-        ],
-        "breadcrumb": [
-          "Settings",
-          "Sub-agents"
-        ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
-        "groups": [
-          {
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": false
-              }
-            ]
-          },
-          {
-            "heading": "YOLO Target Subagents",
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              }
-            ]
-          }
-        ],
-        "removable": false
-      }
-    }
-  },
-  {
-    "uri": "/api/settings/edit",
-    "request": {
-      "page": [
-        "subagents"
-      ],
-      "edit": {
-        "kind": "set",
-        "path": [
           "subagents",
-          "yolo",
           "straightforward",
-          "effort"
-        ],
-        "choice": "high"
-      }
-    },
-    "status": 200,
-    "response": {
-      "draft_environments": {
-        "profiles.claude": {
-          "ANTHROPIC_API_KEY": {
-            "mj_hidden_value": true
-          },
-          "PROXY_TOKEN": {
-            "from_secret": "PROXY_TOKEN"
-          }
-        },
-        "targets.lab": {
-          "LAB_TOKEN": {
-            "mj_hidden_value": true
-          }
-        }
-      },
-      "page": {
-        "path": [
-          "subagents"
+          "1"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Straightforward",
+          "Item 2"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Changes stay in this draft until you save.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
+                  "1",
                   "model"
                 ],
-                "label": "Straightforward model",
+                "label": "Model",
                 "control": "choice",
-                "value": "opus",
+                "value": "sonnet",
                 "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
                   {
                     "value": "opus",
                     "label": "opus"
@@ -2650,231 +2129,57 @@
                 "path": [
                   "subagents",
                   "straightforward",
+                  "1",
                   "effort"
                 ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
+                "label": "Effort",
                 "control": "choice",
                 "value": null,
                 "choices": [
                   {
                     "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": false
-              }
-            ]
-          },
-          {
-            "heading": "YOLO Target Subagents",
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
+                    "label": "Default (Discovering efforts…)"
                   }
                 ]
               }
             ]
           }
         ],
-        "removable": false
+        "removable": true,
+        "notices": [
+          "Discovery: claude: effort discovery pending"
+        ]
       }
+    }
+  },
+  {
+    "uri": "/api/settings/save",
+    "request": {
+      "page": [
+        "subagents",
+        "straightforward",
+        "1"
+      ]
+    },
+    "status": 400,
+    "response": {
+      "error": "[subagents.straightforward] may configure at most one model per provider (both opus and sonnet belong to Anthropic)"
     }
   },
   {
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "straightforward",
+        "1"
       ],
       "edit": {
-        "kind": "toggle",
+        "kind": "remove",
         "path": [
           "subagents",
-          "use_same_on_all_targets"
+          "straightforward",
+          "1"
         ]
       }
     },
@@ -2897,456 +2202,35 @@
       },
       "page": {
         "path": [
-          "subagents"
-        ],
-        "breadcrumb": [
-          "Settings",
-          "Sub-agents"
-        ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
-        "groups": [
-          {
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": true
-              }
-            ]
-          }
-        ],
-        "removable": false
-      }
-    }
-  },
-  {
-    "uri": "/api/settings/edit",
-    "request": {
-      "page": [
-        "subagents"
-      ],
-      "edit": {
-        "kind": "toggle",
-        "path": [
           "subagents",
-          "use_same_on_all_targets"
-        ]
-      }
-    },
-    "status": 200,
-    "response": {
-      "draft_environments": {
-        "profiles.claude": {
-          "ANTHROPIC_API_KEY": {
-            "mj_hidden_value": true
-          },
-          "PROXY_TOKEN": {
-            "from_secret": "PROXY_TOKEN"
-          }
-        },
-        "targets.lab": {
-          "LAB_TOKEN": {
-            "mj_hidden_value": true
-          }
-        }
-      },
-      "page": {
-        "path": [
-          "subagents"
+          "straightforward"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Straightforward"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Work with a clear method. Add one or more (model, effort) pairs.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
-                  "model"
+                  "0"
                 ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": false
-              }
-            ]
-          },
-          {
-            "heading": "YOLO Target Subagents",
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Item 1",
+                "control": "page",
+                "summary": "2 settings"
               }
             ]
           }
         ],
+        "add": {
+          "label": "Add",
+          "named": false
+        },
         "removable": false
       }
     }
@@ -3355,7 +2239,8 @@
     "uri": "/api/settings/save",
     "request": {
       "page": [
-        "subagents"
+        "subagents",
+        "straightforward"
       ]
     },
     "status": 200,
@@ -3392,265 +2277,35 @@
       },
       "page": {
         "path": [
-          "subagents"
+          "subagents",
+          "straightforward"
         ],
         "breadcrumb": [
           "Settings",
-          "Sub-agents"
+          "Sub-agents",
+          "Straightforward"
         ],
-        "help": "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.",
+        "help": "Work with a clear method. Add one or more (model, effort) pairs.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
                   "subagents",
-                  "max_concurrent"
-                ],
-                "label": "Maximum concurrent children",
-                "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
-                "number": true
-              },
-              {
-                "path": [
-                  "subagents",
                   "straightforward",
-                  "model"
+                  "0"
                 ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "subtle",
-                  "effort"
-                ],
-                "label": "Subtle effort",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "use_same_on_all_targets"
-                ],
-                "label": "Use the same subagents on all targets",
-                "help": "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.",
-                "control": "checkbox",
-                "checked": false
-              }
-            ]
-          },
-          {
-            "heading": "YOLO Target Subagents",
-            "rows": [
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "model"
-                ],
-                "label": "Straightforward model",
-                "control": "choice",
-                "value": "opus",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "straightforward",
-                  "effort"
-                ],
-                "label": "Straightforward effort",
-                "control": "choice",
-                "value": "high",
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "Default (Harness default)"
-                  },
-                  {
-                    "value": "high",
-                    "label": "high"
-                  },
-                  {
-                    "value": "max",
-                    "label": "max"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "subtle",
-                  "model"
-                ],
-                "label": "Subtle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
-              },
-              {
-                "path": [
-                  "subagents",
-                  "yolo",
-                  "oracle",
-                  "model"
-                ],
-                "label": "Oracle model",
-                "control": "choice",
-                "value": null,
-                "choices": [
-                  {
-                    "value": null,
-                    "label": "None"
-                  },
-                  {
-                    "value": "opus",
-                    "label": "opus"
-                  },
-                  {
-                    "value": "sonnet",
-                    "label": "sonnet"
-                  }
-                ]
+                "label": "Item 1",
+                "control": "page",
+                "summary": "2 settings"
               }
             ]
           }
         ],
+        "add": {
+          "label": "Add",
+          "named": false
+        },
         "removable": false
       }
     }

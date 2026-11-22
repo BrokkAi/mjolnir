@@ -6,7 +6,11 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "guardian":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+        }
+        "guardian" if path.len() == 1 => {
+            let g = mj_core::config::GuardianConfig::default();
+            json!({"enabled":g.enabled,"local_classifier":g.local_classifier,"use_gpu":g.use_gpu})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -35,24 +39,16 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null},"use_same_on_all_targets":true,"yolo":{"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}}})
-        }
-        "subagents"
-            if path.len() == 2
-                && (matches!(key, "straightforward" | "subtle" | "oracle") || key == "yolo") =>
-        {
-            if key == "yolo" {
-                json!({"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}})
-            } else {
-                json!({"model":null,"effort":null})
-            }
+            json!({"max_concurrent":6,"primary":[],"straightforward":[],"subtle":[],"oracle":[]})
         }
         "subagents"
             if path.len() == 3
-                && path[1] == "yolo"
-                && matches!(key, "straightforward" | "subtle" | "oracle") =>
+                && matches!(
+                    path[1].as_str(),
+                    "primary" | "straightforward" | "subtle" | "oracle"
+                ) =>
         {
-            json!({"model":null,"effort":null})
+            json!({"model":"","effort":null})
         }
         "profiles" if path.len() == 2 => {
             profile_defaults(value["kind"].as_str().unwrap_or("codex"))
@@ -303,8 +299,7 @@ pub fn label(key: &str) -> String {
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
-        "use_same_on_all_targets" => "Use the same subagents on all targets",
-        "yolo" => "YOLO Target Subagents",
+        "primary" => "Primary and supervisor",
         "straightforward" => "Straightforward",
         "subtle" => "Subtle",
         "oracle" => "Oracle",
@@ -359,6 +354,8 @@ pub fn label(key: &str) -> String {
         "repositories" => "Repositories",
         "id" => "Name",
         "github" => "Git URL or GitHub owner/repository",
+        "guardian" => "Guardian",
+        "local_classifier" => "Local classifier",
         "local" => "Local repository directory",
         "destination" => "Checkout folder",
         "tools_directory" => "Native tool cache directory",
@@ -377,18 +374,8 @@ pub fn field_label(path: &[String]) -> String {
         .as_slice()
     {
         ["github"] => "GitHub events".to_owned(),
-        ["subagents", task, field]
-            if ["straightforward", "subtle", "oracle"].contains(task)
-                && ["model", "effort"].contains(field) =>
-        {
-            format!("{} {}", label(task), field)
-        }
-        ["subagents", "yolo", task, field]
-            if ["straightforward", "subtle", "oracle"].contains(task)
-                && ["model", "effort"].contains(field) =>
-        {
-            format!("{} {}", label(task), field)
-        }
+        ["guardian", "use_gpu"] => "Use GPU for local classifier".to_owned(),
+        ["github", "watch", "use_gpu"] => "Use GPU for GitHub relevance".to_owned(),
         ["machines", _, "build_cache", "scheduler", "cpus"] => {
             "Concurrent compile permits".to_owned()
         }
@@ -399,33 +386,17 @@ pub fn field_label(path: &[String]) -> String {
     }
 }
 
-/// The `_subagent_options` key for a sub-agent task path. The shared set uses
-/// the task name; the YOLO set is prefixed so its model's efforts are
-/// discovered independently.
-pub fn subagent_options_key(path: &[String]) -> Option<String> {
+/// The `(_subagent_options task, index)` lookup key for a sub-agent array row.
+pub fn subagent_options_path(path: &[String]) -> Option<(&str, &str)> {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
-        ["subagents", task, ..] if matches!(*task, "straightforward" | "subtle" | "oracle") => {
-            Some((*task).to_owned())
-        }
-        ["subagents", "yolo", task, ..]
-            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        ["subagents", task, index, ..]
+            if matches!(*task, "primary" | "straightforward" | "subtle" | "oracle") =>
         {
-            Some(format!("yolo.{task}"))
+            Some((*task, *index))
         }
         _ => None,
     }
-}
-
-/// Whether a subagent model/effort path belongs to the YOLO set.
-pub fn is_yolo_subagent_path(path: &[String]) -> bool {
-    path.len() >= 3 && path[0] == "subagents" && path[1] == "yolo"
-}
-
-/// Whether the Sub-agents page uses one set for every target. A missing value
-/// is the default, which shares.
-pub fn shared_subagents(value: &Value) -> bool {
-    value["use_same_on_all_targets"].as_bool().unwrap_or(true)
 }
 
 /// What an empty (JSON null) value means for this setting: the effect the
@@ -435,7 +406,7 @@ pub fn shared_subagents(value: &Value) -> bool {
 pub fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
-        ["subagents", _, "model"] | ["subagents", "yolo", _, "model"] => "None".to_owned(),
+        ["subagents", _, _, "model"] => "None".to_owned(),
         ["machines", _, "build_cache", "tools_directory"] => {
             "~/.cache/mjolnir/build on the machine".to_owned()
         }
@@ -449,13 +420,13 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
-        ["subagents", task, "effort"] | ["subagents", "yolo", task, "effort"]
-            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        ["subagents", task, index, "effort"]
+            if matches!(*task, "primary" | "straightforward" | "subtle" | "oracle") =>
         {
-            let options = subagent_options_key(path)
-                .and_then(|key| draft["_subagent_options"].get(key))
-                .is_some_and(|options| options[super::discovery::EFFORTS_PENDING] == true);
-            if options {
+            let pending = draft["_subagent_options"][*task][*index]
+                [super::discovery::EFFORTS_PENDING]
+                == true;
+            if pending {
                 "Discovering efforts…".into()
             } else {
                 "Harness default".into()
@@ -606,6 +577,15 @@ pub fn section_summary(
                 "On · GitHub activity".to_owned()
             }
         }
+        "guardian" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else if section["local_classifier"] == Value::Bool(false) {
+                "On · utility/ACP only".to_owned()
+            } else {
+                "On · local classifier".to_owned()
+            }
+        }
         "quota" => "Host".to_owned(),
         "daemon" => match section["runtime"].as_str() {
             Some("podman") => "Podman container".to_owned(),
@@ -657,6 +637,13 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
             value.to_string()
         };
     };
+    if value.is_empty()
+        && path.last().is_some_and(|key| key == "model")
+        && (subagent_options_path(path).is_some()
+            || (path.len() == 4 && path[0] == "review" && path[1] == "reviewers"))
+    {
+        return "Select a model".to_owned();
+    }
     // Only the theme field: `auto` is also an image pull policy.
     if super::draft::storage_path(path) == ["theme"]
         && let Ok(choice) = serde_json::from_value::<ThemeChoice>(Value::String(value.into()))
@@ -775,16 +762,24 @@ pub fn build_cache_gigabytes_label(size: &str) -> String {
 
 pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
-    let subagent = subagent_options_key(path);
+    let subagent = subagent_options_path(path);
     let reviewer = path.len() == 4 && path[0] == "review" && path[1] == "reviewers";
     if (subagent.is_some() || reviewer) && matches!(key, "model" | "effort") {
-        let mut choices = if path[0] == "review" && key == "model" {
-            Vec::new()
+        let mut choices = if key == "model" {
+            if draft
+                .pointer(&super::draft::pointer(path))
+                .and_then(Value::as_str)
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                vec![Value::String(String::new())]
+            } else {
+                Vec::new()
+            }
         } else {
             vec![Value::Null]
         };
-        let options = if let Some(subagent) = subagent {
-            &draft["_subagent_options"][&subagent]
+        let options = if let Some((task, index)) = subagent {
+            &draft["_subagent_options"][task][index]
         } else {
             &draft["_reviewer_options"][&path[2]]
         };
@@ -944,6 +939,26 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
                 "Automatically use a GPU only when it runs faster than the CPU. Turn off for CPU-only GitHub relevance scoring. Device failures select CPU and report a notice.",
             );
         }
+        ["guardian"] => {
+            return Some(
+                "Review permission requests using the local classifier and utility/ACP review path.",
+            );
+        }
+        ["guardian", "enabled"] => {
+            return Some(
+                "Controls daemon reviews and new sessions immediately. When off, permission requests are sent to you.",
+            );
+        }
+        ["guardian", "local_classifier"] => {
+            return Some(
+                "Controls daemon reviews and new sessions immediately. When off, Stage 1 is skipped and review goes to utility/ACP.",
+            );
+        }
+        ["guardian", "use_gpu"] => {
+            return Some(
+                "Use a GPU for the local classifier. This takes effect when the background server next starts.",
+            );
+        }
         ["github"] | ["github", "watch"] => {
             return Some(
                 "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
@@ -1052,12 +1067,10 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
         "subagents" => {
-            "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
+            "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents."
         }
-        "use_same_on_all_targets" => {
-            "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
-        }
-        "straightforward" => "Work with a clear method. Choose a model and its effort.",
+        "primary" => "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+        "straightforward" => "Work with a clear method. Add one or more (model, effort) pairs.",
         "subtle" => {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
@@ -1097,7 +1110,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Antigravity only: offer the Claude and GPT models of the account's third-party quota pool. Off: the profile offers only Gemini models, refuses switching to the others, and hides that pool's quota. A session already on one keeps it until you switch."
         }
         "mjolnir_guardian" => {
-            "On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. Off: pending requests go to your permission form. Applies to new sessions."
+            "On runtimes that keep configured approvals, Mjolnir reviews the tool permission requests that reach it after the harness applies its own rules. The top-level Guardian setting must also be enabled. Off: pending requests go to your permission form. Applies to new sessions."
         }
         "claude_permission_mode" => {
             "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."

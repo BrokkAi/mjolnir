@@ -112,7 +112,7 @@ pub fn run_suspend_preflight(
                 Some(&spec.session_id),
                 exclude_commits.clone(),
                 std::path::PathBuf::new(),
-            )
+            )?
         } else {
             mj_checkpoint::checkpoint::managed_clone_snapshot_input(
                 &repo.id,
@@ -120,7 +120,7 @@ pub fn run_suspend_preflight(
                 Some(&spec.session_id),
                 std::path::PathBuf::new(),
                 repo.origin_override.clone(),
-            )
+            )?
         };
         input.keep_dir = repo.keep_dir.clone();
 

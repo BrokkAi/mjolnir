@@ -19,14 +19,44 @@ impl DashboardState {
         .cloned()
     }
 
+    pub(crate) fn new_wizard_has_auto_primary(&self) -> bool {
+        self.config.subagents.primary_configured()
+    }
+
+    pub(crate) fn new_wizard_profile_count(&self) -> usize {
+        self.offered_profiles().count() + usize::from(self.new_wizard_has_auto_primary())
+    }
+
+    pub(crate) fn new_wizard_profile_id(&self, index: usize) -> Option<String> {
+        if self.new_wizard_has_auto_primary() {
+            if index == 0 {
+                Some(String::new())
+            } else {
+                self.nth_offered_profile(index - 1)
+            }
+        } else {
+            self.nth_offered_profile(index)
+        }
+    }
+
+    pub(crate) fn new_wizard_profile_label(&self, index: usize) -> String {
+        if self.new_wizard_has_auto_primary() && index == 0 {
+            "Auto (Primary)".to_owned()
+        } else {
+            self.new_wizard_profile_id(index).unwrap_or_default()
+        }
+    }
+
     /// The index among the offered profiles the wizard opens on. A launch
     /// that copies another session's settings uses it too when that session's
     /// profile cannot be used.
     pub(crate) fn default_new_profile_index(&self) -> usize {
+        let offset = usize::from(self.new_wizard_has_auto_primary());
         self.recent_launch_choice()
             .and_then(|session| {
                 self.offered_profiles()
                     .position(|(id, _)| id == session.last_profile)
+                    .map(|index| index + offset)
             })
             .unwrap_or(0)
     }
@@ -87,26 +117,28 @@ impl DashboardState {
         let target = self.offered_target_index_or_first(
             recent.map_or("localhost", |session| session.target_template_id.as_str()),
         );
+        let target_id = nth_key(&self.config.targets, target);
         let profile_id = self
-            .nth_offered_profile(profile)
+            .new_wizard_profile_id(profile)
             .expect("an offered profile was checked above");
         let profile_id = profile_id.as_str();
         let remembered = self.state.last_subagent_policy_for(profile_id);
-        let yolo = self
-            .config
-            .targets
-            .get(&nth_key(&self.config.targets, target))
-            .is_some_and(TargetTemplate::is_yolo);
         let mut delegation = subagents::SubagentDraft::new(remembered.clone());
         delegation.oracle = self.state.last_oracle_choice_for(profile_id);
+        delegation.supervisors = self.state.last_supervisor_choice_for(profile_id);
         delegation.refresh_create(
             profile_id,
+            &target_id,
             &self.config,
             &self.profile_capabilities,
             &remembered,
             self.state.last_oracle_choice_for(profile_id),
-            yolo,
+            self.state.last_supervisor_choice_for(profile_id),
         );
+        let mut expanded_providers = std::collections::BTreeSet::new();
+        if let Some(provider) = NewWizard::provider_for_profile(self, profile) {
+            expanded_providers.insert(provider);
+        }
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
             worktree_options: None,
@@ -115,6 +147,8 @@ impl DashboardState {
             step: WizardStep::Profile,
 
             profile,
+            expanded_providers,
+            focused_provider: None,
             bundle,
             target,
             target_step_skipped: false,
@@ -153,6 +187,15 @@ impl DashboardState {
     /// this for a failed but checkpointed session; the resume dialog reaches it
     /// for a stopped one.
     pub fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
+        let workspace_id = self.active_workspace_id.clone().unwrap_or_default();
+        self.begin_resume_in_workspace(session_id, workspace_id)
+    }
+
+    pub(crate) fn begin_resume_in_workspace(
+        &mut self,
+        session_id: &str,
+        workspace_id: String,
+    ) -> DashboardAction {
         let Some(session) = self.session_record(session_id).cloned() else {
             return DashboardAction::None;
         };
@@ -202,12 +245,13 @@ impl DashboardState {
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
-                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned())
+                    .with_supervisors(session.supervisors),
             ),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.listed_title().to_owned(),
-            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
+            workspace_id,
             moving: false,
             preparation: None,
             preparing: false,
@@ -330,7 +374,8 @@ impl DashboardState {
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
-                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned())
+                    .with_supervisors(session.supervisors),
             ),
             session_id: session.id.clone(),
             source: ResumeSource::Session,

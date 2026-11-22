@@ -218,9 +218,19 @@ fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() 
     dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot { profiles });
 
     // Opening the subagents dialog populates options from the process cache immediately.
+    dashboard.config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
+        model: "fast".into(),
+        effort: None,
+    }];
     dashboard.begin_settings_section("subagents", None);
     assert_eq!(dashboard.take_profile_hydration(), None);
-    let model_path = vec!["subagents".into(), "straightforward".into(), "model".into()];
+    choose(&mut dashboard, "straightforward");
+    let model_path = vec![
+        "subagents".into(),
+        "straightforward".into(),
+        "0".into(),
+        "model".into(),
+    ];
     setup_dialog_mut(&mut dashboard.mode)
         .unwrap()
         .focus_path(&model_path);
@@ -231,6 +241,7 @@ fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() 
     let effort_path = vec![
         "subagents".into(),
         "straightforward".into(),
+        "0".into(),
         "effort".into(),
     ];
     setup_dialog_mut(&mut dashboard.mode)
@@ -243,12 +254,214 @@ fn subagents_settings_reuses_cached_efforts_across_reopens_and_model_switches() 
     // Closing and reopening preserves the cached model and effort options.
     dashboard.handle_key(key(KeyCode::Esc));
     dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(key(KeyCode::Esc));
     dashboard.begin_settings_section("subagents", None);
     assert_eq!(dashboard.take_profile_hydration(), None);
+    choose(&mut dashboard, "straightforward");
     setup_dialog_mut(&mut dashboard.mode)
         .unwrap()
         .focus_path(&model_path);
     dashboard.handle_key(key(KeyCode::Enter));
     let (models, _) = open_choices(setup_dialog_mut(&mut dashboard.mode).unwrap());
-    assert_eq!(models, vec![Value::Null, json!("fast"), json!("smart")]);
+    assert_eq!(models, vec![json!("fast"), json!("smart")]);
+}
+
+#[test]
+fn subagent_single_page_rejects_partly_configured_rows_and_handles_remove_and_narrow_layout() {
+    use mj_core::profile_capabilities::{
+        CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
+    };
+    use mj_core::worker_launch::ProfileConfig;
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    let profiles = dashboard
+        .config
+        .enabled_profiles()
+        .map(|(id, profile)| {
+            (
+                profile.capabilities_key(id),
+                ProfileCapabilities {
+                    choices: CapabilityState::Ready(ProfileConfig {
+                        model: Some("fast".into()),
+                        models: vec![choice("fast"), choice("smart")],
+                        efforts: vec![],
+                        observed_at: 1,
+                    }),
+                    efforts: std::collections::BTreeMap::from([
+                        ("fast".into(), CapabilityState::Ready(vec![choice("low")])),
+                        ("smart".into(), CapabilityState::Ready(vec![choice("high")])),
+                    ]),
+                },
+            )
+        })
+        .collect();
+    dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot { profiles });
+    dashboard.begin_settings_section("subagents", None);
+    choose(&mut dashboard, "straightforward");
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+        ["subagents", "straightforward"]
+    );
+
+    // Add stays on the category page, marks the draft dirty, and focuses row 0 model.
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.path, ["subagents", "straightforward"]);
+        assert!(dialog.is_dirty(), "incomplete row must count as dirty");
+        assert_eq!(
+            dialog.focused_path(),
+            Some(vec![
+                "subagents".into(),
+                "straightforward".into(),
+                "0".into(),
+                "model".into(),
+            ])
+        );
+    }
+
+    // Esc, Backspace, Back button, and Ctrl+S all reject the partly configured row.
+    for trigger in [
+        key(KeyCode::Esc),
+        key(KeyCode::Backspace),
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+    ] {
+        let action = dashboard.handle_key(trigger);
+        assert_eq!(action, DashboardAction::None);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.path, ["subagents", "straightforward"]);
+        assert!(
+            dialog
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Straightforward entry 1")),
+            "expected incomplete-row notice, got {:?}",
+            dialog.notice
+        );
+    }
+
+    // A background capability refresh with a discovery error must not clobber the active notice.
+    {
+        let mut unreachable_profiles = dashboard.profile_capabilities.profiles.clone();
+        for caps in unreachable_profiles.values_mut() {
+            caps.choices = CapabilityState::Failed("worker unavailable".into());
+        }
+        let saved = dashboard.profile_capabilities.clone();
+        dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot {
+            profiles: unreachable_profiles.clone(),
+        });
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            dialog
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Straightforward entry 1")),
+            "background discovery error overwrote active validation notice: {:?}",
+            dialog.notice
+        );
+        // Existing discovery notices still refresh to new failure details and clear on recovery.
+        dialog.notice = Some("Discovery: pending".into());
+        dashboard.set_profile_capabilities(ProfileCapabilitiesSnapshot {
+            profiles: unreachable_profiles,
+        });
+        assert!(
+            setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("worker unavailable"))
+        );
+        dashboard.set_profile_capabilities(saved);
+        assert_eq!(setup_dialog_mut(&mut dashboard.mode).unwrap().notice, None);
+    }
+
+    // Jumping away via search and trying to save still rejects and jumps back to the incomplete row.
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for ch in "theme".chars() {
+        dashboard.handle_key(key(KeyCode::Char(ch)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+        ["interface"]
+    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert_eq!(action, DashboardAction::None);
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.path, ["subagents", "straightforward"]);
+        assert_eq!(
+            dialog.focused_path(),
+            Some(vec![
+                "subagents".into(),
+                "straightforward".into(),
+                "0".into(),
+                "model".into(),
+            ])
+        );
+    }
+
+    // Removing the only incomplete row via Delete unblocks Back and clears dirty state.
+    dashboard.handle_key(key(KeyCode::Delete));
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.path, ["subagents", "straightforward"]);
+        assert_eq!(dialog.draft["subagents"]["straightforward"], json!([]));
+        assert!(!dialog.is_dirty());
+    }
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().path,
+        ["subagents"]
+    );
+
+    // Re-enter, configure two rows, verify narrow rendering, and remove row 0 to check index shifting.
+    choose(&mut dashboard, "straightforward");
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    select_choice(&mut dashboard, "fast");
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    select_choice(&mut dashboard, "smart");
+    let effort_1 = vec![
+        "subagents".into(),
+        "straightforward".into(),
+        "1".into(),
+        "effort".into(),
+    ];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&effort_1);
+    dashboard.handle_key(key(KeyCode::Enter));
+    select_choice(&mut dashboard, "high");
+
+    // Narrow layout renders stacked model/effort/remove controls without overlapping or panicking.
+    let narrow = drawn(&mut dashboard, 60, 30).join("\n");
+    assert!(narrow.contains("1 model"), "{narrow}");
+    assert!(narrow.contains("1 effort"), "{narrow}");
+    assert!(narrow.contains("Remove 1"), "{narrow}");
+    assert!(narrow.contains("2 model"), "{narrow}");
+
+    // Removing row 0 shifts row 1 ("smart" / "high") into index 0 and keeps the page open.
+    let model_0 = vec![
+        "subagents".into(),
+        "straightforward".into(),
+        "0".into(),
+        "model".into(),
+    ];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&model_0);
+    dashboard.handle_key(key(KeyCode::Delete));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.path, ["subagents", "straightforward"]);
+    assert_eq!(
+        dialog.draft["subagents"]["straightforward"],
+        json!([{"model": "smart", "effort": "high"}])
+    );
 }

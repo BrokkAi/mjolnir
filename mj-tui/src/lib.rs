@@ -373,6 +373,7 @@ pub enum DashboardAction {
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         oracle: Option<bool>,
+        supervisors: Option<bool>,
         oracle_choice: Option<mj_core::config::SubagentChoice>,
         /// The session's automatic turn-review choice. `None` follows the
         /// global `[review]` settings.
@@ -382,6 +383,8 @@ pub enum DashboardAction {
         /// confirmation is still in flight, so the request keeps its origin.
         workspace_id: String,
         profile_id: String,
+        /// Load-balance across enabled profiles in this provider when `profile_id` is empty.
+        provider: Option<mj_core::config::QuotaProvider>,
         bundle_id: String,
         project_directory: Option<std::path::PathBuf>,
         target_template_id: String,
@@ -475,6 +478,7 @@ pub enum DashboardAction {
         /// Delegation policy for the destination; `None` keeps the session's.
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         oracle: Option<bool>,
+        supervisors: Option<bool>,
         oracle_choice: Option<mj_core::config::SubagentChoice>,
         consent: mj_core::suspend_consent::SuspendConsent,
         skip_keep_paths: Vec<std::path::PathBuf>,
@@ -624,6 +628,10 @@ pub enum DashboardAction {
         profile_id: String,
     },
     OpenResumeDialog,
+    OpenFilteredResumeDialog {
+        query: String,
+        state: Option<SessionStateFilter>,
+    },
     ImportSession {
         profile_id: String,
         native_session_id: String,

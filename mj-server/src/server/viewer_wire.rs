@@ -15,10 +15,11 @@ const INTERNED_FIELDS: [&str; 5] = [
     "incompatible_resume_targets",
 ];
 
-pub(super) const METADATA_FIELDS: [&str; 20] = [
+pub(super) const METADATA_FIELDS: [&str; 21] = [
     "profile_capabilities",
     "last_subagent_policies",
     "last_oracle_choices",
+    "last_supervisor_choices",
     "oracle_configured",
     "operator_away",
     "auto_afk_minutes",
@@ -113,6 +114,7 @@ struct SnapshotMetadata<'a> {
     last_subagent_policies:
         &'a std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     last_oracle_choices: &'a std::collections::BTreeMap<String, bool>,
+    last_supervisor_choices: &'a std::collections::BTreeMap<String, bool>,
     oracle_configured: bool,
     subagents_configured: bool,
     revision: u64,
@@ -169,6 +171,7 @@ pub(super) fn metadata(
         profile_capabilities: &snapshot.profile_capabilities,
         last_subagent_policies: &snapshot.last_subagent_policies,
         last_oracle_choices: &snapshot.last_oracle_choices,
+        last_supervisor_choices: &snapshot.last_supervisor_choices,
         oracle_configured: snapshot.oracle_configured,
         subagents_configured: snapshot.subagents_configured,
         revision: snapshot.revision,

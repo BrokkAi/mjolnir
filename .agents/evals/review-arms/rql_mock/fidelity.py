@@ -1,4 +1,5 @@
 """Host-only lean-pilot sampling, adjudication and gate arithmetic."""
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -9,7 +10,7 @@ import re
 from random import Random
 
 from census_label import CENSUS
-from .engine import parse
+from .engine import REPAIR_STALLED, parse
 from .engine.grammar import MENU
 from .engine.validation import canonical
 
@@ -259,13 +260,26 @@ def accuracy(records, seed):
             "true_positive": correct, "returned": returned, "gold": relevant}
 
 
+def is_repair_stall(answer):
+    return (answer is not None and answer.get("status") == "engine_error"
+            and answer.get("failure") == REPAIR_STALLED)
+
+
 def stratum_metrics(records, seed):
     metric = accuracy(records, seed)
-    pairs = [(set(r["engine"]), set(r["fresh"])) for r in records if r["fresh"] is not None]
-    similarities = [Fraction(len(first & again), len(first | again)) if first or again else Fraction(1)
-                    for first, again in pairs]
-    stability = float(sum(similarities) / len(similarities)) if pairs else None
-    return {**metric, "stability_n": len(pairs), "stability_jaccard": stability}
+    similarities = []
+    for record in records:
+        if record["fresh"] is None:
+            continue
+        first, again = set(record["engine"]), set(record["fresh"])
+        # Either side failing leaves nothing to reproduce, so the pair scores zero;
+        # two empty sets would otherwise count as a perfect match.
+        if is_repair_stall(record.get("fresh_answer")) or is_repair_stall(record.get("engine_answer")):
+            similarities.append(Fraction(0))
+        else:
+            similarities.append(Fraction(len(first & again), len(first | again)) if first or again else Fraction(1))
+    stability = float(sum(similarities) / len(similarities)) if similarities else None
+    return {**metric, "stability_n": len(similarities), "stability_jaccard": stability}
 
 
 def prescience_counts(record):
@@ -372,15 +386,16 @@ def measure(query, fresh, engine, enumerate_rows, adjudicate):
     """Pool anonymous candidates and count typed semantic row identities."""
     def answer(again):
         result = engine(query.commit, query.text, fresh=again)
-        if result["status"] != "ok":
+        if result["status"] != "ok" and not is_repair_stall(result):
             raise RuntimeError(f"{query.key}: engine {result['status']}: {result.get('message', '')}")
         return result
 
     first = answer(False)
     independent = enumerate_rows(query.repo, query.commit, query.text)
     again = answer(True) if fresh else None
-    sources = {"engine": first["rows"], "enumerated": independent["rows"],
-               "census": query.census, "fresh": again["rows"] if again else ()}
+    sources = {"engine": first["rows"] if first["status"] == "ok" else (),
+               "enumerated": independent["rows"], "census": query.census,
+               "fresh": again["rows"] if again and again["status"] == "ok" else ()}
     unique = sorted({canonical(row) for rows in sources.values() for row in rows})
     ids = {row: str(index) for index, row in enumerate(unique)}
     candidates = {ids[row]: json.loads(row) for row in unique}
@@ -401,25 +416,40 @@ def measure(query, fresh, engine, enumerate_rows, adjudicate):
 
 def gate_report(manifest_hash, served, queries, records, seed):
     groups = {}
+    failures = []
+    failure_counts = Counter()
+    by_step = {}
     for query in queries:
-        groups.setdefault((query.step, query.stratum), []).append(records[query.key])
+        record = records[query.key]
+        groups.setdefault((query.step, query.stratum), []).append(record)
+        step = query.step
+        if step == DOCUMENTED:
+            step = query.text.split()[0][1:]
+            by_step.setdefault(step, []).append(record)
+        for field, fresh in (("engine_answer", False), ("fresh_answer", True)):
+            answer = record.get(field)
+            if is_repair_stall(answer):
+                failures.append({"query_key": query.key, "step": step, "stratum": query.stratum,
+                                 "fresh": fresh, "reason": answer["failure"],
+                                 "repair_error_counts": answer["repair_error_counts"]})
+                failure_counts[query.step, step] += 1
     documented = groups.get((DOCUMENTED, "random"), [])
     docs = stratum_metrics(documented, f"{seed}/documented")
-    by_step = {}
-    for record, query in zip(documented, (q for q in queries if q.step == DOCUMENTED)):
-        step = query.text.split()[0][1:]
-        by_step.setdefault(step, []).append(record)
     decisive = {step: groups.get((step, "decisive"), []) for step in served}
     pooled = pooled_prescience([row for step in served for row in decisive[step]], f"{seed}/prescience",
                                applicable=bool(served))
-    steps = {step: step_result(groups[step, "random"], decisive[step], f"{seed}/{step}")
+    steps = {step: {**step_result(groups[step, "random"], decisive[step], f"{seed}/{step}"),
+                    "engine_failure_count": failure_counts[step, step]}
              for step in served}
     return {"manifest_sha256": manifest_hash, "served_steps": served,
             "steps": steps, "prescience_pooled": pooled,
+            "engine_failures": failures, "engine_failure_count": len(failures),
             "documented": {"reported_only": True, "random_n": len(documented), "metrics": docs,
                            "reasons": bar_failures("documented pooled random", docs),
                            "prescience": "not_estimable",
+                           "engine_failure_count": sum(failure_counts[DOCUMENTED, step] for step in by_step),
                            "by_step": {step: {"random_n": len(rows),
+                                              "engine_failure_count": failure_counts[DOCUMENTED, step],
                                               "metrics": stratum_metrics(rows, f"{seed}/{step}")}
                                        for step, rows in sorted(by_step.items())}},
             "candidate_sources": ["engine", "terra_enumerator", "census"],
@@ -432,7 +462,8 @@ def gate_report(manifest_hash, served, queries, records, seed):
                                  "Report census-only misses separately.",
             "accuracy_method": "Pool row counts within each stratum and bootstrap queries with replacement. "
                                "The lower bound is the 2.5th percentile of 10,000 seeded replicates. "
-                               "An empty denominator scores 1. Stability averages query Jaccard.",
+                               "An empty denominator scores 1. Stability averages query Jaccard, "
+                               "with zero for a failed re-ask.",
             "created_at": datetime.now(timezone.utc).isoformat()}
 
 

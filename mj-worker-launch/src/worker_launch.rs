@@ -291,6 +291,7 @@ pub fn stage_worker_files_for(
         storage.managed_temporary_volume,
         &storage.attachments,
     )?;
+    append_session_state_instructions(profile.kind, &profile_stage)?;
     append_subagent_policy(
         profile.kind,
         &profile_stage,
@@ -693,6 +694,7 @@ pub fn session_launch_config(
             parent_worktree: subagent_parent_worktree(config, state, session_id),
         },
         &target,
+        config,
     )?;
     launch.reviewer_launch = if subagent.is_some() {
         crate::database::load_subagent(session_id)?
@@ -767,20 +769,23 @@ pub fn session_launch_config(
     }
     apply_jev_settings(&mut launch, &config.jev);
     launch.agent_mailboxes_enabled = true;
+    let subagent_view = subagent.map(|child| child.to_record_view());
     launch.subagents = session
         .subagents
         .clone()
         .unwrap_or_default()
-        .for_launch(profile.kind, subagent.is_some());
+        .for_launch(profile.kind, subagent_view.as_ref());
     // Only a delegating parent's spawn tool reads this. Other sessions keep
     // the default, so their launch files do not change.
-    let yolo = session.is_yolo_target(config);
     launch.subtle_subagents = !launch.subagents.uses_mjolnir()
-        || config.subagents.offers_subtle_for(&launch.subagents, yolo);
-    launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents, yolo);
+        || config.subagents.offers_subtle(&launch.subagents);
+    launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents);
     // Registration decided whether this child can be given the tool.
     launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
     launch.subagent_kind = subagent.as_ref().map(|child| child.kind);
+    launch.supervisor = subagent.as_ref().is_some_and(|child| child.supervisor);
+    launch.supervisors_enabled =
+        subagent.is_none() && session.supervisors && launch.subagents.uses_mjolnir();
 
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).
@@ -883,6 +888,7 @@ pub fn session_launch_config(
                 parent_worktree: None,
             },
             &parent_target,
+            config,
         )?;
         launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
             parent_launch.cwd

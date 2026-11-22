@@ -1482,7 +1482,7 @@ impl std::str::FromStr for HarnessKind {
 }
 
 /// The company that meters a profile's allowance, independent of its harness.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum QuotaProvider {
     Anthropic,
     OpenAI,

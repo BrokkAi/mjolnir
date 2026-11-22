@@ -101,6 +101,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             post(respond_elicitation),
         )
         .route("/sessions/{session_id}/export", post(export))
+        .route("/checkpoints/purge-untracked", post(purge_untracked))
         .route("/ui/requests", post(request_ui))
         .route("/wiki/search", get(wiki_search))
         .route("/wiki/sync", post(wiki_sync_request))

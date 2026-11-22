@@ -111,48 +111,69 @@ impl DurableRelay {
         !self.snapshot.managed_subagent
     }
 
+    pub(super) fn settle_local_quota(&mut self) -> Result<()> {
+        use mj_core::assessment::{Action, Status};
+        let Some(a) = self.snapshot.assessment.as_deref().filter(|a| {
+            // Storing a settlement calls back here through the journal tail.
+            a.current() && a.action.is_none()
+        }) else {
+            return Ok(());
+        };
+        let child = self.snapshot.managed_subagent;
+        let diagnostic = a.completion.diagnostic.as_ref();
+        let qualifies = if child {
+            let continuation = &self.snapshot.continuation;
+            let owns_quota_frontier = !continuation.quota_suppressed
+                && continuation.user_command_id.is_some()
+                && continuation.completed_command_id.as_deref() == Some(&a.turn_id);
+            self.recovers_child_quota
+                && owns_quota_frontier
+                && a.status == Status::Pending
+                && (diagnostic.is_some_and(|d| d.is_usage_limit())
+                    || mj_core::state::classify_prompt_completion(&a.completion.stop_reason)
+                        == mj_core::state::PromptCompletion::QuotaLimit)
+        } else {
+            self.verdict_harness.is_some()
+                && !self.jev_disabled
+                && a.verdict.is_none()
+                && a.glide.is_none()
+                && matches!(a.status, Status::Pending | Status::Failed)
+                && diagnostic
+                    .is_some_and(mj_core::diagnostic::TurnDiagnostic::is_typed_usage_limit_code)
+        };
+        if !qualifies {
+            return Ok(());
+        }
+        let mut a = a.clone();
+        a.action = Some(Action::RecoverQuota);
+        a.retry_at_ms = None;
+        let (status, reason) = if !child && self.automatic_action_suppressed() {
+            (Status::Superseded, "automatic_action_suppressed")
+        } else {
+            (Status::Deferred, "quota_resolution_required")
+        };
+        a.status = status;
+        a.reason = reason.into();
+        self.store_assessment(a)
+    }
+
     /// Persist suppression so replaying controllers and older assessment readers
     /// never wait for a child classification. Keep the shared event format.
     pub(super) fn suppress_child_assessment(&mut self) -> Result<()> {
+        use mj_core::assessment::{Action, Status};
         if self.snapshot.managed_subagent {
             self.replied_verdict = RepliedVerdictState::default();
-            if let Some(mut assessment) = self
+            if let Some(a) = self
                 .snapshot
                 .assessment
                 .as_deref()
-                .cloned()
-                .filter(|a| a.current())
+                .filter(|a| a.current() && a.action != Some(Action::RecoverQuota))
             {
-                use mj_core::assessment::{Action, Status};
-                let continuation = &self.snapshot.continuation;
-                let owns_quota_frontier = !continuation.quota_suppressed
-                    && continuation.user_command_id.is_some()
-                    && continuation.completed_command_id.as_deref() == Some(&assessment.turn_id);
-                if assessment.action == Some(Action::RecoverQuota) {
-                    // SetQuotaRecovery advances this verdict for the same turn.
-                    return Ok(());
-                }
-                if self.recovers_child_quota
-                    && owns_quota_frontier
-                    && assessment.status == Status::Pending
-                    && (assessment
-                        .completion
-                        .diagnostic
-                        .as_ref()
-                        .is_some_and(|d| d.is_usage_limit())
-                        || mj_core::state::classify_prompt_completion(
-                            &assessment.completion.stop_reason,
-                        ) == mj_core::state::PromptCompletion::QuotaLimit)
-                {
-                    assessment.action = Some(Action::RecoverQuota);
-                    assessment.status = Status::Deferred;
-                    assessment.reason = "quota_resolution_required".into();
-                } else {
-                    assessment.status = Status::Superseded;
-                    assessment.reason = "managed_subagent".into();
-                }
-                assessment.retry_at_ms = None;
-                self.store_assessment(assessment)?;
+                let mut a = a.clone();
+                a.status = Status::Superseded;
+                a.reason = "managed_subagent".into();
+                a.retry_at_ms = None;
+                self.store_assessment(a)?;
             }
         }
         Ok(())
@@ -173,6 +194,7 @@ impl DurableRelay {
     /// operations stay compiled on Windows so their tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
+        self.settle_local_quota()?;
         if !self.classifies_turns() {
             return self.suppress_child_assessment();
         }
@@ -282,8 +304,9 @@ impl DurableRelay {
             a.current()
                 && a.status == mj_core::assessment::Status::Assessed
                 && (a.glide.is_some()
-                    || self.replied_verdict.asked_turn.as_ref()
-                        != Some(&(a.turn_id.clone(), a.completed_ordinal)))
+                    || (a.action != Some(mj_core::assessment::Action::RecoverQuota)
+                        && self.replied_verdict.asked_turn.as_ref()
+                            != Some(&(a.turn_id.clone(), a.completed_ordinal))))
         }) else {
             return Ok(());
         };
@@ -451,6 +474,18 @@ impl DurableRelay {
         (self.activity_facts(), self.native_agent_count())
     }
 
+    fn automatic_action_suppressed(&self) -> bool {
+        !self.snapshot.assessment_questions.is_empty()
+            || self.snapshot.goal.budget_limited()
+            || self
+                .snapshot
+                .goal
+                .snapshot
+                .as_ref()
+                .is_some_and(|g| g.status == "paused")
+            || !self.snapshot.queued_prompts.is_empty()
+    }
+
     #[cfg(any(unix, test))]
     pub(crate) fn apply_glide_assessment(
         &mut self,
@@ -492,15 +527,7 @@ impl DurableRelay {
         a.action = Some(action);
         a.status = Status::Assessed;
         a.retry_at_ms = None;
-        let suppressed = !self.snapshot.assessment_questions.is_empty()
-            || self.snapshot.goal.budget_limited()
-            || self
-                .snapshot
-                .goal
-                .snapshot
-                .as_ref()
-                .is_some_and(|g| g.status == "paused")
-            || !self.snapshot.queued_prompts.is_empty();
+        let suppressed = self.automatic_action_suppressed();
         let reason = if suppressed {
             a.status = Status::Superseded;
             "automatic_action_suppressed"

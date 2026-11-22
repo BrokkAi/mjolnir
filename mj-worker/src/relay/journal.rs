@@ -782,6 +782,7 @@ impl DurableRelay {
                 .join("\n");
             summary_prompt = Some(prompt_text);
         }
+        let previous_native_session_id = self.snapshot.native_session_id.clone();
         let previous_assessment = self.snapshot.assessment.clone();
         match staged {
             Some(next_snapshot) => self.snapshot = next_snapshot,
@@ -790,6 +791,14 @@ impl DurableRelay {
             // fail here either: this event was digested from this exact
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
+        }
+        if self.snapshot.native_session_id != previous_native_session_id {
+            self.forget_antigravity_state();
+        }
+        if matches!(&event.observation, RelayObservation::CommandStarted { command_id, .. }
+            if self.snapshot.active_prompt.as_ref().is_some_and(|prompt| &prompt.command_id == command_id))
+        {
+            self.antigravity_prompt_started();
         }
         if self.classifies_turns() && self.snapshot.assessment != previous_assessment {
             self.publish_assessment_diagnostic();
@@ -860,6 +869,7 @@ impl DurableRelay {
         {
             self.persist_snapshot()?;
         }
+        self.settle_local_quota()?;
         self.suppress_child_assessment()?;
         self.service_live_baselines();
         Ok(ordinal)

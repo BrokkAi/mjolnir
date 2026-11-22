@@ -447,6 +447,11 @@ impl<K: Copy + Eq> Form<K> {
         }
     }
 
+    /// Returns the last registered hitbox area for `id`, if present.
+    pub fn control_area(&self, id: K) -> Option<Rect> {
+        self.control(id).map(|control| control.area)
+    }
+
     /// Registers a control with its exact drawn hitbox.
     pub fn register(&mut self, id: K, kind: ControlKind, area: Rect, enabled: bool) {
         self.register_with_cursor_map(id, kind, area, enabled, Vec::new());

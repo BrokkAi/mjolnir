@@ -1414,10 +1414,12 @@ pub(crate) fn spawn_dashboard_create_session(
             create_managed_worktree,
             subagents,
             oracle,
+            supervisors,
             oracle_choice,
             review,
             workspace_id,
             profile_id,
+            provider,
             bundle_id,
             project_directory,
             target_template_id,
@@ -1464,16 +1466,21 @@ pub(crate) fn spawn_dashboard_create_session(
             if cancelled.load(Ordering::Acquire) {
                 bail!("operation cancelled");
             }
-            let title = mj_core::state::default_session_title(
-                project_directory.as_deref(),
-                &bundle_id,
-                &profile_id,
-            );
+            let title = if profile_id.is_empty() {
+                String::new()
+            } else {
+                mj_core::state::default_session_title(
+                    project_directory.as_deref(),
+                    &bundle_id,
+                    &profile_id,
+                )
+            };
             let registered = mj_core::runtime::block_on(async {
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
                         oracle,
+                        supervisors,
                         oracle_choice,
                         remember_launch_choices: true,
                         remember_container_size,
@@ -1491,6 +1498,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
+                        provider,
                         bundle_id,
                         project_directory,
                         target_template_id,

@@ -853,6 +853,9 @@ pub(crate) async fn apply_dashboard_action(
             context.acknowledge_dashboard_sessions(receipts);
         }
         DashboardAction::OpenResumeDialog => context.start_resume_discovery(),
+        DashboardAction::OpenFilteredResumeDialog { query, state } => {
+            context.start_resume_discovery_with_filter(Some((query, state)));
+        }
         DashboardAction::SearchArchivedSessions { request_id, query } => {
             context.wiki_search_task = None;
             let guard = crate::dashboard::io::spawn_wiki_search(
@@ -1760,6 +1763,7 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
     let DashboardAction::MoveSession {
         subagents,
         oracle,
+        supervisors,
         oracle_choice,
         consent,
         skip_keep_paths,
@@ -1782,6 +1786,7 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
             daemon
                 .prepare_move_session(MoveSelection {
                     oracle,
+                    supervisors,
                     oracle_choice,
                     subagents,
                     consent,

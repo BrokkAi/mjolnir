@@ -206,7 +206,9 @@ pub const RELAY_IN_PLACE_MOVE_PROTOCOL: u32 = 81;
 pub const RELAY_GUARDIAN_REVIEW_PROTOCOL: u32 = 82;
 /// 83 includes optional repository instructions in guardian review requests.
 pub const RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL: u32 = 83;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL;
+/// 84 adds worker-local Antigravity Stop-hook observations (`AntigravityStop`).
+pub const RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL: u32 = 84;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

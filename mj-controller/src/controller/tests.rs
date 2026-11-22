@@ -808,6 +808,7 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -891,6 +892,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: true,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.clone(),
             task_name: "without credentials".into(),
@@ -902,6 +904,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
             initial_prompt: "Inspect the source".into(),
             request_key: "credential-child".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap()
         .child_session_id;
@@ -1282,6 +1285,7 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit",
             SessionLaunchOptions {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 at: Some(at.to_uppercase()),
                 branch: Some("town/run-1".into()),
@@ -1319,6 +1323,7 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit with base",
             SessionLaunchOptions {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 base: Some("v1.0".into()),
@@ -1373,6 +1378,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
+        supervisors: None,
             oracle_choice: None,
             no_later_history: true,
             ..launch_options(Vec::new())
@@ -1383,6 +1389,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
+        supervisors: None,
             oracle_choice: None,
             at: Some(at.into()),
             base: Some("origin/main".into()),
@@ -1394,6 +1401,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
 
     let id = register(SessionLaunchOptions {
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         at: Some(at.to_uppercase()),
         base: Some(base.to_uppercase()),
@@ -1437,6 +1445,7 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             "without later history",
             SessionLaunchOptions {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 no_later_history: true,
@@ -2159,6 +2168,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2170,6 +2180,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: Some("/reports".into()),
+            category: "straightforward".into(),
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
@@ -2317,6 +2328,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2328,6 +2340,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap();
     let child_id = child.child_session_id.clone();
@@ -2686,6 +2699,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2697,6 +2711,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
             report_root: Some("/reports".into()),
+            category: "straightforward".into(),
         })
         .unwrap()
         .child_session_id;
@@ -2907,6 +2922,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             "durable target",
             SessionLaunchOptions {
                 oracle: None,
+        supervisors: None,
                 oracle_choice: None,
                 // Set at creation, since a lifecycle transition does not own
                 // this column (see `update_lifecycle_fields`); this test
@@ -2975,6 +2991,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: id.clone(),
             task_name: "child".into(),
@@ -2986,6 +3003,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             initial_prompt: "test child".into(),
             request_key: "durable-child".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap();
     assert_eq!(
@@ -3311,10 +3329,10 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         Some(SubagentPolicy::Native)
     );
     let mut after = controller.config.clone();
-    after.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+    after.subagents.straightforward = vec![mj_core::config::SubagentChoice {
         model: "next".into(),
         effort: None,
-    });
+    }];
     controller
         .state
         .validate_setup_update(&controller.config, &after)
@@ -3387,10 +3405,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     config.subagents.max_concurrent = 0;
-    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+    config.subagents.oracle = vec![mj_core::config::SubagentChoice {
         model: "oracle-model".into(),
         effort: Some("high".into()),
-    });
+    }];
     let profile = config.profiles["codex"].clone();
     config.profiles.insert("resolved-reviewer".into(), profile);
     let parent_id = "0123456789abcdef0123456789abcdef";
@@ -3427,6 +3445,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
+        supervisor: false,
         reviewer_launch: Some(launch.clone()),
         parent_session_id: parent_id.into(),
         task_name: "review".into(),
@@ -3438,6 +3457,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         initial_prompt: "Review and hand back JSON".into(),
         request_key: "same-request".into(),
         report_root: None,
+        category: "reviewer".into(),
     };
     let child = controller.register_subagent(request.clone()).unwrap();
     assert_eq!(
@@ -3501,6 +3521,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "oracle".into(),
@@ -3512,6 +3533,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             initial_prompt: "Question:\nWhich option?".into(),
             request_key: "oracle-first".into(),
             report_root: Some("/reports".into()),
+            category: "oracle".into(),
         })
         .unwrap();
     assert_eq!(
@@ -3571,6 +3593,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: muse_parent_id.into(),
             task_name: "oracle".into(),
@@ -3582,6 +3605,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             initial_prompt: "Question:\nWhy?".into(),
             request_key: "muse-oracle".into(),
             report_root: Some("/reports".into()),
+            category: "oracle".into(),
         })
         .unwrap();
     assert!(!muse_oracle.handback_tool);
@@ -3620,6 +3644,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "ordinary child".into(),
@@ -3631,6 +3656,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             initial_prompt: "work".into(),
             request_key: "same-request".into(),
             report_root: None,
+            category: "straightforward".into(),
         })
         .unwrap();
     assert_ne!(
@@ -3666,6 +3692,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
+        supervisor: false,
         reviewer_launch: Some(launch),
         parent_session_id: worker.child_session_id.clone(),
         task_name: "child's review".into(),
@@ -3677,6 +3704,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         initial_prompt: "Review the child's commits".into(),
         request_key: "nested-review".into(),
         report_root: None,
+        category: "reviewer".into(),
     };
     let nested = controller.register_subagent(request.clone()).unwrap();
     assert_eq!(nested.parent_session_id, worker.child_session_id);
@@ -3691,6 +3719,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
             reviewer_launch: None,
             ..request
         })
@@ -3766,6 +3795,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
             .register_subagent(RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
+        supervisor: false,
                 reviewer_launch: None,
                 parent_session_id: parent_id.into(),
                 task_name: request_key.into(),
@@ -3777,6 +3807,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
                 initial_prompt: "work".into(),
                 request_key: request_key.into(),
                 report_root: None,
+                category: "straightforward".into(),
             })
             .unwrap()
     };

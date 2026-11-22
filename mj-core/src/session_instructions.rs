@@ -110,8 +110,13 @@ pub fn compose(facts: &InstructionContext<'_>, index: Result<&str, &str>) -> Str
     }
     match facts.instruction_role {
         Some(InstructionRole::Worker) => {
-            let has_handback = agent_socket
-                .is_some_and(|socket| socket.role == crate::subagent::SubagentMcpRole::Child);
+            let has_handback = agent_socket.is_some_and(|socket| {
+                matches!(
+                    socket.role,
+                    crate::subagent::SubagentMcpRole::Child
+                        | crate::subagent::SubagentMcpRole::Supervisor
+                )
+            });
             sections.push("When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.".into());
             if !has_handback {
                 sections.push(format!(
@@ -178,7 +183,7 @@ static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 });
 
 /// Policy for the separate `mj-review` server, composed into standing instructions.
-const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or opening a pull or merge request. It replies immediately; the verdict arrives later as a Mjolnir message. With no `paths` it reviews the repository of your working directory; pass `paths` to review other worktrees, or several together in one review. Reviews of different worktrees run at the same time; a worktree is in one open review at a time, and a request that overlaps one is refused with what to do next. Reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason (pass `path` when more than one verdict is outstanding); later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
+const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or opening a pull or merge request. It replies immediately; the verdict arrives later as a Mjolnir message. With no `paths` it reviews the repository of your working directory; pass `paths` to review other worktrees, or several together in one review. Reviews of different worktrees run at the same time; a worktree is in one open review at a time, and a request that overlaps one is refused with what to do next. Reviewing a worktree at HEAD lets you keep working meanwhile. When multiple reviewers run, partial results arrive as each finishes: start investigating and fixing findings you agree with as soon as they arrive instead of idling until all reviewers finish, while waiting for the final verdict before committing, calling `override_review`, requesting another review, or pushing. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason (pass `path` when more than one verdict is outstanding); later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
 
 static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -193,6 +198,16 @@ static BRIEF_WRITER_HANDOFF: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// A supervisor's server instructions: it owns its delegated slice, may delegate
+/// straightforward/subtle workers, must wait for or close all its workers before
+/// calling `handback`, and must call `handback` once to report back to its parent.
+pub static SUPERVISOR_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "You are a Mjolnir supervisor sub-agent. You own your delegated slice and may delegate `straightforward` or `subtle` worker sub-agents via `spawn`, monitor them with `list_agents`, follow up with `send_message`, and cancel them with `close`. You cannot spawn nested supervisors or oracles. While your workers run, you may end your turn with a brief waiting status; your session stays live and Mjolnir delivers each worker's report as a message when it finishes. Wait for or close all of your running workers before calling `handback`, then call `handback` once as your last action to report back to your parent. Your first prompt names your report directory. {}",
+        crate::subagent::HANDBACK_REPORT_RULES.as_str()
+    )
+});
+
 pub fn standing_instructions(
     role: SubagentMcpRole,
     harness: HarnessKind,
@@ -203,6 +218,7 @@ pub fn standing_instructions(
             CODEX_SERVER_INSTRUCTIONS.as_str()
         }
         SubagentMcpRole::Parent => SERVER_INSTRUCTIONS.as_str(),
+        SubagentMcpRole::Supervisor => SUPERVISOR_INSTRUCTIONS.as_str(),
         SubagentMcpRole::MessageOnly | SubagentMcpRole::FetchOnly => MESSAGE_ONLY_INSTRUCTIONS,
         SubagentMcpRole::Child => match review_role {
             Some(role) => review_child_output_contract(role),

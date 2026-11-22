@@ -42,6 +42,23 @@ impl HarnessStartup {
     }
 }
 
+#[derive(Default)]
+struct TaskMonitors {
+    kimi: Option<KimiTaskMonitor>,
+    antigravity: Option<AntigravityTaskMonitor>,
+}
+
+impl TaskMonitors {
+    async fn prepare_event(
+        &mut self,
+        relay: &Arc<RelayCell>,
+        event: &mut RuntimeEvent,
+    ) -> Result<()> {
+        prepare_kimi_runtime_event(&mut self.kimi, relay, event).await?;
+        prepare_antigravity_runtime_event(&mut self.antigravity, relay, event).await
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_relay_coordinator_with_shells(
     relay: Arc<RelayCell>,
@@ -50,6 +67,7 @@ pub(super) async fn run_relay_coordinator_with_shells(
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
     kimi_tasks: Option<KimiTaskMonitor>,
+    antigravity_tasks: Option<AntigravityTaskMonitor>,
     capture: Option<crate::work_facts::WorkObserver>,
     startup: HarnessStartup,
 ) -> Result<()> {
@@ -60,7 +78,10 @@ pub(super) async fn run_relay_coordinator_with_shells(
         dispatch_wakes,
         commands,
         user_shells,
-        kimi_tasks,
+        TaskMonitors {
+            kimi: kimi_tasks,
+            antigravity: antigravity_tasks,
+        },
         verdict,
         capture,
         Some(startup),
@@ -88,7 +109,10 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         dispatch_wakes,
         commands,
         user_shells,
-        kimi_tasks,
+        TaskMonitors {
+            kimi: kimi_tasks,
+            ..TaskMonitors::default()
+        },
         verdict,
         capture,
         None,
@@ -103,7 +127,7 @@ fn run_relay_coordinator(
     mut dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     mut user_shells: crate::user_shell::UserShellRegistry,
-    mut kimi_tasks: Option<KimiTaskMonitor>,
+    mut task_monitors: TaskMonitors,
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
     capture: Option<crate::work_facts::WorkObserver>,
     mut startup: Option<HarnessStartup>,
@@ -143,6 +167,8 @@ fn run_relay_coordinator(
         let mut session_configuration = SessionConfiguration::Opening;
         let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
         kimi_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut antigravity_poll = tokio::time::interval(ANTIGRAVITY_TASK_POLL_INTERVAL);
+        antigravity_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut login_reads = tokio::task::JoinSet::new();
         let initial_login = {
             let state = relay.lock().expect("relay state lock poisoned");
@@ -193,6 +219,41 @@ fn run_relay_coordinator(
                 let cut_held = relay.worker_writes_held();
                 (cut_held || relay.close_pending(), cut_held)
             };
+            if !cut_held
+                && relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .has_pending_antigravity_turn_settle()
+            {
+                let mut capturing = capture.as_ref().map(|observer| Capture {
+                    observer,
+                    wakes: &mut dispatch_wakes,
+                });
+                if Box::pin(settle_antigravity_turn(
+                    &relay,
+                    &mut in_flight,
+                    &mut events,
+                    &mut session_configuration,
+                    &mut user_shells,
+                    &mut task_monitors,
+                    capturing.as_mut(),
+                    startup.as_mut(),
+                ))
+                .await?
+                {
+                    verdict_tasks.shutdown().await;
+                    return Ok(());
+                }
+                recover_authentication(&relay)?;
+                dispatch_pending(
+                    &relay,
+                    &commands,
+                    &mut in_flight,
+                    session_configuration.is_ready(),
+                    &mut user_shells,
+                )?;
+                continue;
+            }
             if !held
                 && relay
                     .lock()
@@ -312,7 +373,7 @@ fn run_relay_coordinator(
                         });
                         if record_queued_runtime_events(
                             &relay, &mut in_flight, &mut events, &mut session_configuration,
-                            &mut user_shells, &mut kimi_tasks, queued, capturing.as_mut(), startup.as_mut(),
+                            &mut user_shells, &mut task_monitors, queued, capturing.as_mut(), startup.as_mut(),
                         ).await? {
                             verdict_tasks.shutdown().await;
                             return Ok(());
@@ -372,7 +433,7 @@ fn run_relay_coordinator(
                             &mut events,
                             &mut session_configuration,
                             &mut user_shells,
-                            &mut kimi_tasks,
+                            &mut task_monitors,
                             queued,
                             capturing.as_mut(),
                             startup.as_mut(),
@@ -411,7 +472,7 @@ fn run_relay_coordinator(
                         &mut events,
                         &mut session_configuration,
                         &mut user_shells,
-                        &mut kimi_tasks,
+                        &mut task_monitors,
                         capturing.as_mut(),
                         startup.as_mut(),
                     ).await? {
@@ -480,7 +541,7 @@ fn run_relay_coordinator(
                     });
                     if record_events_in_order(
                         &relay, &mut in_flight, deferred, &mut events, &mut session_configuration,
-                        &mut user_shells, &mut kimi_tasks, capturing.as_mut(), startup.as_mut(),
+                        &mut user_shells, &mut task_monitors, capturing.as_mut(), startup.as_mut(),
                     ).await? {
                         verdict_tasks.shutdown().await;
                         return Ok(());
@@ -488,10 +549,17 @@ fn run_relay_coordinator(
                     // A checkpoint barrier may have been waiting for this turn.
                     dispatch_pending(&relay, &commands, &mut in_flight, session_configuration.is_ready(), &mut user_shells)?;
                 }
-                _ = kimi_poll.tick(), if kimi_tasks.is_some() && !held => {
-                    kimi_tasks
+                _ = kimi_poll.tick(), if task_monitors.kimi.is_some() && !held => {
+                    task_monitors.kimi
                         .as_mut()
                         .expect("Kimi poll branch is guarded")
+                        .refresh(&relay, false)
+                        .await?;
+                }
+                _ = antigravity_poll.tick(), if task_monitors.antigravity.is_some() && !held => {
+                    task_monitors.antigravity
+                        .as_mut()
+                        .expect("Antigravity poll branch is guarded")
                         .refresh(&relay, false)
                         .await?;
                 }
@@ -689,6 +757,71 @@ async fn capture_while_open(
     }
 }
 
+/// Record the queued ACP output ahead of the Stop's durable turn boundary.
+#[allow(clippy::too_many_arguments)]
+async fn settle_antigravity_turn(
+    relay: &Arc<RelayCell>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    session_configuration: &mut SessionConfiguration,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    task_monitors: &mut TaskMonitors,
+    mut capture: Option<&mut Capture<'_>>,
+    mut startup: Option<&mut HarnessStartup>,
+) -> Result<bool> {
+    let queued = events.len();
+    if record_queued_runtime_events(
+        relay,
+        in_flight,
+        events,
+        session_configuration,
+        user_shells,
+        task_monitors,
+        queued,
+        capture.as_deref_mut(),
+        startup.as_deref_mut(),
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+    if !relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .has_pending_antigravity_turn_settle()
+    {
+        return Ok(false);
+    }
+
+    if let Some(monitor) = task_monitors.antigravity.as_mut() {
+        monitor.refresh(relay, true).await?;
+    }
+    let mut deferred = std::collections::VecDeque::new();
+    let facts = match capture.as_deref_mut() {
+        Some(capture) => Some(capture_while_open(capture, relay, events, &mut deferred).await),
+        None => None,
+    };
+    {
+        let mut relay = relay.lock().expect("relay state lock poisoned");
+        relay.offer_settle_facts(facts);
+        let settled = relay.settle_pending_antigravity_harness_turn();
+        relay.offer_settle_facts(None);
+        settled?;
+    }
+    record_events_in_order(
+        relay,
+        in_flight,
+        deferred,
+        events,
+        session_configuration,
+        user_shells,
+        task_monitors,
+        capture,
+        startup,
+    )
+    .await
+}
+
 /// Prepare, observe (for a sub-agent's finishing prompt) and record one runtime
 /// event, then the events that arrived while it was observed.
 #[allow(clippy::too_many_arguments)]
@@ -699,7 +832,7 @@ async fn record_one_runtime_event(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
-    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    task_monitors: &mut TaskMonitors,
     capture: Option<&mut Capture<'_>>,
     startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
@@ -710,7 +843,7 @@ async fn record_one_runtime_event(
         events,
         session_configuration,
         user_shells,
-        kimi_tasks,
+        task_monitors,
         capture,
         startup,
     )
@@ -729,7 +862,7 @@ async fn record_events_in_order(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
-    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    task_monitors: &mut TaskMonitors,
     mut capture: Option<&mut Capture<'_>>,
     mut startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
@@ -744,7 +877,7 @@ async fn record_events_in_order(
             &mut deferred,
             session_configuration,
             user_shells,
-            kimi_tasks,
+            task_monitors,
             capture.as_deref_mut(),
             startup.as_deref_mut(),
         ))
@@ -766,7 +899,7 @@ async fn observe_and_record(
     deferred: &mut std::collections::VecDeque<RuntimeEvent>,
     session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
-    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    task_monitors: &mut TaskMonitors,
     capture: Option<&mut Capture<'_>>,
     startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
@@ -780,14 +913,14 @@ async fn observe_and_record(
     let work_facts = match capture.filter(|_| finishing_prompt) {
         Some(capture) => {
             let (prepared, facts) = tokio::join!(
-                prepare_kimi_runtime_event(kimi_tasks, relay, &mut event),
+                task_monitors.prepare_event(relay, &mut event),
                 capture_while_open(capture, relay, events, deferred),
             );
             prepared?;
             Some(facts)
         }
         None => {
-            prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
+            task_monitors.prepare_event(relay, &mut event).await?;
             None
         }
     };
@@ -876,7 +1009,7 @@ async fn record_runtime_event_batch(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
-    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    task_monitors: &mut TaskMonitors,
     mut capture: Option<&mut Capture<'_>>,
     mut startup: Option<&mut HarnessStartup>,
 ) -> Result<bool> {
@@ -887,7 +1020,7 @@ async fn record_runtime_event_batch(
         events,
         session_configuration,
         user_shells,
-        kimi_tasks,
+        task_monitors,
         capture.as_deref_mut(),
         startup.as_deref_mut(),
     )
@@ -902,7 +1035,7 @@ async fn record_runtime_event_batch(
         events,
         session_configuration,
         user_shells,
-        kimi_tasks,
+        task_monitors,
         queued,
         capture,
         startup,
@@ -917,7 +1050,7 @@ async fn record_queued_runtime_events(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configuration: &mut SessionConfiguration,
     user_shells: &mut crate::user_shell::UserShellRegistry,
-    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    task_monitors: &mut TaskMonitors,
     maximum: usize,
     mut capture: Option<&mut Capture<'_>>,
     mut startup: Option<&mut HarnessStartup>,
@@ -932,7 +1065,7 @@ async fn record_queued_runtime_events(
                     events,
                     session_configuration,
                     user_shells,
-                    kimi_tasks,
+                    task_monitors,
                     capture.as_deref_mut(),
                     startup.as_deref_mut(),
                 )
@@ -1987,7 +2120,7 @@ mod startup_tests {
                 wakes,
                 commands,
                 shells,
-                None,
+                TaskMonitors::default(),
                 None,
                 None,
                 Some(startup),
@@ -2142,3 +2275,6 @@ mod startup_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod antigravity_tests;

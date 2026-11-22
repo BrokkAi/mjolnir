@@ -70,9 +70,7 @@ use mj_checkpoint::archive::CanonicalQueuedCommandKind;
 use mj_core::clock::epoch_millis;
 /// Whether this relay models turns the harness starts on its own.
 ///
-/// Only Claude Code's adapter marks the end of such a turn today (an origin
-/// key on the settling `usage_update`), so every other harness keeps the
-/// behaviour it had before harness turns existed. See
+/// The harness-specific policy chooses which signals open and settle a turn. See
 /// `.agents/docs/claude-autonomous-turns.md`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HarnessTurnPolicy {
@@ -80,6 +78,7 @@ pub enum HarnessTurnPolicy {
     Disabled,
     ClaudeAdapter,
     CodexAdapter,
+    Antigravity,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -131,6 +130,7 @@ pub enum BackgroundWorkPolicy {
     AirTasks,
     /// Kimi's native detached-agent set, together with hosted terminals.
     KimiTasks,
+    AntigravityTasks,
 }
 
 pub(crate) struct PendingLiveBaseline {
@@ -330,6 +330,7 @@ pub struct DurableRelay {
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
+    pub(crate) jev_disabled: bool,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
     #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
@@ -349,6 +350,7 @@ pub struct DurableRelay {
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
     claude_pending_stops: BTreeMap<String, BTreeSet<String>>,
+    antigravity_work: background::AntigravityWorkState,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
@@ -356,7 +358,7 @@ pub struct DurableRelay {
     kimi_provisional_tasks: BTreeMap<String, KimiProvisionalTask>,
     kimi_observed_task_ids: BTreeSet<String>,
     kimi_observed_tool_ids: BTreeSet<String>,
-    /// Whether Kimi's provider-owned background work is synchronized. Other
+    /// Whether provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
     /// The classifier the sub-agent handback check asks. Only the Unix worker
@@ -1059,6 +1061,7 @@ impl DurableRelay {
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
+            jev_disabled: mj_core::jev::disabled_by_environment(),
             authentication_login_path: None,
             login_identity: Default::default(),
             replied_verdict: Default::default(),
@@ -1066,6 +1069,7 @@ impl DurableRelay {
             air_tasks: BTreeMap::new(),
             pending_settle_facts: None,
             claude_pending_stops: BTreeMap::new(),
+            antigravity_work: background::AntigravityWorkState::default(),
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
@@ -1718,6 +1722,7 @@ impl DurableRelay {
         if self.snapshot.managed_subagent != managed {
             self.record_observation(RelayObservation::ManagedSubagentConfigured { managed })?;
         }
+        self.settle_local_quota()?;
         self.suppress_child_assessment()
     }
 
@@ -2198,7 +2203,10 @@ impl DurableRelay {
     /// [`HARNESS_TURN_STOP_GRACE`]. The snapshot owns the stop: a journal
     /// event records it, so it is the same on every path and after a restart.
     pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
-        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter {
+        if !matches!(
+            self.harness_turns,
+            HarnessTurnPolicy::ClaudeAdapter | HarnessTurnPolicy::Antigravity
+        ) {
             return None;
         }
         let turn = self.snapshot.autonomous_harness_turn()?;
@@ -2218,7 +2226,7 @@ impl DurableRelay {
         tracing::warn!(
             session_id = %self.snapshot.session_id,
             first_ordinal,
-            "Claude Code did not answer a stop of the turn it started on its own; ending the turn"
+            "The harness did not answer a stop of its autonomous turn; ending the turn"
         );
         self.settle_harness_turn(Some("stop_unanswered".to_owned()), "cancelled")?;
         Ok(true)

@@ -133,6 +133,7 @@ impl FetchedPath {
             position: 0,
             start: self.offset,
             cancelled: None,
+            probe: None,
         }
     }
 

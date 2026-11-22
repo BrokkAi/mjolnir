@@ -557,6 +557,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+                supervisor: false,
             };
             connection.execute(
                 "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)

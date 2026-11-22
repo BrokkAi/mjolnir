@@ -46,6 +46,13 @@ impl DashboardContext {
     /// usable while the scans are still running, and the scans run
     /// concurrently rather than one after another.
     pub(crate) fn start_resume_discovery(&mut self) {
+        self.start_resume_discovery_with_filter(None);
+    }
+
+    pub(crate) fn start_resume_discovery_with_filter(
+        &mut self,
+        filter: Option<(String, Option<mj_tui::SessionStateFilter>)>,
+    ) {
         self.import_discovery_id = self.import_discovery_id.wrapping_add(1);
         self.dashboard.show_resume_dialog(
             self.import_discovery_id,
@@ -56,11 +63,14 @@ impl DashboardContext {
                     .map(|(id, profile)| (id.to_owned(), profile.kind)),
             ),
         );
+        if let Some((query, state)) = filter {
+            self.dashboard.set_resume_filter(query, state);
+        }
         crate::dashboard::io::spawn_resume_candidates(
             self.import_discovery_id,
             self.dashboard_io_tx.clone(),
         );
-        // Opening the dialog issues the empty query. It lists the most recent
+        // Opening the dialog issues its initial query. It lists the most recent
         // indexed sessions and, just as importantly, brings back the index's
         // state, which decides whether the search box can be typed into.
         if let Some((request_id, query)) = self.dashboard.next_wiki_search() {

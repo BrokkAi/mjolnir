@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use axum::body::Body;
-use axum::http::Request;
 use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
+use axum::http::Request;
 use http_body_util::BodyExt as _;
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, watch};
 use tower::ServiceExt as _;
 
 use super::super::{
-    ControllerRequest, ServerOptions, ServerRequests, ViewerOperation, ViewerOperationKind,
-    ViewerProfile, ViewerSnapshot, router, tests::sample_config_state,
+    router, tests::sample_config_state, ControllerRequest, ServerOptions, ServerRequests,
+    ViewerOperation, ViewerOperationKind, ViewerProfile, ViewerSnapshot,
 };
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
@@ -80,12 +80,10 @@ async fn wiki_backend_failures_are_not_retryable_shutdowns() {
             StatusCode::INTERNAL_SERVER_ERROR,
             "{path}"
         );
-        assert!(
-            response
-                .headers()
-                .get(crate::server::UPGRADE_HEADER)
-                .is_none()
-        );
+        assert!(response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .is_none());
         assert_eq!(
             json_body(response).await,
             serde_json::json!({"error": expected})
@@ -169,11 +167,9 @@ async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessi
             assert_eq!(value["claude"], failure);
         } else if let Some(sessions) = value["sessions"].as_array() {
             assert!(!sessions.is_empty());
-            assert!(
-                sessions
-                    .iter()
-                    .all(|session| session["profile_login_error"] == failure)
-            );
+            assert!(sessions
+                .iter()
+                .all(|session| session["profile_login_error"] == failure));
         } else {
             assert_eq!(value["profile_login_error"], failure);
         }
@@ -672,16 +668,14 @@ async fn external_event_same_key_retries_ignore_creation_time() {
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
     let original = serde_json::from_str::<serde_json::Value>(&first_row.event_json).unwrap();
-    assert!(
-        mj_controller::database::enqueue_mailbox_event(
-            event_key,
-            "session-2",
-            &original.to_string(),
-            false,
-            false,
-        )
-        .is_err()
-    );
+    assert!(mj_controller::database::enqueue_mailbox_event(
+        event_key,
+        "session-2",
+        &original.to_string(),
+        false,
+        false,
+    )
+    .is_err());
 
     writer.shutdown().unwrap();
 }
@@ -716,17 +710,15 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
         "text":"A comment from an older daemon.",
         "created_at_ms":42
     });
-    assert!(
-        mj_controller::database::enqueue_mailbox_event(
-            "github:acme/repo#12:comment:3",
-            "session-1",
-            &legacy.to_string(),
-            true,
-            false,
-        )
-        .unwrap()
-        .inserted()
-    );
+    assert!(mj_controller::database::enqueue_mailbox_event(
+        "github:acme/repo#12:comment:3",
+        "session-1",
+        &legacy.to_string(),
+        true,
+        false,
+    )
+    .unwrap()
+    .inserted());
     let row = mj_controller::database::pending_mailbox_events(10)
         .unwrap()
         .into_iter()
@@ -739,17 +731,15 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             text: "A comment from an older daemon.".into()
         }
     );
-    assert!(
-        !mj_controller::database::enqueue_mailbox_event(
-            &event.key,
-            &row.target_session_id,
-            &serde_json::to_string(&event).unwrap(),
-            true,
-            false,
-        )
-        .unwrap()
-        .inserted()
-    );
+    assert!(!mj_controller::database::enqueue_mailbox_event(
+        &event.key,
+        &row.target_session_id,
+        &serde_json::to_string(&event).unwrap(),
+        true,
+        false,
+    )
+    .unwrap()
+    .inserted());
     writer.shutdown().unwrap();
 }
 
@@ -1002,11 +992,9 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(
-        std::str::from_utf8(frame.data_ref().unwrap())
-            .unwrap()
-            .contains("id: 3")
-    );
+    assert!(std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .contains("id: 3"));
     snapshots.send_modify(|snapshot| {
         snapshot
             .sessions
@@ -1175,11 +1163,9 @@ async fn event_stream_without_cursor_starts_at_the_current_frontier() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(
-        std::str::from_utf8(frame.data_ref().unwrap())
-            .unwrap()
-            .contains("id: 2")
-    );
+    assert!(std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .contains("id: 2"));
 }
 
 #[tokio::test]
@@ -1437,14 +1423,14 @@ impl SubagentBackend for FakeBackend {
                 .subagent_configuration
                 .clone()
                 .unwrap_or(mj_core::config::SubagentConfig {
-                    straightforward: Some(mj_core::config::SubagentChoice {
+                    straightforward: vec![mj_core::config::SubagentChoice {
                         model: "kimi-code/k3".into(),
                         effort: None,
-                    }),
-                    subtle: Some(mj_core::config::SubagentChoice {
+                    }],
+                    subtle: vec![mj_core::config::SubagentChoice {
                         model: "kimi-code/k3".into(),
                         effort: None,
-                    }),
+                    }],
                     ..Default::default()
                 }))
         })
@@ -1561,6 +1547,7 @@ impl SubagentBackend for FakeBackend {
                     quota: crate::server::api::CandidateQuota::Unknown,
                     may_consume_credits: false,
                     unhealthy: Default::default(),
+                    cache_identity: None,
                 }],
                 unavailable: Vec::new(),
             })
@@ -1688,6 +1675,7 @@ impl SubagentBackend for FakeBackend {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
+                supervisor: false,
             })
         })
     }
@@ -2101,6 +2089,23 @@ fn api_app_with_worker_check(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
+    let (app, actions, snapshot, bundles, _client_state) =
+        api_app_with_client_state(backend, adjust, preferences_path, worker_check);
+    (app, actions, snapshot, bundles)
+}
+
+fn api_app_with_client_state(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    worker_check: Option<crate::server::WorkerSourceCheck>,
+) -> (
+    axum::Router,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<super::super::ClientStateRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -2117,7 +2122,7 @@ fn api_app_with_worker_check(
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
     let (preflight_tx, _preflight_rx) = mpsc::channel(8);
     let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+    let (client_state_tx, client_state_rx) = mpsc::channel(8);
     let browser = super::super::tests::test_browser_source(snapshot_rx.clone());
     let mut options = ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -2142,7 +2147,13 @@ fn api_app_with_worker_check(
     if let Some(check) = worker_check {
         options.set_worker_source_check(check);
     }
-    (router(options), action_rx, snapshot_tx, bundle_rx)
+    (
+        router(options),
+        action_rx,
+        snapshot_tx,
+        bundle_rx,
+        client_state_rx,
+    )
 }
 
 fn bearer(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -2794,7 +2805,59 @@ fn model_candidate_with_efforts(
             }],
         },
         unhealthy: Default::default(),
+        cache_identity: None,
     }
+}
+
+#[tokio::test]
+async fn bare_session_start_with_primary_forwards_model_and_effort_to_followup() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    let backend = Arc::new(FakeBackend {
+        subagent_configuration: Some(mj_core::config::SubagentConfig {
+            primary: vec![mj_core::config::SubagentChoice {
+                model: "gpt-6.1-sol".into(),
+                effort: Some("xhigh".into()),
+            }],
+            ..Default::default()
+        }),
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate_with_efforts(
+                "codex-1",
+                80,
+                "gpt-6.1-sol",
+                &["high", "xhigh"],
+            )],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend.clone(),
+        |snapshot| snapshot.primary_configured = true,
+        preferences_path,
+    );
+    let response = mj_core::runtime::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","target_id":"podman"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(
+        request.action,
+        ControllerAction::New { ref profile_id, .. } if profile_id == "codex-1"
+    ));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("sess-primary-1".into()),
+            notice: None,
+        })
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let followups = backend.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert_eq!(followups[0].1.model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(followups[0].1.effort.as_deref(), Some("xhigh"));
 }
 
 #[tokio::test]
@@ -3008,6 +3071,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         request.action,
         ControllerAction::New {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
@@ -3142,14 +3206,14 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 async fn subagent_model_selection_uses_any_enabled_profile() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
         subagent_configuration: Some(mj_core::config::SubagentConfig {
-            straightforward: Some(mj_core::config::SubagentChoice {
+            straightforward: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: None,
-            }),
-            subtle: Some(mj_core::config::SubagentChoice {
+            }],
+            subtle: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: None,
-            }),
+            }],
             ..Default::default()
         }),
         session_model_candidates: Some(SubagentCandidates {
@@ -3188,7 +3252,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
-        false,
+        mj_core::config::ExecutionPolicy::Unconstrained,
     )
     .await
     .unwrap();
@@ -3962,8 +4026,7 @@ async fn a_forced_close_ignores_active_subagents() {
 
 #[tokio::test]
 async fn a_forced_close_rejects_removed_delete_branch_field() {
-    let (app, _actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/destroy"))
@@ -4093,16 +4156,12 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
     assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
     assert!(body["capacity_retry"].is_null());
-    assert!(
-        body["session"]["last_turn_outcome"]
-            .get("answered_through")
-            .is_none()
-    );
-    assert!(
-        body["session"]["last_turn_outcome"]
-            .get("diagnostic")
-            .is_none()
-    );
+    assert!(body["session"]["last_turn_outcome"]
+        .get("answered_through")
+        .is_none());
+    assert!(body["session"]["last_turn_outcome"]
+        .get("diagnostic")
+        .is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -4275,11 +4334,9 @@ async fn an_event_stream_ended_by_a_handoff_names_the_cursor_to_resume_from() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(
-        std::str::from_utf8(frame.data_ref().unwrap())
-            .unwrap()
-            .contains("id: 4")
-    );
+    assert!(std::str::from_utf8(frame.data_ref().unwrap())
+        .unwrap()
+        .contains("id: 4"));
     assert!(backend.upgrade_gate.try_close());
     backend.shutdown.cancel();
     let rest = tokio::time::timeout(Duration::from_secs(2), body.collect())
@@ -4697,7 +4754,7 @@ fn projection_with(outcome: MaterializedTurnOutcome) -> mj_core::state::Material
 // Hard-won: #1304: a stored expect-continuation verdict held every wait on an idle session open.
 #[test]
 fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
-    use mj_core::activity::{ActivityState, verdict};
+    use mj_core::activity::{verdict, ActivityState};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
         work_facts: None,
@@ -5463,11 +5520,9 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
         response.headers()[axum::http::header::CONTENT_ENCODING],
         "gzip"
     );
-    assert!(
-        !response
-            .headers()
-            .contains_key(axum::http::header::CONTENT_LENGTH)
-    );
+    assert!(!response
+        .headers()
+        .contains_key(axum::http::header::CONTENT_LENGTH));
     let mut body = response.into_body().into_data_stream();
     use futures::StreamExt as _;
     let first = body.next().await.unwrap().unwrap();
@@ -6256,6 +6311,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
         failure_notice: None,
         oracle: None,
+        supervisors: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
@@ -6325,6 +6381,7 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                             noticed_turn: None,
                             reported_finish: None,
                             handback_tool: false,
+                            supervisor: false,
                         },
                     );
                 }
@@ -6540,16 +6597,14 @@ async fn only_the_session_wait_follows_the_quota_check() {
             .outcome,
         WaitOutcome::QuotaLimit,
     );
-    assert!(
-        resolve_wait(
-            &WaitObservation {
-                subagent: true,
-                ..queued
-            },
-            &request,
-        )
-        .is_none()
-    );
+    assert!(resolve_wait(
+        &WaitObservation {
+            subagent: true,
+            ..queued
+        },
+        &request,
+    )
+    .is_none());
 
     let response = finish_wait(
         &backend,
@@ -6860,12 +6915,10 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(
-        json_body(response)
-            .await
-            .to_string()
-            .contains("Docker is not installed on this host")
-    );
+    assert!(json_body(response)
+        .await
+        .to_string()
+        .contains("Docker is not installed on this host"));
 }
 
 /// A target the daemon has no worker binary for is refused at admission with
@@ -7915,6 +7968,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
+        supervisor: false,
     };
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
     let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
@@ -8256,24 +8310,229 @@ fn queued_rejection_does_not_finish_the_running_prompt_wait() {
         message: "transport failed".into(),
     };
     let observation = idle(Some(outcome));
-    assert!(
-        resolve_wait(
-            &observation,
-            &WaitRequest {
-                turn_id: Some(5),
-                ..Default::default()
-            }
-        )
-        .is_none()
+    assert!(resolve_wait(
+        &observation,
+        &WaitRequest {
+            turn_id: Some(5),
+            ..Default::default()
+        }
+    )
+    .is_none());
+    assert!(resolve_wait(
+        &observation,
+        &WaitRequest {
+            turn_id: Some(7),
+            ..Default::default()
+        }
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() {
+    let (app, _actions, _snapshot_tx, _bundles, mut client_state) = api_app_with_client_state(
+        Arc::new(FakeBackend::default()),
+        |_| {},
+        absent_preferences_path(),
+        None,
     );
-    assert!(
-        resolve_wait(
-            &observation,
-            &WaitRequest {
-                turn_id: Some(7),
-                ..Default::default()
-            }
+
+    async fn post(app: axum::Router, body: serde_json::Value) -> Response {
+        app.oneshot(
+            bearer(Request::post("/api/v1/checkpoints/purge-untracked"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
         )
-        .is_some()
+        .await
+        .unwrap()
+    }
+
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"all": false}),
+        serde_json::json!({"session_id": "session-1", "all": true}),
+        serde_json::json!({"session_id": ""}),
+        serde_json::json!({"session_id": "", "all": true}),
+    ] {
+        let response = post(app.clone(), body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(response).await["error"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            error.contains("name exactly one of session_id or all"),
+            "{error}"
+        );
+    }
+
+    let invalid = post(app.clone(), serde_json::json!({"session_id": "bad id"})).await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert!(json_body(invalid).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("session ID must be 8-128"),);
+
+    let unknown_field = post(
+        app.clone(),
+        serde_json::json!({"session_id": "session-1", "extra": true}),
+    )
+    .await;
+    assert_eq!(unknown_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let anonymous = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/checkpoints/purge-untracked")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"all":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    async fn round_trip(
+        app: axum::Router,
+        client_state: &mut mpsc::Receiver<super::super::ClientStateRequest>,
+        body: serde_json::Value,
+        expected: PurgeUntrackedRequest,
+        answer: Result<PurgeUntrackedResponse, PurgeUntrackedFailure>,
+    ) -> Response {
+        let pending = mj_core::runtime::spawn(post(app, body));
+        let request = client_state.recv().await.expect("purge request");
+        let super::super::ClientStateRequest::PurgeUntracked { request, reply } = request else {
+            panic!("expected a purge-untracked client-state request");
+        };
+        assert_eq!(request, expected);
+        reply.send(answer).expect("the handler is still waiting");
+        pending.await.unwrap()
+    }
+
+    let dry = PurgeUntrackedResponse {
+        sessions: vec![PurgeUntrackedSession {
+            session_id: "session-1".into(),
+            status: PurgeUntrackedStatus::DryRun,
+            bytes_reclaimed: 4096,
+            reason: None,
+            stash_untracked_notes: vec![PurgeUntrackedStashNote {
+                repository_id: "project".into(),
+                commit: "abcdef".into(),
+                message: "WIP notes".into(),
+            }],
+            warnings: vec!["could not read one stash".into()],
+        }],
+        total_bytes_reclaimed: 4096,
+        dry_run: true,
+    };
+    let response = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"session_id": "session-1", "dry_run": true}),
+        PurgeUntrackedRequest {
+            session_id: Some("session-1".into()),
+            all: false,
+            dry_run: true,
+        },
+        Ok(dry.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::to_value(&dry).unwrap()
+    );
+
+    let live = PurgeUntrackedResponse {
+        sessions: vec![
+            PurgeUntrackedSession {
+                session_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                status: PurgeUntrackedStatus::Purged,
+                bytes_reclaimed: 4096,
+                reason: None,
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+            },
+            PurgeUntrackedSession {
+                session_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                status: PurgeUntrackedStatus::Skipped,
+                bytes_reclaimed: 0,
+                reason: Some("lifecycle operation in progress".into()),
+                stash_untracked_notes: Vec::new(),
+                warnings: Vec::new(),
+            },
+        ],
+        total_bytes_reclaimed: 4096,
+        dry_run: false,
+    };
+    let response = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"all": true}),
+        PurgeUntrackedRequest {
+            session_id: None,
+            all: true,
+            dry_run: false,
+        },
+        Ok(live.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::to_value(&live).unwrap()
+    );
+
+    let missing = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"session_id": "missing01"}),
+        PurgeUntrackedRequest {
+            session_id: Some("missing01".into()),
+            all: false,
+            dry_run: false,
+        },
+        Err(PurgeUntrackedFailure::NotFound(
+            "unknown session missing01".into(),
+        )),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(json_body(missing).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown session missing01"));
+
+    let busy = round_trip(
+        app.clone(),
+        &mut client_state,
+        serde_json::json!({"session_id": "busybusy"}),
+        PurgeUntrackedRequest {
+            session_id: Some("busybusy".into()),
+            all: false,
+            dry_run: false,
+        },
+        Err(PurgeUntrackedFailure::Conflict(
+            "lifecycle operation in progress for session busybusy".into(),
+        )),
+    )
+    .await;
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    assert!(json_body(busy).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("lifecycle operation in progress"));
+
+    let dropped = mj_core::runtime::spawn(post(
+        app.clone(),
+        serde_json::json!({"session_id": "session-1"}),
+    ));
+    drop(client_state.recv().await.expect("purge request"));
+    let dropped = dropped.await.unwrap();
+    assert_eq!(dropped.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(dropped).await["error"].as_str().unwrap(),
+        "the controller is unavailable"
     );
 }

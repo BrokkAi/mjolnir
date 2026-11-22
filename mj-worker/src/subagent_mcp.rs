@@ -224,6 +224,8 @@ pub struct ParentTools {
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
     /// no `task_type` and every child uses the straightforward choice.
     pub subtle_subagents: bool,
+    /// Whether a top-level parent's `spawn` offers `task_type = "supervisor"`.
+    pub supervisors_enabled: bool,
 }
 
 impl Default for ParentTools {
@@ -232,6 +234,7 @@ impl Default for ParentTools {
             oracle: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
+            supervisors_enabled: false,
         }
     }
 }
@@ -375,7 +378,8 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
 ) -> Result<()> {
     let socket = socket.to_path_buf();
     options.oracle |= oracle_enabled(&socket);
-    let report_budget = if role == SubagentMcpRole::Child {
+    options.supervisors_enabled |= supervisors_enabled(&socket);
+    let report_budget = if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) {
         ChildReportBudget::from_socket(&socket)?
     } else {
         None
@@ -400,6 +404,19 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         review_role.map(mj_core::session_instructions::review_child_output_contract);
     let tools = match role {
         SubagentMcpRole::Parent => tool_definitions_with_options(harness, options),
+        SubagentMcpRole::Supervisor => {
+            let mut sup_options = options;
+            sup_options.oracle = false;
+            sup_options.supervisors_enabled = false;
+            let mut tools = tool_definitions_with_options(harness, sup_options);
+            let mut handback = child_tool_definitions().remove(0);
+            if let Some(budget) = &report_budget {
+                let description = handback["description"].as_str().unwrap();
+                handback["description"] = json!(format!("{description} {}", budget.note()));
+            }
+            tools.push(handback);
+            tools
+        }
         SubagentMcpRole::MessageOnly => {
             let mut tools = vec![send_message_tool(), fetch_tool()];
             if options.oracle {
@@ -619,11 +636,21 @@ fn call_with_budget_and_options(
             // daemon: the configuration may have gained one since launch.
             let task_type = match args.task_type {
                 Some(task_type) => task_type,
-                None if !options.subtle_subagents => {
+                None if !options.subtle_subagents
+                    && !(role == SubagentMcpRole::Parent && options.supervisors_enabled) =>
+                {
                     mj_core::subagent::SubagentTaskType::Straightforward
                 }
                 None => bail!("missing field `task_type`"),
             };
+            if task_type == mj_core::subagent::SubagentTaskType::Supervisor {
+                if role == SubagentMcpRole::Supervisor {
+                    bail!("supervisors cannot spawn nested supervisors (maximum depth is 2)");
+                }
+                if role != SubagentMcpRole::Parent || !options.supervisors_enabled {
+                    bail!("supervisors are not enabled for this session");
+                }
+            }
             SubagentToolAction::Spawn {
                 no_github_credentials: args.no_github_credentials,
                 task_name: args.task_name,
@@ -663,7 +690,7 @@ fn call_with_budget_and_options(
                 child_session_id: args.child_session_id,
             }
         }
-        "handback" if role == SubagentMcpRole::Child => {
+        "handback" if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) => {
             if let Some(budget) = ChildReportBudget::from_socket(socket)?
                 && let Err(error) = budget.check()
             {
@@ -804,7 +831,7 @@ const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem u
 
 /// The parent's `spawn` tool. With only the straightforward type configured
 /// there is no choice to make, so it has no `task_type`.
-fn spawn_tool(subtle_subagents: bool) -> Value {
+fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
     let (lead, selection) = if subtle_subagents {
         (
             SPAWN_TWO_TASK_TYPES,
@@ -813,15 +840,22 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
     } else {
         (SPAWN_ONE_TASK_TYPE, "the configured model and effort")
     };
+    let mut task_types = vec!["straightforward"];
+    if subtle_subagents {
+        task_types.push("subtle");
+    }
+    if supervisors_enabled {
+        task_types.push("supervisor");
+    }
     let mut properties = json!({
         "no_github_credentials":{"type":"boolean","description":"Withhold GitHub credentials from this child and its descendants. A parent's credential opt-out is always inherited."},
         "task_name":{"type":"string"},
         "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
-        "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
+        "task_type":{"type":"string","enum":task_types,"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs. `supervisor` starts a depth-1 supervisor from the primary pool that can delegate its own `straightforward`/`subtle` workers."},
         "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
     });
     let mut required = json!(["task_name", "instructions", "task_type"]);
-    if !subtle_subagents {
+    if !subtle_subagents && !supervisors_enabled {
         properties
             .as_object_mut()
             .expect("properties are an object")
@@ -857,7 +891,7 @@ fn tool_definitions_with_options(
         "additionalProperties":false
     });
     let mut tools = vec![
-        spawn_tool(options.subtle_subagents),
+        spawn_tool(options.subtle_subagents, options.supervisors_enabled),
         read_only(tool(
             "list_agents",
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
@@ -885,6 +919,13 @@ fn oracle_enabled(socket: &Path) -> bool {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .is_some_and(|launch| launch["oracle"] == true)
+}
+
+fn supervisors_enabled(socket: &Path) -> bool {
+    std::fs::read(socket.with_file_name("launch.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|launch| launch["supervisors_enabled"] == true)
 }
 
 fn ask_oracle_tool() -> Value {
@@ -1167,12 +1208,14 @@ mod tests {
         oracle: false,
         agent_mailboxes_enabled: false,
         subtle_subagents: true,
+        supervisors_enabled: false,
     };
 
     const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
         oracle: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: false,
+        supervisors_enabled: false,
     };
 
     fn spawn_definition(options: ParentTools) -> Value {
@@ -1803,7 +1846,7 @@ mod tests {
                         }
                         assert!(!description.contains("child_session_id"));
                     }
-                    SubagentMcpRole::Parent => {
+                    SubagentMcpRole::Parent | SubagentMcpRole::Supervisor => {
                         let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
                         let props = &spawn["inputSchema"]["properties"];
                         assert!(props.get("files").is_none() && props.get("context").is_none());

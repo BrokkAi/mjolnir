@@ -219,14 +219,14 @@ impl ExportRuntime for RecordingExports {
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         mj_core::config::SubagentConfig {
-            straightforward: Some(mj_core::config::SubagentChoice {
+            straightforward: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: Some("low".into()),
-            }),
-            subtle: Some(mj_core::config::SubagentChoice {
+            }],
+            subtle: vec![mj_core::config::SubagentChoice {
                 model: "nova".into(),
                 effort: Some("high".into()),
-            }),
+            }],
             ..Default::default()
         }
     }
@@ -343,6 +343,7 @@ async fn selection_backend_refusing(
             mj_controller::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: "test-identity".into(),
+                last_good: None,
                 report: Some(report),
             },
         )
@@ -1023,14 +1024,14 @@ struct ParentExports(SessionRecord);
 impl ExportRuntime for ParentExports {
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         mj_core::config::SubagentConfig {
-            straightforward: Some(mj_core::config::SubagentChoice {
+            straightforward: vec![mj_core::config::SubagentChoice {
                 model: "luna".into(),
                 effort: None,
-            }),
-            subtle: Some(mj_core::config::SubagentChoice {
+            }],
+            subtle: vec![mj_core::config::SubagentChoice {
                 model: "nova".into(),
                 effort: None,
-            }),
+            }],
             ..Default::default()
         }
     }
@@ -1050,6 +1051,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+            supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -1970,6 +1972,7 @@ async fn a_child_hands_back_one_report_per_turn() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
+            supervisor: false,
         },
     )
     .unwrap();
@@ -3445,6 +3448,7 @@ fn store_parent_and_child(child_id: &str) {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
+            supervisor: false,
         },
     )
     .unwrap();
@@ -4701,6 +4705,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
+                supervisor: false,
             },
         )
         .unwrap();
@@ -8100,6 +8105,7 @@ impl ExportRuntime for OracleExports {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
+            supervisor: false,
             };
             let mut session = parent_record(&id, &request.profile_id);
             session.oracle = false;
@@ -8154,6 +8160,7 @@ async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
             mj_controller::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: "test-identity".into(),
+                last_good: None,
                 report: Some(report),
             },
         )

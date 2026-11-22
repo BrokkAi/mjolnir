@@ -2471,10 +2471,10 @@ mod tests {
             model_probe,
         );
         let mut config = test_config(&[("opencode", HarnessKind::OpenCode)]);
-        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+        config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
             model: "provider/model-7".into(),
             effort: None,
-        });
+        }];
         catalog.sync(&config);
         let settled = |model: &'static str| {
             let catalog = catalog.clone();
@@ -2495,10 +2495,10 @@ mod tests {
         // A Settings draft selecting another model probes just that one, and
         // only the models probed are published.
         let mut draft = config.clone();
-        draft.subagents.subtle = Some(mj_core::config::SubagentChoice {
+        draft.subagents.subtle = vec![mj_core::config::SubagentChoice {
             model: "provider/model-42".into(),
             effort: None,
-        });
+        }];
         catalog.ensure(&draft);
         settled("provider/model-42").await;
         assert_eq!(
@@ -3265,10 +3265,10 @@ mod tests {
         write_home_model(root, "solo", "solo-first");
         let calls = calls();
         let (mut config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
-        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+        config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
             model: "extra".into(),
             effort: None,
-        });
+        }];
         let probe_homes = homes.clone();
         let model_homes = homes;
         let probe_calls = calls.clone();
@@ -3470,10 +3470,10 @@ mod tests {
         write_home_model(root, "solo", "solo-first");
         let calls = calls();
         let (mut config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
-        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+        config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
             model: "extra".into(),
             effort: None,
-        });
+        }];
         let probe_homes = homes.clone();
         let model_homes = homes;
         let probe_calls = calls.clone();
@@ -3996,6 +3996,7 @@ mod tests {
                     crate::quota::QuotaReportPublication {
                         login_error: None,
                         cache_identity: "test-identity".into(),
+                        last_good: None,
                         report: Some(report),
                     },
                 )
@@ -4078,6 +4079,7 @@ mod tests {
             crate::quota::QuotaReportPublication {
                 login_error: None,
                 cache_identity: "test-identity".into(),
+                last_good: None,
                 report: Some(subscription_report("codex", HarnessKind::Codex)),
             },
         );
@@ -4462,10 +4464,10 @@ mod tests {
         let (release, gate) = tokio::sync::watch::channel(false);
         let catalog = ProfileCatalog::with_probe(gated_probe(probes.clone(), started, gate));
         let mut config = test_config(&[("parent", HarnessKind::Codex), ("p", HarnessKind::Muse)]);
-        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+        config.subagents.straightforward = vec![mj_core::config::SubagentChoice {
             model: "p-model".into(),
             effort: None,
-        });
+        }];
         let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
             straightforward: None,
             subtle: None,
@@ -4501,8 +4503,8 @@ mod tests {
             model: "p-model".into(),
             effort: None,
         };
-        config.subagents.straightforward = Some(choice.clone());
-        config.subagents.subtle = Some(choice);
+        config.subagents.straightforward = vec![choice.clone()];
+        config.subagents.subtle = vec![choice];
         catalog.sync(&config);
         let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
             straightforward: None,

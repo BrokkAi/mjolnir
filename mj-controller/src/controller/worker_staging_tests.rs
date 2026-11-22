@@ -452,6 +452,8 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
+        supervisor: false,
+        supervisors_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         goal_resume_request: None,
@@ -719,6 +721,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
+            &mj_core::config::Config::default(),
         )
         .unwrap();
 

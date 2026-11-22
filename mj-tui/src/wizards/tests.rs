@@ -1578,6 +1578,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
@@ -1585,6 +1586,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
+            provider: None,
             bundle_id: raw_project_context_id("/srv/repaired"),
             project_directory: Some("/srv/repaired".into()),
             target_template_id: "machine".into(),
@@ -1646,7 +1648,13 @@ fn new_session_profile_step_aligns_its_columns() {
         },
     );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    dashboard.quota_providers.settle();
     ready_open_new_wizard(&mut dashboard);
+    // ANTHROPIC starts expanded for the initially selected claude-1; expand
+    // MOONSHOT too so both providers' rows are visible for column alignment.
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Right));
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -1665,7 +1673,7 @@ fn new_session_profile_step_aligns_its_columns() {
     let kimi = row("kimi-1");
     let profile_column = cell_column(headings, "PROFILE");
     for (line, profile) in [(claude, "claude-1"), (kimi, "kimi-1")] {
-        assert_eq!(cell_column(line, profile), profile_column);
+        assert_eq!(cell_column(line, profile), profile_column + 2);
         assert_eq!(
             cell_column(line, "refreshing"),
             cell_column(headings, "WEEKLY")
@@ -1679,6 +1687,189 @@ fn new_session_profile_step_aligns_its_columns() {
         cell_column(kimi, "Kimi Code"),
         cell_column(headings, "HARNESS")
     );
+}
+
+#[test]
+fn new_session_profile_step_groups_by_provider_and_brackets_auto() {
+    let mut config = config();
+    config
+        .subagents
+        .primary
+        .push(mj_core::config::SubagentChoice {
+            model: "claude-sonnet".into(),
+            effort: None,
+        });
+    config.profiles.insert(
+        "kimi-1".into(),
+        HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi")),
+    );
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    dashboard.quota_providers.settle();
+    ready_open_new_wizard(&mut dashboard);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let draw_lines = |dashboard: &mut DashboardState, terminal: &mut Terminal<TestBackend>| {
+        terminal.draw(|frame| render(frame, dashboard)).unwrap();
+        buffer_lines(terminal.backend().buffer())
+    };
+
+    // With Auto (Primary) selected, Auto is bracketed by blank lines and every
+    // provider starts collapsed with its disclosure arrow in Profiles-pane order.
+    let lines = draw_lines(&mut dashboard, &mut terminal);
+    fn modal_inner(line: &str) -> &str {
+        let start = line.find('│').unwrap() + '│'.len_utf8();
+        let rest = &line[start..];
+        let inner_start = rest.find('│').unwrap() + '│'.len_utf8();
+        let inner = &rest[inner_start..];
+        let inner_end = inner.find('│').unwrap();
+        inner[..inner_end].trim()
+    }
+    let heading_idx = lines
+        .iter()
+        .position(|line| line.contains("PROFILE") && line.contains("HARNESS"))
+        .expect("profile heading row");
+    let auto_idx = lines
+        .iter()
+        .position(|line| line.contains("Auto (Primary)"))
+        .expect("Auto row");
+    assert_eq!(auto_idx, heading_idx + 2, "blank line above Auto");
+    assert!(
+        modal_inner(&lines[heading_idx + 1]).is_empty(),
+        "expected blank line above Auto, got {:?}",
+        lines[heading_idx + 1]
+    );
+    assert!(
+        modal_inner(&lines[auto_idx + 1]).is_empty(),
+        "expected blank line below Auto, got {:?}",
+        lines[auto_idx + 1]
+    );
+    assert!(lines[auto_idx + 2].contains("▸ ANTHROPIC"));
+    assert!(lines[auto_idx + 3].contains("▸ OPENAI"));
+    assert!(lines[auto_idx + 4].contains("▸ MOONSHOT"));
+    let joined = lines.join("\n");
+    assert!(!joined.contains("claude-1"));
+    assert!(!joined.contains("codex-1"));
+    assert!(!joined.contains("kimi-1"));
+
+    // Down moves past the blank spacer onto ANTHROPIC: Next is enabled because
+    // a provider is selectable to load-balance across its profiles; Space and
+    // Right/Left toggle expansion without advancing.
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::Anthropic)
+    );
+    assert_eq!(
+        new_wizard(&dashboard).selected_profile_label(&dashboard),
+        "Auto (Anthropic)"
+    );
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+    let expanded = draw_lines(&mut dashboard, &mut terminal).join("\n");
+    assert!(expanded.contains("▾ ANTHROPIC"));
+    assert!(expanded.contains("claude-1"));
+
+    // Space collapses ANTHROPIC; Right expands it and a second Right enters its
+    // first profile; Left collapses back to the provider row.
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    assert!(
+        !draw_lines(&mut dashboard, &mut terminal)
+            .join("\n")
+            .contains("claude-1")
+    );
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    assert!(
+        draw_lines(&mut dashboard, &mut terminal)
+            .join("\n")
+            .contains("claude-1")
+    );
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    assert_eq!(new_wizard(&dashboard).selected_provider(&dashboard), None);
+    assert_eq!(
+        dashboard
+            .new_wizard_profile_id(new_wizard(&dashboard).profile)
+            .as_deref(),
+        Some("claude-1")
+    );
+    ready_key(&mut dashboard, key(KeyCode::Left));
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::Anthropic)
+    );
+    assert!(
+        !draw_lines(&mut dashboard, &mut terminal)
+            .join("\n")
+            .contains("claude-1")
+    );
+
+    // Clicking the arrow on a collapsed provider expands it; clicking the
+    // provider name selects it without collapsing, and Enter advances with that
+    // provider selected for load-balancing.
+    click_project_text(&mut dashboard, &mut terminal, "▸ OPENAI");
+    assert!(
+        draw_lines(&mut dashboard, &mut terminal)
+            .join("\n")
+            .contains("codex-1")
+    );
+    click_project_text(&mut dashboard, &mut terminal, "OPENAI");
+    assert!(
+        draw_lines(&mut dashboard, &mut terminal)
+            .join("\n")
+            .contains("codex-1")
+    );
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::OpenAI)
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(
+        new_wizard(&dashboard).selected_provider(&dashboard),
+        Some(mj_core::config::QuotaProvider::OpenAI)
+    );
+    let action = dashboard.create_session_action_without_closing(new_wizard(&dashboard));
+    assert!(matches!(
+        action,
+        DashboardAction::CreateSession {
+            ref profile_id,
+            provider: Some(mj_core::config::QuotaProvider::OpenAI),
+            ..
+        } if profile_id.is_empty()
+    ));
+}
+
+#[test]
+fn new_session_profile_step_reconciles_when_provider_discovery_completes() {
+    let mut dashboard = dashboard_with_session(running_session());
+    ready_open_new_wizard(&mut dashboard);
+    // Simulate having opened while Codex provider discovery was still resolving:
+    // only the temporary "(resolving)" group is in expanded_providers, while
+    // discovery has now settled to OpenAI.
+    let resolving = mj_core::config::QuotaProvider::Other("Codex (resolving)".into());
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.expanded_providers.clear();
+        wizard.expanded_providers.insert(resolving.clone());
+        wizard.focused_provider = None;
+    }
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("▾ OPENAI"), "{rendered}");
+    assert!(rendered.contains("codex-1"), "{rendered}");
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+
+    // A stale focused "(resolving)" header clears back to the selected profile
+    // instead of leaving Next disabled or swallowing Enter.
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.focused_provider = Some(resolving);
+    }
+    assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
 }
 
 /// The profile step reports quota as two percentages remaining, one per
@@ -1723,6 +1914,11 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
         },
     )]);
     dashboard.begin_new();
+    // running_session() opens on codex-1 under OPENAI; move up to ANTHROPIC and
+    // expand it so claude-1's quota columns are shown.
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Right));
     let lines = captured_drawn(&mut dashboard, 120, 30);
 
     let heading_index = lines
@@ -1730,8 +1926,8 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
         .position(|line| line.contains("PROFILE"))
         .unwrap_or_else(|| panic!("missing profile heading in {lines:?}"));
     let headings = &lines[heading_index];
-    // Profiles are listed in id order, so the reported one is the first row.
-    let claude = &lines[heading_index + 1];
+    assert!(lines[heading_index + 1].contains("▾ ANTHROPIC"));
+    let claude = &lines[heading_index + 2];
     assert!(claude.contains("claude-1"), "{claude:?}");
 
     assert_eq!(
@@ -1798,6 +1994,7 @@ fn raw_localhost_uses_local_project_history() {
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
             subagents: Some(mj_core::subagent::SubagentPolicy::Native),
@@ -1805,6 +2002,7 @@ fn raw_localhost_uses_local_project_history() {
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
+            provider: None,
             bundle_id: raw_project_context_id("/home/me/project"),
             project_directory: Some("/home/me/project".into()),
             target_template_id: "localhost".into(),
@@ -1819,7 +2017,11 @@ fn raw_localhost_uses_local_project_history() {
 /// source already typed and the destination filled in.
 fn dashboard_at_mount_editor(source: &str) -> DashboardState {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.quota_providers.settle();
     ready_open_new_wizard(&mut dashboard);
+    // Move to the collapsed OPENAI provider, expand it, select codex-1, and advance.
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Right));
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
@@ -2230,6 +2432,7 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         conversion: None,
         selection: mj_core::state::MoveSelection {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -6024,13 +6227,13 @@ fn golden_single_choice_fast_paths() {
 #[test]
 fn oracle_choice_stays_available_when_delegation_is_none() {
     let mut config = config();
-    config.subagents.oracle = Some(mj_core::config::SubagentChoice {
+    config.subagents.oracle = vec![mj_core::config::SubagentChoice {
         model: "advisor".into(),
         effort: None,
-    });
+    }];
     let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
     let profile = config.profiles.keys().next().unwrap().clone();
-    draft.update_choices(&profile, &config, &Default::default(), false);
+    draft.update_choices(&profile, "localhost", &config, &Default::default());
     assert!(draft.oracle_available());
     assert_eq!(
         draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
@@ -6038,12 +6241,12 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     );
     assert!(!draft.oracle);
     assert_eq!(draft.policy, mj_core::subagent::SubagentPolicy::None);
-    let override_choice = config.subagents.oracle.take();
+    let override_choice = config.subagents.oracle.pop();
     let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
         .with_oracle(true, override_choice);
-    override_draft.update_choices(&profile, &config, &Default::default(), false);
+    override_draft.update_choices(&profile, "localhost", &config, &Default::default());
     assert!(override_draft.oracle_available());
-    config.subagents.oracle = override_draft.oracle_choice.clone();
+    config.subagents.oracle = override_draft.oracle_choice.clone().into_iter().collect();
     let mut state = State::default();
     state.last_oracle_choices.insert(profile, false);
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
@@ -6066,12 +6269,12 @@ fn golden_create_delegation_availability_and_submission() {
                 model: "model".into(),
                 effort: None,
             };
-            dashboard.config.subagents.straightforward = Some(choice.clone());
-            dashboard.config.subagents.subtle = Some(choice);
-            dashboard.config.subagents.oracle = Some(SubagentChoice {
+            dashboard.config.subagents.straightforward = vec![choice.clone()];
+            dashboard.config.subagents.subtle = vec![choice];
+            dashboard.config.subagents.oracle = vec![SubagentChoice {
                 model: "advisor".into(),
                 effort: Some("high".into()),
-            });
+            }];
         }
         dashboard.state.last_subagent_policies.insert(
             String::new(),
@@ -6105,7 +6308,7 @@ fn golden_create_delegation_availability_and_submission() {
         let screen = drawn(&mut dashboard, 140, 40).join("\n");
         assert!(screen.contains("Sub-agents"));
         if !configured {
-            assert!(screen.contains("Set up YOLO target sub-agents"));
+            assert!(screen.contains("Set up Mjolnir sub-agents"));
         }
         output.push_str(&format!("=== configured={configured} ===\n{screen}\n"));
         let Mode::New(wizard) = &dashboard.mode else {
@@ -6183,10 +6386,10 @@ fn golden_create_delegation_availability_and_submission() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Dsh;
         if configured {
-            dashboard.config.subagents.straightforward = Some(SubagentChoice {
+            dashboard.config.subagents.straightforward = vec![SubagentChoice {
                 model: "model".into(),
                 effort: None,
-            });
+            }];
         }
         dashboard
             .state
@@ -6268,41 +6471,15 @@ fn move_unconfigured_delegation_retains_none_until_changed() {
 }
 
 #[test]
-fn yolo_target_uses_its_own_configured_choices() {
-    let choice = |model: &str| mj_core::config::SubagentChoice {
-        model: model.into(),
-        effort: None,
-    };
-    let mut config = config();
-    config.subagents.straightforward = Some(choice("shared"));
-    config.subagents.yolo.straightforward = Some(choice("yolo"));
-    config.subagents.use_same_on_all_targets = false;
-    let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::Mjolnir {
-        straightforward: None,
-        subtle: None,
-    });
-    draft.update_choices("claude-1", &config, &Default::default(), true);
-    assert!(draft.unavailable_reason().is_none());
-
-    config.subagents.yolo.straightforward = None;
-    draft.update_choices("claude-1", &config, &Default::default(), true);
-    let reason = draft.unavailable_reason().unwrap();
-    assert!(reason.contains("YOLO"), "{reason}");
-    // The shared set still serves ordinary targets.
-    draft.update_choices("claude-1", &config, &Default::default(), false);
-    assert!(draft.unavailable_reason().is_none());
-}
-
-#[test]
 fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     use mj_core::subagent::SubagentPolicy;
     let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
     let mut config = config();
-    draft.update_choices("claude-1", &config, &Default::default(), false);
+    draft.update_choices("claude-1", "localhost", &config, &Default::default());
     assert!(!draft.select_policy(1));
     assert!(draft.unavailable_reason().unwrap().contains("Settings"));
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
-    draft.update_choices("claude-1", &config, &Default::default(), false);
+    draft.update_choices("claude-1", "localhost", &config, &Default::default());
     assert!(!draft.select_policy(1));
     assert!(
         draft
@@ -6312,7 +6489,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
-    draft.update_choices("claude-1", &config, &Default::default(), false);
+    draft.update_choices("claude-1", "localhost", &config, &Default::default());
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);
     assert_eq!(draft.selected(), SubagentPolicy::None);
@@ -6334,8 +6511,8 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         model: "model".into(),
         effort: None,
     };
-    dashboard.config.subagents.straightforward = Some(choice.clone());
-    dashboard.config.subagents.subtle = Some(choice);
+    dashboard.config.subagents.straightforward = vec![choice.clone()];
+    dashboard.config.subagents.subtle = vec![choice];
     dashboard.config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Grok;
     dashboard.state.last_subagent_policies.insert(
         "codex-1".into(),
@@ -6457,8 +6634,8 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         model: "model".into(),
         effort: None,
     };
-    dashboard.config.subagents.straightforward = Some(choice.clone());
-    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.config.subagents.straightforward = vec![choice.clone()];
+    dashboard.config.subagents.subtle = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
@@ -6468,7 +6645,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         }
     );
     // Subtle is optional: straightforward alone keeps Mjolnir available.
-    dashboard.config.subagents.subtle = None;
+    dashboard.config.subagents.subtle.clear();
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
@@ -6478,15 +6655,15 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         }
     );
     // Subtle alone is never enough.
-    dashboard.config.subagents.straightforward = None;
-    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.config.subagents.straightforward.clear();
+    dashboard.config.subagents.subtle = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Native
     );
     assert!(new_wizard(&dashboard).subagents.error().is_none());
-    dashboard.config.subagents.straightforward = Some(choice.clone());
+    dashboard.config.subagents.straightforward = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     let Mode::New(wizard) = &mut dashboard.mode else {
         unreachable!()
@@ -6501,13 +6678,13 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     wizard
         .subagents
         .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 1));
-    dashboard.config.subagents.straightforward = None;
+    dashboard.config.subagents.straightforward.clear();
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Native
     );
-    dashboard.config.subagents.straightforward = Some(choice);
+    dashboard.config.subagents.straightforward = vec![choice];
     dashboard
         .state
         .last_subagent_policies
@@ -6567,6 +6744,7 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     let mut dashboard = dashboard_with_session(parent.clone());
     dashboard
@@ -6657,6 +6835,7 @@ fn new_session_like_carries_the_container_owners_size() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     let mut state = dashboard.state.clone();
     state.sessions.insert(child.id.clone(), child.clone());

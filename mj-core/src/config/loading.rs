@@ -89,6 +89,26 @@ pub(super) fn drop_removed_harness_profiles(document: &mut toml::Value) -> Vec<S
     removed
 }
 
+/// Whether `document` carried non-empty legacy `[subagents.yolo.*]` choices
+/// that this build drops on load.
+pub(super) fn has_legacy_subagent_yolo_choices(document: &toml::Value) -> bool {
+    let Some(yolo) = document
+        .get("subagents")
+        .and_then(toml::Value::as_table)
+        .and_then(|subagents| subagents.get("yolo"))
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+    ["primary", "straightforward", "subtle", "oracle"]
+        .into_iter()
+        .any(|key| match yolo.get(key) {
+            Some(toml::Value::Table(table)) => !table.is_empty(),
+            Some(toml::Value::Array(array)) => !array.is_empty(),
+            _ => false,
+        })
+}
+
 /// Read a configuration override under its `MJ_` name. Mjolnir shares no
 /// state or environment with hel installs; there is no legacy fallback.
 pub fn env_override_os(name: &str) -> Option<std::ffi::OsString> {

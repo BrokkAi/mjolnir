@@ -6,9 +6,8 @@ pub fn oracle_launch_enabled(
     session: &mj_core::state::SessionRecord,
     managed_child: bool,
     choices: &mj_core::config::SubagentConfig,
-    yolo: bool,
 ) -> bool {
-    !managed_child && session.effective_oracle(choices, yolo).is_some()
+    !managed_child && !session.effective_oracle(choices).is_empty()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -120,11 +119,29 @@ pub fn apply_jev_settings(launch: &mut WorkerLaunchConfig, config: &mj_core::con
 /// `HarnessKind::supports_delegation_tools` holds can receive them at all.
 #[cfg(any(test, feature = "test-support"))]
 pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
+    let child = is_child.then(|| mj_core::subagent::SubagentRecord {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
+        child_session_id: session.id.clone(),
+        parent_session_id: String::new(),
+        task_name: String::new(),
+        profile_id: session.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: String::new(),
+        request_key: String::new(),
+        created_at: String::new(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: true,
+        supervisor: false,
+    });
     session
         .subagents
         .clone()
         .unwrap_or_default()
-        .for_launch(session.harness_kind, is_child)
+        .for_launch(session.harness_kind, child.as_ref())
         .uses_mjolnir()
 }
 
@@ -167,6 +184,7 @@ pub fn worker_launch_config(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
+    config: &mj_core::config::Config,
 ) -> Result<(
     WorkerLaunchConfig,
     Option<ProjectMemoryLaunchConfig>,
@@ -180,9 +198,11 @@ pub fn worker_launch_config(
         backend,
         worker_workspace,
         target,
+        config,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn worker_launch_config_with_checkout(
     session: &mj_core::state::SessionRecord,
     checkout: &mj_core::state::Checkout<'_>,
@@ -191,6 +211,7 @@ pub fn worker_launch_config_with_checkout(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
+    config: &mj_core::config::Config,
 ) -> Result<(
     WorkerLaunchConfig,
     Option<ProjectMemoryLaunchConfig>,
@@ -440,7 +461,7 @@ pub fn worker_launch_config_with_checkout(
             serde_json::to_string(&roots)?,
         );
     }
-    let approval_choices = profile.approval_choices();
+    let approval_choices = config.profile_approval_choices(profile);
     Ok((
         WorkerLaunchConfig {
             cpu_accounting: backend.cpu_accounting(),
@@ -456,6 +477,8 @@ pub fn worker_launch_config_with_checkout(
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             subagent_kind: None,
+            supervisor: false,
+            supervisors_enabled: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
             initial_model: None,

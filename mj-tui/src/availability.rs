@@ -248,8 +248,16 @@ impl DashboardState {
                 *wizard_target = target.or(first_target).unwrap_or(0);
                 gone = return_to_changed_step(step, profile.is_none(), target.is_none());
             };
+        let mut reveal_new_profile = None;
         match &mut self.mode {
-            Mode::New(wizard) => place(&mut wizard.step, &mut wizard.profile, &mut wizard.target),
+            Mode::New(wizard) => {
+                let before = wizard.profile;
+                place(&mut wizard.step, &mut wizard.profile, &mut wizard.target);
+                if wizard.profile != before || profile.is_none() {
+                    wizard.focused_provider = None;
+                    reveal_new_profile = Some(wizard.profile);
+                }
+            }
             Mode::Resume(wizard) => {
                 if !launching && (profile.is_none() || target.is_none()) {
                     wizard.note_destination_change();
@@ -257,6 +265,12 @@ impl DashboardState {
                 place(&mut wizard.step, &mut wizard.profile, &mut wizard.target);
             }
             _ => {}
+        }
+        if let Some(profile_index) = reveal_new_profile {
+            let provider = crate::wizards::NewWizard::provider_for_profile(self, profile_index);
+            if let (Some(provider), Mode::New(wizard)) = (provider, &mut self.mode) {
+                wizard.expanded_providers.insert(provider);
+            }
         }
         if let Some(gone) = gone {
             let (id, reason) = match gone {

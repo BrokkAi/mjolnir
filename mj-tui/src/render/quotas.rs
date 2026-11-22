@@ -391,7 +391,7 @@ use mj_core::config::QuotaProvider;
     clippy::disallowed_methods,
     reason = "Provider colours paint both foreground and background against the active theme; monochrome uses the theme palette."
 )]
-fn provider_accent(provider: &QuotaProvider) -> Color {
+pub(crate) fn provider_accent(provider: &QuotaProvider) -> Color {
     if theme::current() == theme::UiTheme::Mono {
         return theme::palette().text;
     }

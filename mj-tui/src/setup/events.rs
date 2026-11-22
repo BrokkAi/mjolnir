@@ -47,7 +47,7 @@ impl DashboardState {
         };
         let result = dialog.stage_edits(edits).map(|paths| {
             let first = &paths[0];
-            dialog.open_page(first[..first.len() - 1].to_vec());
+            dialog.open_page(setup_page_for_path(first));
             dialog.focus_path(first);
             dialog.notice = Some(notice);
         });
@@ -299,9 +299,7 @@ impl DashboardState {
         ) else {
             return None;
         };
-        if unreachable.is_some() && dialog.path.first().is_some_and(|p| p == "subagents") {
-            dialog.notice = unreachable;
-        }
+        sync_subagent_discovery_notice(dialog, unreachable);
         dialog.prepare();
         None
     }
@@ -522,7 +520,12 @@ impl DashboardState {
                 }
                 Err(interaction) => interaction,
             };
+        enum PostRefreshFocus {
+            Path(Vec<String>),
+            Control(SetupControl),
+        }
         let mut action = DashboardAction::None;
+        let mut post_focus = None;
         match interaction {
             Some(Interaction::Activate(OpenSearch)) if dialog.managed_setup.is_none() => {
                 dialog.open_search();
@@ -604,6 +607,14 @@ impl DashboardState {
                             action = dialog.open_review(self)
                         }
                         SettingKind::Page => dialog.open_page(control.path),
+                        SettingKind::RemoveEntry => {
+                            if let Some(index) = subagent_row_index(&control.path) {
+                                post_focus = Some(match dialog.remove_subagent_entry(index) {
+                                    Some(path) => PostRefreshFocus::Path(path),
+                                    None => PostRefreshFocus::Control(Add),
+                                });
+                            }
+                        }
                         SettingKind::Checkbox => dialog.toggle_path(&control.path),
                         SettingKind::Choices(values) => {
                             let selected = values
@@ -675,52 +686,51 @@ impl DashboardState {
                 action = dialog.create_managed_profile_and_login(&self.profile_capabilities);
             }
             Some(Interaction::Activate(Add)) if dialog.managed_setup.is_none() => {
-                dialog.add();
+                if let Some(model_path) = dialog.add() {
+                    post_focus = Some(PostRefreshFocus::Path(model_path));
+                }
             }
             Some(Interaction::Activate(Remove)) => {
-                let mut parent = dialog.path.clone();
-                if let Some(key) = parent.pop()
-                    && dialog
-                        .draft
-                        .pointer(&pointer(&parent))
-                        .is_some_and(|v| is_collection(&parent, v))
-                {
-                    match mj_client::settings::edit::remove_entry(&mut dialog.draft, &dialog.path) {
-                        Err(refusal) => dialog.notice = Some(refusal),
-                        Ok(removal) => {
-                            if removal.notice.is_some() {
-                                dialog.notice = removal.notice;
+                if is_subagent_category_page(&dialog.path) {
+                    let index = dialog
+                        .form
+                        .borrow()
+                        .focused()
+                        .and_then(|id| dialog.descriptor(id))
+                        .and_then(|control| subagent_row_index(&control.path));
+                    if let Some(index) = index {
+                        post_focus = Some(match dialog.remove_subagent_entry(index) {
+                            Some(path) => PostRefreshFocus::Path(path),
+                            None => PostRefreshFocus::Control(Add),
+                        });
+                    }
+                } else {
+                    let mut parent = dialog.path.clone();
+                    if let Some(key) = parent.pop()
+                        && dialog
+                            .draft
+                            .pointer(&pointer(&parent))
+                            .is_some_and(|v| is_collection(&parent, v))
+                    {
+                        match mj_client::settings::edit::remove_entry(
+                            &mut dialog.draft,
+                            &dialog.path,
+                        ) {
+                            Err(refusal) => dialog.notice = Some(refusal),
+                            Ok(removal) => {
+                                if removal.notice.is_some() {
+                                    dialog.notice = removal.notice.clone();
+                                }
+                                // Rebind pending text to the surviving entry when array indices shift.
+                                dialog.rebind_fields_after_removal(&parent, &removal);
+                                if parent.first().is_some_and(|p| p == "profiles") {
+                                    dialog.invalidate_review_validation_for(Some(
+                                        parent.get(1).unwrap_or(&key),
+                                    ));
+                                }
+                                dialog.descriptors.clear();
+                                dialog.open_page(parent);
                             }
-                            // Rebind pending text to the surviving entry when array indices shift.
-                            dialog.fields = std::mem::take(&mut dialog.fields)
-                                .into_iter()
-                                .filter_map(|(mut path, field)| {
-                                    if removal
-                                        .removed
-                                        .iter()
-                                        .any(|removed| path.starts_with(removed))
-                                    {
-                                        return None;
-                                    }
-                                    if let Some(removed) = removal.list_index
-                                        && path.starts_with(&parent)
-                                        && let Some(index) = path
-                                            .get(parent.len())
-                                            .and_then(|part| part.parse::<usize>().ok())
-                                        && index > removed
-                                    {
-                                        path[parent.len()] = (index - 1).to_string();
-                                    }
-                                    Some((path, field))
-                                })
-                                .collect();
-                            if parent.first().is_some_and(|p| p == "profiles") {
-                                dialog.invalidate_review_validation_for(Some(
-                                    parent.get(1).unwrap_or(&key),
-                                ));
-                            }
-                            dialog.descriptors.clear();
-                            dialog.open_page(parent);
                         }
                     }
                 }
@@ -824,14 +834,32 @@ impl DashboardState {
         if let Ok(unreachable) = mj_client::settings::discovery::fill_subagent_options(
             &mut dialog.draft,
             &self.profile_capabilities,
-        ) && dialog.notice.is_none()
-            && unreachable.is_some()
-            && dialog.path.first().is_some_and(|p| p == "subagents")
-        {
-            dialog.notice = unreachable;
+        ) {
+            sync_subagent_discovery_notice(&mut dialog, unreachable);
         }
         dialog.prepare();
+        match post_focus {
+            Some(PostRefreshFocus::Path(path)) => dialog.focus_path(&path),
+            Some(PostRefreshFocus::Control(control)) => {
+                dialog.form.get_mut().focus(control);
+                dialog.form.get_mut().reveal_focused();
+            }
+            None => {}
+        }
         self.mode = Mode::Setup(dialog);
         action
+    }
+}
+
+fn sync_subagent_discovery_notice(dialog: &mut SetupDialog, unreachable: Option<String>) {
+    if !dialog.path.first().is_some_and(|p| p == "subagents") {
+        return;
+    }
+    let notice_is_discovery = dialog
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.starts_with("Discovery: "));
+    if dialog.notice.is_none() || notice_is_discovery {
+        dialog.notice = unreachable;
     }
 }

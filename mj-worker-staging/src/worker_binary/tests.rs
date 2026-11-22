@@ -44,21 +44,16 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
         effort: Some("high".into()),
     };
     session.oracle = true;
-    assert!(!oracle_launch_enabled(&session, false, &choices, false));
-    choices.oracle = Some(choice.clone());
-    assert!(oracle_launch_enabled(&session, false, &choices, false));
-    assert!(!oracle_launch_enabled(&session, true, &choices, false));
+    assert!(!oracle_launch_enabled(&session, false, &choices));
+    choices.oracle = vec![choice.clone()];
+    assert!(oracle_launch_enabled(&session, false, &choices));
+    assert!(!oracle_launch_enabled(&session, true, &choices));
     session.oracle = false;
-    assert!(!oracle_launch_enabled(&session, false, &choices, false));
+    assert!(!oracle_launch_enabled(&session, false, &choices));
     session.oracle = true;
     session.oracle_choice = Some(Box::new(choice));
-    choices.oracle = None;
-    assert!(oracle_launch_enabled(&session, false, &choices, false));
-
-    // A YOLO target reads its own oracle choice, which is absent here.
-    session.oracle_choice = None;
-    choices.use_same_on_all_targets = false;
-    assert!(!oracle_launch_enabled(&session, false, &choices, true));
+    choices.oracle.clear();
+    assert!(oracle_launch_enabled(&session, false, &choices));
 }
 
 #[test]
@@ -3077,6 +3072,7 @@ fn a_session_without_project_memory_launches_without_memory() {
                 &mj_core::state::TargetRuntimeSettings::from(
                     &mj_core::config::TargetTemplate::LocalBare,
                 ),
+                &mj_core::config::Config::default(),
             )
             .unwrap()
         };
@@ -3168,6 +3164,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
+            &mj_core::config::Config::default(),
         )
         .unwrap();
         let memory = memory.expect("a session without the opt-out has project memory");
@@ -4093,6 +4090,7 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4380,6 +4378,7 @@ fn launches_on_every_target(
             parent_worktree: None,
         },
         &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4402,6 +4401,7 @@ fn launches_on_every_target(
             parent_worktree: None,
         },
         &with_target_keys(&container),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4424,6 +4424,7 @@ fn launches_on_every_target(
             parent_worktree: None,
         },
         &with_target_keys(&container),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4539,6 +4540,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&docker),
+        &mj_core::config::Config::default(),
     )
     .unwrap()
     .0;
@@ -4824,6 +4826,7 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
+        &mj_core::config::Config::default(),
     )
     .unwrap();
 
@@ -4876,6 +4879,7 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
+        &mj_core::config::Config::default(),
     )
     .unwrap();
 
@@ -4976,6 +4980,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
             parent_worktree: None,
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
+        &mj_core::config::Config::default(),
     )
     .unwrap();
 
@@ -5358,6 +5363,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
+        supervisor: false,
+        supervisors_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5530,6 +5537,8 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
+        supervisor: false,
+        supervisors_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5980,6 +5989,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
+            &mj_core::config::Config::default(),
         )
         .unwrap();
         let memory = memory.expect("a session without the opt-out has project memory");
@@ -6709,5 +6719,30 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
         assert!(actual.contains(mj_core::project_memory::MEMORY_GUIDANCE));
         // Permit cleanup on platforms whose read-only attribute prevents removal.
         std::fs::set_permissions(&instruction_path, original_permissions).unwrap();
+    }
+}
+
+#[test]
+fn session_state_instructions_are_appended_once_for_every_harness() {
+    let text = mj_core::session_keep::SESSION_STATE_INSTRUCTIONS;
+    assert!(text.contains("## Keeping your work across suspend and move"));
+    assert!(text.contains("$MJ_KEEP_DIR"));
+    assert!(text.contains("Git-ignored files are never kept."));
+    for harness in mj_core::config::HarnessKind::ALL {
+        let stage = tempfile::tempdir().unwrap();
+        let path = stage.path().join(harness.agent_instructions_file());
+        std::fs::write(&path, "existing\n").unwrap();
+        append_session_state_instructions(harness, stage.path()).unwrap();
+        append_session_state_instructions(harness, stage.path()).unwrap();
+        let actual = std::fs::read_to_string(&path).unwrap();
+        assert!(actual.starts_with("existing\n"), "{harness:?}");
+        assert_eq!(
+            actual
+                .matches("## Keeping your work across suspend and move")
+                .count(),
+            1,
+            "{harness:?}\n{actual}"
+        );
+        assert!(actual.contains(text), "{harness:?}");
     }
 }

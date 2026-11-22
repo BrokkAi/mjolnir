@@ -19,7 +19,7 @@ use zip::CompressionMethod;
 use super::{ARCHIVE_SCHEMA_VERSION_SHARDED, ArchiveManifest, RepositoryManifest};
 use super::{
     MANIFEST_PATH, PayloadDescriptor, PayloadPartDescriptor, PayloadRole, digest_bytes,
-    payload_part_path, restrict_archive_permissions, validate_untracked_tar, write_stream_entry,
+    payload_part_path, validate_untracked_tar, write_stream_entry,
 };
 
 /// Commits larger than this are not stash metadata. Skip them instead of
@@ -56,8 +56,12 @@ pub enum ArchiveUntrackedPurgeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveUntrackedPurgeReport {
     pub kind: ArchiveUntrackedPurgeKind,
-    /// Uncompressed bytes removed from untracked payloads. An empty tar is
-    /// 1024 bytes, so this is `old size - 1024` for each body that was larger.
+    /// On-disk bytes a live purge removed: the old archive's file size minus
+    /// the rewritten archive's file size. A dry run estimates the same saving
+    /// from the ZIP central directory: the compressed size of each removed
+    /// untracked entry, including shards, minus the compressed size of the
+    /// empty tar that would replace it. Neither number is the uncompressed
+    /// tar size.
     pub bytes_reclaimed: u64,
     pub stash_untracked_notes: Vec<StashUntrackedNote>,
     /// Non-fatal warnings (for example when stash bundle inspection could not
@@ -66,30 +70,185 @@ pub struct ArchiveUntrackedPurgeReport {
     pub schema_version: u32,
 }
 
+/// A purge that stopped before installing a destination.
+#[derive(Debug)]
+pub enum PreparedUntrackedPurge {
+    /// Nothing was written. The report is the whole result.
+    Finished(ArchiveUntrackedPurgeReport),
+    /// A verified temporary archive. Dropping this removes that file.
+    Staged(StagedUntrackedPurge),
+    /// `cancelled` asked the purge to stop. Temporary files are already gone.
+    Cancelled,
+}
+
+/// A rewritten archive that has been fsynced and verified, but not installed.
+///
+/// The temporary file lives in the destination's directory. [`Self::install`]
+/// is the atomic rename onto `destination`. Dropping this value deletes the
+/// temporary file and does not touch `destination`.
+#[derive(Debug)]
+pub struct StagedUntrackedPurge {
+    temporary: tempfile::NamedTempFile,
+    destination: std::path::PathBuf,
+    pub archive_sha256: String,
+    pub bytes_reclaimed: u64,
+    pub stash_untracked_notes: Vec<StashUntrackedNote>,
+    pub warnings: Vec<String>,
+    schema_version: u32,
+}
+
+impl StagedUntrackedPurge {
+    /// Path the staged bytes will occupy after [`Self::install`].
+    pub fn destination(&self) -> &std::path::Path {
+        &self.destination
+    }
+
+    /// Install the staged bytes at the destination with `persist_noclobber`.
+    ///
+    /// A failure after the rename removes that installed file. A file that
+    /// already occupied the destination is left in place, because
+    /// `persist_noclobber` refuses to replace it.
+    pub fn install(self) -> Result<ArchiveUntrackedPurgeReport> {
+        let StagedUntrackedPurge {
+            temporary,
+            destination,
+            archive_sha256,
+            bytes_reclaimed,
+            stash_untracked_notes,
+            warnings,
+            schema_version,
+        } = self;
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        temporary
+            .persist_noclobber(&destination)
+            .map_err(|error| error.error)
+            .with_context(|| format!("install purged archive {}", destination.display()))?;
+        if let Err(error) = (|| -> Result<()> {
+            super::restrict_archive_permissions(&destination)?;
+            mj_core::config::sync_directory(parent)?;
+            Ok(())
+        })() {
+            return Err(remove_installed(destination, error));
+        }
+        Ok(ArchiveUntrackedPurgeReport {
+            kind: ArchiveUntrackedPurgeKind::Rewritten { archive_sha256 },
+            bytes_reclaimed,
+            stash_untracked_notes,
+            warnings,
+            schema_version,
+        })
+    }
+}
+
+fn remove_installed(destination: std::path::PathBuf, error: anyhow::Error) -> anyhow::Error {
+    match std::fs::remove_file(&destination) {
+        Ok(()) => error,
+        Err(remove) => error.context(format!(
+            "also failed to remove incomplete archive {}: {remove}",
+            destination.display()
+        )),
+    }
+}
+
+/// A probe that never asks a purge to stop.
+pub fn archive_purge_not_cancelled() -> &'static super::ArchivePurgeCancel {
+    static NEVER: std::sync::OnceLock<super::ArchivePurgeCancel> = std::sync::OnceLock::new();
+    NEVER.get_or_init(|| std::sync::Arc::new(|| false))
+}
+
+/// Whether a purge stopped because its cancellation probe fired.
+pub fn purge_was_cancelled(error: &anyhow::Error) -> bool {
+    super::archive_verification_cancelled(error)
+        || error
+            .chain()
+            .any(|cause| cause.downcast_ref::<PurgeCancelled>().is_some())
+}
+
+#[derive(Debug)]
+struct PurgeCancelled;
+
+impl std::fmt::Display for PurgeCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("archive purge cancelled")
+    }
+}
+
+impl std::error::Error for PurgeCancelled {}
+
+fn stop_if_cancelled(cancelled: &super::ArchivePurgeCancel) -> Result<()> {
+    if cancelled() {
+        Err(PurgeCancelled.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Replace every non-empty legacy untracked tar with an empty one.
 ///
 /// `destination_archive` is written only when `dry_run` is false and some
 /// untracked body is larger than an empty tar. The write installs with
-/// `persist_noclobber`, then [`super::verify_archive_streaming`]. Only a
-/// destination this call actually installed is removed if that verification
-/// fails. A file that was already at `destination_archive`, or one created
-/// there before the install, is left in place.
+/// `persist_noclobber` after the rewritten bytes have been verified. Only a
+/// destination this call actually installed is removed if a later step fails.
+/// A file that was already at `destination_archive` is left in place.
+///
+/// This entry never cancels. Call [`prepare_untracked_purge`] to stop when a
+/// probe returns true, and install the staged file separately.
 pub fn purge_untracked_from_archive(
     source_archive: &std::path::Path,
     destination_archive: &std::path::Path,
     dry_run: bool,
 ) -> Result<ArchiveUntrackedPurgeReport> {
-    let verified = super::verify_archive_streaming(source_archive).with_context(|| {
-        format!(
-            "verify archive {} before purging untracked files",
-            source_archive.display()
-        )
-    })?;
+    match prepare_untracked_purge(
+        source_archive,
+        destination_archive,
+        dry_run,
+        archive_purge_not_cancelled(),
+    )? {
+        PreparedUntrackedPurge::Finished(report) => Ok(report),
+        PreparedUntrackedPurge::Cancelled => bail!("archive purge cancelled"),
+        PreparedUntrackedPurge::Staged(staged) => staged.install(),
+    }
+}
+
+/// Verify `source_archive` and, when a live purge has something to remove,
+/// rewrite it into a temporary file in the destination directory.
+///
+/// The destination is not installed. [`StagedUntrackedPurge::install`] does
+/// that. When `cancelled` returns true, this drops any temporary file and
+/// returns [`PreparedUntrackedPurge::Cancelled`] instead of an archive error.
+pub fn prepare_untracked_purge(
+    source_archive: &std::path::Path,
+    destination_archive: &std::path::Path,
+    dry_run: bool,
+    cancelled: &super::ArchivePurgeCancel,
+) -> Result<PreparedUntrackedPurge> {
+    if cancelled() {
+        return Ok(PreparedUntrackedPurge::Cancelled);
+    }
+    let verified = match super::verify_archive_streaming_unless(source_archive, cancelled) {
+        Ok(verified) => verified,
+        Err(error) if purge_was_cancelled(&error) || cancelled() => {
+            return Ok(PreparedUntrackedPurge::Cancelled);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "verify archive {} before purging untracked files",
+                    source_archive.display()
+                )
+            });
+        }
+    };
     let manifest = verified.manifest;
     let schema_version = manifest.schema_version;
     let empty = empty_untracked_tar()?;
     let empty_len = empty.len() as u64;
-    let bytes_reclaimed = manifest
+    // Eligibility stays on the uncompressed body. The reported number is the
+    // on-disk delta, which compression can make much smaller.
+    let uncompressed_reclaim = manifest
         .payloads
         .iter()
         .filter(|payload| is_untracked(&payload.role) && payload.size > empty_len)
@@ -100,49 +259,109 @@ pub fn purge_untracked_from_archive(
             .repositories
             .iter()
             .all(|repository| repository.metadata.origin_delta.is_some());
-    if origin_delta && bytes_reclaimed == 0 {
-        return Ok(ArchiveUntrackedPurgeReport {
+    if origin_delta && uncompressed_reclaim == 0 {
+        return Ok(PreparedUntrackedPurge::Finished(ArchiveUntrackedPurgeReport {
             kind: ArchiveUntrackedPurgeKind::AlreadyNewFormat,
             bytes_reclaimed: 0,
             stash_untracked_notes: Vec::new(),
             warnings: Vec::new(),
             schema_version,
-        });
+        }));
     }
-    let (stash_untracked_notes, warnings) = stash_untracked_notes(source_archive, &manifest);
-    if bytes_reclaimed == 0 {
-        return Ok(ArchiveUntrackedPurgeReport {
+    let (stash_untracked_notes, warnings) =
+        match stash_untracked_notes(source_archive, &manifest, cancelled) {
+            Ok(notes) => notes,
+            Err(error) if purge_was_cancelled(&error) || cancelled() => {
+                return Ok(PreparedUntrackedPurge::Cancelled);
+            }
+            Err(error) => return Err(error),
+        };
+    if uncompressed_reclaim == 0 {
+        return Ok(PreparedUntrackedPurge::Finished(ArchiveUntrackedPurgeReport {
             kind: ArchiveUntrackedPurgeKind::AlreadyClean,
             bytes_reclaimed: 0,
             stash_untracked_notes,
             warnings,
             schema_version,
-        });
+        }));
     }
     if dry_run {
-        return Ok(ArchiveUntrackedPurgeReport {
+        let bytes_reclaimed = match compressed_reclaim_estimate(
+            source_archive,
+            &manifest,
+            &empty,
+            cancelled,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if purge_was_cancelled(&error) || cancelled() => {
+                return Ok(PreparedUntrackedPurge::Cancelled);
+            }
+            Err(error) => return Err(error),
+        };
+        return Ok(PreparedUntrackedPurge::Finished(ArchiveUntrackedPurgeReport {
             kind: ArchiveUntrackedPurgeKind::DryRun,
             bytes_reclaimed,
             stash_untracked_notes,
             warnings,
             schema_version,
-        });
+        }));
     }
-    let archive_sha256 = rewrite_archive(source_archive, destination_archive, &manifest, &empty)
-        .with_context(|| {
-            format!(
-                "purge untracked files from {} into {}",
-                source_archive.display(),
-                destination_archive.display()
-            )
-        })?;
-    Ok(ArchiveUntrackedPurgeReport {
-        kind: ArchiveUntrackedPurgeKind::Rewritten { archive_sha256 },
-        bytes_reclaimed,
+    if cancelled() {
+        return Ok(PreparedUntrackedPurge::Cancelled);
+    }
+    let temporary = match stage_rewritten_archive(
+        source_archive,
+        destination_archive,
+        &manifest,
+        &empty,
+        cancelled,
+    ) {
+        Ok(temporary) => temporary,
+        Err(error) if purge_was_cancelled(&error) || cancelled() => {
+            return Ok(PreparedUntrackedPurge::Cancelled);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "purge untracked files from {} into {}",
+                    source_archive.display(),
+                    destination_archive.display()
+                )
+            });
+        }
+    };
+    let archive_sha256 = match super::verify_archive_streaming_unless(temporary.path(), cancelled)
+    {
+        Ok(verified) => verified.archive_sha256,
+        Err(error) if purge_was_cancelled(&error) || cancelled() => {
+            return Ok(PreparedUntrackedPurge::Cancelled);
+        }
+        Err(error) => {
+            return Err(error.context(
+                "purged archive failed verification and was removed",
+            ));
+        }
+    };
+    // One checkpoint archive is one file. Its untracked shards are ZIP
+    // entries in that file, so the file-size delta is the disk space every
+    // rewritten shard released.
+    let old_bytes = file_len(source_archive)?;
+    let new_bytes = file_len(temporary.path())?;
+    Ok(PreparedUntrackedPurge::Staged(StagedUntrackedPurge {
+        temporary,
+        destination: destination_archive.to_path_buf(),
+        archive_sha256,
+        bytes_reclaimed: old_bytes.saturating_sub(new_bytes),
         stash_untracked_notes,
         warnings,
         schema_version,
-    })
+    }))
+}
+
+fn file_len(path: &std::path::Path) -> Result<u64> {
+    Ok(std::fs::metadata(path)
+        .with_context(|| format!("read the size of {}", path.display()))?
+        .len())
 }
 
 fn is_untracked(role: &PayloadRole) -> bool {
@@ -253,12 +472,14 @@ fn replacement_entries(payload: &PayloadDescriptor, empty: &[u8]) -> Vec<(String
         .collect()
 }
 
-fn rewrite_archive(
+fn stage_rewritten_archive(
     source_archive: &std::path::Path,
     destination_archive: &std::path::Path,
     manifest: &ArchiveManifest,
     empty: &[u8],
-) -> Result<String> {
+    cancelled: &super::ArchivePurgeCancel,
+) -> Result<tempfile::NamedTempFile> {
+    stop_if_cancelled(cancelled)?;
     ensure!(
         !destination_archive.exists(),
         "refusing to replace existing archive {}",
@@ -281,75 +502,27 @@ fn rewrite_archive(
     );
     let manifest_bytes =
         serde_json::to_vec_pretty(&manifest).context("serialize purged archive manifest")?;
-    // Set only after `persist_noclobber` returns. An earlier error must not
-    // delete a file that already occupied `destination_archive`.
-    let mut persisted = false;
-    let written = write_rewritten_zip(
-        source_archive,
-        destination_archive,
-        parent,
-        &manifest_bytes,
-        &planned,
-        &mut persisted,
-    );
-    if let Err(error) = written {
-        if persisted && let Err(remove) = std::fs::remove_file(destination_archive) {
-            return Err(error).with_context(|| {
-                format!(
-                    "also failed to remove incomplete archive {}: {remove}",
-                    destination_archive.display()
-                )
-            });
-        }
-        return Err(error);
-    }
-    match super::verify_archive_streaming(destination_archive) {
-        Ok(verified) => Ok(verified.archive_sha256),
-        Err(error) => {
-            if !persisted {
-                return Err(error);
-            }
-            match std::fs::remove_file(destination_archive) {
-                Ok(()) => Err(error).context("purged archive failed verification and was removed"),
-                Err(remove) => Err(error).with_context(|| {
-                    format!(
-                        "purged archive failed verification and could not be removed at {}: {remove}",
-                        destination_archive.display()
-                    )
-                }),
-            }
-        }
-    }
-}
-
-fn write_rewritten_zip(
-    source_archive: &std::path::Path,
-    destination_archive: &std::path::Path,
-    parent: &std::path::Path,
-    manifest_bytes: &[u8],
-    planned: &[PlannedReplacement],
-    persisted: &mut bool,
-) -> Result<()> {
+    // The temporary file is the only thing this function creates. Dropping it
+    // removes those bytes. The destination is installed later, and only then.
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary archive in {}", parent.display()))?;
-    restrict_archive_permissions(temporary.path())?;
+    super::restrict_archive_permissions(temporary.path())?;
     {
         let mut writer = zip::ZipWriter::new(temporary.as_file_mut());
-        stream_rewritten_entries(&mut writer, source_archive, manifest_bytes, planned)?;
+        stream_rewritten_entries(
+            &mut writer,
+            source_archive,
+            &manifest_bytes,
+            &planned,
+            cancelled,
+        )?;
         writer.finish().context("finish purged archive ZIP")?;
     }
     temporary
         .as_file()
         .sync_all()
         .context("fsync purged archive")?;
-    temporary
-        .persist_noclobber(destination_archive)
-        .map_err(|error| error.error)
-        .with_context(|| format!("install purged archive {}", destination_archive.display()))?;
-    *persisted = true;
-    restrict_archive_permissions(destination_archive)?;
-    mj_core::config::sync_directory(parent)?;
-    Ok(())
+    Ok(temporary)
 }
 
 fn stream_rewritten_entries(
@@ -357,6 +530,7 @@ fn stream_rewritten_entries(
     source_archive: &std::path::Path,
     manifest_bytes: &[u8],
     planned: &[PlannedReplacement],
+    cancelled: &super::ArchivePurgeCancel,
 ) -> Result<()> {
     let mut skip = BTreeSet::new();
     let mut emit_at = BTreeMap::<String, usize>::new();
@@ -370,14 +544,13 @@ fn stream_rewritten_entries(
         );
         skip.extend(replacement.old_names.iter().cloned());
     }
-    let source =
-        File::open(source_archive).with_context(|| format!("open {}", source_archive.display()))?;
-    let mut archive = zip::ZipArchive::new(source)
+    let mut archive = super::open_archive_probed(source_archive, cancelled)
         .with_context(|| format!("read {}", source_archive.display()))?;
     let manifest_digest = digest_bytes(manifest_bytes);
     let mut saw_manifest = false;
     let mut emitted = BTreeSet::new();
     for index in 0..archive.len() {
+        stop_if_cancelled(cancelled)?;
         let name = {
             let entry = archive
                 .by_index(index)
@@ -440,32 +613,117 @@ fn write_replacement(
     Ok(())
 }
 
+/// Dry-run estimate of the on-disk saving.
+///
+/// Each removed untracked entry, including every shard, contributes its ZIP
+/// central-directory `compressed_size`. The empty tar that would replace
+/// those entries is compressed the same way a live rewrite compresses it,
+/// and that overhead is subtracted. The archive is not rewritten.
+fn compressed_reclaim_estimate(
+    source_archive: &std::path::Path,
+    manifest: &ArchiveManifest,
+    empty: &[u8],
+    cancelled: &super::ArchivePurgeCancel,
+) -> Result<u64> {
+    stop_if_cancelled(cancelled)?;
+    let mut planned_manifest = manifest.clone();
+    let planned = plan_replacements(&mut planned_manifest, empty);
+    ensure!(
+        !planned.is_empty(),
+        "purge planned no untracked replacement"
+    );
+    let mut archive = super::open_archive_probed(source_archive, cancelled)
+        .with_context(|| format!("read {}", source_archive.display()))?;
+    let mut removed = 0_u64;
+    for replacement in &planned {
+        for name in &replacement.old_names {
+            stop_if_cancelled(cancelled)?;
+            let entry = archive.by_name(name).with_context(|| {
+                format!("read compressed size of untracked entry '{name}'")
+            })?;
+            removed = removed.saturating_add(entry.compressed_size());
+        }
+    }
+    let overhead = replacement_compressed_overhead(&planned)?;
+    Ok(removed.saturating_sub(overhead))
+}
+
+/// Compressed size of the empty-tar entries a live rewrite would store.
+fn replacement_compressed_overhead(planned: &[PlannedReplacement]) -> Result<u64> {
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for replacement in planned {
+        for (name, bytes) in &replacement.entries {
+            writer
+                .start_file(
+                    name.as_str(),
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(CompressionMethod::Zstd)
+                        .compression_level(Some(super::ZSTD_LEVEL))
+                        .unix_permissions(replacement.mode)
+                        .large_file(bytes.len() as u64 > zip::ZIP64_BYTES_THR),
+                )
+                .with_context(|| format!("measure empty untracked payload '{name}'"))?;
+            writer
+                .write_all(bytes)
+                .with_context(|| format!("measure empty untracked payload '{name}'"))?;
+        }
+    }
+    let cursor = writer.finish().context("finish empty-tar size probe")?;
+    let mut archive = zip::ZipArchive::new(cursor).context("read empty-tar size probe")?;
+    let mut overhead = 0_u64;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .context("read empty-tar size probe entry")?;
+        overhead = overhead.saturating_add(entry.compressed_size());
+    }
+    Ok(overhead)
+}
+
 fn stash_untracked_notes(
     source_archive: &std::path::Path,
     manifest: &ArchiveManifest,
-) -> (Vec<StashUntrackedNote>, Vec<String>) {
+    cancelled: &super::ArchivePurgeCancel,
+) -> Result<(Vec<StashUntrackedNote>, Vec<String>)> {
     let mut notes = Vec::new();
     let mut warnings = Vec::new();
     for repository in &manifest.repositories {
+        stop_if_cancelled(cancelled)?;
         if repository.metadata.origin_delta.is_some()
             || repository.metadata.stash_stack.is_empty()
             || repository.committed_bundle_path.is_empty()
         {
             continue;
         }
-        let (repo_notes, repo_warnings) =
-            notes_for_repository(source_archive, manifest, repository);
-        notes.extend(repo_notes);
-        warnings.extend(repo_warnings);
+        match notes_for_repository(source_archive, manifest, repository, cancelled) {
+            Ok((repo_notes, repo_warnings)) => {
+                notes.extend(repo_notes);
+                warnings.extend(repo_warnings);
+            }
+            Err(error) if purge_was_cancelled(&error) => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    repository_id = %repository.metadata.id,
+                    error = %error,
+                    "could not inspect stash entries for untracked files; the purge continues"
+                );
+                warnings.push(format!(
+                    "repository {}: could not inspect stash entries for untracked files ({error}); stash entries may still contain untracked files",
+                    repository.metadata.id
+                ));
+            }
+        }
     }
-    (notes, warnings)
+    Ok((notes, warnings))
 }
 
 fn notes_for_repository(
     source_archive: &std::path::Path,
     manifest: &ArchiveManifest,
     repository: &RepositoryManifest,
-) -> (Vec<StashUntrackedNote>, Vec<String>) {
+    cancelled: &super::ArchivePurgeCancel,
+) -> Result<(Vec<StashUntrackedNote>, Vec<String>)> {
+    stop_if_cancelled(cancelled)?;
     let Some(descriptor) = manifest
         .payloads
         .iter()
@@ -475,40 +733,41 @@ fn notes_for_repository(
             repository_id = %repository.metadata.id,
             "stash inspection skipped a repository with no bundle payload"
         );
-        return (
+        return Ok((
             Vec::new(),
             vec![format!(
                 "repository {}: could not inspect stash entries (bundle payload missing); stash entries may still contain untracked files",
                 repository.metadata.id
             )],
-        );
+        ));
     };
     if descriptor.size == 0 {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     // Shards are concatenated in manifest order onto a temporary file. The
     // pack walker streams that file and keeps only commits, so a repository
     // pack is never buffered in a `Vec<u8>`.
-    let spool = match spool_bundle(source_archive, descriptor) {
+    let spool = match spool_bundle(source_archive, descriptor, cancelled) {
         Ok(spool) => spool,
+        Err(error) if purge_was_cancelled(&error) => return Err(error),
         Err(error) => {
             tracing::warn!(
                 repository_id = %repository.metadata.id,
                 error = %error,
                 "could not read the bundle while inspecting stash entries; the purge continues"
             );
-            return (
+            return Ok((
                 Vec::new(),
                 vec![format!(
                     "repository {}: could not read bundle to inspect stash entries ({error}); stash entries may still contain untracked files",
                     repository.metadata.id
                 )],
-            );
+            ));
         }
     };
     let mut reader = BufReader::new(spool);
     match bundle_prefix_is_git(&mut reader) {
-        Ok(false) => return (Vec::new(), Vec::new()),
+        Ok(false) => return Ok((Vec::new(), Vec::new())),
         Ok(true) => {}
         Err(error) => {
             tracing::warn!(
@@ -516,30 +775,30 @@ fn notes_for_repository(
                 error = %error,
                 "could not read the bundle while inspecting stash entries; the purge continues"
             );
-            return (
+            return Ok((
                 Vec::new(),
                 vec![format!(
                     "repository {}: could not read bundle prefix to inspect stash entries ({error}); stash entries may still contain untracked files",
                     repository.metadata.id
                 )],
-            );
+            ));
         }
     }
     match inspect_bundle_stashes_reader(&mut reader, repository) {
-        Ok(result) => result,
+        Ok(result) => Ok(result),
         Err(error) => {
             tracing::warn!(
                 repository_id = %repository.metadata.id,
                 error = %error,
                 "could not inspect stash entries for untracked files; the purge continues"
             );
-            (
+            Ok((
                 Vec::new(),
                 vec![format!(
                     "repository {}: could not inspect stash entries for untracked files ({error}); stash entries may still contain untracked files",
                     repository.metadata.id
                 )],
-            )
+            ))
         }
     }
 }
@@ -560,8 +819,9 @@ fn bundle_prefix_is_git(reader: &mut impl BufRead) -> Result<bool> {
 fn spool_bundle(
     source_archive: &std::path::Path,
     descriptor: &PayloadDescriptor,
+    cancelled: &super::ArchivePurgeCancel,
 ) -> Result<tempfile::NamedTempFile> {
-    let mut archive = super::open_archive(source_archive)?;
+    let mut archive = super::open_archive_probed(source_archive, cancelled)?;
     let mut spool =
         tempfile::NamedTempFile::new().context("create a temporary git bundle spool")?;
     let mut whole = Sha256::new();

@@ -25,6 +25,7 @@ from .verifier import verify
 ROOT = Path(os.environ.get("REVIEW_ARMS_ENGINE_ROOT", "/mnt/optane/review-arms-pilot"))
 CONFIG = ROOT / "engine.json"
 DOCUMENT_KEYS = ("catalogue", "steps", "menu", "eligible_labels")
+REPAIR_STALLED = "repair_stalled"
 
 
 def frozen_inputs(manifest_path):
@@ -55,7 +56,24 @@ def read_frozen_inputs(manifest_path, raw):
 
 
 class RepairStalled(Exception):
-    """A repair round did not shrink the previous round's errors."""
+    def __init__(self, errors, previous, current):
+        super().__init__("; ".join(errors))
+        self.previous = previous
+        self.current = current
+
+
+def repair_answer(attempt):
+    """Keep submitting the last diagnostics while distinct errors decrease."""
+    errors = []
+    previous_errors = {}
+    while True:
+        result, errors, keys, stage = attempt(errors)
+        if not errors:
+            return result
+        previous = previous_errors.get(stage)
+        if not repair_progress(previous, keys):
+            raise RepairStalled(errors, len(previous), len(keys))
+        previous_errors[stage] = keys
 
 
 def digest(*parts):
@@ -246,6 +264,7 @@ class Engine:
                         provenance["tokens"][counter] = previous + tokens
 
                 provenance["retired_sessions"] = []
+                stalls = []
                 for attempt in range(2):
                     runner, sid = self.session(commit, snapshot, active / "session.json")
                     login = runner.login._asdict()
@@ -253,9 +272,10 @@ class Engine:
                     valid = False
                     try:
                         runner.prepare(sid, snapshot, active)
-                        errors = []
-                        previous_errors = {}
-                        while True:
+
+                        def assess(errors):
+                            if errors:
+                                provenance["validation_retries"] += 1
                             output, record, errors = runner.turn(
                                 sid, query, self.catalogue, self.menu, errors, active)
                             add_turn(record)
@@ -291,17 +311,16 @@ class Engine:
                             if findings:
                                 save_json(evidence / "verifier.json", findings)
                             save_json(evidence / "validation.json", {"errors": errors})
+                            result = None
                             if not errors:
                                 result = response("ok", ordered_rows(rows), coverage)
                                 result["excluded"] = answer["excluded"]
                                 save_json(evidence / "result.json", result)
-                                valid = True
-                                break
                             # The verifier first runs when normalization succeeds.
-                            if not repair_progress(previous_errors.get(stage), normalized):
-                                raise RepairStalled("; ".join(errors))
-                            previous_errors[stage] = normalized
-                            provenance["validation_retries"] += 1
+                            return (result, record), errors, normalized, stage
+
+                        result, record = repair_answer(assess)
+                        valid = True
                     except IsolationFailure as error:
                         add_turn(error.record)
                         save_json(active / "void.json", {"session_id": sid, "reason": str(error)})
@@ -309,13 +328,17 @@ class Engine:
                         if attempt:
                             raise
                     except RepairStalled as error:
+                        stalls.append({"session": sid, "previous": error.previous, "current": error.current})
                         # A session that stops improving gets the same one fresh
                         # session as a voided one: its context may hold the model
                         # to its earlier mistakes.
                         provenance["retired_sessions"].append(
                             {"session": sid, **login, "reason": f"repair stalled: {error}"})
                         if attempt:
-                            return response("engine_error", message=str(error))
+                            result = response("engine_error", message=str(error))
+                            if len(stalls) == 2:
+                                result.update(failure=REPAIR_STALLED, repair_error_counts=stalls)
+                            return result
                     except TurnFailure as error:
                         add_turn(error.record)
                         raise

@@ -156,6 +156,19 @@ pub(super) async fn start_session(
         validate_prompt_text(prompt, false)?;
     }
     let (profile_hint, target_id) = resolve_launch(&state, &request)?;
+    let execution_policy = {
+        let snapshot = state.snapshot_rx.borrow();
+        let yolo = snapshot
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .is_some_and(|target| target.yolo);
+        if yolo {
+            mj_core::config::ExecutionPolicy::Unconstrained
+        } else {
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals
+        }
+    };
     // An unnamed profile plus a named model is the CLI's model-first path.
     // Consider every configured, usable profile; a saved default profile is
     // only the ordering anchor for candidates without a usable draw weight.
@@ -167,9 +180,26 @@ pub(super) async fn start_session(
                     profile_hint.as_deref(),
                     model,
                     request.effort.as_deref(),
+                    execution_policy,
                 )
                 .await?,
             ),
+            None if request.effort.is_none() => {
+                let subagents = backend.subagent_config().await?;
+                if subagents.primary_configured() {
+                    Some(
+                        crate::server::api::resolve_primary_session_selection(
+                            &backend,
+                            profile_hint.as_deref(),
+                            subagents.primary_choices(),
+                            execution_policy,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                }
+            }
             None => None,
         }
     } else {
@@ -288,6 +318,7 @@ pub(super) async fn start_session(
         no_later_history: request.no_later_history,
         subagents: request.subagents,
         oracle: request.oracle,
+        supervisors: request.supervisors,
         oracle_choice: request.oracle_choice,
         review: request.review.clone(),
         no_project_memory: request.no_project_memory,
@@ -295,7 +326,7 @@ pub(super) async fn start_session(
         no_github_credentials: request.no_github_credentials,
         notifications_ignored: request.notifications_ignored,
         workspace_id,
-        profile_id,
+        profile_id: profile_id.clone(),
         bundle_id,
         target_id,
         resource_allocation: resource_allocation.map(Box::new),
@@ -330,14 +361,27 @@ pub(super) async fn start_session(
         ));
     };
 
+    let (selected_model, selected_effort) = match model_selection {
+        Some(selection) => {
+            selection.reservation.commit(Some(session_id.clone()));
+            (Some(selection.model), selection.effort)
+        }
+        None => {
+            backend.quota_telemetry_store().record_committed_placement(
+                &session_id,
+                &profile_id,
+                "primary",
+                mj_core::clock::epoch_seconds() as i64,
+            );
+            (None, None)
+        }
+    };
     backend
         .start_followup(
             session_id.clone(),
             StartFollowup {
-                model: model_selection
-                    .map(|selection| selection.model)
-                    .or(request.model),
-                effort: request.effort,
+                model: selected_model.or(request.model),
+                effort: selected_effort.or(request.effort),
                 prompt: request.prompt,
                 ..Default::default()
             },
@@ -381,10 +425,14 @@ fn resolve_launch(
     let snapshot = state.snapshot_rx.borrow();
     let saved = saved_default(&state.preferences_path);
     let model_first = request.profile_id.is_none() && request.model.is_some();
+    let auto_primary = request.profile_id.is_none()
+        && request.model.is_none()
+        && request.effort.is_none()
+        && snapshot.primary_configured;
     let (profile_id, target_id) = resolve_launch_choices(
         request.profile_id.as_deref(),
         request.target_id.as_deref(),
-        !model_first,
+        !(model_first || auto_primary),
         snapshot.profiles.iter().map(|profile| profile.id.as_str()),
         snapshot
             .targets
@@ -486,7 +534,7 @@ pub(super) async fn resume(
             ResumeSessionResponse {
                 session_id: session_id.clone(),
                 workspace_id,
-                profile_id,
+                profile_id: profile_id.clone(),
                 target_id,
             },
         )

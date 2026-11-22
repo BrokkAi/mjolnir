@@ -372,6 +372,7 @@ mod tests {
                 resource_allocation: None,
                 subagents: None,
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
             },
             source_profile_id: "p1".to_owned(),

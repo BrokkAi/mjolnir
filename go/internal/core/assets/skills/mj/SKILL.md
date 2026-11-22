@@ -137,7 +137,25 @@ Sessions and workspaces:
   `--session` to show one session.
 - `mj new` — create a session with a first prompt and print its id.
 - `mj suspend` — save a recovery copy and release the environment for Resume.
-- `mj destroy` — permanently remove a session, its environment, and recovery archive; `--delete-branch` also removes its managed branch.
+  The copy keeps Git state only: branches, tags, stashes, commits, staged and
+  unstaged changes to tracked files, and linked worktrees. Untracked files are
+  lost unless they are `git add`ed first. Git-ignored files are never kept.
+  `$MJ_KEEP_DIR` is not saved. Pass `--dry-run` to preview, `--discard-untracked`
+  or `--abort-operation` to confirm discarding untracked files or aborting an
+  in-progress Git operation, or `--without-checkpoint` to stop without taking a
+  new checkpoint.
+- `mj move` — continue a live session on another profile or target. A move to
+  another machine keeps the same Git state and does not keep untracked or
+  ignored files. `$MJ_KEEP_DIR` travels with that move (pass `--skip <path>` to
+  omit paths from `$MJ_KEEP_DIR`, or `--dry-run` to inspect the route and
+  workspace). An in-place profile switch keeps the environment, so files stay on
+  disk.
+- `mj restart` — restart a session's agent harness in place without moving or
+  rebuilding its checkout.
+- `mj purge-untracked` — remove legacy untracked checkpoint payloads from stopped
+  sessions. Name one session with `--session <id>` or every session with `--all`.
+  `--dry-run` reports the bytes without rewriting archives.
+- `mj destroy` — permanently remove a session, its environment, and recovery archive.
 - `mj resume` — continue a session that was suspended. It keeps its id, its
   transcript, and its work.
 
@@ -223,6 +241,9 @@ from `--prompt-file`, or from standard input when the argument is `-`.
   agent's final message; `mj diff` gives you what actually changed.
 - One session, one job. Give a child a self-contained task and a way to report.
 - A session that has work in it is not disposable: `mj destroy` permanently removes
-  its environment and recovery archive. Prefer `mj suspend`. Keeping a managed
-  branch does not preserve work held only in the environment.
+  its environment and recovery archive. Prefer `mj suspend`. Untracked files are
+  lost on suspend and on a move to another machine unless you `git add` them
+  first. Git-ignored files are never kept. Scratch that must survive a move
+  goes in `$MJ_KEEP_DIR` (it travels with Move and is not saved on suspend).
+  Keeping a managed branch does not preserve work held only in the environment.
 - Report the session id in anything you tell the user, so they can open it.

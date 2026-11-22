@@ -817,7 +817,20 @@ impl Controller {
             prompt_contexts.extend(stopped_subagents_context);
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, profile);
-            let workspace_root = if let Some(project_directory) = &resumed_project_directory {
+            let workspace_root = if let Some(worktree) =
+                self.state.sessions[session_id].managed_worktree.as_ref()
+            {
+                // Use the managed clone's parent rather than `project_directory.parent()`:
+                // a remotely seeded `--no-checkout` clone has not checked out any
+                // subdirectory yet when `ensure_room_for` and `restore_checkpoint`
+                // validate `workspace_root`.
+                worktree
+                    .worktree_root
+                    .parent()
+                    .context("managed worktree has no parent")?
+                    .to_string_lossy()
+                    .into_owned()
+            } else if let Some(project_directory) = &resumed_project_directory {
                 project_directory
                     .parent()
                     .context("bare project directory has no parent")?
@@ -1010,20 +1023,26 @@ impl Controller {
                         transfer.operation.updated_at = now();
                         crate::database::save_move_operation(transfer.operation)?;
                         let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                        let computed_dest_keep = transfer.dest_keep_dir.clone().or_else(|| {
-                            let repo_root = resumed_project_directory.clone().unwrap_or_else(|| {
-                                self.state.sessions[session_id]
-                                    .project_bundle(&self.config)
-                                    .and_then(|bundle| bundle.primary())
-                                    .map(|primary| {
-                                        PathBuf::from(&workspace_root).join(&primary.destination)
-                                    })
-                                    .unwrap_or_else(|| PathBuf::from(&workspace_root))
-                            });
-                            Some(mj_checkpoint::checkpoint::session_keep_dir(
-                                &repo_root, session_id,
-                            ))
-                        });
+                        let computed_dest_keep = match transfer.dest_keep_dir.clone() {
+                            Some(path) => Some(path),
+                            None => {
+                                let repo_root = resumed_project_directory.clone().unwrap_or_else(|| {
+                                    self.state.sessions[session_id]
+                                        .project_bundle(&self.config)
+                                        .and_then(|bundle| bundle.primary())
+                                        .map(|primary| {
+                                            PathBuf::from(&workspace_root).join(&primary.destination)
+                                        })
+                                        .unwrap_or_else(|| PathBuf::from(&workspace_root))
+                                });
+                                Some(resolve_move_keep_dir(
+                                    restoring,
+                                    backend_ref,
+                                    session_id,
+                                    &repo_root,
+                                )?)
+                            }
+                        };
                         super::move_session::transfer_move_snapshot_to_destination(
                             transfer.operation,
                             &transfer.source_backend,
@@ -1959,27 +1978,27 @@ impl Controller {
                 .context("cross-target Move source target is missing")?;
             let source_backend = backend_locator(source_locator, &previous, &self.config)?;
             let source_worker_root = targets::worker_root(&source_backend, session_id)?;
-            let source_keep_dir = if let Some(worktree) = previous_managed_worktree.as_ref() {
-                Some(mj_checkpoint::checkpoint::session_keep_dir(
-                    &worktree.worktree_root,
-                    session_id,
-                ))
-            } else if let Some(dir) = previous_project_directory.as_deref() {
-                Some(mj_checkpoint::checkpoint::session_keep_dir(dir, session_id))
+            let source_cwd = if let Some(dir) = previous_project_directory.as_deref() {
+                dir.to_path_buf()
+            } else if let Some(worktree) = previous_managed_worktree.as_ref() {
+                worktree.worktree_root.clone()
             } else {
                 let source_ws = PathBuf::from(super::network_git::workspace_root(
                     &source_backend,
                     previous.container_workspace.as_deref(),
                 ));
-                let repo_root = previous
+                previous
                     .project_bundle(&self.config)
                     .and_then(|bundle| bundle.primary())
                     .map(|primary| source_ws.join(&primary.destination))
-                    .unwrap_or(source_ws);
-                Some(mj_checkpoint::checkpoint::session_keep_dir(
-                    &repo_root, session_id,
-                ))
+                    .unwrap_or(source_ws)
             };
+            let source_keep_dir = Some(resolve_move_keep_dir(
+                executor,
+                &source_backend,
+                session_id,
+                &source_cwd,
+            )?);
             Some((source_backend, source_worker_root, source_keep_dir))
         } else {
             None
@@ -2447,6 +2466,7 @@ impl Controller {
         // replaces `record.checkpoint`).
         let mut ephemeral_conversion_archive: Option<(tempfile::TempDir, PathBuf)> = None;
         let mut direct_already_transferred = false;
+        let mut remote_origin_delta_clone_restore = false;
         let result = async {
             if origin_delta {
                 if is_history_cutoff_origin_delta || plan == ResumePlan::RawToWorkspace {
@@ -2455,13 +2475,27 @@ impl Controller {
                 } else if plan == ResumePlan::WorkspaceToRaw {
                     // Handled in the WorkspaceToRaw conversion block below.
                 } else if let Some((upgraded, _)) = upgraded_origin_delta_clone.as_ref() {
-                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    match super::worktree::restore_managed_clone_origin_delta(
                         executor, upgraded, &archive_path, archive_manifest,
-                    )?);
+                    )? {
+                        super::worktree::ManagedCloneRestoreOutcome::RestoredLocally(notices) => {
+                            resume_notices.extend(notices);
+                        }
+                        super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
+                            remote_origin_delta_clone_restore = true;
+                        }
+                    }
                 } else if let Some(worktree) = previous_managed_worktree.as_ref() {
-                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    match super::worktree::restore_managed_clone_origin_delta(
                         executor, worktree, &archive_path, archive_manifest,
-                    )?);
+                    )? {
+                        super::worktree::ManagedCloneRestoreOutcome::RestoredLocally(notices) => {
+                            resume_notices.extend(notices);
+                        }
+                        super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
+                            remote_origin_delta_clone_restore = true;
+                        }
+                    }
                     recreated_managed_worktree = true;
                 } else if is_attached_checkout {
                     // Raw checkout resuming in place: the existing checkout is authoritative.
@@ -2520,7 +2554,10 @@ impl Controller {
                 .and_then(ResumeConversion::workspace_to_raw)
             {
                 if origin_delta {
-                    let local_restore_archive = if let (
+                    let local_restore_archive = if matches!(
+                        &conversion.worktree.target,
+                        mj_core::state::ManagedWorktreeTarget::Local
+                    ) && let (
                         Some(operation),
                         Some((source_backend, source_worker_root, source_keep_dir)),
                     ) = (move_operation.as_deref_mut(), direct_move_source.as_ref())
@@ -2551,7 +2588,7 @@ impl Controller {
                         let dest_keep_dir = mj_checkpoint::checkpoint::session_keep_dir(
                             &conversion.worktree.worktree_root,
                             session_id,
-                        );
+                        )?;
                         operation.phase = mj_core::state::MovePhase::Transferring;
                         operation.updated_at = now();
                         crate::database::save_move_operation(operation)?;
@@ -2571,12 +2608,19 @@ impl Controller {
                     } else {
                         archive_path.clone()
                     };
-                    resume_notices.extend(super::worktree::restore_managed_clone_origin_delta(
+                    match super::worktree::restore_managed_clone_origin_delta(
                         executor,
                         &conversion.worktree,
                         &local_restore_archive,
                         archive_manifest,
-                    )?);
+                    )? {
+                        super::worktree::ManagedCloneRestoreOutcome::RestoredLocally(notices) => {
+                            resume_notices.extend(notices);
+                        }
+                        super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
+                            remote_origin_delta_clone_restore = true;
+                        }
+                    }
                 } else {
                     if conversion.reuse_existing_branch {
                         let recovery_ref =
@@ -2703,6 +2747,7 @@ impl Controller {
             let restore_repositories = if origin_delta {
                 is_history_cutoff_origin_delta
                     || plan == ResumePlan::RawToWorkspace
+                    || remote_origin_delta_clone_restore
                     || (plan == ResumePlan::InPlace
                         && resumed_project_directory.is_none()
                         && previous_managed_worktree.is_none()
@@ -2731,7 +2776,8 @@ impl Controller {
                             &conv.worktree.worktree_root,
                             session_id,
                         )
-                    });
+                    })
+                    .transpose()?;
                 Some(MoveDirectTransfer {
                     operation,
                     source_backend,
@@ -3646,6 +3692,39 @@ pub(in crate::controller) async fn utility_handoff_while_cancellable(
             }
         }
     }
+}
+
+/// Resolve a Move source or destination `.mj/keep/<session-id>` directory using
+/// the same Git top-level interpretation worker startup uses for `MJ_KEEP_DIR`,
+/// so sessions started inside a repository subdirectory or nested repository
+/// transfer the exact scratch directory their worker created.
+pub(super) fn resolve_move_keep_dir(
+    executor: &impl CommandExecutor,
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    let command = targets::command_on_locator(
+        SshTrafficClass::Control,
+        backend,
+        session_id,
+        vec![
+            "git".into(),
+            "-C".into(),
+            cwd.to_string_lossy().into_owned(),
+            "rev-parse".into(),
+            "--show-toplevel".into(),
+        ],
+        "resolve checkout top level for session keep directory",
+    )?;
+    let output = executor.execute(&command)?;
+    let (top_level, _) = mj_core::session_keep::interpret_checkout_top_level(
+        cwd,
+        Some(output.status),
+        &output.stdout,
+        &output.stderr,
+    )?;
+    mj_checkpoint::checkpoint::session_keep_dir(&top_level, session_id)
 }
 
 mod in_place;

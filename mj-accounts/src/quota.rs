@@ -251,7 +251,13 @@ pub struct QuotaReportPublication {
     /// Renewal failure, independent of the usage API result.
     pub login_error: Option<String>,
     pub cache_identity: String,
+    /// The latest probe, including a failure. Display surfaces keep showing
+    /// that failure through [`Self::effective_report`].
     pub report: Option<ProfileQuota>,
+    /// The newest probe with no error. Scheduling uses this when `report` failed,
+    /// so a network error cannot turn a known-exhausted profile into `Unknown`.
+    /// Seeded from `quota_reset_cache` and updated only when a probe succeeds.
+    pub last_good: Option<ProfileQuota>,
 }
 
 impl QuotaReportPublication {

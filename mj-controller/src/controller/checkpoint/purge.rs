@@ -2,6 +2,11 @@
 //!
 //! The daemon admits the session and calls in. This module does not take the
 //! recovery gate itself, and it does not touch Move source environments.
+//! Verification and rewriting do not hold daemon-handoff admission. Only the
+//! commit — installing the new archive, swapping the checkpoint row, and
+//! unlinking the old archive — takes that admission, and only for those calls.
+//! Reported bytes are the archive file's on-disk delta, or for a dry run the
+//! compressed size of the removed untracked ZIP entries.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -11,7 +16,8 @@ use anyhow::{Context, Result, bail, ensure};
 use super::archives::{is_managed_checkpoint_archive_name, recovery_referenced_archive_names};
 use super::*;
 use mj_checkpoint::archive::{
-    ArchiveUntrackedPurgeKind, StashUntrackedNote, purge_untracked_from_archive,
+    ArchivePurgeCancel, ArchiveUntrackedPurgeKind, PreparedUntrackedPurge, StagedUntrackedPurge,
+    StashUntrackedNote, archive_purge_not_cancelled, prepare_untracked_purge,
 };
 
 /// One session's purge, ready for a later command or HTTP surface to render.
@@ -30,6 +36,11 @@ pub enum PurgeSessionOutcome {
     Skipped {
         reason: String,
     },
+    /// Verification or rewriting stopped before the archive was replaced.
+    ///
+    /// The caller decides whether that was a client disconnect or a daemon
+    /// handoff. No destination was installed.
+    Aborted,
 }
 
 /// One row of a batch purge.
@@ -56,6 +67,7 @@ pub fn purge_session_untracked_archive(
     admission: &crate::recovery_gate::SessionAdmission,
     session_id: &str,
     dry_run: bool,
+    cancelled: &ArchivePurgeCancel,
 ) -> Result<PurgeSessionOutcome> {
     // Reject a mismatched admission before opening the store. A development
     // build must not write the default instance, and this check needs no row.
@@ -68,7 +80,7 @@ pub fn purge_session_untracked_archive(
         .collect();
     let restarts = crate::database::load_session_restarts()?;
     let recovery = recovery_referenced_archive_names(&operations, &legacy_operations, &restarts);
-    purge_loaded(admission, session_id, dry_run, &state, &recovery)
+    purge_loaded(admission, session_id, dry_run, &state, &recovery, cancelled)
 }
 
 /// Purge each selected session. State, Moves, and Restarts are loaded once.
@@ -97,7 +109,14 @@ pub fn purge_sessions_untracked_archives(
         total_bytes_reclaimed: 0,
     };
     for (admission, session_id) in sessions {
-        let outcome = purge_loaded(admission, session_id, dry_run, &state, &recovery)?;
+        let outcome = purge_loaded(
+            admission,
+            session_id,
+            dry_run,
+            &state,
+            &recovery,
+            archive_purge_not_cancelled(),
+        )?;
         report.total_bytes_reclaimed += reclaimed(&outcome);
         report.sessions.push(PurgeSessionResult {
             session_id: (*session_id).to_owned(),
@@ -115,7 +134,7 @@ fn reclaimed(outcome: &PurgeSessionOutcome) -> u64 {
         | PurgeSessionOutcome::DryRunWouldPurge {
             bytes_reclaimed, ..
         } => *bytes_reclaimed,
-        PurgeSessionOutcome::Skipped { .. } => 0,
+        PurgeSessionOutcome::Skipped { .. } | PurgeSessionOutcome::Aborted => 0,
     }
 }
 
@@ -138,6 +157,7 @@ fn purge_loaded(
     dry_run: bool,
     state: &State,
     recovery: &std::collections::BTreeSet<OsString>,
+    cancelled: &ArchivePurgeCancel,
 ) -> Result<PurgeSessionOutcome> {
     ensure_admission(admission, session_id)?;
     let Some(session) = state.sessions.get(session_id) else {
@@ -174,14 +194,24 @@ fn purge_loaded(
     // Compare the file that is on disk with the digest the checkpoint row
     // recorded before any rewrite. A mismatch, for a live purge or a dry run,
     // leaves that file and the row alone.
-    let archive_sha256 = verify_archive_streaming(&checkpoint.archive_path)
-        .with_context(|| {
-            format!(
-                "verify checkpoint archive {} before purging untracked files",
-                checkpoint.archive_path.display()
-            )
-        })?
-        .archive_sha256;
+    if cancelled() {
+        return Ok(PurgeSessionOutcome::Aborted);
+    }
+    let archive_sha256 = match mj_checkpoint::archive::verify_archive_streaming_unless(
+        &checkpoint.archive_path,
+        cancelled,
+    ) {
+        Ok(verified) => verified.archive_sha256,
+        Err(_error) if cancelled() => return Ok(PurgeSessionOutcome::Aborted),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "verify checkpoint archive {} before purging untracked files",
+                    checkpoint.archive_path.display()
+                )
+            });
+        }
+    };
     ensure!(
         archive_sha256 == checkpoint.sha256,
         "checkpoint archive {} sha256 is {archive_sha256}, not the recorded {}",
@@ -199,31 +229,40 @@ fn purge_loaded(
     } else {
         unique_managed_archive_path(session_id, checkpoint.event_frontier, &directory)?
     };
-    let report = purge_untracked_from_archive(&checkpoint.archive_path, &destination, dry_run)?;
-    match report.kind {
-        ArchiveUntrackedPurgeKind::AlreadyNewFormat => Ok(PurgeSessionOutcome::Skipped {
-            reason: "archive is already origin-delta format".to_owned(),
-        }),
-        ArchiveUntrackedPurgeKind::AlreadyClean => Ok(PurgeSessionOutcome::Skipped {
-            reason: already_empty_reason(&report.stash_untracked_notes, &report.warnings),
-        }),
-        ArchiveUntrackedPurgeKind::DryRun => {
-            ensure!(dry_run, "archive purge reported a dry run for a live purge");
-            Ok(PurgeSessionOutcome::DryRunWouldPurge {
-                bytes_reclaimed: report.bytes_reclaimed,
-                stash_untracked_notes: report.stash_untracked_notes,
-                warnings: report.warnings,
-            })
-        }
-        ArchiveUntrackedPurgeKind::Rewritten { ref archive_sha256 } => {
-            ensure!(!dry_run, "archive purge wrote a file during a dry run");
-            commit_replacement(
-                session_id,
-                &checkpoint,
-                destination,
-                archive_sha256.clone(),
-                report,
-            )
+    let prepared = match prepare_untracked_purge(
+        &checkpoint.archive_path,
+        &destination,
+        dry_run,
+        cancelled,
+    ) {
+        Ok(prepared) => prepared,
+        Err(_error) if cancelled() => return Ok(PurgeSessionOutcome::Aborted),
+        Err(error) => return Err(error),
+    };
+    match prepared {
+        PreparedUntrackedPurge::Cancelled => Ok(PurgeSessionOutcome::Aborted),
+        PreparedUntrackedPurge::Finished(report) => match report.kind {
+            ArchiveUntrackedPurgeKind::AlreadyNewFormat => Ok(PurgeSessionOutcome::Skipped {
+                reason: "archive is already origin-delta format".to_owned(),
+            }),
+            ArchiveUntrackedPurgeKind::AlreadyClean => Ok(PurgeSessionOutcome::Skipped {
+                reason: already_empty_reason(&report.stash_untracked_notes, &report.warnings),
+            }),
+            ArchiveUntrackedPurgeKind::DryRun => {
+                ensure!(dry_run, "archive purge reported a dry run for a live purge");
+                Ok(PurgeSessionOutcome::DryRunWouldPurge {
+                    bytes_reclaimed: report.bytes_reclaimed,
+                    stash_untracked_notes: report.stash_untracked_notes,
+                    warnings: report.warnings,
+                })
+            }
+            ArchiveUntrackedPurgeKind::Rewritten { .. } => {
+                bail!("archive purge installed a file before the commit step")
+            }
+        },
+        PreparedUntrackedPurge::Staged(staged) => {
+            ensure!(!dry_run, "archive purge staged a file during a dry run");
+            commit_staged(session_id, &checkpoint, staged, cancelled)
         }
     }
 }
@@ -271,6 +310,49 @@ fn unique_managed_archive_path(
         return Ok(path);
     }
     bail!("could not allocate a unique checkpoint archive for {session_id}")
+}
+
+fn commit_staged(
+    session_id: &str,
+    previous: &CheckpointMetadata,
+    staged: StagedUntrackedPurge,
+    cancelled: &ArchivePurgeCancel,
+) -> Result<PurgeSessionOutcome> {
+    // A test can stop here, before handoff admission, and close the upgrade
+    // gate. The staged file is still temporary; returning drops it.
+    pause_before_purge_commit();
+    if cancelled() {
+        return Ok(PurgeSessionOutcome::Aborted);
+    }
+    let _hold = match crate::upgrade::activity_unless_draining("purge untracked commit") {
+        Ok(hold) => hold,
+        Err(error) => {
+            tracing::debug!(
+                session_id,
+                error = format!("{error:#}"),
+                "purge untracked commit deferred for daemon handoff"
+            );
+            return Ok(PurgeSessionOutcome::Aborted);
+        }
+    };
+    if cancelled() {
+        return Ok(PurgeSessionOutcome::Aborted);
+    }
+    let destination = staged.destination().to_path_buf();
+    let report = staged.install()?;
+    let ArchiveUntrackedPurgeKind::Rewritten { archive_sha256 } = report.kind.clone() else {
+        return Err(discard_unreferenced(
+            &destination,
+            anyhow::anyhow!("purged archive install did not report a rewritten archive"),
+        ));
+    };
+    commit_replacement(
+        session_id,
+        previous,
+        destination,
+        archive_sha256,
+        report,
+    )
 }
 
 fn commit_replacement(
@@ -325,6 +407,96 @@ fn commit_replacement(
     })
 }
 
+fn pause_before_purge_commit() {
+    #[cfg(any(test, feature = "test-support"))]
+    commit_pause::wait_if_armed();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod commit_pause {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    struct Slot {
+        entered: bool,
+        release: bool,
+    }
+
+    struct State {
+        slot: Mutex<Slot>,
+        wake: Condvar,
+    }
+
+    static PAUSE: Mutex<Option<Arc<State>>> = Mutex::new(None);
+
+    /// Block the next purge commit until [`PurgeCommitPause::release`].
+    pub fn arm() -> PurgeCommitPause {
+        let state = Arc::new(State {
+            slot: Mutex::new(Slot {
+                entered: false,
+                release: false,
+            }),
+            wake: Condvar::new(),
+        });
+        *PAUSE.lock().expect("purge commit pause") = Some(Arc::clone(&state));
+        PurgeCommitPause { state }
+    }
+
+    pub fn wait_if_armed() {
+        let Some(state) = PAUSE.lock().expect("purge commit pause").clone() else {
+            return;
+        };
+        let mut slot = state.slot.lock().expect("purge commit pause");
+        if slot.release {
+            return;
+        }
+        slot.entered = true;
+        state.wake.notify_all();
+        while !slot.release {
+            slot = state.wake.wait(slot).expect("purge commit pause");
+        }
+    }
+
+    /// Pauses the purge on the far side of archive rewrite, before the commit
+    /// takes daemon-handoff admission.
+    #[derive(Clone)]
+    pub struct PurgeCommitPause {
+        state: Arc<State>,
+    }
+
+    impl PurgeCommitPause {
+        pub fn wait_until_blocked(&self, timeout: Duration) -> bool {
+            let mut slot = self.state.slot.lock().expect("purge commit pause");
+            let deadline = std::time::Instant::now() + timeout;
+            while !slot.entered {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let (guard, result) = self
+                    .state
+                    .wake
+                    .wait_timeout(slot, deadline - now)
+                    .expect("purge commit pause");
+                slot = guard;
+                if result.timed_out() && !slot.entered {
+                    return false;
+                }
+            }
+            true
+        }
+
+        pub fn release(&self) {
+            let mut slot = self.state.slot.lock().expect("purge commit pause");
+            slot.release = true;
+            self.state.wake.notify_all();
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub use commit_pause::{PurgeCommitPause, arm as arm_purge_untracked_commit_pause};
+
 fn discard_unreferenced(path: &std::path::Path, error: anyhow::Error) -> anyhow::Error {
     match std::fs::remove_file(path) {
         Ok(()) => error,
@@ -360,6 +532,19 @@ mod tests {
 
     const CHILD: &str = "MJ_PURGE_UNTRACKED_TEST";
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
+
+    fn purge_one(
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+        dry_run: bool,
+    ) -> Result<PurgeSessionOutcome> {
+        purge_session_untracked_archive(
+            admission,
+            session_id,
+            dry_run,
+            mj_checkpoint::archive::archive_purge_not_cancelled(),
+        )
+    }
 
     fn enter_child(test: &str) -> bool {
         if std::env::var_os(CHILD).is_some() {
@@ -514,6 +699,7 @@ mod tests {
             operation_id: "move-purge".into(),
             selection: MoveSelection {
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 consent: Default::default(),
@@ -561,7 +747,7 @@ mod tests {
     fn purge_rejects_an_admission_for_a_different_session() {
         let admission = session_admission("11111111111111111111111111111111");
         let error =
-            purge_session_untracked_archive(&admission, "22222222222222222222222222222222", true)
+            purge_one(&admission, "22222222222222222222222222222222", true)
                 .unwrap_err();
         assert!(
             error.to_string().contains("session admission is for"),
@@ -579,7 +765,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             &archive_input(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                legacy_repository(untracked_tar("scratch.txt", b"scratch\n")),
+                legacy_repository(untracked_tar("pad.txt", &vec![b'a'; 8 * 1024])),
             ),
         );
         let legacy_bytes = fs::read(&legacy.archive_path).unwrap();
@@ -661,7 +847,7 @@ mod tests {
         let names_before = directory_names();
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &running_admission,
                     "11111111111111111111111111111111",
                     false,
@@ -672,7 +858,7 @@ mod tests {
         );
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &session_admission("22222222222222222222222222222222"),
                     "22222222222222222222222222222222",
                     false,
@@ -683,7 +869,7 @@ mod tests {
         );
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &session_admission("33333333333333333333333333333333"),
                     "33333333333333333333333333333333",
                     false,
@@ -694,7 +880,7 @@ mod tests {
         );
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &session_admission("44444444444444444444444444444444"),
                     "44444444444444444444444444444444",
                     false,
@@ -705,7 +891,7 @@ mod tests {
         );
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &session_admission("55555555555555555555555555555555"),
                     "55555555555555555555555555555555",
                     false,
@@ -716,7 +902,7 @@ mod tests {
         );
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &session_admission("66666666666666666666666666666666"),
                     "66666666666666666666666666666666",
                     false,
@@ -727,7 +913,7 @@ mod tests {
         );
         assert_eq!(
             skipped_reason(
-                purge_session_untracked_archive(
+                purge_one(
                     &session_admission("77777777777777777777777777777777"),
                     "77777777777777777777777777777777",
                     false,
@@ -760,6 +946,25 @@ mod tests {
             );
         };
         assert!(*bytes_reclaimed > 0);
+        let inspected =
+            mj_checkpoint::archive::verify_archive_streaming(&batch_stopped.archive_path).unwrap();
+        let uncompressed: u64 = inspected
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| {
+                matches!(
+                    payload.role,
+                    mj_core::archive::PayloadRole::GitUntrackedTar { .. }
+                        | mj_core::archive::PayloadRole::GitLinkedWorktreeUntrackedTar { .. }
+                ) && payload.size > 1024
+            })
+            .map(|payload| payload.size - 1024)
+            .sum();
+        assert!(
+            *bytes_reclaimed < uncompressed,
+            "dry run reported {bytes_reclaimed}, the uncompressed excess is {uncompressed}"
+        );
         assert_eq!(batch.total_bytes_reclaimed, *bytes_reclaimed);
         assert_eq!(directory_names(), names_before);
         for path in [
@@ -793,13 +998,29 @@ mod tests {
             session_id,
             &archive_input(
                 session_id,
-                legacy_repository(untracked_tar("scratch.txt", b"scratch\n")),
+                legacy_repository(untracked_tar("pad.txt", &vec![b'a'; 8 * 1024])),
             ),
         );
         let previous_bytes = fs::read(&previous.archive_path).unwrap();
+        let old_len = previous_bytes.len() as u64;
+        let inspected =
+            mj_checkpoint::archive::verify_archive_streaming(&previous.archive_path).unwrap();
+        let uncompressed: u64 = inspected
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| {
+                matches!(
+                    payload.role,
+                    mj_core::archive::PayloadRole::GitUntrackedTar { .. }
+                        | mj_core::archive::PayloadRole::GitLinkedWorktreeUntrackedTar { .. }
+                ) && payload.size > 1024
+            })
+            .map(|payload| payload.size - 1024)
+            .sum();
         save(session_id, SessionState::Stopped, Some(previous.clone()));
         let outcome =
-            purge_session_untracked_archive(&session_admission(session_id), session_id, false)
+            purge_one(&session_admission(session_id), session_id, false)
                 .unwrap();
         let PurgeSessionOutcome::Purged {
             bytes_reclaimed, ..
@@ -808,6 +1029,10 @@ mod tests {
             panic!("expected a purge, got {outcome:?}");
         };
         assert!(bytes_reclaimed > 0);
+        assert!(
+            bytes_reclaimed < uncompressed,
+            "purge reported {bytes_reclaimed}, the uncompressed excess is {uncompressed}"
+        );
         assert!(!previous.archive_path.exists());
         let loaded = crate::database::load_state().unwrap();
         let session = &loaded.sessions[session_id];
@@ -827,7 +1052,9 @@ mod tests {
         let verified =
             mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path).unwrap();
         assert_eq!(verified.archive_sha256, checkpoint.sha256);
-        assert!(checkpoint.archive_path.metadata().unwrap().len() < previous_bytes.len() as u64);
+        let new_len = checkpoint.archive_path.metadata().unwrap().len();
+        assert!(new_len < old_len);
+        assert_eq!(bytes_reclaimed, old_len.saturating_sub(new_len));
         assert!(
             verified
                 .manifest
@@ -932,7 +1159,7 @@ mod tests {
         save(session_id, SessionState::Stopped, Some(recorded.clone()));
         let names_before = directory_names();
         for dry_run in [false, true] {
-            let error = purge_session_untracked_archive(
+            let error = purge_one(
                 &session_admission(session_id),
                 session_id,
                 dry_run,
@@ -951,5 +1178,116 @@ mod tests {
         assert_eq!(checkpoint.sha256, recorded.sha256);
         assert_eq!(fs::read(&recorded.archive_path).unwrap(), other_bytes);
         assert_eq!(directory_names(), names_before);
+    }
+
+    #[test]
+    fn purges_checked_in_old_format_fixture_and_resumes_it() {
+        if enter_child("purges_checked_in_old_format_fixture_and_resumes_it") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/legacy-untracked-checkpoint.hel.zip");
+        assert!(
+            fixture_path.is_file(),
+            "checked-in fixture {} is missing",
+            fixture_path.display()
+        );
+        let session_id = "dddddddddddddddddddddddddddddddd";
+        let verified_before =
+            mj_checkpoint::archive::verify_archive_streaming(&fixture_path).unwrap();
+        assert_eq!(verified_before.manifest.schema_version, 12);
+        assert!(verified_before.manifest.repositories[0].metadata.origin_delta.is_none());
+
+        fs::create_dir_all(sessions_dir()).unwrap();
+        let managed_path = sessions_dir().join(format!("{session_id}-1-{NONCE}.hel.zip"));
+        fs::copy(&fixture_path, &managed_path).unwrap();
+        let original_size = managed_path.metadata().unwrap().len();
+        let checkpoint = CheckpointMetadata {
+            archive_path: managed_path.clone(),
+            created_at: "2026-11-21T00:00:00Z".into(),
+            event_frontier: 1,
+            sha256: verified_before.archive_sha256.clone(),
+        };
+        save(session_id, SessionState::Stopped, Some(checkpoint));
+
+        let outcome = purge_one(&session_admission(session_id), session_id, false).unwrap();
+        let PurgeSessionOutcome::Purged {
+            bytes_reclaimed, ..
+        } = outcome
+        else {
+            panic!("expected Purged outcome for checked-in legacy fixture, got {outcome:?}");
+        };
+        assert!(bytes_reclaimed > 0, "expected reclaimed on-disk bytes");
+        assert!(!managed_path.exists(), "old fixture copy should be unlinked");
+
+        let loaded = crate::database::load_state().unwrap();
+        let updated = loaded.sessions[session_id]
+            .checkpoint
+            .as_ref()
+            .expect("updated checkpoint row");
+        assert_ne!(updated.archive_path, managed_path);
+        assert!(updated.archive_path.metadata().unwrap().len() < original_size);
+        let verified_after =
+            mj_checkpoint::archive::verify_archive_streaming(&updated.archive_path).unwrap();
+        assert_eq!(verified_after.manifest.schema_version, 12);
+        assert_eq!(verified_after.archive_sha256, updated.sha256);
+
+        // Resume/restore the purged old-format archive into a fresh checkout.
+        let restore_workspace = tempfile::tempdir().unwrap();
+        let dest_repo = restore_workspace.path().join("project");
+        fs::create_dir_all(&dest_repo).unwrap();
+        let run_git_dest = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&dest_repo)
+                .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+                .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        run_git_dest(&["init", "-b", "main"]);
+        run_git_dest(&["config", "user.name", "Fixture"]);
+        run_git_dest(&["config", "user.email", "fixture@example.test"]);
+        fs::write(dest_repo.join("tracked.txt"), "base line\n").unwrap();
+        run_git_dest(&["add", "tracked.txt"]);
+        run_git_dest(&["commit", "-m", "initial base"]);
+        assert_eq!(
+            run_git_dest(&["rev-parse", "HEAD"]),
+            verified_after.manifest.repositories[0].metadata.base_commit
+        );
+        mj_checkpoint::checkpoint::restore_repositories(
+            &updated.archive_path,
+            restore_workspace.path(),
+            &mj_checkpoint::archive::SystemGit,
+        )
+        .unwrap();
+
+        assert_eq!(
+            run_git_dest(&["symbolic-ref", "--short", "HEAD"]),
+            "feature/legacy"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_repo.join("feature.txt")).unwrap(),
+            "committed legacy feature\n"
+        );
+        assert_eq!(
+            run_git_dest(&["show", ":tracked.txt"]),
+            "staged change"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_repo.join("tracked.txt")).unwrap(),
+            "unstaged change\n"
+        );
+        assert!(
+            !dest_repo.join("scratch.bin").exists(),
+            "purged untracked payload must be absent after resume"
+        );
     }
 }

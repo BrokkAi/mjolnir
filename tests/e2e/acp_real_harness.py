@@ -303,7 +303,7 @@ repositories = [{{ id = "fixture", github = {quote(args.repository)}, destinatio
                 # Keep-on-exit leaves a live session. Exercise an actual
                 # checkpoint/release/resume, then prove a new prompt works.
                 self.cli("suspend", "--session", session,
-                         "--acknowledge-unpublished-work", "--json")
+                         "--discard-untracked", "--json")
                 self.until(f"{session}: suspended", lambda: self.session_when(
                     session, lambda row: row["lifecycle"] == "suspended"))
                 self.cli("resume", "--session", session, "--json")
@@ -328,7 +328,7 @@ repositories = [{{ id = "fixture", github = {quote(args.repository)}, destinatio
             rows = self.cli("sessions", "--json")["sessions"] if self.base_url else []
             for row in rows:
                 session = row["id"]
-                self.cli("destroy", "--session", session, "--delete-branch", "--json")
+                self.cli("destroy", "--session", session, "--json")
             if self.base_url:
                 self.until("all test sessions destroyed",
                            lambda: not self.get("/sessions")["sessions"])

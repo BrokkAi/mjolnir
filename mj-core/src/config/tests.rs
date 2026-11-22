@@ -857,6 +857,7 @@ fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
 
 fn sample_config() -> Config {
     Config {
+        guardian: GuardianConfig::default(),
         images: ImagesConfig::default(),
         version: CONFIG_VERSION,
         keys: Default::default(),
@@ -1070,6 +1071,48 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
         assert!(!kind.mjolnir_guardian_reviews(ExecutionPolicy::ConfiguredApprovals, disabled));
         assert!(!kind.mjolnir_guardian_reviews(ExecutionPolicy::Unconstrained, enabled));
     }
+
+    let mut config = Config::default();
+    assert_eq!(config.guardian, GuardianConfig::default());
+    let default_toml = toml::to_string(&config).expect("serialize default config");
+    assert!(!default_toml.contains("[guardian]"));
+
+    config.guardian = GuardianConfig {
+        enabled: false,
+        local_classifier: false,
+        use_gpu: false,
+    };
+    let custom_toml = toml::to_string(&config).expect("serialize custom guardian config");
+    let loaded: Config = toml::from_str(&custom_toml).expect("round-trip [guardian] settings");
+    assert_eq!(loaded.guardian, config.guardian);
+
+    let profile_on = HarnessProfile::new(HarnessKind::Kimi, PathBuf::from("/profiles/kimi"));
+    let profile_off = HarnessProfile {
+        mjolnir_guardian: false,
+        ..profile_on.clone()
+    };
+    let mut global_on = Config::default();
+    assert!(
+        global_on
+            .profile_approval_choices(&profile_on)
+            .mjolnir_guardian
+    );
+    assert!(
+        !global_on
+            .profile_approval_choices(&profile_off)
+            .mjolnir_guardian
+    );
+    global_on.guardian.enabled = false;
+    assert!(
+        !global_on
+            .profile_approval_choices(&profile_on)
+            .mjolnir_guardian
+    );
+    assert!(
+        !global_on
+            .profile_approval_choices(&profile_off)
+            .mjolnir_guardian
+    );
 
     let codex = HarnessKind::Codex
         .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
@@ -3282,7 +3325,7 @@ fn legacy_profile_subagents_load_without_migration_and_disappear_on_save() {
     let path = root.path().join("config.toml");
     std::fs::write(&path, format!("version = {CONFIG_VERSION}\n[profiles.legacy]\nkind = \"codex\"\nhome = {:?}\nsubagents = {{ mode = \"single_model\", model = \"old\", effort = \"adaptive\" }}\n", root.path().to_string_lossy())).unwrap();
     let config = Config::load_from(&path).unwrap();
-    assert!(!config.subagents.is_configured_for(false));
+    assert!(!config.subagents.is_configured());
     config.save_to(&path).unwrap();
     assert!(
         !std::fs::read_to_string(&path)
@@ -3309,26 +3352,26 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
         effort: None,
     };
     let mut config = Config::default();
-    config.subagents.straightforward = Some(choice("plain"));
+    config.subagents.straightforward = vec![choice("plain")];
     config.validate().unwrap();
-    assert!(config.subagents.is_configured_for(false));
+    assert!(config.subagents.is_configured());
     let policy = SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: None,
     };
-    assert!(!config.subagents.offers_subtle_for(&policy, false));
+    assert!(!config.subagents.offers_subtle(&policy));
     // A session override can add the subtle type for one session.
     let with_subtle = SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: Some(Box::new(choice("smart"))),
     };
-    assert!(config.subagents.offers_subtle_for(&with_subtle, false));
-    config.subagents.subtle = Some(choice("smart"));
+    assert!(config.subagents.offers_subtle(&with_subtle));
+    config.subagents.subtle = vec![choice("smart")];
     config.validate().unwrap();
-    assert!(config.subagents.offers_subtle_for(&policy, false));
+    assert!(config.subagents.offers_subtle(&policy));
 
-    config.subagents.straightforward = None;
-    assert!(!config.subagents.is_configured_for(false));
+    config.subagents.straightforward.clear();
+    assert!(!config.subagents.is_configured());
     let error = config.validate().unwrap_err().to_string();
     assert!(
         error.contains("[subagents.subtle] requires [subagents.straightforward]"),
@@ -3337,108 +3380,84 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
 }
 
 #[test]
-fn yolo_subagent_choices_are_ignored_while_shared_but_kept_for_later() {
-    let choice = |model: &str| SubagentChoice {
-        model: model.into(),
-        effort: None,
-    };
-    let mut config = Config::default();
-    config.subagents.straightforward = Some(choice("shared"));
-    config.subagents.yolo.straightforward = Some(choice("yolo"));
-    config.subagents.yolo.subtle = Some(choice("yolo-smart"));
-    config.validate().unwrap();
-    // Checked: the YOLO values do nothing, including their subtle rule.
-    assert_eq!(
-        config
-            .subagents
-            .choice_for(crate::subagent::SubagentTaskType::Straightforward, true)
-            .unwrap()
-            .model,
-        "shared"
-    );
-    config.subagents.yolo.straightforward = None;
-    config.validate().unwrap();
-    assert_eq!(
-        config
-            .subagents
-            .choice_for(crate::subagent::SubagentTaskType::Straightforward, true)
-            .unwrap()
-            .model,
-        "shared"
-    );
+fn subagent_config_accepts_singular_and_array_and_drops_legacy_yolo() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+version = 23
 
-    // Unchecked: the retained YOLO values become active and are validated.
-    config.subagents.use_same_on_all_targets = false;
-    config.subagents.yolo.straightforward = Some(choice("yolo"));
-    assert!(config.validate().is_ok());
-    assert_eq!(
-        config
-            .subagents
-            .choice_for(crate::subagent::SubagentTaskType::Straightforward, true)
-            .unwrap()
-            .model,
-        "yolo"
-    );
-    assert_eq!(
-        config
-            .subagents
-            .choice_for(crate::subagent::SubagentTaskType::Straightforward, false)
-            .unwrap()
-            .model,
-        "shared"
-    );
-    config.subagents.yolo.straightforward = None;
-    let error = config.validate().unwrap_err().to_string();
-    assert!(
-        error.contains("[subagents.yolo.subtle] requires [subagents.yolo.straightforward]"),
-        "{error}"
-    );
+[subagents]
+use_same_on_all_targets = false
+max_concurrent = 8
+
+[subagents.straightforward]
+model = "gpt-5.4-mini"
+effort = "high"
+
+[[subagents.primary]]
+model = "claude-opus-4-6"
+effort = "high"
+
+[[subagents.primary]]
+model = "gpt-5.4"
+effort = "xhigh"
+
+[subagents.yolo.straightforward]
+model = "kimi-k2.5"
+"#,
+    )
+    .unwrap();
+    let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(loaded.subagents.max_concurrent, 8);
+    assert_eq!(loaded.subagents.straightforward.len(), 1);
+    assert_eq!(loaded.subagents.straightforward[0].model, "gpt-5.4-mini");
+    assert_eq!(loaded.subagents.primary.len(), 2);
+    assert!(loaded.subagents.primary_configured());
+    assert!(loaded.subagents.is_configured());
+    loaded.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("yolo"), "{saved}");
+    assert!(!saved.contains("use_same_on_all_targets"), "{saved}");
+    assert!(saved.contains("version = 24"), "{saved}");
 }
 
 #[test]
-fn inactive_yolo_choices_survive_a_save_and_reload() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("config.toml");
+fn subagent_config_rejects_same_provider_in_one_category() {
     let mut config = Config::default();
-    config.subagents.yolo.straightforward = Some(SubagentChoice {
-        model: "yolo".into(),
-        effort: Some("high".into()),
-    });
-    config.save_to(&path).unwrap();
-    let saved = fs::read_to_string(&path).unwrap();
+    config.subagents.primary = vec![
+        SubagentChoice {
+            model: "claude-opus-4-6".into(),
+            effort: Some("high".into()),
+        },
+        SubagentChoice {
+            model: "claude-sonnet-4-6".into(),
+            effort: Some("high".into()),
+        },
+    ];
+    let error = config.validate().unwrap_err().to_string();
     assert!(
-        saved.contains("[subagents.yolo.straightforward]"),
-        "{saved}"
-    );
-    assert!(!saved.contains("use_same_on_all_targets"), "{saved}");
-    let loaded = Config::load_from(&path).unwrap();
-    assert!(loaded.subagents.use_same_on_all_targets);
-    assert_eq!(
-        loaded
-            .subagents
-            .yolo
-            .straightforward
-            .as_ref()
-            .unwrap()
-            .model,
-        "yolo"
+        error.contains("[subagents.primary] may configure at most one model per provider")
+            && error.contains("Anthropic"),
+        "{error}"
     );
 }
 
 #[test]
 fn oracle_configuration_is_independent_and_rejects_adaptive_effort() {
     let mut config = Config::default();
-    config.subagents.oracle = Some(SubagentChoice {
+    config.subagents.oracle = vec![SubagentChoice {
         model: "advisor".into(),
         effort: Some("high".into()),
-    });
+    }];
     config.validate().unwrap();
-    assert!(config.subagents.oracle_configured_for(false));
+    assert!(config.subagents.oracle_configured());
     let encoded = serde_json::to_value(&config).unwrap();
-    assert_eq!(encoded["subagents"]["oracle"]["model"], "advisor");
+    assert_eq!(encoded["subagents"]["oracle"][0]["model"], "advisor");
     let decoded: Config = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded.subagents.oracle, config.subagents.oracle);
-    config.subagents.oracle.as_mut().unwrap().effort = Some("adaptive".into());
+    config.subagents.oracle[0].effort = Some("adaptive".into());
     assert!(
         config
             .validate()

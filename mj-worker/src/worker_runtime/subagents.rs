@@ -106,6 +106,7 @@ pub(super) fn configure_claude_subagent_mcp(
         return match role {
             Some(
                 role @ (SubagentMcpRole::Parent
+                | SubagentMcpRole::Supervisor
                 | SubagentMcpRole::Child
                 | SubagentMcpRole::FetchOnly),
             ) => Err(anyhow::anyhow!(
@@ -408,11 +409,18 @@ pub(super) fn configure_antigravity_mailbox_hook(
 
     let worker = std::env::current_exe().context("locate worker for Antigravity mailbox hook")?;
     let socket = root.join("control.sock");
-    let command = format!(
-        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch --format antigravity",
-        mj_core::targets::posix_quote(&worker.to_string_lossy()),
-        mj_core::targets::posix_quote(&socket.to_string_lossy())
-    );
+    let hook = |event| {
+        let command = format!(
+            "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event {event} --format antigravity",
+            mj_core::targets::posix_quote(&worker.to_string_lossy()),
+            mj_core::targets::posix_quote(&socket.to_string_lossy())
+        );
+        serde_json::json!({
+            "type": "command",
+            "command": command,
+            "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
+        })
+    };
 
     let mut plugin_bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "name": "mjolnir-mailbox"
@@ -429,13 +437,8 @@ pub(super) fn configure_antigravity_mailbox_hook(
 
     let mut hooks_bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "mjolnir-mailbox": {
-            "PreInvocation": [
-                {
-                    "type": "command",
-                    "command": command,
-                    "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
-                }
-            ]
+            "PreInvocation": [hook("PostToolBatch")],
+            "Stop": [hook("Stop")]
         }
     }))?;
     hooks_bytes.push(b'\n');
@@ -3801,16 +3804,18 @@ mod review_gate_tests {
 
         let hooks_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(plugin_dir.join("hooks.json")).unwrap()).unwrap();
-        let hook = &hooks_json["mjolnir-mailbox"]["PreInvocation"][0];
-        assert_eq!(hook["type"], "command");
-        assert_eq!(hook["timeout"], mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
-        let command = hook["command"].as_str().unwrap();
-        assert!(command.starts_with("MJOLNIR_MAILBOX_HOOK=1 "), "{command}");
-        assert!(
-            command.contains("worker mailbox-hook --socket ")
-                && command.contains("--event PostToolBatch --format antigravity"),
-            "{command}"
-        );
+        for (hook_name, event) in [("PreInvocation", "PostToolBatch"), ("Stop", "Stop")] {
+            let hook = &hooks_json["mjolnir-mailbox"][hook_name][0];
+            assert_eq!(hook["type"], "command");
+            assert_eq!(hook["timeout"], mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
+            let command = hook["command"].as_str().unwrap();
+            assert!(command.starts_with("MJOLNIR_MAILBOX_HOOK=1 "), "{command}");
+            assert!(
+                command.contains("worker mailbox-hook --socket ")
+                    && command.contains(&format!("--event {event} --format antigravity")),
+                "{command}"
+            );
+        }
 
         // Stale worker path in hooks.json is overwritten on re-run.
         std::fs::write(
@@ -3821,10 +3826,7 @@ mod review_gate_tests {
         assert!(configure_antigravity_mailbox_hook(root.path(), "session-1", &home).unwrap());
         let refreshed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(plugin_dir.join("hooks.json")).unwrap()).unwrap();
-        assert_eq!(
-            refreshed["mjolnir-mailbox"]["PreInvocation"][0]["command"],
-            command
-        );
+        assert_eq!(refreshed, hooks_json);
 
         // Refuses non-private home.
         let elsewhere = tempfile::tempdir().unwrap();

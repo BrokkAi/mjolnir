@@ -1200,7 +1200,7 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
 }
 
 #[cfg(unix)]
-fn test_runtime_state_loading_the_store_with_live_recovery() -> (
+pub(super) fn test_runtime_state_loading_the_store_with_live_recovery() -> (
     Arc<RuntimeState>,
     Arc<RecoveryGate>,
     crate::worker_upgrade::WorkerUpgradeCoordinator,
@@ -1721,6 +1721,7 @@ pub(crate) fn runtime_test_session(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -1785,6 +1786,7 @@ pub(super) fn runtime_test_subagent(
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     }
 }
 
@@ -1818,6 +1820,40 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
     let children = state.active_child_session_ids(&parent.id);
 
     assert_eq!(children, vec!["running-child".to_owned()]);
+}
+
+#[test]
+fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
+    let primary = runtime_test_session("primary", "workspace", SessionState::Running);
+    let parked_sup = runtime_test_session("parked-sup", "workspace", SessionState::Parked);
+    let mut live_d2 = runtime_test_session("live-d2", "workspace", SessionState::Running);
+    live_d2.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/tmp/live-d2"),
+    }));
+    let mut state = mj_core::state::State {
+        sessions: [primary.clone(), parked_sup.clone(), live_d2.clone()]
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect(),
+        ..mj_core::state::State::default()
+    };
+    let mut sup_record = runtime_test_subagent(&parked_sup.id, &primary.id);
+    sup_record.supervisor = true;
+    let d2_record = runtime_test_subagent(&live_d2.id, &parked_sup.id);
+    state.subagents = [sup_record, d2_record]
+        .into_iter()
+        .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
+        .collect();
+
+    let children = state.active_child_session_ids(&primary.id);
+    assert!(
+        children.contains(&"live-d2".to_owned()),
+        "active_child_session_ids must include live depth-2 worker under parked supervisor: {children:?}"
+    );
+    assert!(
+        state.subagents_occupy_container(&primary.id),
+        "live depth-2 worker under parked supervisor occupies the primary's container"
+    );
 }
 
 #[tokio::test]
@@ -7189,6 +7225,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: true,
             remember_container_size: true,
@@ -7206,6 +7243,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             initial_prompt: None,
             workspace_id: workspace.id.clone(),
             profile_id: "codex".into(),
+            provider: None,
             bundle_id: "project".into(),
             project_directory: Some(project.clone()),
             target_template_id: "localhost".into(),
@@ -8237,12 +8275,13 @@ esac
                 profile_id: Some("codex".into()),
                 target_template_id: Some("local".into()),
                 consent: Default::default(),
-            skip_keep_paths: Vec::new(),
+                skip_keep_paths: Vec::new(),
                 clear_resource_allocation: false,
                 additional_mounts: None,
                 resource_allocation: None,
                 subagents: None,
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
             },
             source_profile_id: source.last_profile.clone(),
@@ -9651,9 +9690,7 @@ async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushe
 
     let refusal = tokio::time::timeout(
         Duration::from_secs(60),
-        clone
-            .state
-            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
+        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
     )
     .await
     .unwrap()
@@ -9725,9 +9762,7 @@ async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_publishe
 
     tokio::time::timeout(
         Duration::from_secs(60),
-        clone
-            .state
-            .suspend_session(LATCH_RELAY_SESSION.to_owned()),
+        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
     )
     .await
     .unwrap()
@@ -9943,7 +9978,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
                 discard_untracked: mj_core::suspend_consent::UntrackedConsent::None,
                 abort_operations: mj_core::suspend_consent::OperationConsent::None,
                 without_checkpoint: true,
-            confirm_no_checkpoint: true,
+                confirm_no_checkpoint: true,
             }),
     )
     .await
@@ -11817,6 +11852,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         operation_id: "retained-move".into(),
         selection: MoveSelection {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -12056,7 +12092,8 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             },
         )
         .collect();
-    mj_controller::database::register_subagent_with_startup(&child, &relation, rows, None).unwrap();
+    mj_controller::database::register_subagent_with_startup(&child, &relation, rows, None, None)
+        .unwrap();
     let root = tempfile::tempdir().unwrap();
     let model_id = format!("{group_id}-model");
     let prompt_id = format!("{group_id}-prompt");
@@ -13194,6 +13231,7 @@ pub(super) fn retained_startup_test_move(
         operation_id: "startup-durable-move".into(),
         selection: MoveSelection {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -14134,6 +14172,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
     let request = |kind, request_key: &str| mj_controller::controller::RegisterSubagentRequest {
         no_github_credentials: false,
         kind,
+        supervisor: false,
         reviewer_launch: None,
         parent_session_id: parent_id.into(),
         task_name: "task".into(),
@@ -14145,6 +14184,12 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         initial_prompt: "Question:\nWhich option?".into(),
         request_key: request_key.into(),
         report_root: None,
+        category: match kind {
+            mj_core::subagent::SubagentKind::Oracle => "oracle",
+            mj_core::subagent::SubagentKind::Reviewer => "reviewer",
+            mj_core::subagent::SubagentKind::Worker => "straightforward",
+        }
+        .into(),
     };
 
     FAIL_CONTROLLER_RELOAD.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -16642,6 +16687,28 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
     mj_controller::database::save_session(&record).unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    // `DaemonAction::SuspendPreflight` is routed as a cancellable machine action
+    // by `serve.rs`; verify `machine::execute` handles it instead of rejecting
+    // it as "not a machine read".
+    let preflight_reply = super::machine::execute(
+        DaemonAction::SuspendPreflight {
+            session_id: session_id.into(),
+            dry_run: false,
+            without_checkpoint: true,
+        },
+        &state,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .expect("SuspendPreflight must execute through machine::execute");
+    assert!(
+        matches!(
+            preflight_reply,
+            DaemonReply::SuspendPreflight(ref preflight) if preflight.existing_checkpoint.is_none()
+        ),
+        "expected SuspendPreflight reply with existing_checkpoint=None, got: {preflight_reply:?}"
+    );
+
     let consent = mj_core::suspend_consent::SuspendConsent {
         without_checkpoint: true,
         confirm_no_checkpoint: false,
@@ -16655,11 +16722,25 @@ async fn close_without_checkpoint_refusal_leaves_session_running() {
         format!("{err:#}").contains("No verified checkpoint exists"),
         "expected refusal, got: {err:#}"
     );
+    // `suspend_session_with_consent` awaited `started.result`, which only
+    // resolves after lifecycle completion (and any failure recording).
+    assert!(
+        state
+            .owner()
+            .lifecycle
+            .get(session_id)
+            .is_none_or(|active| !active.is_running()),
+        "refused suspend lifecycle must be finished once wait_lifecycle_result returns"
+    );
     let loaded = Controller::load().unwrap();
     assert_eq!(
         loaded.state.sessions[session_id].state,
         SessionState::Running,
         "refused without_checkpoint must not transition session to Closing"
+    );
+    assert_eq!(
+        loaded.state.sessions[session_id].last_error, None,
+        "pre-acceptance suspend refusal must not stamp last_error onto a live session"
     );
 }
 

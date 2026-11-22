@@ -410,18 +410,18 @@ mode after selecting Open settings: "Setup"
 │           │   Daemon                          Host                                                       │  ─────────╯
 │           │                                                                                              │  ─────────╮
 │           │   Sessions                                                                                   │           │
-│           │   Code Review                     Off                                                        │           │
-│           │   Sub-agents                      Up to 6 at once                                            │  ─────────╯
-│           │   Quota checks                    Host                                                       │  ── ▁   ▄ ╮
-│           │   SessionWiki                     Keeps every session                                        │           │
-│           │   Web Access                      On · 127.0.0.1:3765                                        │  ─────────╯
-│           │                                                                                              │  ── ▁   ▄ ╮
+│           │   Guardian                        On · local classifier                                      │           │
+│           │   Code Review                     Off                                                        │  ─────────╯
+│           │   Sub-agents                      Up to 6 at once                                            │  ── ▁   ▄ ╮
+│           │   Quota checks                    Host                                                       │           │
+│           │   SessionWiki                     Keeps every session                                        │  ─────────╯
+│           │   Web Access                      On · 127.0.0.1:3765                                        │  ── ▁   ▄ ╮
+│           │                                                                                              │           │
 │           │   Display                                                                                    │           │
 │           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │           │
 │           │   Notifications                   Terminal                                                   │           │
 │           │   Advanced                        All off                                                    │           │
-│           │                                                                                              │           │
-│           │   Privacy                                                                                    │  ─────────╯
+│           │                                                                                              │  ─────────╯
 │           │   Save and Close                                                                             │  ── ▁   ▄ ╮
 │           ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯           │
 ╰─────────                                                                                                    ─────────╯

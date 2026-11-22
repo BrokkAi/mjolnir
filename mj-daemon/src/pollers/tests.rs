@@ -112,6 +112,7 @@ fn podman_controller(state: SessionState) -> Controller {
         mj_core::state::SessionRecord {
             oracle_choice: None,
             oracle: true,
+            supervisors: false,
             notifications_ignored: false,
             project: None,
             target_runtime: None,
@@ -1063,6 +1064,7 @@ async fn a_refused_claude_login_reports_failed_renewal_then_delivers_a_replaceme
     assert_eq!(check, mj_controller::quota::ClaudeGrantCheck::Failed);
     let mut publication = mj_controller::quota::QuotaReportPublication {
         cache_identity: request.cache_identity(),
+        last_good: None,
         report: None,
         login_error: None,
     };

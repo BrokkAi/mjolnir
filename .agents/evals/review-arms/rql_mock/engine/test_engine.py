@@ -1,16 +1,20 @@
 """Offline engine tests. The tests never call mj, Podman, or a provider."""
 from copy import deepcopy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 from tempfile import TemporaryDirectory
 from types import MethodType
 import unittest
+from unittest.mock import patch
 
+from audit import ROLLOUT_DIRECTORY
 import driver
 from census_label import CENSUS
 from rql_mock import fidelity_live
@@ -686,6 +690,11 @@ class EngineTests(unittest.TestCase):
         runner = FakeRunner(["{\"", broken, "{\"", broken, payload()])
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "engine_error")
+        self.assertEqual(result["failure"], "repair_stalled")
+        self.assertEqual(result["repair_error_counts"], [
+            {"session": session["session"], "previous": 1, "current": 1}
+            for session in result["provenance"]["retired_sessions"]
+        ])
         self.assertIn("expected a row kind and a fields object", result["message"])
         self.assertIn("invalid JSON", runner.turns[1][2][0])
         self.assertEqual(len(runner.launches), 2)
@@ -695,6 +704,25 @@ class EngineTests(unittest.TestCase):
         result = self.engine(runner).answer(COMMIT, QUERY)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(runner.turns), 5)
+
+    def test_isolation_voids_cannot_count_as_repair_stalls(self):
+        class ViolatingRunner(FakeRunner):
+            def turn(self, sid, query, catalogue, menu, errors, directory):
+                output, record, errors = super().turn(sid, query, catalogue, menu, errors, directory)
+                if output is None:
+                    raise IsolationFailure("violated policy", record)
+                return output, record, errors
+
+        stalled = ["{}", "{}"]
+        for inputs in ([None, None], [None, *stalled], [*stalled, None]):
+            with self.subTest(inputs=inputs), TemporaryDirectory(dir=self.cache) as cache:
+                runner = ViolatingRunner(inputs)
+                engine = self.engine(runner)
+                engine.cache = Path(cache)
+                result = engine.answer(COMMIT, QUERY)
+                self.assertEqual(result["status"], "engine_error")
+                self.assertEqual(len(runner.launches), 2)
+                self.assertNotIn("failure", result)
 
     def test_retry_then_success_sorts_and_retains_open_coverage(self):
         first = {"kind": "structural_match", "primary_site": span(line=1), "fields": {}}
@@ -1115,6 +1143,15 @@ class CaptureDriver:
         return [sys.executable, "-c", program, *argv]
 
 
+def summarized_exec(turn, command):
+    identifier = f"exec-terminal-{turn}"
+    call = {"toolCallId": identifier, "name": "exec_command", "title": "List files",
+            "kind": "read", "status": "completed"}
+    item = {"type": "CommandExecution", "id": identifier, "command": command,
+            "cwd": f"/workspace/{SESSION}/repo"}
+    event = {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
+    return call, event
+
 
 class RetirementTests(unittest.TestCase):
     def test_teardown_cli_uses_the_cache_beside_its_explicit_config(self):
@@ -1194,8 +1231,67 @@ class RetirementTests(unittest.TestCase):
                 self.assertTrue((retired / "answers/context-test/pending.json").exists())
                 self.assertEqual((retired / "answers/context-test/answer.raw").exists(), failure != "fetch")
 
+    def test_codex_audits_capture_the_latest_commands_for_each_turn_and_retirement(self):
+        with TemporaryDirectory() as root:
+            directory = Path(root)
+            turn = 1
+            exports = []
+
+            class CodexCapture(CaptureDriver):
+                save = staticmethod(driver.save)
+                capture_pilot_rollouts = staticmethod(driver.capture_pilot_rollouts)
+
+                def wait_idle(self, sid):
+                    return {**super().wait_idle(sid), "harness_kind": "codex"}
+
+                session = wait_idle
+
+                def transcript(self, sid):
+                    items = [{"seq": n, "role": "tool", "body": {"call": summarized_exec(n, ["ls"])[0]}}
+                             for n in range(1, turn + 1)]
+                    return [{"session_id": sid, "items": items, "next_after_seq": turn, "latest_seq": turn}]
+
+            run = subprocess.run
+
+            def export(argv, **kwargs):
+                if argv[0] != "podman":
+                    return run(argv, **kwargs)
+                assert argv[:3] == ["podman", "exec", "fixture-container"]
+                exports.append(turn)
+                rows = "".join(json.dumps(summarized_exec(n, ["ls"])[1]) + "\n"
+                               for n in range(1, turn + 1)).encode()
+                with tarfile.open(fileobj=kwargs["stdout"], mode="w") as bundle:
+                    member = tarfile.TarInfo("rollout-fixture.jsonl")
+                    member.size = len(rows)
+                    bundle.addfile(member, io.BytesIO(rows))
+
+            runner = SealedRunner.__new__(SealedRunner)
+            runner.config = {"instance": INSTANCE, "model_version": VERSION}
+            runner.driver = CodexCapture(directory, clean=True)
+            with patch.object(driver, "session_container_id", return_value="fixture-container"), \
+                    patch.object(driver.subprocess, "run", new=export):
+                self.assertTrue(runner.audit_turn(SESSION, 1, directory))
+                first = json.loads((directory / "turn-1-audit.json").read_bytes())
+                turn = 2
+                self.assertTrue(runner.audit_turn(SESSION, 2, directory))
+                second = json.loads((directory / "turn-2-audit.json").read_bytes())
+                # A retry of the same turn must also export a fresh snapshot.
+                self.assertTrue(runner.audit_turn(SESSION, 2, directory))
+                retry = json.loads((directory / "turn-2-audit.json").read_bytes())
+                turn = 3
+                self.assertTrue(runner.retire(directory, {"session_id": SESSION, "orphan": COMMIT, "commit": COMMIT}))
+            self.assertEqual(exports, [1, 2, 2, 3])
+            final = json.loads((directory / "audit.json").read_bytes())
+            for verdict, label, commands in ((first, "turn-1", 1), (second, "turn-2", 2),
+                                             (retry, "turn-2", 2), (final, "final", 3)):
+                snapshot = verdict["rollout_directory"]
+                self.assertTrue(snapshot.startswith(f"{label}-{ROLLOUT_DIRECTORY}-"))
+                rollout = (directory / snapshot / "rollout-fixture.jsonl").read_bytes().splitlines()
+                self.assertEqual(len(rollout), commands)
+            self.assertNotEqual(second["rollout_directory"], retry["rollout_directory"])
+
     # Hard-won: a19cfbf: fidelity cleanup masked turn failures and never retired completed sessions.
-    def test_fidelity_retains_failed_turn_and_retires_success_only_once(self):
+    def test_fidelity_captures_audit_evidence_and_retires_each_session_once(self):
         def replace(target, name, replacement):
             self.addCleanup(setattr, target, name, getattr(target, name))
             setattr(target, name, replacement)
@@ -1227,37 +1323,122 @@ class RetirementTests(unittest.TestCase):
         adapter.sources = {COMMIT: "source"}
         adapter.claude_version = VERSION
         failure = RuntimeError("original fidelity turn error")
-        model = fidelity_live.TERRA
-        result = {"session": SESSION, "turn": 1, "model": model, "version": model, "effort": "high"}
 
-        def run_turn(*args):
-            if capture.fail == "turn":
+        class FidelityCapture(CaptureDriver):
+            active = False
+            rollout_calls = 0
+            save = staticmethod(driver.save)
+
+            def session(self, sid):
+                return {**self.wait_idle(sid),
+                        "activity_state": {"state": "turn" if self.active else "idle"}}
+
+            def wait_idle(self, sid):
+                return {**super().wait_idle(sid), "harness_kind": harness}
+
+            def mj(self, operation, *args):
+                if operation == "interrupt-turn":
+                    assert self.active and args == ("--session", SESSION)
+                    self.active = False
+                    return {}
+                return super().mj(operation, *args)
+
+            def transcript(self, sid):
+                pages = super().transcript(sid)
+                if harness == "codex":
+                    pages[0]["items"][0]["body"]["call"] = summarized_exec(1, ["ls"])[0]
+                return pages
+
+            def capture_pilot_rollouts(self, directory, sid, *, reuse_existing, directory_name):
+                assert harness == "codex" and sid == SESSION and not reuse_existing
+                self.rollout_calls += 1
+                if scenario == "rollout":
+                    error = subprocess.CalledProcessError(1, ["podman", "exec"])
+                    with patch.object(driver, "session_container_id", return_value="fixture-container"), \
+                            patch.object(driver.subprocess, "run", side_effect=error):
+                        return driver.capture_pilot_rollouts(
+                            directory, sid, reuse_existing=reuse_existing, directory_name=directory_name)
+                dst = directory / directory_name
+                dst.mkdir()
+                words = ["ls"] if self.clean else ["curl", "https://example.invalid"]
+                event = summarized_exec(1, words)[1]
+                (dst / "rollout-fixture.jsonl").write_text(json.dumps(event) + "\n")
+                return True
+
+        def run_turn(runner, sid, snapshot, directory, *args, **kwargs):
+            if scenario == "turn":
+                capture.active = True
                 raise failure
+            if not runner.audit_turn(sid, 1, directory):
+                raise RuntimeError("fidelity session failed the pilot audit")
+            if scenario == "transcript":
+                capture.fail = "transcript"
             return payload().encode(), result
 
         def checked(output, read):
+            if scenario == "output":
+                raise ValueError("original output error")
             rows, _, errors = validate(output, read)
             self.assertFalse(errors)
             return rows
 
         adapter.run_turn = run_turn
-        for scenario in ("turn", "transcript", "success"):
+        for scenario in ("turn", "audit", "output", "rollout", "transcript", "codex",
+                         "incomplete", "changed"):
             with self.subTest(scenario=scenario), TemporaryDirectory() as root:
                 directory = Path(root)
-                capture = CaptureDriver(directory, scenario, clean=True, models=())
+                harness = "codex"
+                model = version = fidelity_live.TERRA
+                result = {"session": SESSION, "turn": 1, "model": model, "version": version, "effort": "high"}
+                capture = FidelityCapture(directory, clean=scenario not in ("audit", "rollout"), models=())
                 launches.clear()
 
                 def sealed():
                     return adapter.sealed_task(COMMIT, directory, model, "terra", {}, lambda _: QUERY, checked)
 
-                if scenario == "turn":
-                    with self.assertRaises(RuntimeError) as error:
+                if scenario in ("incomplete", "changed"):
+                    capture.active = True
+                    identity = {"model": model, "effort": fidelity_live.EFFORT, "profile": "terra", **snapshot,
+                                "inputs_sha256": fidelity_live.sha(canonical([{}, QUERY]).encode())}
+                    if scenario == "changed":
+                        identity["inputs_sha256"] = "different"
+                    driver.save(directory / "intent.json", identity)
+                    driver.save(directory / "session.json", {"session_id": SESSION})
+                    original = {path.name: path.read_bytes() for path in directory.iterdir()}
+                    error = (ValueError, "inputs changed") if scenario == "changed" else (
+                        RuntimeError, "needs reconciliation")
+                    with self.assertRaisesRegex(*error):
                         sealed()
-                    self.assertIs(error.exception, failure)
-                    self.assertEqual(json.loads((directory / "failed.json").read_text()),
-                                     {"session_id": SESSION, "reason": str(failure)})
-                    self.assertFalse((directory / "completed.json").exists())
+                    self.assertTrue(capture.active)
+                    self.assertEqual(launches, [])
                     self.assertEqual(capture.argv, [])
+                    self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, original)
+                    continue
+
+                if scenario in ("turn", "audit", "output", "rollout"):
+                    message = {"turn": "original fidelity turn error", "output": "original output error"}.get(
+                        scenario, "fidelity session failed the pilot audit")
+                    with self.assertRaisesRegex((RuntimeError, ValueError), message) as error:
+                        sealed()
+                    if scenario == "turn":
+                        self.assertIs(error.exception, failure)
+                        self.assertFalse(capture.active)
+                    self.assertEqual(json.loads((directory / "failed.json").read_text()),
+                                     {"session_id": SESSION, "reason": message})
+                    self.assertFalse((directory / "completed.json").exists())
+                    if scenario == "rollout":
+                        self.assertEqual(capture.rollout_calls, 2)
+                        for name in ("turn-1-audit.json", "audit.json"):
+                            verdict = json.loads((directory / name).read_bytes())
+                            self.assertFalse(verdict["passed"])
+                            self.assertIn("missing-codex-rollout", {hit["kind"] for hit in verdict["hits"]})
+                        self.assertTrue((directory / "rollout-capture-error.json").is_file())
+                        self.assertEqual(capture.argv, [])
+                        self.assertFalse((directory / "destroy-request.json").exists())
+                        self.assertFalse((directory / "destroy-receipt.json").exists())
+                        self.assertIn("session preserved: audit evidence capture failed: missing-codex-rollout",
+                                      " ".join(error.exception.__notes__))
+                        continue
                 else:
                     if scenario == "transcript":
                         with self.assertRaisesRegex(RuntimeError, "transcript unavailable"):
@@ -1268,11 +1449,18 @@ class RetirementTests(unittest.TestCase):
                         capture.fail = None
                     self.assertEqual(sealed(), (ROWS, result))
                     self.assertEqual(sealed(), (ROWS, result))
-                    self.assertEqual(len(launches), 1)
-                    self.assertEqual(capture.argv, [("--instance", INSTANCE, "destroy", "--session", SESSION, "--json")])
-                    self.assertTrue((directory / "destroy-receipt.json").is_file())
-                    usage = json.loads((directory / "usage.json").read_text())
-                    self.assertEqual(usage["expected_provider_model"], model)
+                self.assertEqual(len(launches), 1)
+                self.assertEqual(capture.argv, [("--instance", INSTANCE, "destroy", "--session", SESSION, "--json")])
+                self.assertTrue((directory / "destroy-receipt.json").is_file())
+                usage = json.loads((directory / "usage.json").read_text())
+                self.assertEqual(usage["expected_provider_model"], version)
+                if scenario != "turn":
+                    turn_audit = json.loads((directory / "turn-1-audit.json").read_text())
+                    self.assertEqual(turn_audit["passed"], scenario != "audit")
+                self.assertEqual(capture.rollout_calls, 1 if scenario == "turn" else 2)
+                index = json.loads((directory / "capture.json").read_text())
+                final = json.loads((directory / "audit.json").read_bytes())
+                self.assertIn(f"{final['rollout_directory']}/rollout-fixture.jsonl", index["files_sha256"])
 
 
 class SnapshotTests(unittest.TestCase):

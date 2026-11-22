@@ -18,56 +18,52 @@ pub fn fill_subagent_options(
 ) -> Result<Option<String>, serde_json::Error> {
     let config = super::draft::config_from_draft(draft.clone())?;
     let mut unreachable = None;
-    for (scope, task) in [
-        ("", "straightforward"),
-        ("", "subtle"),
-        ("", "oracle"),
-        ("yolo.", "straightforward"),
-        ("yolo.", "subtle"),
-        ("yolo.", "oracle"),
-    ] {
-        if !scope.is_empty() && super::schema::shared_subagents(&draft["subagents"]) {
-            continue;
-        }
-        let model = if scope.is_empty() {
-            draft["subagents"][task]["model"].as_str()
-        } else {
-            draft["subagents"]["yolo"][task]["model"].as_str()
-        };
-        let mut options = capabilities.options(&config, None);
-        let mut efforts_pending = false;
-        if let Some(options) = &mut options {
-            match capabilities.options(&config, model) {
-                Some(efforts) => {
-                    options.efforts = efforts.efforts;
-                    options.unavailable = efforts.unavailable;
+    let base_models = capabilities.options(&config, None);
+    let mut root = serde_json::Map::new();
+    for task in ["primary", "straightforward", "subtle", "oracle"] {
+        let mut task_options = serde_json::Map::new();
+        if let Some(entries) = draft["subagents"][task].as_array() {
+            for (index, entry) in entries.iter().enumerate() {
+                let model = entry["model"].as_str().filter(|m| !m.trim().is_empty());
+                let mut options = base_models.clone();
+                let mut efforts_pending = false;
+                if let Some(options) = &mut options {
+                    match capabilities.options(&config, model) {
+                        Some(efforts) => {
+                            options.efforts = efforts.efforts;
+                            options.unavailable = efforts.unavailable;
+                        }
+                        None => efforts_pending = true,
+                    }
                 }
-                // The selected model's efforts are still being discovered.
-                None => efforts_pending = true,
+                let value = match options {
+                    Some(options) => {
+                        if !options.unavailable.is_empty() && unreachable.is_none() {
+                            unreachable =
+                                Some(format!("Discovery: {}", options.unavailable.join("; ")));
+                        }
+                        let mut value = serde_json::to_value(options).expect("options serialize");
+                        if efforts_pending
+                            || value["unavailable"].as_array().is_some_and(|reasons| {
+                                reasons.iter().any(|reason| {
+                                    reason
+                                        .as_str()
+                                        .is_some_and(|reason| reason.contains("pending"))
+                                })
+                            })
+                        {
+                            value[EFFORTS_PENDING] = Value::Bool(true);
+                        }
+                        value
+                    }
+                    None => Value::Null,
+                };
+                task_options.insert(index.to_string(), value);
             }
         }
-        draft["_subagent_options"][format!("{scope}{task}")] = match options {
-            Some(options) => {
-                if !options.unavailable.is_empty() && unreachable.is_none() {
-                    unreachable = Some(format!("Discovery: {}", options.unavailable.join("; ")));
-                }
-                let mut options = serde_json::to_value(options).expect("options serialize");
-                if efforts_pending
-                    || options["unavailable"].as_array().is_some_and(|reasons| {
-                        reasons.iter().any(|reason| {
-                            reason
-                                .as_str()
-                                .is_some_and(|reason| reason.contains("pending"))
-                        })
-                    })
-                {
-                    options[EFFORTS_PENDING] = Value::Bool(true);
-                }
-                options
-            }
-            None => Value::Null,
-        };
+        root.insert(task.to_owned(), Value::Object(task_options));
     }
+    draft["_subagent_options"] = Value::Object(root);
     Ok(unreachable)
 }
 

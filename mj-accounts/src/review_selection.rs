@@ -517,6 +517,7 @@ mod tests {
             quota,
             may_consume_credits: false,
             unhealthy: BTreeMap::new(),
+            cache_identity: None,
         };
         let candidates = SubagentCandidates {
             offered: vec![

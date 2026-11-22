@@ -418,13 +418,7 @@ pub(crate) fn provider_pools(
                 ));
             continue;
         }
-        let provider = providers.provider(id, profile).unwrap_or_else(|| {
-            if matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode) {
-                QuotaProvider::Other(format!("{} (resolving)", profile.kind.display_name()))
-            } else {
-                profile.quota_provider()
-            }
-        });
+        let provider = profile_provider(id, profile, providers);
         let group = grouped
             .entry(provider.clone())
             .or_insert_with(|| ProviderQuota {
@@ -695,6 +689,20 @@ pub(crate) fn provider_pools(
         }
     }
     grouped.into_values().collect()
+}
+
+pub(crate) fn profile_provider(
+    id: &str,
+    profile: &HarnessProfile,
+    providers: &ProviderDiscovery,
+) -> QuotaProvider {
+    providers.provider(id, profile).unwrap_or_else(|| {
+        if matches!(profile.kind, HarnessKind::Codex | HarnessKind::OpenCode) {
+            QuotaProvider::Other(format!("{} (resolving)", profile.kind.display_name()))
+        } else {
+            profile.quota_provider()
+        }
+    })
 }
 
 /// Largest-remainder apportionment for the available quota and refill chunks.

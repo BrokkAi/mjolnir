@@ -2417,7 +2417,24 @@ def known_engine_grep_input(raw):
     )
 
 
+def engine_compaction(call):
+    """The pinned Claude bridge's marker for an automatic context compaction.
+
+    It summarizes the session's own conversation and runs no tool, so only this
+    exact shape passes: a think card with the compaction marker and nothing that
+    could name a path, an input or an output."""
+    meta = call.get("_meta")
+    air = meta.get("jetbrains", {}).get("air") if isinstance(meta, dict) and isinstance(meta.get("jetbrains"), dict) else None
+    return (call.keys() <= {"toolCallId", "title", "kind", "status", "_meta"}
+            and call.get("kind") == "think" and call.get("title") == "Compact conversation"
+            and call.get("status") in {"completed", "pending", "in_progress"}
+            and meta == {"jetbrains": {"air": air}} and isinstance(air, dict)
+            and air == {"version": 1, "contextCompaction": {"version": 1}})
+
+
 def engine_hits(call, own_workspace, cwd, evidence, audited_calls, seq, claude_code_version):
+    if isinstance(call, dict) and engine_compaction(call):
+        return
     name = call.get("name") if isinstance(call, dict) else None
     if not isinstance(name, str) or name not in ENGINE_TOOLS or call.get("kind") == "execute":
         yield "needs-inspection", f"tool outside the engine allowlist: {name!r}"
@@ -2569,7 +2586,7 @@ def pilot_hits(call, own_workspace, commits, single_commit, *, scripts, written,
 
 
 def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, single_commit=False,
-                cwd=None, home=None, allow_in_place_edits=False, engine=False):
+                cwd=None, home=None, allow_in_place_edits=False, engine=False, rollout_paths=None):
     """Screen pilot inputs; a needs-inspection hit prevents automatic acceptance."""
     try:
         pages = json.loads(transcript_path.read_text())
@@ -2592,6 +2609,8 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
         runtime = read_record(transcript_path.with_name("engine-runtime.json")) if engine else {}
         claude_code_version = (runtime.get("claude_code_version")
                                if isinstance(runtime, dict) and runtime.get("session_id") == own_workspace else None)
+        if rollout_paths is None:
+            rollout_paths = sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))
         result = scan(pages, own_workspace, commits=commits, allow_rql=allow_rql, single_commit=single_commit,
                       cwd=cwd, home=home, allow_in_place_edits=allow_in_place_edits, engine=engine,
                       antigravity=captured_antigravity(transcript_path),
@@ -2599,8 +2618,7 @@ def audit_pilot(transcript_path, own_workspace, *, commits=(), allow_rql=False, 
                       tracked_symlink_targets=before.get("tracked_symlink_targets"),
                       claude_code_version=claude_code_version,
                       tracked_paths=None if before.get("status") or before.get("ignored") else before.get("tracked_paths"),
-                      rollout=rollout_commands(
-                          sorted((transcript_path.parent / ROLLOUT_DIRECTORY).glob("rollout-*.jsonl"))))
+                      rollout=rollout_commands(rollout_paths))
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"tool_items": 0, "hits": [{"kind": "missing-or-unreadable-transcript", "snippet": str(error)}]}
     return dict(result, passed=all(hit["kind"] in PASSING_HIT_KINDS for hit in result["hits"]))

@@ -81,6 +81,8 @@ pub enum ControllerAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         oracle: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervisors: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         oracle_choice: Option<mj_core::config::SubagentChoice>,
         /// Review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,6 +106,7 @@ pub enum ControllerAction {
         /// one rather than guessing.
         #[serde(default)]
         workspace_id: String,
+        #[serde(default, deserialize_with = "deserialize_null_as_empty")]
         profile_id: String,
         bundle_id: String,
         target_id: String,
@@ -564,8 +567,18 @@ pub enum ClientStateRequest {
         session_id: String,
         dry_run: bool,
         without_checkpoint: bool,
-        reply:
-            tokio::sync::oneshot::Sender<Result<mj_core::suspend_consent::SuspendPreflight, String>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<mj_core::suspend_consent::SuspendPreflight, String>,
+        >,
+    },
+    PurgeUntracked {
+        request: crate::server::api::PurgeUntrackedRequest,
+        reply: tokio::sync::oneshot::Sender<
+            Result<
+                crate::server::api::PurgeUntrackedResponse,
+                crate::server::api::PurgeUntrackedFailure,
+            >,
+        >,
     },
     Read {
         client_id: String,
@@ -641,6 +654,12 @@ pub enum BackgroundTaskStopFailure {
 /// What a public request that asks for per-turn review is told. Stored
 /// actions that still say `turn` read as `push` instead.
 const TURN_REVIEW_REMOVED: &str = "Per-turn review was removed. Use review.mode \"push\", or omit review to review before push when reviewers are configured.";
+
+fn deserialize_null_as_empty<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 pub(super) fn deserialize_session_review<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -767,11 +786,9 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            serde_json::to_value(older_client)
-                .unwrap()
-                .get("resource_allocation")
-                .is_none()
-        );
+        assert!(serde_json::to_value(older_client)
+            .unwrap()
+            .get("resource_allocation")
+            .is_none());
     }
 }

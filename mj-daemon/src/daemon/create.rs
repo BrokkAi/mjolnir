@@ -45,11 +45,119 @@ impl PostCreateWait {
 impl RuntimeState {
     pub(super) async fn start_create_session(
         self: &Arc<Self>,
-        request: CreateSessionRequest,
+        mut request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
+        let (primary_selection, provider_reservation, delegation_notice) = if request
+            .profile_id
+            .is_empty()
+        {
+            let config = self.owner().controller().config.clone();
+            let execution_policy = if config
+                .targets
+                .get(&request.target_template_id)
+                .is_some_and(|target| target.is_yolo())
+            {
+                mj_core::config::ExecutionPolicy::Unconstrained
+            } else {
+                mj_core::config::ExecutionPolicy::ConfiguredApprovals
+            };
+            let backend: Arc<dyn crate::server::api::SubagentBackend> = self
+                .quota_report_backend()
+                .ok_or_else(|| anyhow::anyhow!("session selection backend is unavailable"))?;
+            let default_empty_title = mj_core::state::default_session_title(
+                request.project_directory.as_deref(),
+                &request.bundle_id,
+                "",
+            );
+            let apply_chosen_profile = |request: &mut CreateSessionRequest, profile_id: &str| {
+                if request.title.trim().is_empty()
+                    || request.title.ends_with(" ()")
+                    || request.title == default_empty_title
+                {
+                    request.title = mj_core::state::default_session_title(
+                        request.project_directory.as_deref(),
+                        &request.bundle_id,
+                        profile_id,
+                    );
+                }
+                request.profile_id = profile_id.to_owned();
+            };
+            if let Some(provider) = request.provider.clone() {
+                let selected = crate::server::api::resolve_provider_session_selection(
+                    &backend,
+                    &config,
+                    &provider,
+                    execution_policy,
+                    request.subagents.as_ref(),
+                )
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                apply_chosen_profile(&mut request, &selected.profile_id);
+                let mut notice = None;
+                if matches!(
+                    request.subagents,
+                    Some(mj_core::subagent::SubagentPolicy::Native)
+                ) && let Some(profile) = config.enabled_profile(&selected.profile_id)
+                    && !profile.kind.has_native_subagents()
+                {
+                    request.subagents = Some(mj_core::subagent::SubagentPolicy::None);
+                    notice = Some(format!(
+                        "Disabled native sub-agents for this session: selected profile {} ({}) does not support native sub-agents.",
+                        selected.profile_id,
+                        profile.kind.display_name(),
+                    ));
+                }
+                (None, Some(selected.reservation), notice)
+            } else {
+                anyhow::ensure!(
+                    config.subagents.primary_configured(),
+                    "Auto (Primary) requires at least one entry in [[subagents.primary]]"
+                );
+                let selected = crate::server::api::resolve_primary_session_selection(
+                    &backend,
+                    None,
+                    config.subagents.primary_choices(),
+                    execution_policy,
+                )
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                apply_chosen_profile(&mut request, &selected.profile_id);
+                (Some((selected, backend)), None, None)
+            }
+        } else {
+            (None, None, None)
+        };
         let (registered, _, warning) = self
             .start_create_session_inner(request, LifecycleControl::default(), None)
             .await?;
+        if let Some(reservation) = provider_reservation {
+            reservation.commit(Some(registered.session.id.clone()));
+        }
+        if let Some(notice) = delegation_notice {
+            self.push_notice(&registered.session.id, notice);
+        }
+        if let Some((selected, backend)) = primary_selection {
+            selected
+                .reservation
+                .commit(Some(registered.session.id.clone()));
+            if let Err(error) = backend
+                .start_followup(
+                    registered.session.id.clone(),
+                    crate::server::api::StartFollowup {
+                        model: Some(selected.model.clone()),
+                        effort: selected.effort.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(session_id = %registered.session.id, model = %selected.model, effort = ?selected.effort, %error, "failed to queue selected primary model/effort after creating session");
+                self.push_notice(
+                    &registered.session.id,
+                    format!("Session created on profile {}, but applying primary model {} failed ({error:#}). Select the model manually in the session.", registered.session.last_profile, selected.model),
+                );
+            }
+        }
         if let Some(warning) = warning {
             self.push_notice(&registered.session.id, warning);
         }
@@ -205,6 +313,7 @@ impl RuntimeState {
         self.start_subagent_session(mj_controller::controller::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: relation.kind,
+            supervisor: relation.supervisor,
             reviewer_launch: relation.reviewer_launch.clone(),
             parent_session_id: relation.parent_session_id.clone(),
             task_name: relation.task_name.clone(),
@@ -216,6 +325,11 @@ impl RuntimeState {
             initial_prompt: relation.initial_prompt.clone(),
             request_key: relation.request_key.clone(),
             report_root: None,
+            category: match launch.role {
+                mj_core::worker_launch::ReviewChildRole::Reviewer => "reviewer",
+                mj_core::worker_launch::ReviewChildRole::BriefWriter => "brief_writer",
+            }
+            .to_owned(),
         })
         .await?;
         // No total deadline here: one counted queue time and cancelled an
@@ -465,6 +579,7 @@ impl RuntimeState {
                     no_later_history: request.no_later_history,
                     subagents: request.subagents,
                     oracle: request.oracle,
+                    supervisors: request.supervisors,
                     oracle_choice: request.oracle_choice,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
@@ -1017,6 +1132,7 @@ mod delegation_replay_tests {
                 .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
                 oracle: None,
+                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: remember,
                 remember_container_size: false,
@@ -1034,6 +1150,7 @@ mod delegation_replay_tests {
                 initial_prompt: None,
                 workspace_id: workspace.id.clone(),
                 profile_id: "codex".into(),
+                provider: None,
                 bundle_id: mj_core::config::raw_project_context_id(
                     &project.path().to_string_lossy(),
                 ),
@@ -1191,6 +1308,7 @@ mod delegation_replay_tests {
         });
         let request = mj_client::daemon::CreateSessionRequest {
             oracle: None,
+            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,
@@ -1211,6 +1329,7 @@ mod delegation_replay_tests {
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),
+            provider: None,
             bundle_id: "missing-bundle".into(),
             project_directory: None,
             target_template_id: "missing-target".into(),
@@ -1282,6 +1401,7 @@ mod delegation_replay_tests {
                 .start_subagent_session(mj_controller::controller::RegisterSubagentRequest {
                     no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
+                    supervisor: false,
                     reviewer_launch: None,
                     parent_session_id: "parent".into(),
                     task_name: "must reuse original".into(),
@@ -1293,6 +1413,7 @@ mod delegation_replay_tests {
                     initial_prompt: "must not resend".into(),
                     request_key: relation.request_key.clone(),
                     report_root: None,
+                    category: "straightforward".into(),
                 })
                 .await
                 .unwrap();

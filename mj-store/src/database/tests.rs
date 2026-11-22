@@ -6618,7 +6618,7 @@ pub(super) fn register_test_subagent(
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
     super::state_io::insert_session_with_parent(&tx, session, Some(&relation.parent_session_id))?;
-    super::usage::record_child_accounting(&tx, relation)?;
+    super::usage::record_child_accounting(&tx, relation, None)?;
     tx.execute(
         "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
         params![relation.child_session_id, relation.parent_session_id, relation.kind.request_key(&relation.request_key), serde_json::to_string(relation)?],
@@ -6649,6 +6649,7 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
+        supervisor: false,
     };
     save_state_to(path, &state).unwrap();
     register_test_subagent(path, &child, &relation).unwrap();
@@ -8253,6 +8254,37 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
     assert!(
         !renamed
             .last_oracle_choices
+            .contains_key(&record.last_profile)
+    );
+}
+
+#[test]
+fn migration_147_raises_compatibility_floor_and_persists_supervisors_preference() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("supervisors.sqlite3");
+    let mut record = session("sup-parent", "project");
+    record.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    record.supervisors = true;
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let conn = open(&path).unwrap();
+    let schema = schema::read_schema_state(&conn).unwrap();
+    assert_eq!(schema.revision, 147);
+    assert_eq!(schema.minimum_compatible, Some(147));
+    let state = load_state_from(&path).unwrap();
+    assert!(state.sessions[&record.id].supervisors);
+    assert_eq!(
+        state.last_supervisor_choices.get(&record.last_profile),
+        Some(&true)
+    );
+    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
+    let renamed = load_state_from(&path).unwrap();
+    assert_eq!(renamed.last_supervisor_choices.get("renamed"), Some(&true));
+    assert!(
+        !renamed
+            .last_supervisor_choices
             .contains_key(&record.last_profile)
     );
 }

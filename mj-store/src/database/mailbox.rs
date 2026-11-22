@@ -267,6 +267,31 @@ pub fn mailbox_event_exists(event_key: &str) -> Result<bool> {
 }
 
 /// Recent parent messages addressed to this session's children, including
+/// Child session IDs that have an undelivered `SubagentFinished` mailbox row
+/// pending for `parent_session_id`.
+pub fn pending_subagent_finished_children(
+    parent_session_id: &str,
+) -> Result<std::collections::BTreeSet<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT event_json
+         FROM mailbox_outbox
+         WHERE target_session_id = ?1
+           AND accepted_at IS NULL
+           AND failure IS NULL",
+    )?;
+    let mut pending = std::collections::BTreeSet::new();
+    for row in statement.query_map([parent_session_id], |row| row.get::<_, String>(0))? {
+        let json = row?;
+        if let Ok(event) = serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&json)
+            && let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body
+        {
+            pending.insert(report.child_session_id);
+        }
+    }
+    Ok(pending)
+}
+
 /// whether the child's relay has accepted each waking event.
 pub fn subagent_mailbox_messages(parent_session_id: &str) -> Result<Vec<SubagentMailboxMessage>> {
     let connection = open_reader(&database_path())?;
