@@ -302,23 +302,24 @@ impl NewWizard {
         }
     }
 
-    /// Move an explicitly expanded resolving group to the selected profile's
-    /// resolved provider. A collapsed group stays collapsed during discovery.
+    /// Move explicitly expanded resolving groups to their resolved providers.
+    /// A collapsed group stays collapsed during discovery.
     pub(crate) fn effective_expanded_providers(
         &self,
         dashboard: &DashboardState,
     ) -> BTreeSet<QuotaProvider> {
         let mut expanded = self.expanded_providers.clone();
-        if let Some(profile) = dashboard
-            .new_wizard_profile_id(self.profile)
-            .and_then(|id| dashboard.config.profiles.get(&id))
-            && let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
-            && expanded.remove(&QuotaProvider::Other(format!(
-                "{} (resolving)",
-                profile.kind.display_name()
-            )))
-        {
-            expanded.insert(provider);
+        for (id, profile) in dashboard.offered_profiles() {
+            let resolving =
+                QuotaProvider::Other(format!("{} (resolving)", profile.kind.display_name()));
+            if self.expanded_providers.contains(&resolving) {
+                expanded.remove(&resolving);
+                expanded.insert(crate::render::quota_pools::profile_provider(
+                    id,
+                    profile,
+                    &dashboard.quota_providers,
+                ));
+            }
         }
         expanded
     }

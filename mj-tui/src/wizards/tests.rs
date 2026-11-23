@@ -1884,6 +1884,22 @@ fn new_session_profile_step_reconciles_when_provider_discovery_completes() {
     assert!(rendered.contains("codex-1"), "{rendered}");
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
 
+    // An expanded resolving group also stays open when a different provider's
+    // profile is selected; discovery must reconcile every expanded group.
+    let original_profile = new_wizard(&dashboard).profile;
+    let claude = dashboard
+        .offered_profiles()
+        .position(|(id, _)| id == "claude-1")
+        .unwrap();
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.set_profile(claude);
+    }
+    let rendered = drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(rendered.contains("▾ OPENAI"), "{rendered}");
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.set_profile(original_profile);
+    }
+
     // A stale focused "(resolving)" header clears back to the selected profile
     // instead of leaving Next disabled or swallowing Enter.
     if let Mode::New(wizard) = &mut dashboard.mode {
