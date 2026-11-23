@@ -288,6 +288,7 @@ pub struct RuntimeState {
         >,
     >,
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    login_terminals: Mutex<BTreeMap<String, terminal_streams::LoginInput>>,
     /// Resume ownership can precede its durable workspace assignment.
     workspace_resume_admission: Mutex<BTreeMap<String, Arc<tokio::sync::RwLock<()>>>>,
     /// Work waiting for one session's harness to become ready: the prompts a
@@ -909,7 +910,12 @@ mod machine;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;
+mod dashboard_api;
 mod dashboard_reads;
+mod terminal_operations;
+mod terminal_repositories;
+mod terminal_setup;
+mod terminal_streams;
 
 #[cfg(test)]
 pub(crate) mod tests;

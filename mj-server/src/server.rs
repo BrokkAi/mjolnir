@@ -134,15 +134,6 @@ pub struct ServerOptions {
     pub conversation_rx:
         watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     pub action_tx: mpsc::Sender<ControllerRequest>,
-    pub bundle_tx: mpsc::Sender<BundleRequest>,
-    pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
-    pub preflight_tx: mpsc::Sender<PreflightRequest>,
-    pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
-    pub client_state_tx: mpsc::Sender<ClientStateRequest>,
-    /// Dedicated bounded path for stopping one live background task. This is
-    /// deliberately separate from [`ControllerAction`]: stopping a provider
-    /// task does not occupy the controller's action admission slot.
-    background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
     pub image_builds: ImageBuilds,
     finish_image_builds_on_stop: bool,
@@ -186,14 +177,9 @@ pub const UPGRADE_HEADER: &str = "x-mj-upgrade";
 /// the async runtime.
 pub type WorkerSourceCheck = Arc<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>;
 
-/// Typed request channels served by the authenticated HTTP surface.
+/// Action requests forwarded to the daemon admission supervisor.
 pub struct ServerRequests {
     pub action_tx: mpsc::Sender<ControllerRequest>,
-    pub bundle_tx: mpsc::Sender<BundleRequest>,
-    pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
-    pub preflight_tx: mpsc::Sender<PreflightRequest>,
-    pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
-    pub client_state_tx: mpsc::Sender<ClientStateRequest>,
 }
 
 impl ServerOptions {
@@ -212,12 +198,6 @@ impl ServerOptions {
             snapshot_rx,
             conversation_rx,
             action_tx: requests.action_tx,
-            bundle_tx: requests.bundle_tx,
-            receipt_tx: requests.receipt_tx,
-            preflight_tx: requests.preflight_tx,
-            move_preparation_tx: requests.move_preparation_tx,
-            client_state_tx: requests.client_state_tx,
-            background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
             image_builds: ImageBuilds::default(),
             finish_image_builds_on_stop: true,
@@ -289,11 +269,6 @@ impl ServerOptions {
         self.set_cookie_key(key)?;
         self.viewer_revocations = Arc::new(revocations);
         Ok(())
-    }
-
-    /// Install the controller's bounded background-task stop path.
-    pub fn set_background_task_stop_tx(&mut self, tx: mpsc::Sender<BackgroundTaskStopRequest>) {
-        self.background_task_stop_tx = tx;
     }
 
     /// Install the persisted bearer token for the `/api/v1` routes. Rotating

@@ -845,7 +845,10 @@ impl DashboardContext {
     pub(crate) fn drain_dashboard_io(&mut self) -> bool {
         let mut completed = false;
         for pending in std::mem::take(&mut self.pending_runtime_updates) {
-            if !pending.update.awaiting_runtime(&self.controller) {
+            if !pending
+                .update
+                .awaiting_runtime(&self.controller.config, &self.controller.state)
+            {
                 completed = true;
                 self.apply_dashboard_io_update(pending.update);
             } else if std::time::Instant::now() >= pending.deadline {

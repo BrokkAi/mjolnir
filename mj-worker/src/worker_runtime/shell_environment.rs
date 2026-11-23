@@ -7,10 +7,28 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use mj_core::targets::posix_quote;
 
+const OWNED: &str = "MJ_SESSION_BASH_ENV";
+const REFERENCE: &str = "${MJ_SESSION_BASH_ENV}";
+
+/// Git setup already installs a shell hook that restores both launcher paths.
+pub(super) fn configure_if_needed(
+    path: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    if environment
+        .get("BASH_ENV")
+        .is_some_and(|value| value == REFERENCE)
+        && environment
+            .get(OWNED)
+            .is_some_and(|path| Path::new(path).is_file())
+    {
+        return Ok(());
+    }
+    configure(path, environment)
+}
+
 pub(super) fn configure(path: &Path, environment: &mut BTreeMap<String, String>) -> Result<()> {
     const ORIGINAL: &str = "MJ_ORIGINAL_BASH_ENV";
-    const OWNED: &str = "MJ_SESSION_BASH_ENV";
-    const REFERENCE: &str = "${MJ_SESSION_BASH_ENV}";
     const SCRIPT: &str = r#"if [ -n "${MJ_ORIGINAL_BASH_ENV:-}" ] && [ "${MJ_ORIGINAL_BASH_ENV}" != "${BASH_ENV:-}" ] && [ -r "${MJ_ORIGINAL_BASH_ENV}" ]; then
     . "${MJ_ORIGINAL_BASH_ENV}"
 fi

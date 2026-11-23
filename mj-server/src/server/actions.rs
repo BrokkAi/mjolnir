@@ -392,19 +392,11 @@ pub struct ControllerRequest {
     pub reply: tokio::sync::oneshot::Sender<ActionOutcome>,
 }
 
-/// A phone request to create or reuse a quick project bundle. This has its
-/// own channel because bundle creation returns a durable id and must publish a
-/// config snapshot before the HTTP request can succeed; [`ControllerAction`]
-/// intentionally carries only action admission outcomes.
-#[derive(Debug)]
-pub struct BundleRequest {
-    /// Legacy primary-repository matching. Empty when `exact_sources` is set.
-    pub source: String,
-    /// The requested full repository set, with its primary repository first.
-    pub exact_sources: Option<Vec<String>>,
-    /// A discovered network source may select an existing project unchanged.
-    pub discovered: bool,
-    pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
+#[derive(Debug, Serialize)]
+pub struct CreateBundleResponse {
+    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<mj_core::project_catalog::SavedProject>,
 }
 
 /// Safe failure classes for bundle creation. Detailed controller errors stay
@@ -415,83 +407,6 @@ pub enum BundleFailure {
     InvalidSource,
     Refused(Refusal),
     Controller,
-}
-
-/// A phone acknowledging how far it has read a conversation.
-///
-/// This deliberately is not a `ControllerAction`: the viewer posts it after
-/// every conversation fetch, and a fetch follows every revision. Routing it
-/// through the action pipeline made each receipt reload the controller, bump
-/// the revision and broadcast a snapshot, which triggered the next fetch, so
-/// viewer and controller never went quiet; it also consumed the session's
-/// single action slot, intermittently rejecting real actions. A receipt
-/// therefore travels on its own channel and only persists one cursor field.
-/// A phone asking whether a session it is about to create would launch
-/// cleanly, and which network sources it will use first.
-///
-/// This is not a `ControllerAction`: it starts nothing, it takes no session
-/// slot, and it must answer before the person has decided anything. It also
-/// needs the controller, because resolving a local repository's configured
-/// remotes is a fact about the disk rather than about the projection.
-///
-/// Resume preflights share this channel, and so the concurrency cap on it,
-/// because they do the same kind of work on the same disk.
-#[derive(Debug)]
-pub enum PreflightRequest {
-    New(NewPreflightRequest),
-    Resume(ResumePreflightRequest),
-    CompletePath(PathCompletionRequest),
-    DiscoverProjects(ProjectDiscoveryPreflight),
-    ProjectCatalog {
-        refresh: bool,
-        retry: bool,
-        reply: tokio::sync::oneshot::Sender<
-            Result<mj_core::project_catalog::ProjectCatalogView, String>,
-        >,
-    },
-}
-
-/// A project picker lookup sharing the preflight supervision and concurrency cap.
-#[derive(Debug)]
-pub struct ProjectDiscoveryPreflight {
-    pub request: mj_import::project_picker::ProjectDiscoveryRequest,
-    pub reply: tokio::sync::oneshot::Sender<
-        Result<mj_import::project_picker::ProjectDiscovery, &'static str>,
-    >,
-}
-
-/// A browser asking what a half-typed path could be. It shares the preflight
-/// channel because it does the same kind of work: one short-lived, cancellable
-/// look at a local or remote filesystem, under the same concurrency cap.
-#[derive(Debug)]
-pub struct PathCompletionRequest {
-    pub host: CompletionHost,
-    pub prefix: String,
-    pub kind: CompletionKind,
-    pub reply: tokio::sync::oneshot::Sender<Result<PathCompletion, String>>,
-}
-
-#[derive(Debug)]
-pub struct NewPreflightRequest {
-    pub profile_id: String,
-    pub workspace_id: String,
-    pub additional_mounts: Vec<AdditionalMount>,
-    pub bundle_id: String,
-    pub target_id: String,
-    pub project_directory: Option<PathBuf>,
-    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-    pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
-}
-
-/// A resume preflight for one stopped session and one destination target. It
-/// travels on the same channel and under the same concurrency cap as the
-/// new-session preflight because it does the same kind of work: reading a
-/// working tree and asking a remote about itself.
-#[derive(Debug)]
-pub struct ResumePreflightRequest {
-    pub session_id: String,
-    pub target_id: String,
-    pub reply: tokio::sync::oneshot::Sender<Result<PreflightResume, PreflightFailure>>,
 }
 
 /// What a resume preflight found.
@@ -515,21 +430,13 @@ pub enum PreflightResume {
     },
 }
 
-/// A move preparation is intentionally separate from action admission. It
-/// performs read-only compatibility checks and returns the exact fingerprint
-/// the later confirmation must echo; it never interrupts the source session.
-#[derive(Debug)]
-pub struct MovePreparationRequest {
-    pub selection: MoveSelection,
-    pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, Option<Refusal>>>,
-}
-
 /// A preflight can fail because the requested bare directory is unusable, an
 /// isolated repository lacks a usable network source, or the controller-side
 /// check itself could not complete. The HTTP surface keeps those outcomes
 /// distinct without carrying filesystem, Git, or SSH details to the phone.
 #[derive(Debug)]
 pub enum PreflightFailure {
+    Terminal(String),
     InvalidMount,
     Validation,
     /// A configured isolated-session repository cannot be used as a network
@@ -540,68 +447,6 @@ pub enum PreflightFailure {
 }
 
 pub use mj_client::daemon::{PreflightNew, PreflightRepository};
-
-/// What a phone asks about, or stores against, its own identity.
-///
-/// These travel on their own channel rather than as actions, for the reason a
-/// read receipt does: they are frequent, they start nothing, and routing them
-/// through the action pipeline would consume the session's single action slot
-/// and reload the controller on every keystroke.
-#[derive(Debug)]
-pub enum ClientStateRequest {
-    ContainerSettings {
-        session_id: String,
-        resource_allocation: Option<SessionResourceAllocation>,
-        mounts: Vec<AdditionalMount>,
-        reply: tokio::sync::oneshot::Sender<
-            Result<Option<mj_core::state::ContainerUpgradePreview>, ActionOutcome>,
-        >,
-    },
-    ContainerUpgradePreview {
-        session_id: String,
-        reply:
-            tokio::sync::oneshot::Sender<Result<mj_core::state::ContainerUpgradePreview, String>>,
-    },
-    SuspendPreflight {
-        session_id: String,
-        dry_run: bool,
-        without_checkpoint: bool,
-        reply: tokio::sync::oneshot::Sender<
-            Result<mj_core::suspend_consent::SuspendPreflight, String>,
-        >,
-    },
-    PurgeUntracked {
-        request: crate::server::api::PurgeUntrackedRequest,
-        reply: tokio::sync::oneshot::Sender<
-            Result<
-                crate::server::api::PurgeUntrackedResponse,
-                crate::server::api::PurgeUntrackedFailure,
-            >,
-        >,
-    },
-    Read {
-        client_id: String,
-        session_id: String,
-        reply: tokio::sync::oneshot::Sender<Result<ViewerClientState, String>>,
-    },
-    SaveDraft {
-        client_id: String,
-        session_id: String,
-        draft: String,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
-    },
-    MarkWorkspaceRead {
-        client_id: String,
-        workspace_id: String,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
-    },
-    History {
-        session_id: String,
-        query: String,
-        scope: String,
-        reply: tokio::sync::oneshot::Sender<Result<ViewerPromptHistory, String>>,
-    },
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -617,27 +462,6 @@ pub struct ViewerPromptHistory {
     /// Whether the search stopped before it ran out of history, so a phone can
     /// say the answer is partial rather than presenting it as complete.
     pub truncated: bool,
-}
-
-#[derive(Debug)]
-pub struct ReadReceiptRequest {
-    pub client_id: String,
-    pub session_id: String,
-    pub through: u64,
-    pub reply: tokio::sync::oneshot::Sender<Result<(), String>>,
-}
-
-/// A phone request to stop one currently projected background task.
-///
-/// This is intentionally not a [`ControllerAction`]. The request is already
-/// validated against the current operational snapshot by the HTTP handler,
-/// then the controller resolves the live session handle and waits for the
-/// provider acknowledgement in a supervised task.
-#[derive(Debug)]
-pub struct BackgroundTaskStopRequest {
-    pub session_id: String,
-    pub background_task_id: String,
-    pub reply: tokio::sync::oneshot::Sender<Result<(), BackgroundTaskStopFailure>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

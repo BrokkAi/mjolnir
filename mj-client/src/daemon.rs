@@ -1,5 +1,9 @@
 //! Authenticated local daemon protocol and client transport.
-mod chunk_bytes;
+use crate::http::{
+    AbandonedPromptRequest, LifecycleCompletion, MoveSourcesRequest, RestartSessionRequest,
+    SessionCommandRequest, StartupPromptOutcomesRequest, StartupPromptRequest,
+    SuspendPreflightRequest,
+};
 pub mod connector;
 pub mod login_terminal;
 pub mod ssh;
@@ -14,7 +18,6 @@ use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{RelayCommand, RelayOperationalState};
 use mj_core::state::*;
 use mj_core::targets::{AdditionalMount, ProvisionStage};
-use mj_core::workspace::WorkspaceRecord;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
@@ -22,12 +25,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-/// A single-message read has a terminal unsupported result on older daemons.
+
 #[derive(Debug)]
 pub enum StoredTranscriptItem {
     Found(Box<TranscriptItem>),
     Missing,
-    Unsupported,
 }
 
 /// Durable terminal results for caller-owned startup prompt identities.
@@ -322,24 +324,6 @@ pub struct ImportedBundle {
     pub bundle: mj_core::config::ProjectBundle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceListing {
-    pub workspace: WorkspaceRecord,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionPreview {
-    pub id: String,
-    pub title: String,
-    pub project: String,
-    pub harness: String,
-    pub state: String,
-    pub active: bool,
-    pub updated_at: String,
-}
-
 /// One session in the user's SessionWiki index, as a control surface shows it.
 ///
 /// It is the daemon's own shape rather than SessionWiki's row: it carries the
@@ -596,14 +580,6 @@ pub struct WorkspaceLayouts {
 pub struct StoredSessionMetadata {
     pub mount_history: mj_core::snapshot_map::SnapshotMap<String, Vec<PathBuf>>,
     pub container_sizes: mj_core::snapshot_map::SnapshotMap<String, HostContainerSize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceSnapshot {
-    pub workspace: WorkspaceRecord,
-    pub sessions: Vec<SessionPreview>,
-    pub drafts: Vec<DraftPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -959,97 +935,8 @@ pub enum RecoveryAdoptionProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
-    DismissNotification {
-        session_id: String,
-        target: mj_core::attention::NotificationDismissal,
-    },
     ProveIdentity {
         nonce: String,
-    },
-    LoginTerminal {
-        profile_id: String,
-        cols: u16,
-        rows: u16,
-    },
-    PreviewBuildCache {
-        machine: mj_core::config::Machine,
-    },
-    InstallMbx {
-        machine: mj_core::config::Machine,
-    },
-    PreflightNewSession {
-        request: NewSessionPreflightRequest,
-    },
-    ValidateProjectDirectory {
-        target_id: String,
-        directory: PathBuf,
-    },
-    CheckpointArchiveSizes {
-        paths: std::collections::BTreeMap<String, PathBuf>,
-    },
-    SaveSpinnerStyle {
-        style: mj_core::config::SpinnerStyle,
-    },
-    SetQuotaPreferences {
-        prefer: Vec<String>,
-    },
-    TestTarget {
-        target_id: String,
-    },
-    ProfileLoginStatuses,
-    CheckAvailability,
-    DiscoverSetup {
-        scope: crate::discovery::DetectScope,
-        machines: Vec<(String, mj_core::config::Machine)>,
-    },
-    CompletePath {
-        host: mj_core::path_completion::CompletionHost,
-        prefix: String,
-        kind: mj_core::path_completion::CompletionKind,
-    },
-    CheckProjectDirectories {
-        paths: Vec<std::path::PathBuf>,
-    },
-    DiscoverProjects {
-        request: mj_core::project_picker::ProjectDiscoveryRequest,
-    },
-    ResolveContainerPath {
-        target_id: String,
-        source: std::path::PathBuf,
-    },
-    ResolveSetupPath {
-        machine: mj_core::config::Machine,
-        source: std::path::PathBuf,
-    },
-    ValidateMountSource {
-        target_id: String,
-        source: std::path::PathBuf,
-    },
-    ValidateSessionMounts {
-        target_id: String,
-        mounts: Vec<mj_core::targets::AdditionalMount>,
-    },
-    /// Raw file fragments. Completion supplies the SHA-256 of all bytes.
-    UploadChunk {
-        #[serde(with = "chunk_bytes")]
-        bytes: Vec<u8>,
-        sha256: Option<String>,
-    },
-    TranscriptionAvailable {
-        preferred_profile: String,
-    },
-    TranscribeAudio {
-        preferred_profile: String,
-        blob: String,
-    },
-    RecordOperatorActivity,
-    SetOperatorAway {
-        away: bool,
-    },
-    NativeAgentHistory {
-        owner: String,
-        child: String,
-        before: Option<(u64, String)>,
     },
     Ping,
     /// Frozen upgrade handshake, available from daemon protocol 33 onward.
@@ -1068,395 +955,7 @@ pub enum DaemonAction {
     /// protocol 74, so it is deliberately not part of the frozen management
     /// subset: a client asks only a daemon of its own protocol.
     Identity,
-    /// The configuration the daemon serves. Clients read it here instead of
-    /// opening `config.toml`, which belongs to the daemon.
-    Configuration,
-    /// Whether first-run setup has work to do: a new installation, or one
-    /// whose setup did not finish. A dashboard asks before it shows the
-    /// first-run welcome, which takes the keyboard.
-    FirstRunSetupDue,
-    /// Discover and persist the first-run configuration in the daemon's own
-    /// environment. A client in another placement asks its daemon instead of
-    /// writing the client's `config.toml`.
-    RunFirstRunSetup,
-    /// Use the client's directory when both processes can see the same paths.
-    RunFirstRunSetupIn {
-        project_directory: PathBuf,
-    },
-    /// Run the doctor in the daemon's own environment and return the
-    /// actionable errors, which a client shows after first-run setup.
-    RunDoctor,
-    /// Check a project's Git remotes before a new session starts, in the
-    /// environment that owns the project paths.
-    NewSessionRemoteRepairs {
-        bundle_id: String,
-        target_id: String,
-    },
-    /// Apply the remote-tracking repairs a preflight proposed, in the
-    /// environment that owns the project checkout.
-    RepairRepositoryRemotes {
-        bundle_id: String,
-        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-    },
-    /// The project source label for a session, read in the environment that
-    /// owns the checkout.
-    SessionProjectSource {
-        session_id: String,
-    },
     Status,
-    WebViewerAccess,
-    ApiCredential,
-    /// The daemon host's Git commit author, which its sessions inherit.
-    GitIdentity,
-    /// Write the daemon host's global Git commit author.
-    SetGitIdentity {
-        name: String,
-        email: String,
-    },
-    RecoverWebViewer(crate::web::WebViewerRecovery),
-    InspectWebListener,
-    ListWorkspaces,
-    /// Every workspace's detached drafts, without their text: the workspace
-    /// manager's details answer. Added in protocol 100.
-    ListWorkspaceDrafts,
-    CreateWorkspace {
-        name: String,
-    },
-    RenameWorkspace {
-        workspace_id: String,
-        name: String,
-    },
-    TouchWorkspace {
-        workspace_id: String,
-    },
-    CloseWorkspace {
-        workspace_id: String,
-    },
-    CancelWorkspaceClose {
-        workspace_id: String,
-    },
-    DeleteWorkspace {
-        workspace_id: String,
-    },
-    /// Take or renew a client's attachment lease.
-    Attach {
-        client_id: String,
-    },
-    Detach {
-        client_id: String,
-    },
-    PersistReadReceipt {
-        client_id: String,
-        workspace_id: String,
-        session_id: String,
-        through: u64,
-    },
-    PersistTerminalDraft {
-        client_id: String,
-        session_id: String,
-        owner_pid: u32,
-        revision: u64,
-        draft: mj_core::storage::DetachedSessionDraft,
-    },
-    RecordAbandonedPrompt {
-        session_id: String,
-        bundle_id: String,
-        text: String,
-    },
-    /// Persist the shared sidebar preference and publish it before replying.
-    SaveSidebarSize {
-        size: mj_core::workspace::PaneSize,
-    },
-    SaveWorkspacePaneSizes {
-        workspace_id: String,
-        sizes: mj_core::workspace::PaneSizes,
-    },
-    SaveWorkspaceLayout {
-        workspace_id: String,
-        layout: mj_core::workspace::ConversationLayout,
-    },
-    ImportSession {
-        blob: String,
-        session: Box<SessionRecord>,
-        /// A project the import synthesized. The daemon writes it with the
-        /// session, so a client never edits the daemon's configuration.
-        #[serde(default)]
-        bundle: Option<ImportedBundle>,
-    },
-    SetSessionTitle {
-        session_id: String,
-        title: String,
-    },
-    SetSessionNotificationsIgnored {
-        session_id: String,
-        ignored: bool,
-    },
-    SetSessionWorkspace {
-        session_id: String,
-        workspace_id: String,
-    },
-    SetSessionContainerSettings {
-        session_id: String,
-        resource_allocation: Option<SessionResourceAllocation>,
-        mounts: Vec<AdditionalMount>,
-        mount_history: Vec<PathBuf>,
-    },
-    MarkSessionTargetMissing {
-        session_id: String,
-        detail: String,
-        updated_at: String,
-    },
-    /// Legacy wire tombstone: rejected with guidance to suspend.
-    CheckpointSession {
-        session_id: String,
-    },
-    /// Search the user's SessionWiki index. An empty query lists the most
-    /// recent sessions.
-    ProjectCatalog {
-        refresh: bool,
-        retry: bool,
-    },
-    CreateProject {
-        sources: Vec<String>,
-    },
-    RemoveProject {
-        bundle_id: String,
-    },
-    /// The live sessions whose user or agent messages contain a query,
-    /// ignoring case. Tool calls and tool output do not count.
-    SessionTextSearch {
-        query: String,
-    },
-    ScanRecovery {
-        all_instances: bool,
-    },
-    AdoptRecovery(RecoveryAdoptionRequest),
-    DestroyRecovery {
-        session_id: String,
-        target_id: String,
-        confirmation: String,
-        all_instances: bool,
-    },
-    Snapshot {
-        workspace_id: String,
-    },
-    /// Everything the terminal dashboard reads from the store at startup.
-    DashboardStartup {
-        client_id: String,
-        workspace_id: String,
-    },
-    /// Stored pane sizes and conversation layouts of these workspaces.
-    WorkspaceLayouts {
-        workspace_ids: Vec<String>,
-    },
-    /// Mount history and remembered container sizes.
-    StoredSessionMetadata,
-    /// The last `items` entries of a stored projection.
-    StoredProjectionTail {
-        session_id: String,
-        items: usize,
-    },
-    /// One stored transcript item, addressed by its stable identity.
-    StoredTranscriptItem {
-        session_id: String,
-        stable_id: String,
-    },
-    /// The newest agent transcript item complete through this relay ordinal.
-    StoredAgentMessageThrough {
-        session_id: String,
-        through: u64,
-    },
-    /// The stored projection summary of one session.
-    StoredSessionSummary {
-        session_id: String,
-    },
-    /// Check that a stopped session's checkpointed repositories can be
-    /// fetched again before it resumes on `target_id`.
-    ResumeRepositoryPreflight {
-        session_id: String,
-        target_id: String,
-    },
-    /// Point one of a stopped session's repositories at a new origin, then
-    /// check the sources again.
-    ReplaceResumeRepositoryOrigin {
-        session_id: String,
-        repository_id: String,
-        replacement: String,
-    },
-    /// How much session storage an archive age would free.
-    ArchiveSpacePreview {
-        older_than_days: Option<u32>,
-    },
-    /// Save the terminal Setup editor's configuration, checked against the
-    /// stored sessions it would disturb. Both are configuration JSON.
-    SaveSetup {
-        original: String,
-        updated: String,
-    },
-    RuntimeChanges {
-        cursor: Option<crate::runtime_feed::RuntimeCursor>,
-        wait: bool,
-        subagent_parents: std::collections::BTreeSet<String>,
-    },
-    /// One live session's transcript tail as it was at `cursor`, so the
-    /// deltas after that cursor apply to it exactly.
-    SessionTail {
-        session_id: String,
-        cursor: crate::runtime_feed::RuntimeCursor,
-    },
-    /// The sessions the resume dialog lists. The runtime feed carries only
-    /// live sessions, so the dialog asks for these when it opens.
-    ResumeCandidates,
-    /// One session's whole record, live or stopped. The resume wizard reads
-    /// it for the row picked in the resume dialog.
-    SessionRecord {
-        session_id: String,
-    },
-    /// The session `mj go` opens: the remembered one while it is still
-    /// eligible, otherwise the most recently updated eligible session of the
-    /// workspace, live or stopped.
-    GoStartupSession {
-        workspace_id: String,
-        last_session_id: Option<String>,
-    },
-    /// Every host and fleet with the capacity service's latest CPU, RAM and
-    /// filesystem readings. Added in protocol 101.
-    HostCapacity,
-    /// Re-read the daemon probe definitions and sample every host.
-    RefreshCapacity,
-    /// Ask the daemon's quota poller to probe now. The daemon is the only
-    /// process that probes; the result arrives in the runtime feed. Added in
-    /// protocol 43.
-    RefreshQuota,
-    /// Probe exactly these profiles once, even disabled ones, and serve their
-    /// reports in the runtime feed. Added in protocol 99; `forced` (probe now,
-    /// off the profile's schedule, even with a fresh report) in protocol 100.
-    ProbeQuotaProfiles {
-        profile_ids: Vec<String>,
-        forced: bool,
-    },
-    /// Discover eligible subagent models in the daemon, which owns the cache.
-    SubagentOptions {
-        profile: String,
-        model: Option<String>,
-        /// Setup can probe an unsaved draft without changing live settings.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        config: Option<Box<Config>>,
-    },
-    /// Ensure valid unsaved profile definitions are hydrating. Results arrive
-    /// through runtime publications; this request does no discovery itself.
-    WarmProfileCapabilities {
-        config: Box<Config>,
-    },
-    RenameProfile {
-        old_id: String,
-        new_id: String,
-    },
-    RenameTarget {
-        old_id: String,
-        new_id: String,
-    },
-    InterruptAll {
-        session_id: String,
-    },
-    SubmitSessionCommand {
-        #[serde(default)]
-        inherited_draft: Option<String>,
-        session_id: String,
-        command_id: String,
-        command: RelayCommand,
-    },
-    /// Deliver a prompt typed while a session was still starting, once the
-    /// daemon sees that session's harness become ready. The daemon owns the
-    /// wait, so the prompt arrives whether or not this client is still
-    /// running or still showing that session.
-    QueueStartupPrompt {
-        session_id: String,
-        command_id: String,
-        text: String,
-        prompt: Vec<ContentBlock>,
-        encoded_draft: String,
-        #[serde(default)]
-        move_operation_id: Option<String>,
-        /// The saved draft text this prompt was typed from, if the client
-        /// also persisted it. Cleared after a successful submit so the
-        /// delivered prompt does not reappear as a draft.
-        #[serde(default)]
-        inherited_draft: Option<String>,
-    },
-    /// Take back a prompt queued with `QueueStartupPrompt` that the daemon has
-    /// not started delivering, so the person can edit it. The daemon cancels
-    /// the prompt with this caller-owned command ID and replies
-    /// `PromptWithdrawn(true)`, or `PromptWithdrawn(false)` when none is
-    /// waiting because delivery already started.
-    WithdrawStartupPrompt {
-        session_id: String,
-        command_id: String,
-    },
-    StartupPromptOutcomes {
-        session_id: String,
-        command_ids: Vec<String>,
-    },
-    SyncSession {
-        session_id: String,
-    },
-    RespondElicitation {
-        session_id: String,
-        elicitation_id: String,
-        response: ElicitationResponse,
-    },
-    StartSessionLifecycle(SessionLifecycleRequest),
-    WaitSessionLifecycle(LifecycleReceipt),
-    SuspendPreflight {
-        session_id: String,
-        #[serde(default)]
-        dry_run: bool,
-        #[serde(default)]
-        without_checkpoint: bool,
-    },
-    SuspendSession {
-        session_id: String,
-        #[serde(default)]
-        discard_untracked: mj_core::suspend_consent::UntrackedConsent,
-        #[serde(default)]
-        abort_operations: mj_core::suspend_consent::OperationConsent,
-        #[serde(default)]
-        without_checkpoint: bool,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        confirm_no_checkpoint: bool,
-    },
-    RestartSession {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        acknowledge_container_recreation: bool,
-    },
-    StartCreateSession(CreateSessionRequest),
-    WaitCreateSession {
-        session_id: String,
-    },
-    ResumeSession(ResumeSessionRequest),
-    PrepareMoveSession(MoveSelection),
-    MoveSession(MoveSessionRequest),
-    MoveSources {
-        session_id: String,
-        cleanup_operation_id: Option<String>,
-    },
-    DestroyStoppedSession {
-        session_id: String,
-    },
-    ForceDestroySession {
-        session_id: String,
-    },
-    CancelLifecycle {
-        session_id: String,
-    },
-    RecoverDraft {
-        draft_id: String,
-    },
-    DiscardDrafts {
-        workspace_id: String,
-        draft_id: Option<String>,
-    },
     Stop,
 }
 
@@ -1543,129 +1042,17 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
-    InterruptedAll(InterruptAllResult),
-    AdoptionInstalled {
-        session_id: String,
-    },
-    AdoptionWaiting {
-        blockers: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        destroy_command: Option<String>,
-    },
     IdentityProof {
         mac: Vec<u8>,
     },
-    LoginTerminalReady,
-    BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
-    MbxInstalled(String),
-    CheckpointArchiveSizes(
-        std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
-    ),
-    SetupDiscovery(Box<crate::discovery::SetupDetection>),
-    ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
-    NewSessionPreflight(PreflightNew),
-    PathCompletion(mj_core::path_completion::PathCompletion),
-    ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
-    ProjectDiscovery(mj_core::project_picker::ProjectDiscovery),
-    ResolvedPath(std::path::PathBuf),
-    MountValidation(std::path::PathBuf, Option<String>),
-    SessionMountValidation(Option<(String, String)>),
-    TranscriptionAvailable(bool),
-    Transcription(String),
-    BlobUploaded(String),
-    LifecycleAccepted(LifecycleReceipt),
-    /// Only a captured operation result may report this failure.
-    LifecycleFailed(String),
-    LifecycleObservationUnavailable(LifecycleReceipt),
-    NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     UpgradePending,
     /// Labels for the work holding an automatic handoff open, empty when
     /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
-    Configuration(Box<Config>),
-    FirstRunSetupDue(bool),
-    FirstRunSetup(Option<FirstRunSetupReport>),
-    DoctorErrors(Vec<String>),
-    RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
-    ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
-    WebViewerAccess(crate::web::WebViewerAccess),
-    ApiCredential(String),
-    GitIdentity(GitIdentity),
-    WebListeners(Vec<crate::web::WebListenerProcess>),
-    SubagentOptions(mj_core::subagent::SubagentOptions),
-    Workspaces(Vec<WorkspaceListing>),
-    Workspace(WorkspaceRecord),
-    WorkspaceDrafts(Vec<WorkspaceDrafts>),
-    RecoveredDraft {
-        session_id: String,
-        text: String,
-        revision: Option<i64>,
-    },
-    Count(usize),
-    HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
-    Snapshot(WorkspaceSnapshot),
-    DashboardStartup(Box<DashboardStartup>),
-    WorkspaceLayouts(WorkspaceLayouts),
-    StoredSessionMetadata(StoredSessionMetadata),
-    /// Legacy count-mode reply: older clients require this to stay unchunked.
-    StoredProjectionTail(
-        #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
-        Option<Box<MaterializedSession>>,
-    ),
-    StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
-    StoredTranscriptItem(Option<Box<TranscriptItem>>),
-    SavedSetup(Box<Config>),
-    ArchiveSpacePreview(ArchiveSpacePreview),
-    ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
-    RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
-    SessionTail(Box<crate::runtime_feed::SessionTailReply>),
-    ResumeCandidates(Box<ResumeCandidates>),
-    GoStartupSession(Option<Box<SessionRecord>>),
-    SessionRecord(Option<Box<SessionRecordWithVerdict>>),
-    /// Transport fragments of one chunked reply (see
-    /// [`DaemonReply::is_chunked`]); never exposed to consumers.
-    ReplyChunk {
-        #[serde(with = "chunk_bytes")]
-        bytes: Vec<u8>,
-        finished: bool,
-    },
-    RegisteredSession(Box<RegisteredSession>),
-    ContainerUpgradePreview(mj_core::state::ContainerUpgradePreview),
-    SuspendPreflight(Box<mj_core::suspend_consent::SuspendPreflight>),
-    MovePreparation(Box<MovePreparation>),
-    MoveOutcome(MoveOutcome),
-    MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
-    Ordinal(u64),
-    Text(String),
-    OptionalSessionState(Option<SessionState>),
-    RecoveryScan(mj_core::state::RecoveryScan),
-    ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
-    ProjectCreated(mj_core::project_catalog::SavedProject),
-    SessionTextMatches(SessionTextSearchPage),
-    /// Whether a queued startup prompt was withdrawn before delivery.
-    PromptWithdrawn(bool),
-    StartupPromptIdentityConflict,
-    StartupPromptOutcomes(std::collections::BTreeMap<String, StartupPromptOutcome>),
     Done,
-}
-
-impl DaemonReply {
-    /// Replies that can outgrow one frame. The daemon sends them as
-    /// [`DaemonReply::ReplyChunk`] fragments and the client reassembles them.
-    pub fn is_chunked(&self) -> bool {
-        matches!(
-            self,
-            Self::Configuration(_)
-                | Self::DashboardStartup(_)
-                | Self::RuntimeChanges(_)
-                | Self::SessionTail(_)
-                | Self::StoredTranscriptItem(_)
-                | Self::ResumeCandidates(_)
-        )
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1701,7 +1088,7 @@ pub struct ResumeCandidates {
 /// One row of the resume dialog's Mjolnir tab: what the row shows, without
 /// the rest of the record. A session's title can be tens of kilobytes, and
 /// most of a store's history is never resumed, so the resume wizard fetches
-/// the whole record (`DaemonAction::SessionRecord`) only for the row picked.
+/// the whole record (`GET /api/v1/sessions/{id}/record`) only for the row picked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeCandidate {
@@ -2087,46 +1474,7 @@ pub async fn read_frame<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&body).context("decode daemon frame")
 }
 
-/// Read one reply, reassembling a chunked one before exposing it. All
-/// fragments belong to the same response; disconnects discard partial state.
-pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
-    let mut response: ResponseEnvelope = read_frame(stream).await?;
-    if !matches!(response.result, Ok(DaemonReply::ReplyChunk { .. })) {
-        return Ok(response);
-    }
-    let protocol_version = response.protocol_version;
-    let request_id = response.request_id;
-    let mut body = Vec::new();
-    loop {
-        ensure!(
-            response.protocol_version == protocol_version && response.request_id == request_id,
-            "daemon crossed reply fragment identities"
-        );
-        let Ok(DaemonReply::ReplyChunk { bytes, finished }) = response.result else {
-            bail!("daemon interrupted a chunked reply");
-        };
-        ensure!(!bytes.is_empty(), "empty reply fragment");
-        body.extend(bytes);
-        if finished {
-            break;
-        }
-        response = read_frame(stream).await?;
-    }
-    let reply: DaemonReply =
-        mj_core::runtime::spawn_blocking(move || serde_json::from_slice(&body))
-            .await
-            .context("reply decoder task failed")??;
-    ensure!(
-        reply.is_chunked(),
-        "daemon chunked a reply that is never chunked"
-    );
-    Ok(ResponseEnvelope {
-        protocol_version,
-        request_id,
-        result: Ok(reply),
-    })
-}
-
+/// Client for daemon management and HTTP endpoint discovery.
 pub struct DaemonClient {
     ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
     connector: Option<std::sync::Arc<connector::DaemonConnector>>,
@@ -2164,6 +1512,10 @@ impl DaemonClient {
         );
         client.stream = Some(stream);
         Ok(client)
+    }
+
+    pub(crate) fn metadata(&self) -> &DaemonMetadata {
+        &self.metadata
     }
 
     pub fn pid(&self) -> u32 {
@@ -2280,159 +1632,6 @@ impl DaemonClient {
         }
     }
 
-    /// Streams raw bytes on this connection. The returned blob is connection-scoped;
-    /// consume it before disconnecting. Delivery failures are never replayed.
-    pub async fn upload(
-        &mut self,
-        reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    ) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        let mut stream = self.take_stream()?;
-        let mut digest = Sha256::new();
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-        let mut buffer = vec![0; 64 * 1024];
-        loop {
-            let n = reader.read(&mut buffer).await?;
-            digest.update(&buffer[..n]);
-            write_frame(
-                &mut stream,
-                &RequestEnvelope {
-                    protocol_version: self.metadata.protocol_version,
-                    request_id,
-                    token: self.metadata.token.clone(),
-                    action: DaemonAction::UploadChunk {
-                        bytes: buffer[..n].to_vec(),
-                        sha256: (n == 0).then(|| {
-                            digest
-                                .clone()
-                                .finalize()
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>()
-                        }),
-                    },
-                },
-            )
-            .await?;
-            if n == 0 {
-                break;
-            }
-        }
-        let response = self.finish_exchange(stream, request_id).await?;
-        match response.result.map_err(anyhow::Error::msg)? {
-            DaemonReply::BlobUploaded(blob) => Ok(blob),
-            reply => bail!("unexpected blob upload reply {reply:?}"),
-        }
-    }
-
-    /// Upload and consume on one connection. Only explicit non-admission permits
-    /// replay; a transport error may hide acceptance and is returned to the caller.
-    pub async fn upload_and_consume<R, A>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-    {
-        self.upload_and_consume_with_reconnect(reader, action, reconnect_after_upload_refusal)
-            .await
-    }
-
-    async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-        mut reconnect: F,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-        F: FnMut() -> Fut,
-        Fut: Future<Output = Result<Self>>,
-    {
-        self.upload_and_consume_observed_with_reconnect(
-            reader,
-            action,
-            &mut reconnect,
-            |_| std::future::ready(Ok(())),
-            std::future::pending(),
-        )
-        .await
-    }
-
-    /// Report each phase; cancellation is observed only during byte upload.
-    pub async fn upload_and_consume_observed<R, A, P, PF, C>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-        phase: P,
-        cancel: C,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-        P: FnMut(bool) -> PF,
-        PF: Future<Output = Result<()>>,
-        C: Future<Output = ()>,
-    {
-        self.upload_and_consume_observed_with_reconnect(
-            reader,
-            action,
-            reconnect_after_upload_refusal,
-            phase,
-            cancel,
-        )
-        .await
-    }
-
-    async fn upload_and_consume_observed_with_reconnect<R, A, F, Fut, P, PF, C>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-        mut reconnect: F,
-        mut phase: P,
-        cancel: C,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-        F: FnMut() -> Fut,
-        Fut: Future<Output = Result<Self>>,
-        P: FnMut(bool) -> PF,
-        PF: Future<Output = Result<()>>,
-        C: Future<Output = ()>,
-    {
-        tokio::pin!(cancel);
-        use tokio::io::AsyncSeekExt;
-        let start = reader.stream_position().await?;
-        phase(true).await?;
-        loop {
-            let blob = tokio::select! {
-                biased;
-                _ = &mut cancel => bail!("upload cancelled"),
-                result = self.upload(reader) => result?,
-            };
-            phase(false).await?;
-            let reply = self.request_once(action(blob)).await?;
-            if !matches!(reply, DaemonReply::UpgradePending) {
-                return Ok(reply);
-            }
-            phase(true).await?;
-            *self = tokio::select! {
-                biased;
-                _ = &mut cancel => bail!("upload cancelled"),
-                result = async {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    reconnect().await
-                } => result?,
-            };
-            reader.seek(std::io::SeekFrom::Start(start)).await?;
-        }
-    }
-
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
         let mut stream = self.take_stream()?;
         let protocol_version = self.metadata.protocol_version;
@@ -2469,7 +1668,7 @@ impl DaemonClient {
         mut stream: TcpStream,
         request_id: u64,
     ) -> Result<ResponseEnvelope> {
-        let response = read_response(&mut stream).await.map_err(transport_lost)?;
+        let response: ResponseEnvelope = read_frame(&mut stream).await.map_err(transport_lost)?;
         ensure!(
             response.protocol_version == self.metadata.protocol_version,
             "daemon changed protocol"
@@ -2497,10 +1696,7 @@ impl DaemonClient {
     /// The configuration the daemon serves. Clients use this instead of
     /// opening the daemon's `config.toml`.
     pub async fn config(&mut self) -> Result<Config> {
-        match self.request(DaemonAction::Configuration).await? {
-            DaemonReply::Configuration(config) => Ok(*config),
-            reply => bail!("unexpected daemon configuration reply {reply:?}"),
-        }
+        self.http().await?.config().await
     }
 
     /// Whether the connected daemon can resolve paths from this client.
@@ -2510,31 +1706,21 @@ impl DaemonClient {
     }
 
     pub async fn first_run_setup_due(&mut self) -> Result<bool> {
-        match self.request(DaemonAction::FirstRunSetupDue).await? {
-            DaemonReply::FirstRunSetupDue(due) => Ok(due),
-            reply => bail!("unexpected first-run setup reply {reply:?}"),
-        }
+        self.http().await?.first_run_setup_due().await
     }
 
     pub async fn run_first_run_setup(
         &mut self,
         project_directory: Option<PathBuf>,
     ) -> Result<Option<FirstRunSetupReport>> {
-        let action = match project_directory {
-            Some(project_directory) => DaemonAction::RunFirstRunSetupIn { project_directory },
-            None => DaemonAction::RunFirstRunSetup,
-        };
-        match self.request(action).await? {
-            DaemonReply::FirstRunSetup(report) => Ok(report),
-            reply => bail!("unexpected first-run setup reply {reply:?}"),
-        }
+        self.http()
+            .await?
+            .run_first_run_setup(project_directory)
+            .await
     }
 
     pub async fn run_doctor(&mut self) -> Result<Vec<String>> {
-        match self.request(DaemonAction::RunDoctor).await? {
-            DaemonReply::DoctorErrors(errors) => Ok(errors),
-            reply => bail!("unexpected doctor reply {reply:?}"),
-        }
+        self.http().await?.run_doctor().await
     }
 
     pub async fn new_session_remote_repairs(
@@ -2542,16 +1728,10 @@ impl DaemonClient {
         bundle_id: String,
         target_id: String,
     ) -> Result<Vec<mj_core::local_git::LocalRemoteRepair>> {
-        match self
-            .request(DaemonAction::NewSessionRemoteRepairs {
-                bundle_id,
-                target_id,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::RemoteRepairs(repairs) => Ok(repairs),
-            reply => bail!("unexpected new-session preflight reply {reply:?}"),
-        }
+            .new_session_remote_repairs(bundle_id, target_id)
+            .await
     }
 
     pub async fn repair_repository_remotes(
@@ -2559,26 +1739,17 @@ impl DaemonClient {
         bundle_id: String,
         repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::RepairRepositoryRemotes { bundle_id, repairs })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected remote-repair reply {reply:?}"),
-        }
+            .repair_repository_remotes(bundle_id, repairs)
+            .await
     }
 
     pub async fn session_project_source(
         &mut self,
         session_id: String,
     ) -> Result<mj_core::state::ProjectSourceIdentity> {
-        match self
-            .request(DaemonAction::SessionProjectSource { session_id })
-            .await?
-        {
-            DaemonReply::ProjectSource(source) => Ok(source),
-            reply => bail!("unexpected project-source reply {reply:?}"),
-        }
+        self.http().await?.session_project_source(session_id).await
     }
 
     pub async fn status(&mut self) -> Result<DaemonStatus> {
@@ -2590,17 +1761,11 @@ impl DaemonClient {
 
     /// Obtain the HTTP bearer credential from its daemon owner.
     pub async fn api_credential(&mut self) -> Result<String> {
-        match self.request(DaemonAction::ApiCredential).await? {
-            DaemonReply::ApiCredential(token) => Ok(token),
-            reply => bail!("unexpected API credential reply: {reply:?}"),
-        }
+        self.http().await?.api_credential().await
     }
 
     pub async fn web_access(&mut self) -> Result<crate::web::WebViewerAccess> {
-        match self.request(DaemonAction::WebViewerAccess).await? {
-            DaemonReply::WebViewerAccess(access) => Ok(access),
-            reply => bail!("unexpected web viewer reply {reply:?}"),
-        }
+        self.http().await?.web_access().await
     }
 
     pub async fn subagent_options(
@@ -2609,87 +1774,42 @@ impl DaemonClient {
         model: Option<String>,
         config: Option<Config>,
     ) -> Result<mj_core::subagent::SubagentOptions> {
-        match self
-            .request(DaemonAction::SubagentOptions {
-                profile,
-                model,
-                config: config.map(Box::new),
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::SubagentOptions(options) => Ok(options),
-            reply => bail!("unexpected subagent options reply {reply:?}"),
-        }
+            .subagent_options(profile, model, config)
+            .await
     }
 
     pub async fn warm_profile_capabilities(&mut self, config: Config) -> Result<()> {
-        match self
-            .request(DaemonAction::WarmProfileCapabilities {
-                config: Box::new(config),
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected capability hydration reply {reply:?}"),
-        }
+        self.http().await?.warm_profile_capabilities(config).await
     }
 
     pub async fn recover_web_viewer(
         &mut self,
         action: crate::web::WebViewerRecovery,
     ) -> Result<()> {
-        match self.request(DaemonAction::RecoverWebViewer(action)).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected web viewer recovery reply {reply:?}"),
-        }
+        self.http().await?.recover_web_viewer(action).await
     }
 
     pub async fn inspect_web_listener(&mut self) -> Result<Vec<crate::web::WebListenerProcess>> {
-        match self.request(DaemonAction::InspectWebListener).await? {
-            DaemonReply::WebListeners(processes) => Ok(processes),
-            reply => bail!("unexpected listener inspection reply {reply:?}"),
-        }
-    }
-
-    pub async fn list_workspaces(&mut self) -> Result<Vec<WorkspaceListing>> {
-        match self.request(DaemonAction::ListWorkspaces).await? {
-            DaemonReply::Workspaces(workspaces) => Ok(workspaces),
-            reply => bail!("unexpected daemon workspace reply {reply:?}"),
-        }
-    }
-
-    /// Every workspace's detached drafts, without their text.
-    pub async fn list_workspace_drafts(&mut self) -> Result<Vec<WorkspaceDrafts>> {
-        match self.request(DaemonAction::ListWorkspaceDrafts).await? {
-            DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
-            reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
-        }
+        self.http().await?.inspect_web_listener().await
     }
 
     /// The capacity service's latest reading of every host and fleet. This
     /// reads what the daemon holds and never probes.
     pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
-        match self.request(DaemonAction::HostCapacity).await? {
-            DaemonReply::HostCapacity(rows) => Ok(rows),
-            reply => bail!("unexpected host-capacity reply {reply:?}"),
-        }
+        self.http().await?.host_capacity().await
     }
 
     /// Ask the daemon to refresh host capacity. Readings arrive on the feed.
     pub async fn refresh_capacity(&mut self) -> Result<()> {
-        match self.request(DaemonAction::RefreshCapacity).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected refresh-capacity reply {reply:?}"),
-        }
+        self.http().await?.refresh_capacity().await
     }
 
     /// Ask the daemon to probe every profile that is not on hold. Returns when
     /// the daemon has accepted the request, not when the probes finish.
     pub async fn refresh_quota(&mut self) -> Result<()> {
-        match self.request(DaemonAction::RefreshQuota).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected refresh-quota reply {reply:?}"),
-        }
+        self.http().await?.refresh_quota().await
     }
 
     /// Ask the daemon to probe exactly these profiles once, even disabled
@@ -2701,168 +1821,18 @@ impl DaemonClient {
         profile_ids: Vec<String>,
         forced: bool,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::ProbeQuotaProfiles {
-                profile_ids,
-                forced,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected probe-quota reply {reply:?}"),
-        }
-    }
-
-    pub async fn git_identity(&mut self) -> Result<GitIdentity> {
-        match self.request(DaemonAction::GitIdentity).await? {
-            DaemonReply::GitIdentity(identity) => Ok(identity),
-            reply => bail!("unexpected git-identity reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_git_identity(&mut self, name: String, email: String) -> Result<GitIdentity> {
-        match self
-            .request(DaemonAction::SetGitIdentity { name, email })
-            .await?
-        {
-            DaemonReply::GitIdentity(identity) => Ok(identity),
-            reply => bail!("unexpected set-git-identity reply {reply:?}"),
-        }
+            .probe_quota_profiles(profile_ids, forced)
+            .await
     }
 
     pub async fn rename_profile(&mut self, old_id: String, new_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RenameProfile { old_id, new_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected rename-profile reply {reply:?}"),
-        }
+        self.http().await?.rename_profile(old_id, new_id).await
     }
 
     pub async fn rename_target(&mut self, old_id: String, new_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RenameTarget { old_id, new_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected rename-target reply {reply:?}"),
-        }
-    }
-
-    pub async fn create_workspace(&mut self, name: String) -> Result<WorkspaceRecord> {
-        match self.request(DaemonAction::CreateWorkspace { name }).await? {
-            DaemonReply::Workspace(workspace) => Ok(workspace),
-            reply => bail!("unexpected create-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn rename_workspace(&mut self, workspace_id: String, name: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RenameWorkspace { workspace_id, name })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected rename-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn touch_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::TouchWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected touch-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn cancel_workspace_close(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CancelWorkspaceClose { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected cancel workspace close reply: {reply:?}"),
-        }
-    }
-
-    pub async fn close_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CloseWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected close workspace reply: {reply:?}"),
-        }
-    }
-
-    pub async fn delete_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::DeleteWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected delete-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn attach(&mut self, client_id: String) -> Result<()> {
-        match self.request(DaemonAction::Attach { client_id }).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected attach reply {reply:?}"),
-        }
-    }
-
-    pub async fn detach(&mut self, client_id: String) -> Result<()> {
-        match self.request(DaemonAction::Detach { client_id }).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected detach reply {reply:?}"),
-        }
-    }
-
-    pub async fn persist_read_receipt(
-        &mut self,
-        client_id: String,
-        workspace_id: String,
-        session_id: String,
-        through: u64,
-    ) -> Result<u64> {
-        match self
-            .request(DaemonAction::PersistReadReceipt {
-                client_id,
-                workspace_id,
-                session_id,
-                through,
-            })
-            .await?
-        {
-            DaemonReply::Ordinal(ordinal) => Ok(ordinal),
-            reply => bail!("unexpected read-receipt reply {reply:?}"),
-        }
-    }
-
-    pub async fn persist_terminal_draft(
-        &mut self,
-        client_id: String,
-        session_id: String,
-        owner_pid: u32,
-        revision: u64,
-        draft: mj_core::storage::DetachedSessionDraft,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::PersistTerminalDraft {
-                client_id,
-                session_id,
-                owner_pid,
-                revision,
-                draft,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected terminal-draft reply {reply:?}"),
-        }
+        self.http().await?.rename_target(old_id, new_id).await
     }
 
     /// Persist a prompt the user abandoned in the chat composer.
@@ -2872,306 +1842,31 @@ impl DaemonClient {
         bundle_id: String,
         text: String,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::RecordAbandonedPrompt {
-                session_id,
-                bundle_id,
-                text,
-            })
+        let request = AbandonedPromptRequest { bundle_id, text };
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected abandoned-prompt reply {reply:?}"),
-        }
-    }
-
-    pub async fn save_sidebar_size(&mut self, size: mj_core::workspace::PaneSize) -> Result<()> {
-        match self.request(DaemonAction::SaveSidebarSize { size }).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected sidebar-size save reply {reply:?}"),
-        }
+            .record_abandoned_prompt(session_id, request)
+            .await
     }
 
     /// Write the load-balancing preference order, most preferred first.
     pub async fn set_quota_preferences(&mut self, prefer: Vec<String>) -> Result<()> {
-        match self
-            .request(DaemonAction::SetQuotaPreferences { prefer })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected quota-preference save reply {reply:?}"),
-        }
-    }
-
-    pub async fn save_workspace_pane_sizes(
-        &mut self,
-        workspace_id: String,
-        sizes: mj_core::workspace::PaneSizes,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SaveWorkspacePaneSizes {
-                workspace_id,
-                sizes,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected pane-size save reply {reply:?}"),
-        }
-    }
-
-    pub async fn save_workspace_layout(
-        &mut self,
-        workspace_id: String,
-        layout: mj_core::workspace::ConversationLayout,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SaveWorkspaceLayout {
-                workspace_id,
-                layout,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected layout save reply {reply:?}"),
-        }
-    }
-
-    pub async fn import_session(
-        &mut self,
-        session: SessionRecord,
-        bundle: Option<ImportedBundle>,
-        reader: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin),
-    ) -> Result<()> {
-        match self
-            .upload_and_consume(reader, |blob| DaemonAction::ImportSession {
-                blob,
-                session: Box::new(session.clone()),
-                bundle: bundle.clone(),
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected imported-session reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_title(&mut self, session_id: String, title: String) -> Result<String> {
-        match self
-            .request(DaemonAction::SetSessionTitle { session_id, title })
-            .await?
-        {
-            DaemonReply::Text(title) => Ok(title),
-            reply => bail!("unexpected session-title reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_notifications_ignored(
-        &mut self,
-        session_id: String,
-        ignored: bool,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionNotificationsIgnored {
-                session_id,
-                ignored,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected notifications-ignored reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_workspace(
-        &mut self,
-        session_id: String,
-        workspace_id: String,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionWorkspace {
-                session_id,
-                workspace_id,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected session-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_container_settings(
-        &mut self,
-        session_id: String,
-        resource_allocation: Option<SessionResourceAllocation>,
-        mounts: Vec<AdditionalMount>,
-        mount_history: Vec<PathBuf>,
-    ) -> Result<Option<mj_core::state::ContainerUpgradePreview>> {
-        match self
-            .request(DaemonAction::SetSessionContainerSettings {
-                session_id,
-                resource_allocation,
-                mounts,
-                mount_history,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(None),
-            DaemonReply::ContainerUpgradePreview(preview) => Ok(Some(preview)),
-            reply => bail!("unexpected container-settings reply {reply:?}"),
-        }
-    }
-
-    pub async fn mark_session_target_missing(
-        &mut self,
-        session_id: String,
-        detail: String,
-        updated_at: String,
-    ) -> Result<Option<SessionState>> {
-        match self
-            .request(DaemonAction::MarkSessionTargetMissing {
-                session_id,
-                detail,
-                updated_at,
-            })
-            .await?
-        {
-            DaemonReply::OptionalSessionState(state) => Ok(state),
-            reply => bail!("unexpected target-missing reply {reply:?}"),
-        }
-    }
-
-    /// Search the user's SessionWiki index, newest first when the query is
-    /// empty and best match first otherwise. The reply carries the state of
-    /// the index as well as the rows, so a caller can say the first build is
-    /// still running.
-    pub async fn project_catalog(
-        &mut self,
-        refresh: bool,
-        retry: bool,
-    ) -> Result<mj_core::project_catalog::ProjectCatalogView> {
-        match self
-            .request(DaemonAction::ProjectCatalog { refresh, retry })
-            .await?
-        {
-            DaemonReply::ProjectCatalog(view) => Ok(view),
-            other => bail!("unexpected project catalog reply: {other:?}"),
-        }
-    }
-
-    pub async fn create_project(
-        &mut self,
-        sources: Vec<String>,
-    ) -> Result<mj_core::project_catalog::SavedProject> {
-        match self
-            .request(DaemonAction::CreateProject { sources })
-            .await?
-        {
-            DaemonReply::ProjectCreated(project) => Ok(project),
-            other => bail!("unexpected project creation reply: {other:?}"),
-        }
-    }
-
-    pub async fn remove_project(&mut self, bundle_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RemoveProject { bundle_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            other => bail!("unexpected project removal reply: {other:?}"),
-        }
-    }
-
-    async fn request_without_reconnect(&mut self, action: DaemonAction) -> Result<DaemonReply> {
-        match self.request_once(action).await? {
-            DaemonReply::UpgradePending => {
-                bail!("the daemon refused admission while being replaced; reopen to sync again")
-            }
-            reply => Ok(reply),
-        }
-    }
-
-    /// The live sessions whose user or agent messages contain `query`, and
-    /// which of the two matched. Answers from the SessionWiki index, so a very
-    /// new message can be missing until the next sync.
-    pub async fn session_text_search(&mut self, query: String) -> Result<SessionTextSearchPage> {
-        match self
-            .request_without_reconnect(DaemonAction::SessionTextSearch { query })
-            .await?
-        {
-            DaemonReply::SessionTextMatches(matches) => Ok(matches),
-            reply => bail!("unexpected session text search reply {reply:?}"),
-        }
+        self.http().await?.set_quota_preferences(prefer).await
     }
 
     pub async fn scan_recovery(
         &mut self,
         all_instances: bool,
     ) -> Result<mj_core::state::RecoveryScan> {
-        match self
-            .request(DaemonAction::ScanRecovery { all_instances })
-            .await?
-        {
-            DaemonReply::RecoveryScan(scan) => Ok(scan),
-            reply => bail!("unexpected recovery-scan reply {reply:?}"),
-        }
+        self.http().await?.scan_recovery(all_instances).await
     }
 
     pub async fn adopt_recovery(
         &mut self,
         adoption: RecoveryAdoptionRequest,
-        mut progress: impl FnMut(RecoveryAdoptionProgress),
+        progress: impl FnMut(RecoveryAdoptionProgress),
     ) -> Result<()> {
-        let mut stream = self.take_stream()?;
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-        write_frame(
-            &mut stream,
-            &RequestEnvelope {
-                protocol_version: self.metadata.protocol_version,
-                request_id,
-                token: self.metadata.token.clone(),
-                action: DaemonAction::AdoptRecovery(adoption),
-            },
-        )
-        .await
-        .map_err(transport_lost)?;
-        loop {
-            let response = read_response(&mut stream).await.map_err(transport_lost)
-                .context("adoption connection ended before completion; check mj sessions, then rerun recover adopt if needed")?;
-            ensure!(
-                response.protocol_version == self.metadata.protocol_version,
-                "daemon changed protocol"
-            );
-            ensure!(
-                response.request_id == request_id,
-                "daemon crossed request IDs: expected {request_id}, received {}",
-                response.request_id
-            );
-            match response.result {
-                Ok(DaemonReply::AdoptionWaiting {
-                    blockers,
-                    destroy_command,
-                }) => {
-                    progress(RecoveryAdoptionProgress::Waiting {
-                        blockers,
-                        destroy_command,
-                    });
-                    continue;
-                }
-                Ok(DaemonReply::AdoptionInstalled { session_id }) => {
-                    progress(RecoveryAdoptionProgress::Installed { session_id });
-                    continue;
-                }
-                _ => {}
-            }
-            self.stream = Some(stream);
-            return match response.result {
-                Ok(DaemonReply::Done) => Ok(()),
-                Ok(reply) => bail!("unexpected recovery-adoption reply {reply:?}"),
-                Err(error) => bail!("{error}"),
-            };
-        }
+        self.http().await?.adopt_recovery(adoption, progress).await
     }
 
     pub async fn destroy_recovery(
@@ -3181,135 +1876,10 @@ impl DaemonClient {
         confirmation: String,
         all_instances: bool,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::DestroyRecovery {
-                session_id,
-                target_id,
-                confirmation,
-                all_instances,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected recovery-destroy reply {reply:?}"),
-        }
-    }
-
-    pub async fn snapshot(&mut self, workspace_id: String) -> Result<WorkspaceSnapshot> {
-        match self
-            .request(DaemonAction::Snapshot { workspace_id })
-            .await?
-        {
-            DaemonReply::Snapshot(snapshot) => Ok(snapshot),
-            reply => bail!("unexpected snapshot reply {reply:?}"),
-        }
-    }
-
-    pub async fn dashboard_startup(
-        &mut self,
-        client_id: String,
-        workspace_id: String,
-    ) -> Result<DashboardStartup> {
-        match self
-            .request(DaemonAction::DashboardStartup {
-                client_id,
-                workspace_id,
-            })
-            .await?
-        {
-            DaemonReply::DashboardStartup(startup) => Ok(*startup),
-            reply => bail!("unexpected dashboard startup reply {reply:?}"),
-        }
-    }
-
-    pub async fn workspace_layouts(
-        &mut self,
-        workspace_ids: Vec<String>,
-    ) -> Result<WorkspaceLayouts> {
-        match self
-            .request(DaemonAction::WorkspaceLayouts { workspace_ids })
-            .await?
-        {
-            DaemonReply::WorkspaceLayouts(layouts) => Ok(layouts),
-            reply => bail!("unexpected workspace layouts reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_session_metadata(&mut self) -> Result<StoredSessionMetadata> {
-        match self.request(DaemonAction::StoredSessionMetadata).await? {
-            DaemonReply::StoredSessionMetadata(metadata) => Ok(metadata),
-            reply => bail!("unexpected stored session metadata reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_projection_tail(
-        &mut self,
-        session_id: String,
-        items: usize,
-    ) -> Result<Option<MaterializedSession>> {
-        match self
-            .request(DaemonAction::StoredProjectionTail { session_id, items })
-            .await?
-        {
-            DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
-            reply => bail!("unexpected stored projection reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_transcript_item(
-        &mut self,
-        session_id: String,
-        stable_id: String,
-    ) -> Result<StoredTranscriptItem> {
-        // Never send an unknown action to an older daemon or retry its refusal.
-        if self.metadata.protocol_version < STORED_TRANSCRIPT_READ_PROTOCOL {
-            return Ok(StoredTranscriptItem::Unsupported);
-        }
-        match self
-            .request(DaemonAction::StoredTranscriptItem {
-                session_id,
-                stable_id,
-            })
-            .await?
-        {
-            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
-            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
-            reply => bail!("unexpected stored transcript item reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_agent_message_through(
-        &mut self,
-        session_id: String,
-        through: u64,
-    ) -> Result<StoredTranscriptItem> {
-        if self.metadata.protocol_version < NOTIFICATION_STACK_PROTOCOL {
-            return Ok(StoredTranscriptItem::Unsupported);
-        }
-        match self
-            .request(DaemonAction::StoredAgentMessageThrough {
-                session_id,
-                through,
-            })
-            .await?
-        {
-            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
-            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
-            reply => bail!("unexpected stored agent message reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_session_summary(
-        &mut self,
-        session_id: String,
-    ) -> Result<Option<MaterializedSessionSummary>> {
-        match self
-            .request(DaemonAction::StoredSessionSummary { session_id })
-            .await?
-        {
-            DaemonReply::StoredSessionSummary(summary) => Ok(summary.map(|summary| *summary)),
-            reply => bail!("unexpected stored session summary reply {reply:?}"),
-        }
+            .destroy_recovery(session_id, target_id, confirmation, all_instances)
+            .await
     }
 
     pub async fn resume_repository_preflight(
@@ -3317,16 +1887,10 @@ impl DaemonClient {
         session_id: String,
         target_id: String,
     ) -> Result<ResumeRepositorySourcePreflight> {
-        match self
-            .request(DaemonAction::ResumeRepositoryPreflight {
-                session_id,
-                target_id,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
-            reply => bail!("unexpected resume repository preflight reply {reply:?}"),
-        }
+            .resume_repository_preflight(session_id, target_id)
+            .await
     }
 
     pub async fn replace_resume_repository_origin(
@@ -3335,40 +1899,24 @@ impl DaemonClient {
         repository_id: String,
         replacement: String,
     ) -> Result<ResumeRepositorySourcePreflight> {
-        match self
-            .request(DaemonAction::ReplaceResumeRepositoryOrigin {
-                session_id,
-                repository_id,
-                replacement,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
-            reply => bail!("unexpected repository origin replacement reply {reply:?}"),
-        }
+            .replace_resume_repository_origin(session_id, repository_id, replacement)
+            .await
     }
 
     pub async fn archive_space_preview(
         &mut self,
         older_than_days: Option<u32>,
     ) -> Result<ArchiveSpacePreview> {
-        match self
-            .request(DaemonAction::ArchiveSpacePreview { older_than_days })
+        self.http()
             .await?
-        {
-            DaemonReply::ArchiveSpacePreview(preview) => Ok(preview),
-            reply => bail!("unexpected archive space preview reply {reply:?}"),
-        }
+            .archive_space_preview(older_than_days)
+            .await
     }
 
     pub async fn save_setup(&mut self, original: String, updated: String) -> Result<Config> {
-        match self
-            .request(DaemonAction::SaveSetup { original, updated })
-            .await?
-        {
-            DaemonReply::SavedSetup(config) => Ok(*config),
-            reply => bail!("unexpected setup save reply {reply:?}"),
-        }
+        self.http().await?.save_setup(original, updated).await
     }
 
     pub async fn runtime_changes(
@@ -3386,75 +1934,10 @@ impl DaemonClient {
         wait: bool,
         subagent_parents: std::collections::BTreeSet<String>,
     ) -> Result<crate::runtime_feed::RuntimeFrame> {
-        match self
-            .request(DaemonAction::RuntimeChanges {
-                cursor,
-                wait,
-                subagent_parents,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::RuntimeChanges(frame) => Ok(*frame),
-            reply => bail!("unexpected runtime changes reply {reply:?}"),
-        }
-    }
-
-    pub async fn session_tail(
-        &mut self,
-        session_id: String,
-        cursor: crate::runtime_feed::RuntimeCursor,
-    ) -> Result<crate::runtime_feed::SessionTailReply> {
-        match self
-            .request(DaemonAction::SessionTail { session_id, cursor })
-            .await?
-        {
-            DaemonReply::SessionTail(reply) => Ok(*reply),
-            reply => bail!("unexpected session tail reply {reply:?}"),
-        }
-    }
-
-    pub async fn resume_candidates(&mut self) -> Result<ResumeCandidates> {
-        match self.request(DaemonAction::ResumeCandidates).await? {
-            DaemonReply::ResumeCandidates(candidates) => Ok(*candidates),
-            reply => bail!("unexpected resume candidates reply {reply:?}"),
-        }
-    }
-
-    pub async fn session_record(&mut self, session_id: String) -> Result<Option<SessionRecord>> {
-        Ok(self
-            .session_record_with_verdict(session_id)
-            .await?
-            .map(|session| session.record))
-    }
-
-    pub async fn session_record_with_verdict(
-        &mut self,
-        session_id: String,
-    ) -> Result<Option<SessionRecordWithVerdict>> {
-        match self
-            .request(DaemonAction::SessionRecord { session_id })
-            .await?
-        {
-            DaemonReply::SessionRecord(record) => Ok(record.map(|record| *record)),
-            reply => bail!("unexpected session record reply {reply:?}"),
-        }
-    }
-
-    pub async fn go_startup_session(
-        &mut self,
-        workspace_id: String,
-        last_session_id: Option<String>,
-    ) -> Result<Option<SessionRecord>> {
-        match self
-            .request(DaemonAction::GoStartupSession {
-                workspace_id,
-                last_session_id,
-            })
-            .await?
-        {
-            DaemonReply::GoStartupSession(record) => Ok(record.map(|record| *record)),
-            reply => bail!("unexpected go startup session reply {reply:?}"),
-        }
+            .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
+            .await
     }
 
     pub async fn submit_session_command(
@@ -3464,18 +1947,16 @@ impl DaemonClient {
         command: RelayCommand,
         inherited_draft: Option<String>,
     ) -> Result<u64> {
-        match self
-            .request(DaemonAction::SubmitSessionCommand {
-                inherited_draft,
-                session_id,
-                command_id,
-                command,
-            })
+        let request = SessionCommandRequest {
+            command_id,
+            command,
+            inherited_draft,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::Ordinal(ordinal) => Ok(ordinal),
-            reply => bail!("unexpected session command reply {reply:?}"),
-        }
+            .submit_session_command(session_id, request)
+            .await
+            .map_err(terminal_action_refusal)
     }
 
     /// Hand the daemon a prompt for a session that is still starting. The
@@ -3492,22 +1973,19 @@ impl DaemonClient {
         encoded_draft: String,
         move_operation_id: Option<String>,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::QueueStartupPrompt {
-                session_id,
-                command_id,
-                text,
-                prompt,
-                encoded_draft,
-                move_operation_id,
-                inherited_draft,
-            })
+        let request = StartupPromptRequest {
+            command_id,
+            text,
+            prompt,
+            encoded_draft,
+            move_operation_id,
+            inherited_draft,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            DaemonReply::StartupPromptIdentityConflict => Err(StartupPromptIdentityConflict.into()),
-            reply => bail!("unexpected startup prompt reply {reply:?}"),
-        }
+            .queue_startup_prompt(session_id, request)
+            .await
+            .map_err(terminal_action_refusal)
     }
 
     /// Take a prompt back from the daemon's startup queue before delivery.
@@ -3519,16 +1997,10 @@ impl DaemonClient {
         session_id: String,
         command_id: String,
     ) -> Result<bool> {
-        match self
-            .request(DaemonAction::WithdrawStartupPrompt {
-                session_id,
-                command_id,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::PromptWithdrawn(withdrawn) => Ok(withdrawn),
-            reply => bail!("unexpected startup prompt withdrawal reply {reply:?}"),
-        }
+            .withdraw_startup_prompt(session_id, command_id)
+            .await
     }
 
     /// Read only the requested durable terminal receipts (at most 128 IDs).
@@ -3537,26 +2009,15 @@ impl DaemonClient {
         session_id: String,
         command_ids: Vec<String>,
     ) -> Result<std::collections::BTreeMap<String, StartupPromptOutcome>> {
-        match self
-            .request(DaemonAction::StartupPromptOutcomes {
-                session_id,
-                command_ids,
-            })
+        let request = StartupPromptOutcomesRequest { command_ids };
+        self.http()
             .await?
-        {
-            DaemonReply::StartupPromptOutcomes(outcomes) => Ok(outcomes),
-            reply => bail!("unexpected startup prompt outcomes reply {reply:?}"),
-        }
+            .startup_prompt_outcomes(session_id, request)
+            .await
     }
 
     pub async fn sync_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::SyncSession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected session sync reply {reply:?}"),
-        }
+        self.http().await?.sync_session(session_id).await
     }
 
     pub async fn respond_elicitation(
@@ -3565,36 +2026,10 @@ impl DaemonClient {
         elicitation_id: String,
         response: ElicitationResponse,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::RespondElicitation {
-                session_id,
-                elicitation_id,
-                response,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected elicitation reply {reply:?}"),
-        }
-    }
-
-    pub async fn native_agent_history(
-        &mut self,
-        owner: String,
-        child: String,
-        before: Option<(u64, String)>,
-    ) -> Result<mj_core::native_agent::NativeAgentHistoryPage> {
-        match self
-            .request(DaemonAction::NativeAgentHistory {
-                owner,
-                child,
-                before,
-            })
-            .await?
-        {
-            DaemonReply::NativeAgentHistory(page) => Ok(page),
-            reply => bail!("unexpected native agent history reply {reply:?}"),
-        }
+            .respond_elicitation(session_id, elicitation_id, response)
+            .await
     }
 
     /// Submit once and retain the receipt; a lost reply does not permit replay.
@@ -3603,45 +2038,40 @@ impl DaemonClient {
         request: SessionLifecycleRequest,
     ) -> Result<LifecycleReceipt> {
         let session_id = request.session_id().to_owned();
-        let reply = self
-            .request(DaemonAction::StartSessionLifecycle(request))
+        async { self.http().await?.start_session_lifecycle(request).await }
             .await
             .map_err(|error| {
-                if error.is::<DaemonRefusal>() {
+                if let Some(failure) = error.downcast_ref::<crate::http::HttpApiError>() {
+                    DaemonRefusal(failure.message.clone()).into()
+                } else if error.is::<DaemonRefusal>() {
                     error
                 } else {
-                    anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id.clone()))
-                        .context(error)
+                    anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id)).context(error)
                 }
-            })?;
-        match reply {
-            DaemonReply::LifecycleAccepted(receipt) => Ok(receipt),
-            reply => Err(
-                anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id))
-                    .context(format!("unexpected lifecycle acceptance reply {reply:?}")),
-            ),
-        }
+            })
     }
 
     /// Observe exactly this operation. Dropping the observer never cancels it.
     pub async fn wait_session_lifecycle(
         &mut self,
         receipt: LifecycleReceipt,
-    ) -> Result<DaemonReply> {
-        let reply = self
-            .request(DaemonAction::WaitSessionLifecycle(receipt.clone()))
-            .await
-            .map_err(|error| {
-                anyhow::Error::new(LifecycleObservationUnavailable(receipt.clone())).context(error)
-            })?;
+    ) -> Result<LifecycleCompletion> {
+        let reply = async {
+            self.http()
+                .await?
+                .wait_session_lifecycle(receipt.clone())
+                .await
+        }
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(LifecycleObservationUnavailable(receipt.clone())).context(error)
+        })?;
         match reply {
-            reply @ (DaemonReply::Done | DaemonReply::MoveOutcome(_)) => Ok(reply),
-            DaemonReply::LifecycleFailed(detail) => Err(DaemonRefusal(detail).into()),
-            DaemonReply::LifecycleObservationUnavailable(receipt) => {
+            reply @ (LifecycleCompletion::Done | LifecycleCompletion::MoveOutcome(_)) => Ok(reply),
+            LifecycleCompletion::LifecycleFailed(detail) => Err(DaemonRefusal(detail).into()),
+            LifecycleCompletion::LifecycleObservationUnavailable(receipt) => {
                 Err(LifecycleObservationUnavailable(receipt).into())
             }
-            reply => Err(anyhow::Error::new(LifecycleObservationUnavailable(receipt))
-                .context(format!("unexpected lifecycle completion reply {reply:?}"))),
         }
     }
 
@@ -3651,17 +2081,14 @@ impl DaemonClient {
         dry_run: bool,
         without_checkpoint: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        match self
-            .request(DaemonAction::SuspendPreflight {
-                session_id,
-                dry_run,
-                without_checkpoint,
-            })
+        let request = SuspendPreflightRequest {
+            dry_run,
+            without_checkpoint,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::SuspendPreflight(preflight) => Ok(*preflight),
-            reply => bail!("unexpected suspend-preflight reply {reply:?}"),
-        }
+            .suspend_preflight(session_id, request)
+            .await
     }
 
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
@@ -3677,19 +2104,11 @@ impl DaemonClient {
         session_id: String,
         consent: mj_core::suspend_consent::SuspendConsent,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::SuspendSession {
-                session_id,
-                discard_untracked: consent.discard_untracked,
-                abort_operations: consent.abort_operations,
-                without_checkpoint: consent.without_checkpoint,
-                confirm_no_checkpoint: consent.confirm_no_checkpoint,
-            })
+        let request = consent;
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected close-session reply {reply:?}"),
-        }
+            .suspend_session_with_consent(session_id, request)
+            .await
     }
 
     pub async fn restart_session(&mut self, session_id: String) -> Result<()> {
@@ -3707,29 +2126,20 @@ impl DaemonClient {
             self.metadata.protocol_version,
             PROTOCOL_VERSION
         );
-        match self
-            .request(DaemonAction::RestartSession {
-                session_id,
-                acknowledge_container_recreation,
-            })
+        let request = RestartSessionRequest {
+            acknowledge_container_recreation,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected restart-session reply {reply:?}"),
-        }
+            .restart_session_with_ack(session_id, request)
+            .await
     }
 
     pub async fn start_create_session(
         &mut self,
         request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        match self
-            .request(DaemonAction::StartCreateSession(request))
-            .await?
-        {
-            DaemonReply::RegisteredSession(registered) => Ok(*registered),
-            reply => bail!("unexpected start-create reply {reply:?}"),
-        }
+        self.http().await?.start_create_session(request).await
     }
 
     /// Wait for a session's creation to end. Answered from durable state, so
@@ -3738,85 +2148,23 @@ impl DaemonClient {
     /// connection, which carries [`DaemonTransportLost`], and the caller
     /// starts the next daemon and asks again.
     pub async fn wait_create_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request_once(DaemonAction::WaitCreateSession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected wait-create reply {reply:?}"),
-        }
+        self.http().await?.wait_create_session(session_id).await
     }
 
     pub async fn resume_session(&mut self, request: ResumeSessionRequest) -> Result<()> {
-        match self.request(DaemonAction::ResumeSession(request)).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected resume-session reply {reply:?}"),
-        }
+        self.http().await?.resume_session(request).await
     }
 
     pub async fn destroy_stopped_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::DestroyStoppedSession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected destroy-stopped reply {reply:?}"),
-        }
+        self.http().await?.destroy_stopped_session(session_id).await
     }
 
     pub async fn force_destroy_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::ForceDestroySession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected force-destroy reply {reply:?}"),
-        }
+        self.http().await?.force_destroy_session(session_id).await
     }
 
     pub async fn cancel_lifecycle(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CancelLifecycle { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected cancel-lifecycle reply {reply:?}"),
-        }
-    }
-
-    /// Fetch a detached draft. The destination terminal save retires the source.
-    pub async fn recover_draft(
-        &mut self,
-        draft_id: String,
-    ) -> Result<(String, String, Option<i64>)> {
-        match self
-            .request(DaemonAction::RecoverDraft { draft_id })
-            .await?
-        {
-            DaemonReply::RecoveredDraft {
-                session_id,
-                text,
-                revision,
-            } => Ok((session_id, text, revision)),
-            reply => bail!("unexpected recover-draft reply {reply:?}"),
-        }
-    }
-
-    pub async fn discard_drafts(
-        &mut self,
-        workspace_id: String,
-        draft_id: Option<String>,
-    ) -> Result<usize> {
-        match self
-            .request(DaemonAction::DiscardDrafts {
-                workspace_id,
-                draft_id,
-            })
-            .await?
-        {
-            DaemonReply::Count(count) => Ok(count),
-            reply => bail!("unexpected discard-drafts reply {reply:?}"),
-        }
+        self.http().await?.cancel_lifecycle(session_id).await
     }
 
     pub async fn stop(&mut self) -> Result<()> {
@@ -3967,8 +2315,6 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 105: indexed single-item stored transcript reads for notification
 // text use chunked replies; legacy count-mode stored projection tails remain
 // unchunked.
-/// The first protocol with notification cards and completion-bound transcript reads.
-pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
 /// The first protocol with daemon-owned notify-once alert events.
 pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 // Version 107: explicit SessionWiki sync generations and progress watches.
@@ -3998,13 +2344,8 @@ pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
 const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
-/// Attachments, reviews, task stops, container upgrades, and wiki actions use HTTP.
-pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 1;
-/// Guidance for clients sending the removed checkpoint action.
-pub const REMOVED_CHECKPOINT_MESSAGE: &str =
-    "The checkpoint action was removed; suspend saves the session.";
-/// The first protocol with indexed stored transcript item reads.
-pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
+/// Terminal operations, including streaming and interactive requests, use HTTP.
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 6;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -4021,72 +2362,27 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RETRY_DELAY: Duration = Duration::from_millis(40);
 impl DaemonClient {
-    pub async fn prepare_move_session(
-        &mut self,
-        selection: MoveSelection,
-    ) -> Result<MovePreparation> {
-        match self
-            .request(DaemonAction::PrepareMoveSession(selection))
-            .await?
-        {
-            DaemonReply::MovePreparation(preparation) => Ok(*preparation),
-            _ => bail!("daemon returned an unexpected move preparation reply"),
-        }
-    }
-
     pub async fn move_sources(
         &mut self,
         session_id: String,
         cleanup_operation_id: Option<String>,
     ) -> Result<Vec<mj_core::move_workspace::RetainedMoveSource>> {
-        match self
-            .request(DaemonAction::MoveSources {
-                session_id,
-                cleanup_operation_id,
-            })
-            .await?
-        {
-            DaemonReply::MoveSources(sources) => Ok(sources),
-            reply => bail!("unexpected Move sources reply: {reply:?}"),
-        }
+        let request = MoveSourcesRequest {
+            cleanup_operation_id,
+        };
+        self.http().await?.move_sources(session_id, request).await
     }
 
     pub async fn move_session(&mut self, request: MoveSessionRequest) -> Result<MoveOutcome> {
-        match self.request(DaemonAction::MoveSession(request)).await? {
-            DaemonReply::MoveOutcome(outcome) => Ok(outcome),
-            _ => bail!("daemon returned an unexpected move reply"),
-        }
+        self.http().await?.move_session(request).await
     }
 }
 
-impl DaemonAction {
-    /// Disposable machine work uses dedicated connections. Closing one or
-    /// handing off the daemon cancels it; interrupted installs can be rerun.
-    pub fn is_cancellable_machine_action(&self) -> bool {
-        if let Self::PreflightNewSession { request } = self
-            && !request.remote_repairs.is_empty()
-        {
-            return false;
-        }
-        matches!(
-            self,
-            Self::InstallMbx { .. }
-                | Self::PreviewBuildCache { .. }
-                | Self::CheckpointArchiveSizes { .. }
-                | Self::TestTarget { .. }
-                | Self::ProfileLoginStatuses
-                | Self::DiscoverSetup { .. }
-                | Self::PreflightNewSession { .. }
-                | Self::SuspendPreflight { .. }
-                | Self::ValidateProjectDirectory { .. }
-                | Self::CompletePath { .. }
-                | Self::CheckProjectDirectories { .. }
-                | Self::DiscoverProjects { .. }
-                | Self::ResolveContainerPath { .. }
-                | Self::ResolveSetupPath { .. }
-                | Self::ValidateMountSource { .. }
-                | Self::ValidateSessionMounts { .. }
-        )
+fn terminal_action_refusal(error: anyhow::Error) -> anyhow::Error {
+    if let Some(failure) = error.downcast_ref::<crate::http::HttpApiError>() {
+        DaemonRefusal(failure.message.clone()).into()
+    } else {
+        error
     }
 }
 
@@ -4150,15 +2446,6 @@ pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
     mac.update(b"mj-daemon-identity-v1");
     mac.update(nonce.as_bytes());
     mac
-}
-
-async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
-    loop {
-        if let Ok(client) = connect_existing().await {
-            return Ok(client);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
 }
 
 #[cfg(test)]
@@ -4288,9 +2575,8 @@ mod tests {
     // Hard-won: #1566: a cancelled request left its reply for the next request on a reused daemon connection.
     #[tokio::test]
     async fn cancelled_request_cannot_reuse_a_complete_or_partial_response() {
-        // Cancel before the reply, within its length header, within its body,
-        // and between fragments of a chunked response.
-        for prefix in [0, 2, 8, usize::MAX] {
+        // Cancel before the reply, within its length header, and within its body.
+        for prefix in [0, 2, 8] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let metadata = cancellation_metadata(listener.local_addr().unwrap());
             let (received, waiting) = tokio::sync::oneshot::channel();
@@ -4318,25 +2604,7 @@ mod tests {
                 let body = serde_json::to_vec(&response).unwrap();
                 let mut frame = (body.len() as u32).to_be_bytes().to_vec();
                 frame.extend(body);
-                let prefix = if prefix == usize::MAX {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: Ok(DaemonReply::ReplyChunk {
-                                bytes: vec![b'{'],
-                                finished: false,
-                            }),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    0
-                } else {
-                    stream.write_all(&frame[..prefix]).await.unwrap();
-                    prefix
-                };
+                stream.write_all(&frame[..prefix]).await.unwrap();
                 received.send(()).unwrap();
                 released.await.unwrap();
                 // Cancellation may already have closed the socket. Either result
@@ -4359,132 +2627,6 @@ mod tests {
             let error = client.request(DaemonAction::Ping).await.unwrap_err();
             assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
             assert!(error.downcast_ref::<DaemonTransportLost>().is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelled_upload_cannot_reuse_its_connection() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = cancellation_metadata(listener.local_addr().unwrap());
-        let (received, waiting) = tokio::sync::oneshot::channel();
-        let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut total = 0;
-            while total < 128 * 1024 {
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
-                    panic!("expected upload chunk");
-                };
-                assert!(sha256.is_none());
-                total += bytes.len();
-            }
-            received.send(()).unwrap();
-            let mut byte = [0];
-            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
-        });
-        let (mut writer, mut reader) = tokio::io::duplex(128 * 1024);
-        writer.write_all(&vec![42; 128 * 1024]).await.unwrap();
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        {
-            let upload = client.upload(&mut reader);
-            tokio::pin!(upload);
-            tokio::select! {
-                result = &mut upload => panic!("upload source remains open: {result:?}"),
-                result = waiting => result.unwrap(),
-            }
-        }
-        let error = client.request(DaemonAction::Ping).await.unwrap_err();
-        assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn adoption_progress_keeps_response_identity_and_cancel_closes_its_connection() {
-        for cancel in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let metadata = cancellation_metadata(listener.local_addr().unwrap());
-            let (release, released) = tokio::sync::oneshot::channel();
-            let server = mj_core::runtime::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(request.action, DaemonAction::AdoptRecovery(_)));
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version: request.protocol_version,
-                        result: Ok(DaemonReply::AdoptionWaiting {
-                            blockers: vec!["current turn".into()],
-                            destroy_command: Some("mj recover destroy".into()),
-                        }),
-                    },
-                )
-                .await
-                .unwrap();
-                if cancel {
-                    let mut byte = [0u8; 1];
-                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
-                } else {
-                    released.await.unwrap();
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            request_id: request.request_id,
-                            protocol_version: request.protocol_version,
-                            result: Ok(DaemonReply::AdoptionInstalled {
-                                session_id: "orphan".into(),
-                            }),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            request_id: request.request_id,
-                            protocol_version: request.protocol_version,
-                            result: Ok(DaemonReply::Done),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
-            });
-            let mut client = DaemonClient::connect(metadata).await.unwrap();
-            let mut installed_notice = None;
-            let (observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
-            {
-                let work = client.adopt_recovery(
-                    RecoveryAdoptionRequest {
-                        session_id: "orphan".into(),
-                        target_id: "podman".into(),
-                        profile: None,
-                        bundle: None,
-                        all_instances: false,
-                    },
-                    |event| match event {
-                        RecoveryAdoptionProgress::Waiting {
-                            blockers,
-                            destroy_command,
-                        } => observed.send((blockers, destroy_command)).unwrap(),
-                        RecoveryAdoptionProgress::Installed { session_id } => {
-                            installed_notice = Some(session_id);
-                        }
-                    },
-                );
-                tokio::pin!(work);
-                tokio::select! {
-                    result = &mut work => panic!("adoption ended before its boundary: {result:?}"),
-                    message = observations.recv() => assert_eq!(message.unwrap(), (vec!["current turn".to_owned()], Some("mj recover destroy".to_owned()))),
-                }
-                if !cancel {
-                    release.send(()).unwrap();
-                    work.await.unwrap();
-                }
-            }
-            assert_eq!(installed_notice.as_deref(), (!cancel).then_some("orphan"));
-            assert_eq!(client.stream.is_none(), cancel);
-            server.await.unwrap();
         }
     }
 
@@ -4580,334 +2722,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn abandoned_prompt_history_uses_the_daemon_protocol_action() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "abandoned-prompt-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            assert_eq!(request.protocol_version, PROTOCOL_VERSION);
-            assert_eq!(request.token, "abandoned-prompt-test");
-            assert_eq!(
-                serde_json::to_value(request.action).unwrap(),
-                serde_json::json!({
-                    "action": "record_abandoned_prompt",
-                    "arguments": {
-                        "session_id": "session-1",
-                        "bundle_id": "project-1",
-                        "text": "unfinished draft"
-                    }
-                })
-            );
-            write_frame(
-                &mut stream,
-                &ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(DaemonReply::Done),
-                },
-            )
-            .await
-            .unwrap();
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-
-        client
-            .record_abandoned_prompt(
-                "session-1".into(),
-                "project-1".into(),
-                "unfinished draft".into(),
-            )
-            .await
-            .unwrap();
-        server.await.unwrap();
-    }
-
     // Hard-won: c502e9bdf662: cold-cache discovery failed to save and left Codex profiles out of model choices
-    #[tokio::test]
-    async fn subagent_discovery_uses_the_daemon_and_preserves_choices_and_failures() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "subagent-discovery-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let options: mj_core::subagent::SubagentOptions =
-            serde_json::from_value(serde_json::json!({
-                "models": [{"value": "gpt-6-luna", "name": "Luna", "description": null}],
-                "efforts": [{"value": "high", "name": "High", "description": null}],
-                "unavailable": ["another-profile: authentication failed"]
-            }))
-            .unwrap();
-        let expected = serde_json::to_value(&options).unwrap();
-        let mut draft = Config::default();
-        draft.profiles.insert(
-            "codex".into(),
-            serde_json::from_value(serde_json::json!({
-                "kind": "codex", "home": "/unsaved/profile",
-                "subagents": {"mode": "single_model", "model": "gpt-6-luna", "effort": "high"}
-            }))
-            .unwrap(),
-        );
-        let expected_draft = serde_json::to_value(&draft).unwrap();
-        let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            for (index, model) in [
-                None,
-                Some("gpt-6-luna".to_owned()),
-                Some("gpt-6-luna".to_owned()),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert_eq!(request.token, "subagent-discovery-test");
-                let DaemonAction::SubagentOptions {
-                    profile,
-                    model: requested,
-                    config,
-                } = request.action
-                else {
-                    panic!("unexpected discovery request")
-                };
-                assert_eq!(profile, "codex");
-                assert_eq!(requested, model);
-                assert_eq!(
-                    serde_json::to_value(config).unwrap(),
-                    if index == 1 {
-                        expected_draft.clone()
-                    } else {
-                        serde_json::Value::Null
-                    }
-                );
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: request.protocol_version,
-                        request_id: request.request_id,
-                        result: if index != 2 {
-                            Ok(DaemonReply::SubagentOptions(options.clone()))
-                        } else {
-                            Err("profile discovery cancelled".into())
-                        },
-                    },
-                )
-                .await
-                .unwrap();
-            }
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let discovered = client
-            .subagent_options("codex".into(), None, None)
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
-        let discovered = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()), Some(draft))
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
-        let error = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()), None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), "profile discovery cancelled");
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn upgrade_refusal_retries_the_identical_command_but_lost_acknowledgements_do_not() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "test-token".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let action = DaemonAction::SubmitSessionCommand {
-            inherited_draft: None,
-            session_id: "test-session".into(),
-            command_id: "steer-command".into(),
-            command: RelayCommand::Steer {
-                active_prompt_id: "active-command".into(),
-                queued_prompt_id: "queued-command".into(),
-            },
-        };
-        let expected = serde_json::to_value(&action).unwrap();
-        let server = mj_core::runtime::spawn(async move {
-            for reply in [
-                Some(DaemonReply::UpgradePending),
-                Some(DaemonReply::Done),
-                None,
-            ] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert_eq!(serde_json::to_value(&request.action).unwrap(), expected);
-                if let Some(reply) = reply {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: Ok(reply),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-        });
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let reply = client
-            .request_with_reconnect(action.clone(), || DaemonClient::connect(metadata.clone()))
-            .await
-            .unwrap();
-        assert!(matches!(reply, DaemonReply::Done));
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        assert!(
-            client
-                .request_with_reconnect(action, || async {
-                    panic!("an ambiguous acknowledgement must not replay a mutation");
-                })
-                .await
-                .is_err()
-        );
-        server.await.unwrap();
-    }
-
-    // Hard-won: #1514: a refused consumer reused a blob from the old connection.
-    #[tokio::test]
-    async fn refused_blob_consumer_reuploads_before_single_acceptance() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let bytes = vec![42; 192 * 1024];
-        let expected = bytes.clone();
-        let server = mj_core::runtime::spawn(async move {
-            let mut accepted = 0;
-            for attempt in 0..4 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut received: Vec<u8> = Vec::new();
-                let upload = loop {
-                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                    let DaemonAction::UploadChunk { bytes, sha256 } = &request.action else {
-                        panic!("expected upload before consuming action");
-                    };
-                    received.extend(bytes);
-                    if sha256.is_some() {
-                        break request;
-                    }
-                };
-                assert_eq!(received, expected);
-                let blob = format!("connection-{attempt}");
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: upload.protocol_version,
-                        request_id: upload.request_id,
-                        result: Ok(DaemonReply::BlobUploaded(blob.clone())),
-                    },
-                )
-                .await
-                .unwrap();
-                let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                let DaemonAction::TranscribeAudio { blob: actual, .. } = consume.action else {
-                    panic!("expected consumer");
-                };
-                assert_eq!(actual, blob);
-                if attempt == 2 {
-                    continue;
-                } // Lost ACK must not reconnect or replay.
-                let reply = if attempt == 0 || attempt == 3 {
-                    DaemonReply::UpgradePending
-                } else {
-                    accepted += 1;
-                    DaemonReply::Done
-                };
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: consume.protocol_version,
-                        request_id: consume.request_id,
-                        result: Ok(reply),
-                    },
-                )
-                .await
-                .unwrap();
-            }
-            assert_eq!(accepted, 1);
-        });
-        let action = |blob| DaemonAction::TranscribeAudio {
-            preferred_profile: "test".into(),
-            blob,
-        };
-        let mut reader = std::io::Cursor::new(bytes);
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let reply = client
-            .upload_and_consume_with_reconnect(&mut reader, action, || {
-                DaemonClient::connect(metadata.clone())
-            })
-            .await
-            .unwrap();
-        assert!(matches!(reply, DaemonReply::Done));
-        reader.set_position(0);
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        assert!(
-            client
-                .upload_and_consume_with_reconnect(&mut reader, action, || async {
-                    panic!("lost acknowledgement cannot authorize replay");
-                })
-                .await
-                .is_err()
-        );
-        // Hard-won: af709d6e2: cancellation was ignored during refused-upload reconnection.
-        reader.set_position(0);
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let reconnecting = tokio::sync::Notify::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.upload_and_consume_observed_with_reconnect(
-                &mut reader,
-                action,
-                || async {
-                    reconnecting.notify_one();
-                    std::future::pending::<Result<DaemonClient>>().await
-                },
-                |_| std::future::ready(Ok(())),
-                reconnecting.notified(),
-            ),
-        )
-        .await
-        .expect("cancellation must interrupt reconnection");
-        assert!(result.unwrap_err().to_string().contains("upload cancelled"));
-        server.await.unwrap();
-    }
 
     // Hard-won: 25fee3db784d: protocol-mismatch advice omitted which installed mj the user ran
     #[test]
@@ -4962,107 +2777,5 @@ mod tests {
             message.contains("this client runs /home/dev/.cargo/bin/mj (version 2.9.0)"),
             "{message}"
         );
-    }
-
-    #[tokio::test]
-    async fn unavailable_lifecycle_observation_distinguishes_disconnect_from_operation_failure() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "lifecycle-observation".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let receipt = LifecycleReceipt {
-            session_id: "observed-session".into(),
-            operation_id: "accepted-operation".into(),
-        };
-        let server = mj_core::runtime::spawn(async move {
-            for phase in 0..5 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(
-                    (&request.action, phase),
-                    (DaemonAction::WaitSessionLifecycle(_), 0 | 1 | 4)
-                        | (DaemonAction::StartSessionLifecycle(_), 2 | 3)
-                ));
-                if matches!(phase, 1 | 3 | 4) {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: if phase == 4 {
-                                Ok(DaemonReply::LifecycleFailed(
-                                    "checkpoint verification failed".into(),
-                                ))
-                            } else {
-                                Err("daemon is shutting down; retry to reach a fresh daemon".into())
-                            },
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-        });
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let error = client
-            .wait_session_lifecycle(receipt.clone())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error
-                .downcast_ref::<LifecycleObservationUnavailable>()
-                .unwrap()
-                .0,
-            receipt
-        );
-        drop(client);
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let error = client
-            .wait_session_lifecycle(receipt.clone())
-            .await
-            .unwrap_err();
-        assert!(error.is::<LifecycleObservationUnavailable>());
-        assert!(format!("{error:#}").contains("daemon is shutting down"));
-        drop(client);
-        for disconnected in [true, false] {
-            let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-            let error = client
-                .start_session_lifecycle(SessionLifecycleRequest::Suspend {
-                    session_id: "observed-session".into(),
-                    discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
-                    abort_operations: mj_core::suspend_consent::OperationConsent::None,
-                    without_checkpoint: false,
-                    confirm_no_checkpoint: false,
-                })
-                .await
-                .unwrap_err();
-            if disconnected {
-                assert_eq!(
-                    error
-                        .downcast_ref::<LifecycleAdmissionUnconfirmed>()
-                        .unwrap()
-                        .0,
-                    "observed-session"
-                );
-                assert!(!error.is::<DaemonRefusal>());
-            } else {
-                assert!(error.is::<DaemonRefusal>());
-                assert!(!error.is::<LifecycleAdmissionUnconfirmed>());
-            }
-        }
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let error = client.wait_session_lifecycle(receipt).await.unwrap_err();
-        assert!(error.is::<DaemonRefusal>());
-        assert!(!error.is::<LifecycleObservationUnavailable>());
-        assert!(error.to_string().contains("checkpoint verification failed"));
-        drop(client);
-        server.await.unwrap();
     }
 }

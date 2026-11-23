@@ -3314,3 +3314,310 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
     assert!(!checkpoint.capabilities.restart);
     assert!(!checkpoint.capabilities.move_session);
 }
+
+use crate::daemon::tests::{
+    isolated_test_store, runtime_test_session, seed_legacy_detached_draft, start_test_http_api,
+    test_runtime_state_loading_the_store,
+};
+
+#[tokio::test]
+async fn workspace_draft_http_lists_previews_recovers_and_discards() {
+    const NAME: &str = "workspace_draft_http_lists_previews_recovers_and_discards";
+    let Some(_writer) = isolated_test_store(module_path!(), NAME) else {
+        return;
+    };
+    let workspace = mj_controller::database::create_workspace("Draft HTTP").unwrap();
+    let mut session = runtime_test_session("draft-session", &workspace.id, SessionState::Stopped);
+    session.draft_input = "inherited seed".into();
+    mj_controller::database::save_session(&session).unwrap();
+    let text = format!(
+        r#"mjolnir-chat-draft-v1:{{"text":"some\n   readable {}"}}"#,
+        "界".repeat(210)
+    );
+    mj_controller::database::save_terminal_draft(
+        &session.id,
+        "other terminal",
+        std::process::id(),
+        7,
+        mj_core::storage::DetachedSessionDraft {
+            text: text.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let (client, shutdown, server) = start_test_http_api(state).await;
+    let groups = client.list_workspace_drafts().await.unwrap();
+    let draft = &groups[0].drafts[0];
+    assert_eq!(draft.session_title.as_deref(), Some(session.listed_title()));
+    assert!(draft.preview.starts_with("some readable 界"));
+    assert_eq!(draft.preview.chars().count(), 201);
+    assert!(draft.preview.ends_with('…'));
+
+    let recovered = client.recover_draft(draft.id.clone()).await.unwrap();
+    assert_eq!(
+        recovered,
+        mj_client::http::RecoveredDraft {
+            session_id: session.id.clone(),
+            text: text.clone(),
+            revision: Some(7)
+        }
+    );
+    assert_eq!(
+        client.recover_draft(draft.id.clone()).await.unwrap(),
+        recovered
+    );
+    assert_eq!(
+        mj_controller::database::load_state().unwrap().sessions[&session.id].draft_input,
+        "inherited seed",
+    );
+
+    client
+        .persist_terminal_draft(
+            "receiving terminal".into(),
+            session.id.clone(),
+            std::process::id(),
+            1,
+            mj_core::storage::DetachedSessionDraft {
+                text: text.clone(),
+                retired_drafts: vec![mj_core::storage::RetiredDetachedDraft {
+                    draft_id: draft.id.clone(),
+                    revision: Some(6),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client.recover_draft(draft.id.clone()).await.unwrap(),
+        recovered
+    );
+    client
+        .persist_terminal_draft(
+            "receiving terminal".into(),
+            session.id.clone(),
+            std::process::id(),
+            2,
+            mj_core::storage::DetachedSessionDraft {
+                text,
+                retired_drafts: vec![mj_core::storage::RetiredDetachedDraft {
+                    draft_id: draft.id.clone(),
+                    revision: recovered.revision,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let error = client.recover_draft(draft.id.clone()).await.unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<mj_client::http::HttpApiError>()
+            .unwrap()
+            .status()
+            .as_u16(),
+        404
+    );
+    assert_eq!(
+        client
+            .persist_read_receipt(
+                "receiving terminal".into(),
+                workspace.id.clone(),
+                session.id.clone(),
+                0
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    let transferred = client.list_workspace_drafts().await.unwrap();
+    assert_eq!(transferred[0].drafts.len(), 1);
+    assert_eq!(transferred[0].drafts[0].source, "receiving terminal");
+    assert_eq!(transferred[0].drafts[0].preview, draft.preview);
+    assert_eq!(
+        client
+            .discard_drafts(
+                workspace.id.clone(),
+                Some(transferred[0].drafts[0].id.clone())
+            )
+            .await
+            .unwrap(),
+        1
+    );
+
+    for text in ["single discard", "bulk 1", "bulk 2"] {
+        seed_legacy_detached_draft(&workspace.id, None, "legacy", None, text).unwrap();
+    }
+    let drafts = mj_controller::database::list_detached_drafts(&workspace.id).unwrap();
+    let id = drafts
+        .iter()
+        .find(|draft| draft.text == "single discard")
+        .unwrap()
+        .id
+        .clone();
+    for (draft_id, expected) in [(Some(id), 1), (None, 2)] {
+        assert_eq!(
+            client
+                .discard_drafts(workspace.id.clone(), draft_id)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(
+        mj_controller::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn project_and_workspace_http_clients_use_the_daemons_state() {
+    const CHILD: &str = "MJ_TEST_PROJECT_WORKSPACE_HTTP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let global_git = root.path().join("gitconfig");
+        std::fs::write(&global_git, "").unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(
+                module_path!(),
+                "project_and_workspace_http_clients_use_the_daemons_state",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("GIT_CONFIG_GLOBAL", global_git)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let config_dir = mj_core::config::config_dir();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let mut config = bare_preflight_config();
+    config.profiles.insert(
+        "agent".into(),
+        HarnessProfile::new(HarnessKind::Codex, root.path().join("profile")),
+    );
+    config.save().unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let (http, stop, server) = start_test_http_api(state).await;
+    let workspace = http.create_workspace("Before".into()).await.unwrap();
+    http.rename_workspace(workspace.id.clone(), "After".into())
+        .await
+        .unwrap();
+    http.touch_workspace(workspace.id.clone()).await.unwrap();
+    let workspaces = http.list_workspaces().await.unwrap();
+    assert_eq!(workspaces[0].name, "After");
+    assert!(workspaces[0].last_opened_at >= workspace.last_opened_at);
+
+    let completions = http
+        .complete_path(
+            mj_core::path_completion::CompletionHost::Target("raw".into()),
+            root.path().join("pro").display().to_string(),
+            mj_core::path_completion::CompletionKind::Directories,
+        )
+        .await
+        .unwrap();
+    assert!(
+        completions
+            .candidates
+            .iter()
+            .any(|candidate| candidate.ends_with("project/"))
+    );
+    let preflight = http
+        .preflight_new_session(&mj_client::daemon::NewSessionPreflightRequest {
+            profile_id: "agent".into(),
+            workspace_id: workspace.id.clone(),
+            bundle_id: String::new(),
+            target_id: "raw".into(),
+            project_directory: Some(project.clone()),
+            additional_mounts: Vec::new(),
+            remote_repairs: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preflight.project_directory, Some(project.clone()));
+    let discovered = http
+        .discover_projects(
+            &mj_core::project_picker::ProjectDiscoveryRequest::Directory {
+                path: root.path().display().to_string(),
+                filter: "project".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        discovered
+            .entries
+            .iter()
+            .any(|entry| entry.name == "project")
+    );
+    assert!(
+        http.project_catalog(false, false)
+            .await
+            .unwrap()
+            .projects
+            .is_empty()
+    );
+    http.project_catalog(true, true).await.unwrap();
+    let identity = http
+        .set_git_identity("HTTP Test".into(), "http@example.com".into())
+        .await
+        .unwrap();
+    assert_eq!(identity.name.as_deref(), Some("HTTP Test"));
+    assert_eq!(http.git_identity().await.unwrap().email, identity.email);
+    for args in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "initial"][..],
+    ] {
+        let output = mj_core::subprocess::run_with_input(
+            std::process::Command::new("git")
+                .current_dir(&project)
+                .args(args),
+            b"",
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let created = http
+        .create_project(vec![project.display().to_string()])
+        .await
+        .unwrap();
+    assert_eq!(created.project.bundle.repositories.len(), 1);
+    http.remove_project(created.bundle_id).await.unwrap();
+    let selection = serde_json::from_value(serde_json::json!({"session_id":"missing"})).unwrap();
+    let refusal = http.prepare_move_session(selection).await.unwrap_err();
+    assert_eq!(
+        refusal
+            .downcast_ref::<mj_client::http::HttpApiError>()
+            .unwrap()
+            .status()
+            .as_u16(),
+        409
+    );
+    assert_eq!(
+        http.cancel_workspace_close(workspace.id.clone())
+            .await
+            .unwrap_err()
+            .downcast_ref::<mj_client::http::HttpApiError>()
+            .unwrap()
+            .status()
+            .as_u16(),
+        409,
+    );
+    http.close_workspace(workspace.id).await.unwrap();
+    assert!(http.list_workspaces().await.unwrap().is_empty());
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}

@@ -61,6 +61,35 @@ async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
     assert_eq!(rejected.headers()["x-mj-upgrade"], "pending");
 }
 
+#[tokio::test]
+async fn terminal_recovery_destroy_refuses_during_drain_before_dispatch() {
+    let gate = Arc::new(mj_store::upgrade::Gate::default());
+    let mut options = detached_options();
+    options.set_loopback_token("terminal-test-token".into());
+    options.set_upgrade_gate(gate.clone());
+    gate.begin_draining();
+    assert!(gate.is_open());
+
+    let response = router(options)
+        .oneshot(
+            Request::post("/api/v1/recovery/destroy")
+                .header(axum::http::header::AUTHORIZATION, "Bearer terminal-test-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"session_id":"orphan","target_id":"bare","confirmation":"orphan","all_instances":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[UPGRADE_HEADER], "pending");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], api::DAEMON_HANDOFF_CODE);
+    assert!(gate.active_labels().is_empty());
+}
+
 use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,
@@ -200,12 +229,382 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
     (config, state)
 }
 
+// Exercise HTTP request mapping and acknowledgement with a controllable backend.
+pub(super) async fn capture_viewer_call<T, E, R>(
+    calls: &mpsc::Sender<R>,
+    build: impl FnOnce(tokio::sync::oneshot::Sender<Result<T, E>>) -> R,
+) -> Result<Result<T, E>, api::ApiFailure> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    calls
+        .send(build(reply))
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    Ok(answer
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?)
+}
+
+#[derive(Debug)]
+pub(super) struct BundleCall {
+    pub(super) source: String,
+    pub(super) discovered: bool,
+    pub(super) reply: tokio::sync::oneshot::Sender<Result<CreateBundleResponse, BundleFailure>>,
+}
+
+#[derive(Debug)]
+pub(super) struct ReceiptCall {
+    pub(super) session_id: String,
+    pub(super) through: u64,
+    pub(super) reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+#[derive(Debug)]
+pub(super) struct StopTaskCall {
+    pub(super) session_id: String,
+    pub(super) background_task_id: String,
+    pub(super) reply: tokio::sync::oneshot::Sender<Result<(), BackgroundTaskStopFailure>>,
+}
+
+#[derive(Debug)]
+pub(super) struct NewPreflightCall {
+    pub(super) additional_mounts: Vec<AdditionalMount>,
+    pub(super) reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
+}
+
+#[derive(Debug)]
+pub(super) struct CompletePathCall {
+    pub(super) prefix: String,
+    pub(super) reply: tokio::sync::oneshot::Sender<Result<PathCompletion, String>>,
+}
+
+#[derive(Debug)]
+pub(super) struct DiscoverProjectsCall {
+    pub(super) reply: tokio::sync::oneshot::Sender<
+        Result<mj_import::project_picker::ProjectDiscovery, &'static str>,
+    >,
+}
+
+#[derive(Debug)]
+pub(super) struct PurgeCall {
+    pub(super) request: api::PurgeUntrackedRequest,
+    pub(super) reply: tokio::sync::oneshot::Sender<
+        Result<api::PurgeUntrackedResponse, api::PurgeUntrackedFailure>,
+    >,
+}
+
+#[derive(Debug)]
+enum PreflightCall {
+    New(NewPreflightCall),
+    CompletePath(CompletePathCall),
+    DiscoverProjects(DiscoverProjectsCall),
+}
+
+impl From<NewPreflightCall> for PreflightCall {
+    fn from(call: NewPreflightCall) -> Self {
+        Self::New(call)
+    }
+}
+
+impl From<CompletePathCall> for PreflightCall {
+    fn from(call: CompletePathCall) -> Self {
+        Self::CompletePath(call)
+    }
+}
+
+impl From<DiscoverProjectsCall> for PreflightCall {
+    fn from(call: DiscoverProjectsCall) -> Self {
+        Self::DiscoverProjects(call)
+    }
+}
+
+#[derive(Default)]
+struct ViewerBackend {
+    bundles: Option<mpsc::Sender<BundleCall>>,
+    receipts: Option<mpsc::Sender<ReceiptCall>>,
+    preflights: Option<mpsc::Sender<PreflightCall>>,
+    background_stops: Option<mpsc::Sender<StopTaskCall>>,
+    stored: Option<mpsc::Sender<()>>,
+    settings_review: bool,
+}
+
+impl SubagentBackend for ViewerBackend {
+    fn save_draft(
+        &self,
+        _client_id: String,
+        _session_id: String,
+        _draft: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<Result<(), String>, api::ApiFailure>> {
+        Box::pin(async {
+            self.stored
+                .as_ref()
+                .ok_or_else(ApiError::controller_unavailable)?
+                .try_send(())
+                .unwrap();
+            Ok(Ok(()))
+        })
+    }
+
+    fn prompt_history(
+        &self,
+        _session_id: String,
+        _query: String,
+        _scope: String,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        Result<Result<ViewerPromptHistory, String>, api::ApiFailure>,
+    > {
+        Box::pin(async {
+            self.stored
+                .as_ref()
+                .ok_or_else(ApiError::controller_unavailable)?
+                .try_send(())
+                .unwrap();
+            Ok(Ok(ViewerPromptHistory::default()))
+        })
+    }
+
+    fn create_bundle(
+        &self,
+        source: String,
+        _exact_sources: Option<Vec<String>>,
+        discovered: bool,
+        _include_project: bool,
+        admission: mj_core::upgrade::Work,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        Result<Result<CreateBundleResponse, BundleFailure>, api::ApiFailure>,
+    > {
+        Box::pin(async move {
+            let _admission = admission;
+            capture_viewer_call(
+                self.bundles
+                    .as_ref()
+                    .ok_or_else(ApiError::controller_unavailable)?,
+                |reply| BundleCall {
+                    source,
+                    discovered,
+                    reply,
+                },
+            )
+            .await
+        })
+    }
+
+    fn mark_conversation_read(
+        &self,
+        _client_id: String,
+        session_id: String,
+        through: u64,
+    ) -> mj_client::session::BoxFuture<'_, Result<Result<(), String>, api::ApiFailure>> {
+        Box::pin(async move {
+            capture_viewer_call(
+                self.receipts
+                    .as_ref()
+                    .ok_or_else(ApiError::controller_unavailable)?,
+                |reply| ReceiptCall {
+                    session_id,
+                    through,
+                    reply,
+                },
+            )
+            .await
+        })
+    }
+
+    fn preflight_new(
+        &self,
+        request: mj_client::daemon::NewSessionPreflightRequest,
+        _direct: bool,
+        admission: Option<mj_core::upgrade::Work>,
+        _shutdown: tokio_util::sync::CancellationToken,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        Result<Result<PreflightNew, PreflightFailure>, api::ApiFailure>,
+    > {
+        Box::pin(async move {
+            let _admission = admission;
+            let additional_mounts = request.additional_mounts;
+            capture_viewer_call(
+                self.preflights
+                    .as_ref()
+                    .ok_or_else(ApiError::controller_unavailable)?,
+                |reply| {
+                    NewPreflightCall {
+                        additional_mounts,
+                        reply,
+                    }
+                    .into()
+                },
+            )
+            .await
+        })
+    }
+
+    fn complete_path(
+        &self,
+        _host: CompletionHost,
+        prefix: String,
+        _kind: CompletionKind,
+    ) -> mj_client::session::BoxFuture<'_, Result<Result<PathCompletion, String>, api::ApiFailure>>
+    {
+        Box::pin(async move {
+            capture_viewer_call(
+                self.preflights
+                    .as_ref()
+                    .ok_or_else(ApiError::controller_unavailable)?,
+                |reply| CompletePathCall { prefix, reply }.into(),
+            )
+            .await
+        })
+    }
+
+    fn discover_projects(
+        &self,
+        _request: mj_import::project_picker::ProjectDiscoveryRequest,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        Result<Result<mj_import::project_picker::ProjectDiscovery, &'static str>, api::ApiFailure>,
+    > {
+        Box::pin(async move {
+            capture_viewer_call(
+                self.preflights
+                    .as_ref()
+                    .ok_or_else(ApiError::controller_unavailable)?,
+                |reply| DiscoverProjectsCall { reply }.into(),
+            )
+            .await
+        })
+    }
+
+    fn stop_background_task(
+        &self,
+        session_id: String,
+        background_task_id: String,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        Result<Result<(), BackgroundTaskStopFailure>, api::ApiFailure>,
+    > {
+        Box::pin(async move {
+            capture_viewer_call(
+                self.background_stops
+                    .as_ref()
+                    .ok_or_else(ApiError::controller_unavailable)?,
+                |reply| StopTaskCall {
+                    session_id,
+                    background_task_id,
+                    reply,
+                },
+            )
+            .await
+        })
+    }
+    fn session_handle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<mj_client::session::SessionHandle>>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn prompt(&self, _: String, _: String) -> futures::future::BoxFuture<'_, anyhow::Result<u64>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn turn_state(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TurnState>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn turn_summary(
+        &self,
+        _: String,
+        _: api::TurnSpan,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<api::TurnSummary>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_followup(
+        &self,
+        _: String,
+        _: api::StartFollowup,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_status(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::StartStatus>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn transcript(
+        &self,
+        _: String,
+        _: u64,
+        _: usize,
+        _: Vec<mj_core::transcript::TranscriptRole>,
+        _: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TranscriptPage>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn diff(
+        &self,
+        _: String,
+        _: api::DiffOptions,
+    ) -> futures::future::BoxFuture<'_, Result<String, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn read_file(
+        &self,
+        _: String,
+        _: std::path::PathBuf,
+        _: mj_checkpoint::archive::FetchMode,
+    ) -> futures::future::BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, api::ExportError>>
+    {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn push_branch(
+        &self,
+        _: String,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::PushedBranch, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn bundle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::BundleExport, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+
+    fn profile_config(
+        &self,
+        _profile: String,
+        model: Option<String>,
+        _refresh: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            anyhow::ensure!(self.settings_review, "profile configuration is unavailable");
+            Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.clone(),
+                models: vec![mj_core::acp::SessionConfigChoice {
+                    value: model.unwrap_or_else(|| "claude-sonnet-4.5".into()),
+                    name: "Sonnet 4.5".into(),
+                    description: None,
+                }],
+                efforts: vec![mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                }],
+                observed_at: 0,
+            })
+        })
+    }
+}
+
 type TestServer = (
     Router,
     mpsc::Receiver<ControllerRequest>,
-    mpsc::Receiver<ReadReceiptRequest>,
-    mpsc::Receiver<PreflightRequest>,
-    mpsc::Receiver<ClientStateRequest>,
+    mpsc::Receiver<ReceiptCall>,
+    mpsc::Receiver<PreflightCall>,
 );
 
 fn app() -> TestServer {
@@ -238,36 +637,22 @@ fn app_with_backend(
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
     let (_conversation_tx, conversation_rx) = watch::channel(conversations.into_iter().collect());
     let (action_tx, action_rx) = mpsc::channel(8);
-    let (bundle_tx, _bundle_rx) = mpsc::channel(8);
-    let (receipt_tx, receipt_rx) = mpsc::channel(8);
-    let (preflight_tx, preflight_rx) = mpsc::channel(8);
-    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, client_state_rx) = mpsc::channel(8);
-    let options = test_options(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    )
-    .with_test_credentials("123456", b"01234567890123456789012345678901");
+    let (receipt_calls, receipt_rx) = mpsc::channel(8);
+    let (preflight_calls, preflight_rx) = mpsc::channel(8);
+    let options = test_options(snapshot_rx, conversation_rx, action_tx)
+        .with_test_credentials("123456", b"01234567890123456789012345678901");
     let mut options = options;
-    if let Some(backend) = backend {
-        options.set_subagent_backend(backend);
-    }
-    (
-        router(options),
-        action_rx,
-        receipt_rx,
-        preflight_rx,
-        client_state_rx,
-    )
+    options.set_subagent_backend(backend.unwrap_or_else(|| {
+        Arc::new(ViewerBackend {
+            receipts: Some(receipt_calls),
+            preflights: Some(preflight_calls),
+            ..Default::default()
+        })
+    }));
+    (router(options), action_rx, receipt_rx, preflight_rx)
 }
 
-fn app_with_bundle_receiver() -> (Router, mpsc::Receiver<BundleRequest>) {
+fn app_with_bundle_receiver() -> (Router, mpsc::Receiver<BundleCall>) {
     let (app, bundles, _) = app_with_bundle_and_action_receivers(|_| {});
     (app, bundles)
 }
@@ -276,7 +661,7 @@ fn app_with_bundle_and_action_receivers(
     adjust: impl FnOnce(&mut ViewerSnapshot),
 ) -> (
     Router,
-    mpsc::Receiver<BundleRequest>,
+    mpsc::Receiver<BundleCall>,
     mpsc::Receiver<ControllerRequest>,
 ) {
     let (config, state) = sample_config_state();
@@ -286,22 +671,13 @@ fn app_with_bundle_and_action_receivers(
     let (_conversation_tx, conversation_rx) =
         watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, action_rx) = mpsc::channel(8);
-    let (bundle_tx, bundle_rx) = mpsc::channel(8);
-    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
-    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
-    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
-    let options = test_options(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    )
-    .with_test_credentials("123456", b"01234567890123456789012345678901");
+    let (bundle_calls, bundle_rx) = mpsc::channel(8);
+    let mut options = test_options(snapshot_rx, conversation_rx, action_tx)
+        .with_test_credentials("123456", b"01234567890123456789012345678901");
+    options.set_subagent_backend(Arc::new(ViewerBackend {
+        bundles: Some(bundle_calls),
+        ..Default::default()
+    }));
     (router(options), bundle_rx, action_rx)
 }
 
@@ -326,32 +702,17 @@ pub(super) fn test_browser_source(snapshot_rx: watch::Receiver<ViewerSnapshot>) 
     }
 }
 
-// Keep this test factory's arguments aligned with `ServerRequests`; each
-// channel is asserted independently by the HTTP behavior tests below.
-#[allow(clippy::too_many_arguments)]
 fn test_options(
     snapshot_rx: watch::Receiver<ViewerSnapshot>,
     conversation_rx: watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     action_tx: mpsc::Sender<ControllerRequest>,
-    bundle_tx: mpsc::Sender<BundleRequest>,
-    receipt_tx: mpsc::Sender<ReadReceiptRequest>,
-    preflight_tx: mpsc::Sender<PreflightRequest>,
-    move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
-    client_state_tx: mpsc::Sender<ClientStateRequest>,
 ) -> ServerOptions {
     let browser = test_browser_source(snapshot_rx.clone());
     ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
         snapshot_rx,
         conversation_rx,
-        ServerRequests {
-            action_tx,
-            bundle_tx,
-            receipt_tx,
-            preflight_tx,
-            move_preparation_tx,
-            client_state_tx,
-        },
+        ServerRequests { action_tx },
         browser,
     )
     .unwrap()
@@ -364,21 +725,7 @@ fn detached_options() -> ServerOptions {
     let (_conversation_tx, conversation_rx) =
         watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, _action_rx) = mpsc::channel(1);
-    let (bundle_tx, _bundle_rx) = mpsc::channel(1);
-    let (receipt_tx, _receipt_rx) = mpsc::channel(1);
-    let (preflight_tx, _preflight_rx) = mpsc::channel(1);
-    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(1);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(1);
-    test_options(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    )
+    test_options(snapshot_rx, conversation_rx, action_tx)
 }
 
 /// A valid session cookie for the test server's key.
@@ -421,9 +768,7 @@ async fn login_cookie(app: &Router) -> String {
         .to_string()
 }
 
-fn app_with_background_stop_receiver(
-    can_stop: bool,
-) -> (Router, mpsc::Receiver<BackgroundTaskStopRequest>) {
+fn app_with_background_stop_receiver(can_stop: bool) -> (Router, mpsc::Receiver<StopTaskCall>) {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].background_tasks = vec![ViewerBackgroundTask {
@@ -436,24 +781,13 @@ fn app_with_background_stop_receiver(
     let (_conversation_tx, conversation_rx) =
         watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, _action_rx) = mpsc::channel(8);
-    let (bundle_tx, _bundle_rx) = mpsc::channel(8);
-    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
-    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
-    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
     let (stop_tx, stop_rx) = mpsc::channel(8);
-    let mut options = test_options(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    )
-    .with_test_credentials("123456", b"01234567890123456789012345678901");
-    options.set_background_task_stop_tx(stop_tx);
+    let mut options = test_options(snapshot_rx, conversation_rx, action_tx)
+        .with_test_credentials("123456", b"01234567890123456789012345678901");
+    options.set_subagent_backend(Arc::new(ViewerBackend {
+        background_stops: Some(stop_tx),
+        ..Default::default()
+    }));
     options.set_api_token("test-api-token".into());
     (router(options), stop_rx)
 }
@@ -689,7 +1023,13 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
     });
     let request = bundles.recv().await.expect("bundle request forwarded");
     assert_eq!(request.source, "example/app");
-    request.reply.send(Ok("app".into())).unwrap();
+    request
+        .reply
+        .send(Ok(CreateBundleResponse {
+            bundle_id: "app".into(),
+            project: None,
+        }))
+        .unwrap();
     let response = response.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -720,7 +1060,7 @@ async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
 
 #[tokio::test]
 async fn viewer_snapshot_rejects_unauthenticated_requests_and_accepts_a_cookie() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     let unauthorized = app
         .clone()
         .oneshot(
@@ -1153,7 +1493,7 @@ async fn notification_message_reads_only_the_current_form_identity() {
 
 #[tokio::test]
 async fn elicitation_answer_is_typed_and_forwarded() {
-    let (app, mut actions, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
+    let (app, mut actions, _, _) = app_with_snapshot(pending_elicitation_snapshot);
     let cookie = login_cookie(&app).await;
     let response = mj_core::runtime::spawn(
         app.oneshot(
@@ -1184,7 +1524,7 @@ async fn elicitation_answer_is_typed_and_forwarded() {
 
 #[tokio::test]
 async fn elicitation_answer_for_an_unknown_request_is_refused_without_reaching_the_controller() {
-    let (app, mut actions, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
+    let (app, mut actions, _, _) = app_with_snapshot(pending_elicitation_snapshot);
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
@@ -1907,7 +2247,7 @@ async fn actions_are_refused_when_their_capability_is_false() {
             "interrupt_all",
         ),
     ] {
-        let (app, mut actions, _, _, _) = app();
+        let (app, mut actions, _, _) = app();
         for (header, credential) in [
             (COOKIE, cookie()),
             (
@@ -1941,7 +2281,7 @@ async fn actions_are_refused_when_their_capability_is_false() {
 
 #[tokio::test]
 async fn operator_away_action_is_sessionless_and_reaches_controller() {
-    let (app, mut actions, _, _, _) =
+    let (app, mut actions, _, _) =
         app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
     let cookie = login_cookie(&app).await;
     let posted = mj_core::runtime::spawn(post_action(
@@ -1960,7 +2300,7 @@ async fn operator_away_action_is_sessionless_and_reaches_controller() {
 
 #[tokio::test]
 async fn operator_activity_action_is_sessionless_and_reaches_controller() {
-    let (app, mut actions, _, _, _) =
+    let (app, mut actions, _, _) =
         app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
     let cookie = login_cookie(&app).await;
     let posted = mj_core::runtime::spawn(post_action(
@@ -2033,7 +2373,7 @@ async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             mj_core::config::ApprovalChoices::default(),
         );
-        let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+        let (app, mut actions, _, _) = app_with_snapshot(|snapshot| {
             let session = &mut snapshot.sessions[0];
             session.harness_kind = harness.id().into();
             session.capabilities.set_config = true;
@@ -2111,7 +2451,7 @@ async fn a_config_key_the_harness_never_advertised_is_refused() {
             "an unoffered value",
         ),
     ] {
-        let (app, mut actions, _, _, _) = app_with_snapshot(capable);
+        let (app, mut actions, _, _) = app_with_snapshot(capable);
         let response = post_action(app, cookie(), body.to_owned()).await;
         assert_eq!(
             response.status(),
@@ -2122,7 +2462,7 @@ async fn a_config_key_the_harness_never_advertised_is_refused() {
     }
 
     // The value the harness did advertise is forwarded unchanged.
-    let (app, mut actions, _, _, _) = app_with_snapshot(capable);
+    let (app, mut actions, _, _) = app_with_snapshot(capable);
     let response = mj_core::runtime::spawn(post_action(
         app,
         cookie(),
@@ -2157,7 +2497,7 @@ async fn a_dirty_acknowledgement_is_bounded_and_names_repositories() {
         (oversized.as_str(), "an unbounded acknowledgement"),
         (r#""""#, "an empty repository name"),
     ] {
-        let (app, mut actions, _, _, _) = app();
+        let (app, mut actions, _, _) = app();
         let body = format!(
             r#"{{"action":"new","workspace_id":"default","profile_id":"codex-1","bundle_id":"hel","target_id":"podman","dirty_ack":[{ack}]}}"#
         );
@@ -2209,7 +2549,15 @@ fn a_tampered_cookie_is_refused() {
 /// the daemon's database with text it never sent.
 #[tokio::test]
 async fn an_oversized_draft_is_refused_with_a_stable_code() {
-    let (app, _, _, _, mut stored) = app();
+    let (stored_tx, mut stored) = mpsc::channel(1);
+    let (app, ..) = app_with_backend(
+        BTreeMap::new(),
+        |_| {},
+        Some(Arc::new(ViewerBackend {
+            stored: Some(stored_tx),
+            ..Default::default()
+        })),
+    );
     let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
     let response = app
         .oneshot(
@@ -2230,7 +2578,15 @@ async fn an_oversized_draft_is_refused_with_a_stable_code() {
 /// A search that is not a search is refused before it reaches a database.
 #[tokio::test]
 async fn prompt_history_refuses_an_unknown_scope() {
-    let (app, _, _, _, mut stored) = app();
+    let (stored_tx, mut stored) = mpsc::channel(1);
+    let (app, ..) = app_with_backend(
+        BTreeMap::new(),
+        |_| {},
+        Some(Arc::new(ViewerBackend {
+            stored: Some(stored_tx),
+            ..Default::default()
+        })),
+    );
     let response = app
         .oneshot(
             Request::get("/api/v1/sessions/session-1/prompt-history?q=ship&scope=everything")
@@ -2251,10 +2607,10 @@ async fn prompt_history_refuses_an_unknown_scope() {
 /// before committing, and it refuses an impossible combination there
 /// rather than after the commit.
 /// Every preflight test in this module asks about a new session; a resume
-/// preflight shares the channel but never these fixtures.
-fn new_preflight(request: PreflightRequest) -> NewPreflightRequest {
+/// preflight uses a separate method and never uses these fixtures.
+fn new_preflight(request: PreflightCall) -> NewPreflightCall {
     match request {
-        PreflightRequest::New(request) => request,
+        PreflightCall::New(request) => request,
         other => panic!("expected a new-session preflight, got {other:?}"),
     }
 }
@@ -2273,7 +2629,7 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
         "profile_id": "codex-1", "bundle_id": "hel", "target_id": "podman",
         "additional_mounts": mounts,
     });
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights) = app();
     let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/v1/preflight/new")
@@ -2297,7 +2653,7 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
         serde_json::json!({"error": "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host"})
     );
 
-    let (app, mut actions, _, _, _) = self::app();
+    let (app, mut actions, _, _) = self::app();
     let mut body = body;
     body["action"] = "new".into();
     let response = mj_core::runtime::spawn(post_action(app, cookie(), body.to_string()));
@@ -2358,7 +2714,7 @@ async fn new_session_mount_boundaries_refuse_unsafe_and_unsupported_paths() {
                 ]),
             ),
         ] {
-            let (app, mut actions, _, mut preflights, _) = app();
+            let (app, mut actions, _, mut preflights) = app();
             let mut body = serde_json::json!({
                 "profile_id": "codex-1", "bundle_id": "hel", "target_id": target,
                 "project_directory": directory, "additional_mounts": mounts,
@@ -2397,7 +2753,7 @@ async fn new_session_mount_boundaries_refuse_unsafe_and_unsupported_paths() {
 /// A session the projection does not have never reaches the controller.
 #[tokio::test]
 async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_controller() {
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights) = app();
     let response = app
         .oneshot(
             Request::post("/api/v1/preflight/resume")
@@ -2416,7 +2772,7 @@ async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_contro
 
 #[tokio::test]
 async fn a_bare_preflight_validation_failure_is_actionable_without_its_details() {
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights) = app();
     let response = mj_core::runtime::spawn(app.oneshot(
         Request::post("/api/v1/preflight/new")
             .header(COOKIE, cookie())
@@ -2445,7 +2801,7 @@ async fn a_bare_preflight_validation_failure_is_actionable_without_its_details()
 
 #[tokio::test]
 async fn a_bundle_preflight_controller_failure_keeps_the_generic_service_error() {
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights) = app();
     let response = mj_core::runtime::spawn(
         app.oneshot(
             Request::post("/api/v1/preflight/new")
@@ -2495,7 +2851,7 @@ async fn a_path_completion_rejects_unknown_targets_and_oversized_prefixes() {
             "an oversized prefix",
         ),
     ] {
-        let (app, _, _, mut preflights, _) = app();
+        let (app, _, _, mut preflights) = app();
         let response = app
             .oneshot(
                 Request::post("/api/v1/paths/complete")
@@ -2517,7 +2873,7 @@ async fn a_path_completion_rejects_unknown_targets_and_oversized_prefixes() {
 /// Directory completion must authenticate the caller before asking the controller.
 #[tokio::test]
 async fn a_path_completion_requires_authentication_before_dispatch() {
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights) = app();
     let request =
         || Request::post("/api/v1/paths/complete").header(CONTENT_TYPE, "application/json");
     let body = r#"{"prefix":"/srv/"}"#;
@@ -2537,7 +2893,7 @@ async fn a_path_completion_requires_authentication_before_dispatch() {
                 .unwrap(),
         ),
     );
-    let PreflightRequest::CompletePath(request) = preflights.recv().await.unwrap() else {
+    let PreflightCall::CompletePath(request) = preflights.recv().await.unwrap() else {
         panic!("expected path completion");
     };
     assert_eq!(request.prefix, "/srv/");
@@ -3019,7 +3375,7 @@ async fn browser_attachment_upload_returns_a_stored_reference_without_inline_byt
     ) {
         return;
     }
-    let (app, _, _, _, _) = app_with_snapshot(image_capable);
+    let (app, _, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
@@ -3117,7 +3473,7 @@ async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
     if !in_isolated_store("multi_image_prompts_are_accepted_over_the_general_body_limit") {
         return;
     }
-    let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
+    let (app, mut actions, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let image = sample_valid_image();
     let mut body = serde_json::to_string(&ControllerAction::Prompt {
@@ -3141,7 +3497,7 @@ async fn oversized_normalized_inline_image_prompt_writes_no_blobs() {
     if !in_isolated_store("oversized_normalized_inline_image_prompt_writes_no_blobs") {
         return;
     }
-    let (app, _, _, _, _) = app_with_snapshot(image_capable);
+    let (app, _, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let empty = mj_core::relay::RelayCommand::Prompt {
         prompt: vec!["".into()],
@@ -3176,7 +3532,7 @@ async fn oversized_normalized_inline_image_prompt_writes_no_blobs() {
 
 #[tokio::test]
 async fn viewer_prompt_returns_the_worker_queue_refusal_as_conflict() {
-    let (app, mut actions, _, _, _) = app();
+    let (app, mut actions, _, _) = app();
     let cookie = login_cookie(&app).await;
     let response = mj_core::runtime::spawn(post_action(app, cookie, r#"{"action":"prompt","session_id":"session-1","command_id":"viewer-full-queue","text":"do the work","images":[]}"#.to_owned()));
     let action = actions.recv().await.unwrap();
@@ -3196,7 +3552,7 @@ async fn viewer_prompt_returns_the_worker_queue_refusal_as_conflict() {
 
 #[tokio::test]
 async fn a_body_over_the_prompt_limit_is_still_refused() {
-    let (app, _actions, _, _, _) = app_with_snapshot(image_capable);
+    let (app, _actions, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let image = sample_image(MAX_PROMPT_BODY_BYTES);
     let body = serde_json::to_string(&ControllerAction::Prompt {
@@ -3220,7 +3576,7 @@ async fn malformed_image_payloads_never_reach_the_controller() {
         ("", "image/png", 32, 24),
     ];
     for (data, mime, width, height) in cases {
-        let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
+        let (app, mut actions, _, _) = app_with_snapshot(image_capable);
         let cookie = login_cookie(&app).await;
         let body = serde_json::to_string(&ControllerAction::Prompt {
             command_id: None,
@@ -3368,7 +3724,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
 
 #[tokio::test]
 async fn confirmed_move_action_forwards_the_fingerprinted_request() {
-    let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+    let (app, mut actions, _, _) = app_with_snapshot(|snapshot| {
         snapshot.sessions[0].capabilities.move_session = true;
     });
     let cookie = login_cookie(&app).await;
@@ -3958,7 +4314,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
 // Hard-won: 69a3c1d3: signed-out loads hit the protected snapshot and logged a 401.
 #[tokio::test]
 async fn session_status_answers_signed_out_without_an_error_status() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     let status = |cookie: Option<String>| {
         let app = app.clone();
         async move {
@@ -3993,7 +4349,7 @@ async fn session_status_answers_signed_out_without_an_error_status() {
 
 #[tokio::test]
 async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed() {
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| snapshot.server_time_ms = 1);
+    let (app, _, _, _) = app_with_snapshot(|snapshot| snapshot.server_time_ms = 1);
     let cookie = login_cookie(&app).await;
     for _ in 0..2 {
         let before = mj_core::clock::epoch_millis();
@@ -4017,7 +4373,7 @@ async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed
 
 #[tokio::test]
 async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_interned_fields() {
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+    let (app, _, _, _) = app_with_snapshot(|snapshot| {
         snapshot.notices.push(mj_client::daemon::RuntimeNotice {
             id: 1,
             session_id: "removed-session".into(),
@@ -4146,8 +4502,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
         .map(Arc::new)
         .collect(),
     };
-    let (app, _, _, _, _) =
-        app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
+    let (app, _, _, _) = app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
     let cookie = login_cookie(&app).await;
     let response = app
         .clone()
@@ -4232,7 +4587,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
         .map(Arc::new)
         .collect(),
     };
-    let (app, _, _, _, _) = app_with(
+    let (app, _, _, _) = app_with(
         BTreeMap::from([("session-1".into(), transcript)]),
         |snapshot| snapshot.sessions[0].transitioning = true,
     );
@@ -4251,7 +4606,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
 
 #[tokio::test]
 async fn viewer_turn_control_preserves_an_exact_restart_target() {
-    let (app, mut actions, _, _, _) = app();
+    let (app, mut actions, _, _) = app();
     let cookie = login_cookie(&app).await;
     let command = mj_core::relay::RelayCommand::CancelTurnTarget {
         target: mj_core::relay::TurnInterruptTarget::QueuedRestart {
@@ -4286,7 +4641,7 @@ async fn viewer_turn_control_preserves_an_exact_restart_target() {
 // Hard-won: feddc733: receipt feedback loop consumed action slots and rejected real actions.
 #[tokio::test]
 async fn conversation_read_receipt_never_contends_with_a_running_action() {
-    let (app, mut actions, mut receipts, _, _) = app();
+    let (app, mut actions, mut receipts, _) = app();
     let cookie = login_cookie(&app).await;
     // A prompt for the same session stays in flight for the whole test, so
     // a receipt that still travelled the action pipeline would either
@@ -4379,7 +4734,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
             "is unavailable",
         ),
     ] {
-        let (app, mut actions, _, _, _) = app();
+        let (app, mut actions, _, _) = app();
         let cookie = login_cookie(&app).await;
         let response = mj_core::runtime::spawn(
             app.oneshot(
@@ -4416,7 +4771,7 @@ async fn the_viewer_shows_a_session_whose_action_failed_after_it_was_accepted() 
     // An accepted action reports its outcome only through snapshots, so
     // the application has to react to `has_error` for a late failure to be
     // visible at all.
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     let script = fetch_text(app, "/viewer.js").await;
     assert!(script.contains("has_error"), "viewer ignores has_error");
 }
@@ -4432,7 +4787,7 @@ async fn every_response_carries_the_security_headers() {
         "/manifest.webmanifest",
         "/api/v1/snapshot",
     ] {
-        let (app, _, _, _, _) = app();
+        let (app, _, _, _) = app();
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
@@ -4473,7 +4828,7 @@ async fn every_response_carries_the_security_headers() {
 /// no Rust test would otherwise notice.
 #[tokio::test]
 async fn the_page_carries_no_inline_script_or_style() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     let page = fetch_text(app, "/").await;
     assert!(
         !page.contains("<script>") && !page.contains("<style>"),
@@ -4490,7 +4845,7 @@ async fn the_page_carries_no_inline_script_or_style() {
 #[tokio::test]
 async fn live_state_and_the_service_worker_are_never_stored() {
     for path in ["/service-worker.js", "/api/v1/snapshot"] {
-        let (app, _, _, _, _) = app();
+        let (app, _, _, _) = app();
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
@@ -4521,7 +4876,7 @@ async fn shell_assets_revalidate_with_strong_content_etags() {
         "/apple-touch-icon.png",
         "/fonts/jetbrains-mono.woff2",
     ] {
-        let (app, _, _, _, _) = app();
+        let (app, _, _, _) = app();
         let response = app
             .clone()
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
@@ -4561,7 +4916,7 @@ async fn shell_assets_revalidate_with_strong_content_etags() {
 
 #[tokio::test]
 async fn viewer_responses_negotiate_fast_compression() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     for (encoding, expected) in [("gzip", "gzip"), ("br", "br")] {
         let response = app
             .clone()
@@ -4650,7 +5005,7 @@ async fn viewer_responses_negotiate_fast_compression() {
 
 #[tokio::test]
 async fn server_sent_events_stay_uncompressed_and_yield_the_first_event() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
@@ -4709,7 +5064,7 @@ async fn fetch_text(app: Router, path: &str) -> String {
 
 #[tokio::test]
 async fn repeated_wrong_codes_lock_the_login_endpoint() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _) = app();
     let attempt = |code: &'static str| {
         let app = app.clone();
         async move {
@@ -5314,7 +5669,7 @@ if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown'
 
 #[tokio::test]
 async fn project_discovery_returns_actionable_failures_and_closes_abandoned_replies() {
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights) = app();
     let make_request = || {
         Request::post("/api/v1/projects/discover")
             .header(COOKIE, cookie())
@@ -5323,7 +5678,7 @@ async fn project_discovery_returns_actionable_failures_and_closes_abandoned_repl
             .unwrap()
     };
     let response = mj_core::runtime::spawn(app.clone().oneshot(make_request()));
-    let PreflightRequest::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
+    let PreflightCall::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
         panic!("discovery");
     };
     let message = "GitHub login is unavailable or expired. Run gh auth login on the machine running discovery, then retry.";
@@ -5334,7 +5689,7 @@ async fn project_discovery_returns_actionable_failures_and_closes_abandoned_repl
     assert!(String::from_utf8_lossy(&body).contains(message));
 
     let response = mj_core::runtime::spawn(app.oneshot(make_request()));
-    let PreflightRequest::DiscoverProjects(mut request) = preflights.recv().await.unwrap() else {
+    let PreflightCall::DiscoverProjects(mut request) = preflights.recv().await.unwrap() else {
         panic!("discovery");
     };
     response.abort();
@@ -5378,17 +5733,8 @@ async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
         for shutdown in [false, true] {
             let (snapshots, snapshot_rx) = watch::channel(ViewerSnapshot::default());
             let (_, conversation_rx) = watch::channel(mj_core::snapshot_map::SnapshotMap::new());
-            let options = test_options(
-                snapshot_rx,
-                conversation_rx,
-                mpsc::channel(1).0,
-                mpsc::channel(1).0,
-                mpsc::channel(1).0,
-                mpsc::channel(1).0,
-                mpsc::channel(1).0,
-                mpsc::channel(1).0,
-            )
-            .with_test_credentials("123456", b"01234567890123456789012345678901");
+            let options = test_options(snapshot_rx, conversation_rx, mpsc::channel(1).0)
+                .with_test_credentials("123456", b"01234567890123456789012345678901");
             let cancellation = options.shutdown.clone();
             let app = router(options);
             let cookie = login_cookie(&app).await;
@@ -5956,7 +6302,10 @@ async fn resume_validates_the_workspace_against_the_store_not_the_published_list
     let (app, mut actions, ..) = app_with_backend(
         BTreeMap::new(),
         |snapshot| assert!(snapshot.workspaces.is_empty()),
-        Some(Arc::new(SettingsReviewBackend)),
+        Some(Arc::new(ViewerBackend {
+            settings_review: true,
+            ..Default::default()
+        })),
     );
     let cookie = login_cookie(&app).await;
     let mut session = mj_store::database::test_fixtures::checkpoint_test_session("session-1");
@@ -6000,110 +6349,6 @@ async fn resume_validates_the_workspace_against_the_store_not_the_published_list
     assert!(actions.try_recv().is_err());
 }
 
-struct SettingsReviewBackend;
-
-impl api::SubagentBackend for SettingsReviewBackend {
-    fn session_handle(
-        &self,
-        _: String,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<mj_client::session::SessionHandle>>>
-    {
-        Box::pin(async { Ok(None) })
-    }
-    fn prompt(&self, _: String, _: String) -> futures::future::BoxFuture<'_, anyhow::Result<u64>> {
-        Box::pin(async { anyhow::bail!("unused") })
-    }
-    fn turn_state(
-        &self,
-        _: String,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TurnState>>> {
-        Box::pin(async { Ok(None) })
-    }
-    fn turn_summary(
-        &self,
-        _: String,
-        _: api::TurnSpan,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<api::TurnSummary>> {
-        Box::pin(async { anyhow::bail!("unused") })
-    }
-    fn start_followup(
-        &self,
-        _: String,
-        _: api::StartFollowup,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
-        Box::pin(async { anyhow::bail!("unused") })
-    }
-    fn start_status(
-        &self,
-        _: String,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::StartStatus>>> {
-        Box::pin(async { Ok(None) })
-    }
-    fn transcript(
-        &self,
-        _: String,
-        _: u64,
-        _: usize,
-        _: Vec<mj_core::transcript::TranscriptRole>,
-        _: bool,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TranscriptPage>>> {
-        Box::pin(async { Ok(None) })
-    }
-    fn diff(
-        &self,
-        _: String,
-        _: api::DiffOptions,
-    ) -> futures::future::BoxFuture<'_, Result<String, api::ExportError>> {
-        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
-    }
-    fn read_file(
-        &self,
-        _: String,
-        _: std::path::PathBuf,
-        _: mj_checkpoint::archive::FetchMode,
-    ) -> futures::future::BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, api::ExportError>>
-    {
-        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
-    }
-    fn push_branch(
-        &self,
-        _: String,
-        _: String,
-    ) -> futures::future::BoxFuture<'_, Result<api::PushedBranch, api::ExportError>> {
-        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
-    }
-    fn bundle(
-        &self,
-        _: String,
-    ) -> futures::future::BoxFuture<'_, Result<api::BundleExport, api::ExportError>> {
-        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
-    }
-
-    fn profile_config(
-        &self,
-        _profile: String,
-        model: Option<String>,
-        _refresh: bool,
-    ) -> futures::future::BoxFuture<'_, anyhow::Result<mj_core::worker_launch::ProfileConfig>> {
-        Box::pin(async move {
-            Ok(mj_core::worker_launch::ProfileConfig {
-                model: model.clone(),
-                models: vec![mj_core::acp::SessionConfigChoice {
-                    value: model.unwrap_or_else(|| "claude-sonnet-4.5".into()),
-                    name: "Sonnet 4.5".into(),
-                    description: None,
-                }],
-                efforts: vec![mj_core::acp::SessionConfigChoice {
-                    value: "high".into(),
-                    name: "High".into(),
-                    description: None,
-                }],
-                observed_at: 0,
-            })
-        })
-    }
-}
-
 #[tokio::test]
 async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     if !in_isolated_store("settings_review_autoconfigure_returns_preset_draft_without_saving") {
@@ -6129,7 +6374,10 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     let (app, ..) = app_with_backend(
         BTreeMap::new(),
         move |snapshot| snapshot.profile_capabilities = capabilities.into(),
-        Some(Arc::new(SettingsReviewBackend)),
+        Some(Arc::new(ViewerBackend {
+            settings_review: true,
+            ..Default::default()
+        })),
     );
     let cookie = login_cookie(&app).await;
     let (status, body) = settings_request(&app, &cookie, "/api/v1/settings", None).await;
@@ -6209,7 +6457,7 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
         sink.student_notice(notice);
     }
     let notices = notices.lock().unwrap().clone();
-    let (app, _, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
+    let (app, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
@@ -6315,7 +6563,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         },
     }));
     mj_store::database::save_materialized_session(&history).unwrap();
-    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+    let (app, _, _, _) = app_with_snapshot(|snapshot| {
         snapshot.sessions[0].notification_card = Some(NotificationCard {
             since_ms: 0,
             badge: NotificationKind::Important,
@@ -6503,4 +6751,43 @@ await switched;
 assert.match(other.text(), /standalone output/);
 "#;
     run_viewer_script("tool-detail-fold", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[tokio::test]
+async fn migrated_terminal_routes_reject_browser_and_external_bearer_before_json() {
+    let (app, _, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    for (header, credential) in [
+        (COOKIE, cookie),
+        (
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-api-token".into(),
+        ),
+    ] {
+        for (method, path) in [
+            ("GET", "/api/v1/setup/configuration"),
+            ("GET", "/api/v1/terminal/api-credential"),
+            ("GET", "/api/v1/terminal/web-viewer/access"),
+            ("POST", "/api/v1/setup/save"),
+            ("POST", "/api/v1/setup/profiles/rename"),
+            ("POST", "/api/v1/setup/targets/rename"),
+            ("POST", "/api/v1/recovery/destroy"),
+            ("POST", "/api/v1/machines/build-cache/install"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header.clone(), &credential)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from("{"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
 }

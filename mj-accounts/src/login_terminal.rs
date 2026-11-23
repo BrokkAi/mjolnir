@@ -1,10 +1,8 @@
 //! Daemon-owned disposable login terminals. No worker state or handoff admission.
 use anyhow::{Context, Result};
 use mj_client::daemon::login_terminal::{TerminalInput, TerminalOutput};
-use mj_client::daemon::{read_frame, write_frame};
 use portable_pty::{CommandBuilder, PtySize};
 use std::io::{Read, Write};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -171,13 +169,17 @@ fn size(cols: u16, rows: u16) -> PtySize {
 
 /// Serve a prepared command. Tests pass a real fixture command through this
 /// same connection executor; production passes this daemon's login entrypoint.
-pub async fn serve(
-    mut stream: TcpStream,
+pub async fn serve_channels(
+    mut input: mpsc::Receiver<TerminalInput>,
+    output: mpsc::Sender<TerminalOutput>,
     command: CommandBuilder,
     cols: u16,
     rows: u16,
     cancellation: CancellationToken,
 ) -> Result<()> {
+    if cancellation.is_cancelled() || output.is_closed() {
+        return Ok(());
+    }
     let started = mj_core::runtime::spawn_blocking(move || {
         let pair = portable_pty::native_pty_system().openpty(size(cols, rows))?;
         let reader = pair.master.try_clone_reader()?;
@@ -198,20 +200,20 @@ pub async fn serve(
     let (pair, mut process, mut reader, mut writer) = match started {
         Ok(started) => started,
         Err(error) => {
-            write_frame(
-                &mut stream,
-                &TerminalOutput::Failed(format!("Start login terminal: {error:#}")),
-            )
-            .await?;
+            let _ = output
+                .send(TerminalOutput::Failed(format!(
+                    "Start login terminal: {error:#}"
+                )))
+                .await;
             return Ok(());
         }
     };
     drop(pair.slave);
-    let master = Master(std::sync::Mutex::new(Some(pair.master)));
+    let master = std::sync::Arc::new(Master(std::sync::Mutex::new(Some(pair.master))));
     // A one-chunk rendezvous keeps output backpressure at the PTY instead of
     // accumulating the entire login transcript in daemon memory.
     let (output_tx, mut output_rx) = mpsc::channel(1);
-    let output = mj_core::runtime::spawn_blocking(move || -> Result<()> {
+    let reading = mj_core::runtime::spawn_blocking(move || -> Result<()> {
         let mut bytes = [0u8; 8192];
         let mut forwarding = true;
         loop {
@@ -233,33 +235,35 @@ pub async fn serve(
             }
         }
     });
-    let (mut read, mut write) = stream.into_split();
-    // Keep reading TCP while the harness is not reading its terminal. Otherwise
-    // input backpressure hides EOF and a disconnected login cannot be killed.
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let disconnected = cancellation.child_token();
-    let guard = disconnected.clone().drop_guard();
-    let input = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(async move {
-        let _guard = guard;
-        loop {
-            let frame: TerminalInput = read_frame(&mut read).await?;
-            if input_tx.send(frame).is_err() {
-                return Ok::<(), anyhow::Error>(());
+    let input_master = master.clone();
+    let writer_cancel = cancellation.child_token();
+    let input_cancel = writer_cancel.clone();
+    let mut writing = mj_core::runtime::spawn_blocking(move || -> Result<()> {
+        while let Some(frame) = tokio::runtime::Handle::current().block_on(async {
+            tokio::select! {
+                biased;
+                _ = input_cancel.cancelled() => None,
+                frame = input.recv() => frame,
             }
-        }
-    }));
-    let (bytes_tx, mut bytes_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writing = mj_core::runtime::spawn_blocking(move || -> Result<()> {
-        while let Some(bytes) = bytes_rx.blocking_recv() {
-            writer.write_all(&bytes)?;
-            writer.flush()?;
+        }) {
+            match frame {
+                TerminalInput::Bytes(bytes) => {
+                    writer.write_all(&bytes)?;
+                    writer.flush()?;
+                }
+                TerminalInput::Resize { cols, rows } => {
+                    if let Some(master) = input_master.lock().unwrap().as_ref() {
+                        master.resize(size(cols, rows))?;
+                    }
+                }
+            }
         }
         Ok(())
     });
     let mut exited = observe_exit(&process)?;
     let mut observed = false;
     let mut closing = None;
-    let mut interrupted_write = false;
+    let mut writer_joined = false;
     let result: Result<bool> = async {
         loop {
             tokio::select! {
@@ -269,32 +273,33 @@ pub async fn serve(
                     process.terminate();
                     closing = close_console_on_exit(&master);
                 }
-                _ = disconnected.cancelled() => {
-                    // Connection cancellation is the retry boundary, not login success.
-                    return Ok(false);
-                }
-                frame = input_rx.recv() => match frame {
-                    Some(TerminalInput::Bytes(bytes)) => {
-                        bytes_tx.send(bytes).context("login input writer stopped")?;
+                _ = cancellation.cancelled() => return Ok(false),
+                _ = output.closed() => return Ok(false),
+                result = &mut writing, if !writer_joined => {
+                    writer_joined = true;
+                    let outcome = result.context("join login input writer")?;
+                    if !observed {
+                        outcome?;
+                        return Ok(false);
                     }
-                    Some(TerminalInput::Resize { cols, rows }) => {
-                        if let Some(master) = master.lock().unwrap().as_ref() { master.resize(size(cols, rows))?; }
-                    },
-                    None => return Ok(false),
-                },
+                    if let Err(error) = outcome {
+                        tracing::debug!(%error, "login terminal input ended");
+                    }
+                }
                 bytes = output_rx.recv() => match bytes {
                     Some(bytes) => {
                         let frame = TerminalOutput::Bytes(bytes);
                         tokio::select! {
-                            _ = disconnected.cancelled() => { interrupted_write = true; return Ok(false); },
-                            result = write_frame(&mut write, &frame) => result?,
+                            _ = cancellation.cancelled() => return Ok(false),
+                            result = output.send(frame) => if result.is_err() { return Ok(false); },
                         }
                     },
                     None => return Ok(true),
                 }
             }
         }
-    }.await;
+    }
+    .await;
     // The connection has stopped forwarding output. Release the receiver now so
     // the reader discards PTY output from here on: the root writes to the
     // terminal while it exits (its cancellation error goes to stderr), and a
@@ -307,15 +312,7 @@ pub async fn serve(
         exited.await.context("join login exit observer")??;
     }
     process.terminate();
-    input.abort();
-    match input.await {
-        Ok(Err(error)) => tracing::debug!(%error, "login terminal input ended"),
-        Err(error) if !error.is_cancelled() => {
-            tracing::warn!(%error, "login terminal input task failed")
-        }
-        _ => {}
-    }
-    drop(bytes_tx);
+    writer_cancel.cancel();
     if let Some(closing) = closing {
         closing.await.context("close login console")?;
     }
@@ -325,22 +322,16 @@ pub async fn serve(
     })
     .await
     .context("join login child wait")??;
-    output.await.context("join login output reader")??;
-    writing.await.context("join login input writer")??;
+    reading.await.context("join login output reader")??;
+    if !writer_joined && let Err(error) = writing.await.context("join login input writer")? {
+        tracing::debug!(%error, "login terminal input ended");
+    }
     if result? {
-        write_frame(
-            &mut write,
-            &TerminalOutput::Exited {
+        let _ = output
+            .send(TerminalOutput::Exited {
                 code: status.exit_code(),
-            },
-        )
-        .await?;
-    } else if cancellation.is_cancelled() && !interrupted_write {
-        write_frame(
-            &mut write,
-            &TerminalOutput::Failed("The daemon stopped or handed off; retry Login.".into()),
-        )
-        .await?;
+            })
+            .await;
     }
     Ok(())
 }
@@ -352,11 +343,8 @@ mod tests {
     // Hard-won: 29354e991: a disconnect left the root blocked writing to a full PTY while cleanup waited for its exit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn disconnect_cleanup_drains_output_the_exiting_root_writes() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (server, _) = listener.accept().await.unwrap();
+        let (_input, input_rx) = mpsc::channel(1);
+        let (output, mut client) = mpsc::channel(1);
         // On hangup the root writes far more than the one-chunk channel and the
         // PTY buffer hold, as a root's exit output can when nobody reads it.
         let mut command = CommandBuilder::new("/bin/sh");
@@ -365,11 +353,17 @@ mod tests {
             "trap 'head -c 1048576 /dev/zero | tr \"\\000\" x; exit 0' HUP; \
              printf ready; while :; do sleep 0.05; done",
         ]);
-        let serving =
-            mj_core::runtime::spawn(serve(server, command, 80, 24, CancellationToken::new()));
+        let serving = mj_core::runtime::spawn(serve_channels(
+            input_rx,
+            output,
+            command,
+            80,
+            24,
+            CancellationToken::new(),
+        ));
         let mut transcript = Vec::new();
         while !transcript.ends_with(b"ready") {
-            match read_frame::<TerminalOutput>(&mut client).await.unwrap() {
+            match client.recv().await.unwrap() {
                 TerminalOutput::Bytes(bytes) => transcript.extend(bytes),
                 other => panic!("login ended before it was ready: {other:?}"),
             }

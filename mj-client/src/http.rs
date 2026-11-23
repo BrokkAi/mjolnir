@@ -1,14 +1,32 @@
 //! Typed access to the daemon's direct HTTP API.
-use crate::daemon::{DaemonClient, ssh::SshLease};
-use anyhow::{Context, Result};
+use crate::daemon::{
+    DaemonClient, DaemonMetadata, DaemonRefusal, DaemonTransportLost, connect_existing,
+    connector::DaemonConnector, ssh::SshLease,
+};
+use anyhow::{Context, Result, ensure};
+use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
-use reqwest::header::{CONTENT_TYPE, HeaderMap};
-use reqwest::{Method, RequestBuilder, Response, StatusCode};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::{Method, Request, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
 
+mod projects;
 mod sessions;
+mod terminal;
+mod terminal_operations;
+mod terminal_streams;
+pub use terminal::{ContainerSettingsRequest, ContainerSettingsResponse};
+pub use terminal_operations::*;
+pub use terminal_streams::*;
+mod workspaces;
+
+pub use workspaces::{
+    DiscardDraftsRequest, ReadReceiptRequest, RecoveredDraft, TerminalDraftRequest,
+};
 
 pub use sessions::{
     SessionWorkingContext, StopBackgroundTaskRequest, WikiRestoreBody, WikiRestoreResponse,
@@ -30,6 +48,16 @@ pub(crate) fn proof_nonce() -> Result<String> {
     getrandom::fill(&mut random)
         .map_err(|error| anyhow::anyhow!("generate HTTP proof nonce: {error}"))?;
     Ok(mj_core::hex::lower_hex(random))
+}
+
+fn encode_segment(segment: &str) -> Result<String> {
+    // The URL parser resolves dot segments even when percent-encoded.
+    ensure!(
+        !matches!(segment, "" | "." | ".."),
+        "invalid API path segment"
+    );
+    let encoded: String = url::form_urlencoded::byte_serialize(segment.as_bytes()).collect();
+    Ok(encoded.replace('+', "%20"))
 }
 
 fn proof_mac(token: &str, nonce: &str) -> Hmac<Sha256> {
@@ -57,13 +85,70 @@ pub fn verify_http_api_proof(token: &str, nonce: &str, mac_hex: &str) -> bool {
 }
 
 pub struct HttpDaemonClient {
+    endpoint: RwLock<EndpointState>,
+    connector: Option<Arc<DaemonConnector>>,
+    allow_reconnect: bool,
+    http: reqwest::Client,
+    #[cfg(test)]
+    test_reconnect: Option<TestReconnect>,
+}
+
+#[cfg(test)]
+type TestReconnect = Box<
+    dyn Fn() -> crate::session::BoxFuture<'static, Result<Option<EndpointState>>> + Send + Sync,
+>;
+
+#[derive(Clone)]
+struct EndpointState {
     base_url: String,
     token: String,
     instance_id: Option<String>,
     shares_client_filesystem: bool,
-    http: reqwest::Client,
-    _ssh_lease: Option<Arc<SshLease>>,
+    previous_metadata: Option<DaemonMetadata>,
+    ssh_lease: Option<Arc<SshLease>>,
+    generation: u64,
 }
+
+impl EndpointState {
+    fn new(base_url: String, token: String) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            token,
+            instance_id: None,
+            shares_client_filesystem: false,
+            previous_metadata: None,
+            ssh_lease: None,
+            generation: 0,
+        }
+    }
+
+    async fn resolve(client: &mut DaemonClient) -> Result<Option<Self>> {
+        let identity = client.identity().await?;
+        let Some((base_url, token)) = client.direct_api_endpoint(&identity)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            instance_id: Some(identity.instance_id.clone()),
+            shares_client_filesystem: client.shares_client_filesystem(&identity),
+            previous_metadata: Some(client.metadata().clone()),
+            ssh_lease: client.ssh_lease(),
+            ..Self::new(base_url, token)
+        }))
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    fn authorize(&self, request: &mut Request) -> Result<()> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.token))?;
+        authorization.set_sensitive(true);
+        request.headers_mut().insert(AUTHORIZATION, authorization);
+        Ok(())
+    }
+}
+
+const MISSING_ENDPOINT: &str = "The daemon did not publish a loopback HTTP API endpoint. If it predates the loopback HTTP API, update and restart the daemon.";
 
 #[derive(Debug)]
 pub struct HttpApiError {
@@ -91,7 +176,7 @@ impl HttpApiError {
             && (self.handoff_header || self.code.as_deref() == Some("daemon_handoff"))
     }
 
-    async fn from_response(response: Response) -> Self {
+    async fn from_response(response: Response) -> reqwest::Result<Self> {
         #[derive(Deserialize)]
         struct ErrorBody {
             error: String,
@@ -104,83 +189,187 @@ impl HttpApiError {
             || headers
                 .get("x-mj-upgrade")
                 .is_some_and(|value| value == "pending");
-        let body = response.text().await.unwrap_or_default();
+        let body = response.text().await?;
         let (message, code) = match serde_json::from_str::<ErrorBody>(&body) {
             Ok(error) => (error.error, error.code),
             Err(_) if body.trim().is_empty() => (status.to_string(), None),
             Err(_) => (body, None),
         };
-        Self {
+        Ok(Self {
             status,
             code,
             message,
             handoff_header,
-        }
+        })
     }
 }
 
 impl HttpDaemonClient {
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        Self::with_endpoint(
+            EndpointState::new(base_url.into(), token.into()),
+            None,
+            false,
+        )
+    }
+
+    fn with_endpoint(
+        endpoint: EndpointState,
+        connector: Option<Arc<DaemonConnector>>,
+        allow_reconnect: bool,
+    ) -> Result<Self> {
         // The workspace's reqwest build leaves provider selection to its caller.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
-            token: token.into(),
-            instance_id: None,
-            shares_client_filesystem: false,
+            endpoint: RwLock::new(endpoint),
+            connector,
+            allow_reconnect,
             http,
-            _ssh_lease: None,
+            #[cfg(test)]
+            test_reconnect: None,
         })
     }
 
     pub async fn from_daemon_client(client: &mut DaemonClient) -> Result<Self> {
-        let identity = client.identity().await?;
-        let (base_url, token) = client.direct_api_endpoint(&identity)?.context(
-            "The daemon did not publish a loopback HTTP API endpoint. If it predates the loopback HTTP API, update and restart the daemon.",
-        )?;
-        let mut http = Self::new(base_url, token)?;
-        http.shares_client_filesystem = client.shares_client_filesystem(&identity);
-        http.instance_id = Some(identity.instance_id);
-        http._ssh_lease = client.ssh_lease();
-        Ok(http)
+        let endpoint = EndpointState::resolve(client)
+            .await?
+            .context(MISSING_ENDPOINT)?;
+        Self::with_endpoint(endpoint, client.connector().cloned(), true)
     }
 
-    pub fn instance_id(&self) -> Option<&str> {
-        self.instance_id.as_deref()
+    pub async fn instance_id(&self) -> Option<String> {
+        self.endpoint.read().await.instance_id.clone()
     }
 
-    pub fn shares_client_filesystem(&self) -> bool {
-        self.shares_client_filesystem
+    pub async fn shares_client_filesystem(&self) -> bool {
+        self.endpoint.read().await.shares_client_filesystem
     }
 
-    fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        self.http
-            .request(
-                method,
-                format!("{}/{}", self.base_url, path.trim_start_matches('/')),
-            )
-            .bearer_auth(&self.token)
+    async fn refresh_daemon_endpoint(&self, stale: &EndpointState) -> Result<EndpointState> {
+        if let Some(connector) = &self.connector {
+            let previous = stale
+                .previous_metadata
+                .as_ref()
+                .context("missing daemon metadata for HTTP reconnect")?;
+            let mut client = connector.refresh(previous).await?;
+            return EndpointState::resolve(&mut client)
+                .await?
+                .context(MISSING_ENDPOINT);
+        }
+        loop {
+            // Accept whichever endpoint is currently published, including the
+            // original daemon if an abandoned handoff reopens admission after
+            // its drain lapses. While it is still draining, the outer retry
+            // loop receives another explicit handoff refusal and backs off.
+            if let Some(endpoint) = self.local_endpoint().await? {
+                return Ok(endpoint);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
-    async fn send(request: RequestBuilder) -> Result<Response> {
-        let response = request.send().await?;
+    async fn local_endpoint(&self) -> Result<Option<EndpointState>> {
+        #[cfg(test)]
+        if let Some(reconnect) = &self.test_reconnect {
+            return reconnect().await;
+        }
+        let Ok(mut client) = connect_existing().await else {
+            return Ok(None);
+        };
+        match EndpointState::resolve(&mut client).await {
+            Err(error)
+                if error.is::<DaemonTransportLost>()
+                    || error
+                        .downcast_ref::<DaemonRefusal>()
+                        .is_some_and(|refusal| {
+                            refusal.0.starts_with("daemon is shutting down;")
+                        }) =>
+            {
+                Ok(None)
+            }
+            result => result,
+        }
+    }
+
+    async fn refresh_endpoint(&self, stale: &EndpointState) -> Result<EndpointState> {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut endpoint = self.endpoint.write().await;
+        if endpoint.generation == stale.generation {
+            let mut replacement = self.refresh_daemon_endpoint(stale).await?;
+            replacement.generation = endpoint.generation + 1;
+            *endpoint = replacement;
+        }
+        Ok(endpoint.clone())
+    }
+
+    async fn send_once(http: &reqwest::Client, request: Request) -> Result<Response> {
+        let response = http.execute(request).await?;
         if !response.status().is_success() {
-            return Err(HttpApiError::from_response(response).await.into());
+            return Err(HttpApiError::from_response(response).await?.into());
         }
         Ok(response)
     }
 
-    async fn json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T> {
-        Ok(Self::send(request).await?.json().await?)
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        configure: impl FnOnce(RequestBuilder) -> RequestBuilder,
+        reconnect: bool,
+    ) -> Result<(Response, Option<Arc<SshLease>>)> {
+        let mut endpoint = self.endpoint.read().await.clone();
+        let mut request = configure(self.http.request(method, endpoint.url(path))).build()?;
+        endpoint.authorize(&mut request)?;
+        if !reconnect || !self.allow_reconnect {
+            return Ok((
+                Self::send_once(&self.http, request).await?,
+                endpoint.ssh_lease,
+            ));
+        }
+        loop {
+            let attempt = request
+                .try_clone()
+                .context("HTTP request body cannot be replayed")?;
+            match Self::send_once(&self.http, attempt).await {
+                Err(error)
+                    if error
+                        .downcast_ref::<HttpApiError>()
+                        .is_some_and(HttpApiError::is_handoff) =>
+                {
+                    // Only explicit non-admission permits replay. Keep the
+                    // serialized body and query from the original attempt.
+                    endpoint = self.refresh_endpoint(&endpoint).await?;
+                    let mut url = url::Url::parse(&endpoint.url(path))?;
+                    url.set_query(request.url().query());
+                    *request.url_mut() = url;
+                    endpoint.authorize(&mut request)?;
+                }
+                result => return Ok((result?, endpoint.ssh_lease)),
+            }
+        }
+    }
+
+    async fn json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        configure: impl FnOnce(RequestBuilder) -> RequestBuilder,
+        reconnect: bool,
+    ) -> Result<T> {
+        // Keep the exact forward that delivered the response while reading its
+        // body. Other calls may have already refreshed the client endpoint.
+        let (response, _lease) = self.send(method, path, configure, reconnect).await?;
+        Ok(response.json().await?)
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        Self::json(self.request(Method::GET, path)).await
+        self.json(Method::GET, path, |request| request, true).await
     }
 
     pub async fn get_json_query<T: DeserializeOwned>(
@@ -188,7 +377,17 @@ impl HttpDaemonClient {
         path: &str,
         query: &(impl Serialize + ?Sized),
     ) -> Result<T> {
-        Self::json(self.request(Method::GET, path).query(query)).await
+        self.json(Method::GET, path, |request| request.query(query), true)
+            .await
+    }
+
+    async fn get_json_query_once<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &(impl Serialize + ?Sized),
+    ) -> Result<T> {
+        self.json(Method::GET, path, |request| request.query(query), false)
+            .await
     }
 
     pub async fn post_json<T: DeserializeOwned>(
@@ -196,11 +395,26 @@ impl HttpDaemonClient {
         path: &str,
         body: &(impl Serialize + ?Sized),
     ) -> Result<T> {
-        Self::json(self.request(Method::POST, path).json(body)).await
+        self.json(Method::POST, path, |request| request.json(body), true)
+            .await
     }
 
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        Self::json(self.request(Method::POST, path)).await
+        self.json(Method::POST, path, |request| request, true).await
+    }
+
+    async fn post_empty_once<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.json(Method::POST, path, |request| request, false)
+            .await
+    }
+
+    pub async fn post_empty_query<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &(impl Serialize + ?Sized),
+    ) -> Result<T> {
+        self.json(Method::POST, path, |request| request.query(query), true)
+            .await
     }
 
     pub async fn put_json<T: DeserializeOwned>(
@@ -208,11 +422,13 @@ impl HttpDaemonClient {
         path: &str,
         body: &(impl Serialize + ?Sized),
     ) -> Result<T> {
-        Self::json(self.request(Method::PUT, path).json(body)).await
+        self.json(Method::PUT, path, |request| request.json(body), true)
+            .await
     }
 
     pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        Self::json(self.request(Method::DELETE, path)).await
+        self.json(Method::DELETE, path, |request| request, true)
+            .await
     }
 
     pub async fn post_json_no_content(
@@ -220,12 +436,24 @@ impl HttpDaemonClient {
         path: &str,
         body: &(impl Serialize + ?Sized),
     ) -> Result<()> {
-        Self::send(self.request(Method::POST, path).json(body)).await?;
+        self.send(Method::POST, path, |request| request.json(body), true)
+            .await?;
         Ok(())
     }
 
     pub async fn post_empty_no_content(&self, path: &str) -> Result<()> {
-        Self::send(self.request(Method::POST, path)).await?;
+        self.send(Method::POST, path, |request| request, true)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn patch_json_no_content(
+        &self,
+        path: &str,
+        body: &(impl Serialize + ?Sized),
+    ) -> Result<()> {
+        self.send(Method::PATCH, path, |request| request.json(body), true)
+            .await?;
         Ok(())
     }
 
@@ -234,33 +462,50 @@ impl HttpDaemonClient {
         path: &str,
         body: &(impl Serialize + ?Sized),
     ) -> Result<()> {
-        Self::send(self.request(Method::PUT, path).json(body)).await?;
+        self.send(Method::PUT, path, |request| request.json(body), true)
+            .await?;
         Ok(())
     }
 
     pub async fn delete_no_content(&self, path: &str) -> Result<()> {
-        Self::send(self.request(Method::DELETE, path)).await?;
+        self.send(Method::DELETE, path, |request| request, true)
+            .await?;
         Ok(())
     }
 
     pub async fn post_bytes<T: DeserializeOwned>(
         &self,
         path: &str,
-        body: impl Into<reqwest::Body>,
+        body: impl Into<Bytes>,
         content_type: &str,
         headers: Option<HeaderMap>,
     ) -> Result<T> {
-        let request = self.request(Method::POST, path).body(body);
-        let request = match headers {
-            Some(headers) => request.headers(headers),
-            None => request,
-        };
-        Self::json(request.header(CONTENT_TYPE, content_type)).await
+        let body = body.into();
+        self.json(
+            Method::POST,
+            path,
+            |request| {
+                let request = request.body(body);
+                let request = match headers {
+                    Some(headers) => request.headers(headers),
+                    None => request,
+                };
+                request.header(CONTENT_TYPE, content_type)
+            },
+            true,
+        )
+        .await
     }
 
-    /// Keep this client alive until the stream is consumed to retain its SSH forward.
+    /// Keep a dedicated client alive until the stream is consumed to retain its SSH forward.
     pub async fn get_stream(&self, path: &str) -> Result<Response> {
-        Self::send(self.request(Method::GET, path)).await
+        let (mut response, lease) = self
+            .send(Method::GET, path, |request| request, false)
+            .await?;
+        if let Some(lease) = lease {
+            response.extensions_mut().insert(lease);
+        }
+        Ok(response)
     }
 }
 
@@ -269,6 +514,601 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const HANDOFF: &str = r#"{"error":"restarting","code":"daemon_handoff"}"#;
+    const UNAVAILABLE: &str = "503 Service Unavailable";
+
+    async fn read_request(
+        listener: &TcpListener,
+    ) -> (BufReader<TcpStream>, String, HeaderMap, Vec<u8>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut first_line = String::new();
+        stream.read_line(&mut first_line).await.unwrap();
+        let mut headers = HeaderMap::new();
+        loop {
+            let mut line = String::new();
+            assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            let (name, value) = line.split_once(':').unwrap();
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.trim().parse().unwrap(),
+            );
+        }
+        let mut body = Vec::new();
+        if headers
+            .get("transfer-encoding")
+            .is_some_and(|encoding| encoding == "chunked")
+        {
+            loop {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let length = usize::from_str_radix(line.trim_end(), 16).unwrap();
+                if length == 0 {
+                    line.clear();
+                    stream.read_line(&mut line).await.unwrap();
+                    assert_eq!(line, "\r\n");
+                    break;
+                }
+                let offset = body.len();
+                body.resize(offset + length, 0);
+                stream.read_exact(&mut body[offset..]).await.unwrap();
+                let mut end = [0; 2];
+                stream.read_exact(&mut end).await.unwrap();
+                assert_eq!(&end, b"\r\n");
+            }
+        } else if let Some(length) = headers.get("content-length") {
+            body.resize(length.to_str().unwrap().parse().unwrap(), 0);
+            stream.read_exact(&mut body).await.unwrap();
+        }
+        (stream, first_line.trim_end().to_owned(), headers, body)
+    }
+
+    async fn respond(mut stream: BufReader<TcpStream>, status: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    fn reconnecting_client(
+        initial: &TcpListener,
+        replacement: Option<&TcpListener>,
+    ) -> (HttpDaemonClient, Arc<AtomicUsize>) {
+        let mut client = HttpDaemonClient::new(
+            format!("http://{}", initial.local_addr().unwrap()),
+            "endpoint-secret",
+        )
+        .unwrap();
+        client.allow_reconnect = true;
+        client.endpoint.get_mut().instance_id = Some("original-instance".into());
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let count = reconnects.clone();
+        let replacement = replacement.map(|listener| {
+            let mut endpoint = EndpointState::new(
+                format!("http://{}/replacement", listener.local_addr().unwrap()),
+                "replacement-secret".into(),
+            );
+            endpoint.instance_id = Some("next-instance".into());
+            endpoint.shares_client_filesystem = true;
+            endpoint
+        });
+        client.test_reconnect = Some(Box::new(move || {
+            let probe = count.fetch_add(1, Ordering::SeqCst);
+            let replacement = replacement.clone();
+            Box::pin(async move {
+                let replacement = replacement.context("unexpected reconnect")?;
+                // Simulate the handoff gap where the old daemon has exited and
+                // the replacement has not yet published its endpoint.
+                Ok((probe > 0).then_some(replacement))
+            })
+        }));
+        (client, reconnects)
+    }
+
+    #[tokio::test]
+    async fn runtime_changes_reads_reset_and_exposes_shutdown_without_replay() {
+        use crate::runtime_feed::RuntimeFrame;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&listener, None);
+        let server = async {
+            for (status, body) in [
+                (
+                    "200 OK",
+                    serde_json::to_string(&RuntimeFrame::ResetRequired).unwrap(),
+                ),
+                (UNAVAILABLE, HANDOFF.to_owned()),
+            ] {
+                let (request, path, _, json) = read_request(&listener).await;
+                assert_eq!(path, "POST /api/v1/runtime/changes HTTP/1.1");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&json).unwrap(),
+                    json!({"cursor": null, "wait": true, "subagent_parents": ["parent"]})
+                );
+                respond(request, status, &body).await;
+            }
+        };
+        let (_, ()) = tokio::join!(server, async {
+            let changes = || {
+                client.runtime_changes_for_subagent_parents(
+                    None,
+                    true,
+                    ["parent".to_owned()].into(),
+                )
+            };
+            assert!(matches!(
+                changes().await.unwrap(),
+                RuntimeFrame::ResetRequired
+            ));
+            assert!(changes().await.unwrap_err().is::<DaemonTransportLost>());
+        });
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn adoption_dispatches_split_ndjson_progress_before_the_final_result() {
+        use crate::daemon::{RecoveryAdoptionProgress, RecoveryAdoptionRequest};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&listener, None);
+        let (observed, mut progress) = tokio::sync::mpsc::unbounded_channel();
+        let server = async {
+            let (mut request, path, _, _) = read_request(&listener).await;
+            assert_eq!(path, "POST /api/v1/recovery/adopt HTTP/1.1");
+            request.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"event\":\"wait").await.unwrap();
+            request.write_all(b"ing\",\"blockers\":[\"active turn\"],\"destroy_command\":\"mj recover destroy\"}\n").await.unwrap();
+            match progress.recv().await.unwrap() {
+                RecoveryAdoptionProgress::Waiting {
+                    blockers,
+                    destroy_command,
+                } => {
+                    assert_eq!(blockers, ["active turn"]);
+                    assert_eq!(destroy_command.as_deref(), Some("mj recover destroy"));
+                }
+                other => panic!("unexpected progress {other:?}"),
+            }
+            request
+                .write_all(b"{\"event\":\"installed\",\"session_id\":\"orphan\"}\n")
+                .await
+                .unwrap();
+            assert!(
+                matches!(progress.recv().await.unwrap(), RecoveryAdoptionProgress::Installed { session_id } if session_id == "orphan")
+            );
+            request.write_all(b"{\"event\":\"done\"}\n").await.unwrap();
+        };
+        let request = RecoveryAdoptionRequest {
+            session_id: "orphan".into(),
+            target_id: "bare".into(),
+            profile: None,
+            bundle: None,
+            all_instances: false,
+        };
+        let (_, outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                server,
+                client.adopt_recovery(request, |event| observed.send(event).unwrap())
+            )
+        })
+        .await
+        .unwrap();
+        outcome.unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn login_input_stays_on_the_endpoint_that_opened_the_output() {
+        use crate::daemon::login_terminal::{TerminalInput, TerminalOutput};
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let next = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, Some(&next));
+        let server = async {
+            let (mut output, path, _, body) = read_request(&initial).await;
+            assert_eq!(path, "POST /api/v1/login-terminal HTTP/1.1");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"profile_id":"codex","cols":80,"rows":24})
+            );
+            output.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nx-mjolnir-terminal-id: abc123\r\nConnection: close\r\n\r\n{\"Bytes\":[65]}\n").await.unwrap();
+            let (input, path, headers, body) = read_request(&initial).await;
+            assert_eq!(path, "POST /api/v1/login-terminal/abc123/input HTTP/1.1");
+            assert_eq!(headers[AUTHORIZATION], "Bearer endpoint-secret");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"Resize":{"cols":120,"rows":40}})
+            );
+            respond(input, "204 No Content", "").await;
+            output
+                .write_all(b"{\"Exited\":{\"code\":7}}\n")
+                .await
+                .unwrap();
+        };
+        let exchange = async {
+            let mut terminal = client
+                .open_login_terminal("codex".into(), 80, 24)
+                .await
+                .unwrap();
+            *client.endpoint.write().await = EndpointState::new(
+                format!("http://{}", next.local_addr().unwrap()),
+                "other-secret".into(),
+            );
+            assert!(
+                matches!(terminal.next_output().await.unwrap(), TerminalOutput::Bytes(bytes) if bytes == b"A")
+            );
+            terminal
+                .send_input(TerminalInput::Resize {
+                    cols: 120,
+                    rows: 40,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                terminal.next_output().await.unwrap(),
+                TerminalOutput::Exited { code: 7 }
+            ));
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, exchange);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn install_mbx_exposes_handoff_without_replaying_the_install() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+        let server = async {
+            let (stream, line, _, body) = read_request(&initial).await;
+            assert_eq!(line, "POST /api/v1/machines/build-cache/install HTTP/1.1");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"machine": {"kind": "local"}})
+            );
+            respond(stream, UNAVAILABLE, HANDOFF).await;
+        };
+        let (_, result) = tokio::join!(
+            server,
+            client.install_mbx(mj_core::config::Machine::Local { build_cache: None })
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<HttpApiError>()
+                .unwrap()
+                .is_handoff()
+        );
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn import_rewinds_after_explicit_handoff_and_refreshes_the_endpoint() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, Some(&replacement));
+        let metadata = ImportSessionMetadata {
+            session: serde_json::from_value(json!({
+                "id": "import-session",
+                "title": "Imported",
+                "harness_kind": "codex",
+                "last_profile": "codex",
+                "bundle_id": "project",
+                "target_template_id": "local",
+                "state": "stopped",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap(),
+            bundle: None,
+        };
+        let archive = vec![0x27; 128 * 1024];
+        let staged = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(staged.path(), &archive).await.unwrap();
+        let mut file = tokio::fs::File::open(staged.path()).await.unwrap();
+        let phases = std::cell::RefCell::new(Vec::new());
+        let server = async {
+            let (connection, line, headers, first) = read_request(&initial).await;
+            assert_eq!(line, "POST /api/v1/sessions/import HTTP/1.1");
+            assert_eq!(headers[AUTHORIZATION], "Bearer endpoint-secret");
+            let header_len = u32::from_be_bytes(first[..4].try_into().unwrap()) as usize;
+            assert_eq!(&first[4 + header_len..], &archive);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&first[4..4 + header_len]).unwrap()["session"]["id"],
+                "import-session"
+            );
+            respond(connection, UNAVAILABLE, HANDOFF).await;
+
+            let (connection, line, headers, replay) = read_request(&replacement).await;
+            assert_eq!(line, "POST /replacement/api/v1/sessions/import HTTP/1.1");
+            assert_eq!(headers[AUTHORIZATION], "Bearer replacement-secret");
+            assert_eq!(replay, first);
+            respond(connection, "204 No Content", "").await;
+        };
+        let import = client.import_session_observed(
+            metadata,
+            &mut file,
+            |uploading| {
+                phases.borrow_mut().push(uploading);
+                std::future::ready(Ok(()))
+            },
+            std::future::pending(),
+        );
+        let ((), result) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, import)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(*phases.borrow(), [true, false, true, false]);
+        assert_eq!(reconnects.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn create_wait_distinguishes_shutdown_from_creation_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&listener, None);
+        let server = async {
+            for (status, body) in [
+                (UNAVAILABLE, r#"{"error":"the server is shutting down"}"#),
+                (
+                    "500 Internal Server Error",
+                    r#"{"error":"checkout failed"}"#,
+                ),
+            ] {
+                let (stream, line, _, _) = read_request(&listener).await;
+                assert_eq!(line, "POST /api/v1/sessions/session-1/create/wait HTTP/1.1");
+                respond(stream, status, body).await;
+            }
+        };
+        let requests = async {
+            let shutdown = client
+                .wait_create_session("session-1".into())
+                .await
+                .unwrap_err();
+            assert!(shutdown.is::<DaemonTransportLost>());
+            let failed = client
+                .wait_create_session("session-1".into())
+                .await
+                .unwrap_err();
+            assert!(failed.is::<DaemonRefusal>());
+            assert_eq!(failed.to_string(), "checkout failed");
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_renewal_and_detach_return_without_reconnecting_during_handoff() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+
+        let server = async {
+            for action in ["attach", "detach"] {
+                let (stream, line, _, _) = read_request(&initial).await;
+                assert_eq!(
+                    line,
+                    format!("POST /api/v1/terminal-clients/display-client/{action} HTTP/1.1")
+                );
+                respond(stream, UNAVAILABLE, HANDOFF).await;
+            }
+        };
+        let requests = async {
+            assert!(!client.try_attach("display-client".into()).await.unwrap());
+            let error = client.detach("display-client".into()).await.unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<HttpApiError>()
+                    .is_some_and(HttpApiError::is_handoff)
+            );
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_handoff_refusals_refresh_once_and_replay_exact_requests() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, Some(&replacement));
+        let payload = Bytes::from(vec![0x9b; 128 * 1024]);
+        let body = json!({"name":"updated"});
+        let server = async {
+            let mut attempts = std::collections::BTreeMap::new();
+            let mut streams = Vec::new();
+            // Hold the refusals until all requests are in flight at the same endpoint.
+            for _ in 0..6 {
+                let (stream, line, headers, body) = read_request(&initial).await;
+                assert_eq!(headers[AUTHORIZATION], "Bearer endpoint-secret");
+                assert!(attempts.insert(line, (headers, body)).is_none());
+                streams.push(stream);
+            }
+            for stream in streams {
+                respond(stream, UNAVAILABLE, HANDOFF).await;
+            }
+            for _ in 0..6 {
+                let (stream, line, headers, body) = read_request(&replacement).await;
+                let initial = line.replacen("/replacement/", "/", 1);
+                let (previous_headers, previous_body) = attempts.remove(&initial).unwrap();
+                assert_eq!(headers[AUTHORIZATION], "Bearer replacement-secret");
+                for name in [CONTENT_TYPE.as_str(), "x-upload-name", "x-command-id"] {
+                    assert_eq!(headers.get(name), previous_headers.get(name));
+                }
+                assert_eq!(body, previous_body);
+                respond(stream, "200 OK", r#"{"ok":true}"#).await;
+            }
+            assert!(attempts.is_empty());
+        };
+        let requests = async {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-upload-name", "fixture".parse().unwrap());
+            headers.insert("x-command-id", "test-command".parse().unwrap());
+            let (posted, (), (), (), uploaded, queried) = tokio::try_join!(
+                client.post_json::<Value>("/create", &body),
+                client.rename_workspace("workspace/id".into(), "updated".into()),
+                client.put_json_no_content("/update", &body),
+                client.remove_project("bundle".into()),
+                client.post_bytes::<Value>(
+                    "/upload",
+                    payload,
+                    "application/octet-stream",
+                    Some(headers)
+                ),
+                client.post_empty_query::<Value>("/projects", &[("retry", "true")]),
+            )
+            .unwrap();
+            assert_eq!(posted, json!({"ok":true}));
+            assert_eq!(uploaded, posted);
+            assert_eq!(queried, posted);
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 2);
+        assert_eq!(client.instance_id().await.as_deref(), Some("next-instance"));
+        assert!(client.shares_client_filesystem().await);
+    }
+
+    #[tokio::test]
+    async fn abandoned_handoff_resumes_against_the_same_daemon() {
+        let daemon = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = HttpDaemonClient::new(
+            format!("http://{}", daemon.local_addr().unwrap()),
+            "endpoint-secret",
+        )
+        .unwrap();
+        client.allow_reconnect = true;
+        client.endpoint.get_mut().instance_id = Some("original-instance".into());
+        let same_endpoint = client.endpoint.get_mut().clone();
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let count = reconnects.clone();
+        client.test_reconnect = Some(Box::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            let endpoint = same_endpoint.clone();
+            Box::pin(async move { Ok(Some(endpoint)) })
+        }));
+        let server = async {
+            // Drain refuses twice, then lapses and the original daemon accepts.
+            for _ in 0..2 {
+                let (stream, line, _, _) = read_request(&daemon).await;
+                assert_eq!(line, "POST /api/v1/workspaces/sample/touch HTTP/1.1");
+                respond(stream, UNAVAILABLE, HANDOFF).await;
+            }
+            let (stream, line, _, _) = read_request(&daemon).await;
+            assert_eq!(line, "POST /api/v1/workspaces/sample/touch HTTP/1.1");
+            respond(stream, "204 No Content", "").await;
+        };
+        let ((), result) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, client.touch_workspace("sample".into()))
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            client.instance_id().await.as_deref(),
+            Some("original-instance")
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_acknowledgement_does_not_replay_a_mutation() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+        let body = json!({"name":"maybe saved"});
+        let server = async {
+            let (stream, line, _, received) = read_request(&initial).await;
+            assert_eq!(line, "POST /create HTTP/1.1");
+            assert_eq!(serde_json::from_slice::<Value>(&received).unwrap(), body);
+            drop(stream);
+        };
+        let (_, error) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, client.post_json::<Value>("/create", &body))
+        })
+        .await
+        .unwrap();
+        assert!(error.unwrap_err().is::<reqwest::Error>());
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn ordinary_service_failures_and_conflicts_do_not_replay_mutations() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+        let server = async {
+            for (status, body) in [
+                (UNAVAILABLE, r#"{"error":"unavailable"}"#),
+                ("409 Conflict", HANDOFF),
+            ] {
+                let (stream, line, _, _) = read_request(&initial).await;
+                assert_eq!(line, "DELETE /remove HTTP/1.1");
+                respond(stream, status, body).await;
+            }
+        };
+        let requests = async {
+            for status in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::CONFLICT] {
+                let error = client.delete_no_content("/remove").await.unwrap_err();
+                let error = error.downcast_ref::<HttpApiError>().unwrap();
+                assert_eq!(error.status(), status);
+                assert!(!error.is_handoff());
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn wiki_episode_and_stream_requests_expose_handoff_without_reconnect() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+        let server = async {
+            for expected in [
+                "POST /api/v1/wiki/sync HTTP/1.1",
+                "GET /api/v1/wiki/sync/watch?epoch=original&after=17 HTTP/1.1",
+                "GET /api/v1/wiki/search?q=words&limit=2 HTTP/1.1",
+                "GET /api/v1/events HTTP/1.1",
+            ] {
+                let (stream, line, _, _) = read_request(&initial).await;
+                assert_eq!(line, expected);
+                respond(stream, UNAVAILABLE, HANDOFF).await;
+            }
+        };
+        let requests = async {
+            for error in [
+                client.wiki_sync_request().await.unwrap_err(),
+                client.wiki_sync_watch("original", 17).await.unwrap_err(),
+                client.wiki_search("words", 2).await.unwrap_err(),
+                client.get_stream("/api/v1/events").await.unwrap_err(),
+            ] {
+                assert!(error.downcast_ref::<HttpApiError>().unwrap().is_handoff());
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn authenticates_json_and_binary_requests_and_decodes_api_failures() {
@@ -303,26 +1143,9 @@ mod tests {
                     r#"{"error":"restarting","code":"daemon_handoff"}"#,
                 ),
             ] {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut stream = BufReader::new(stream);
-                let mut first_line = String::new();
-                stream.read_line(&mut first_line).await.unwrap();
+                let (stream, first_line, headers, body) = read_request(&listener).await;
                 let method = if path == "/error" { "GET" } else { "POST" };
-                assert_eq!(first_line.trim_end(), format!("{method} {path} HTTP/1.1"));
-
-                let mut headers = HeaderMap::new();
-                loop {
-                    let mut line = String::new();
-                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
-                    if line == "\r\n" {
-                        break;
-                    }
-                    let (name, value) = line.split_once(':').unwrap();
-                    headers.insert(
-                        reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                        value.trim().parse().unwrap(),
-                    );
-                }
+                assert_eq!(first_line, format!("{method} {path} HTTP/1.1"));
                 assert_eq!(headers["authorization"], "Bearer endpoint-secret");
                 assert_eq!(
                     headers["user-agent"],
@@ -335,18 +1158,8 @@ mod tests {
                     assert_eq!(headers["x-upload-name"], "fixture");
                 }
 
-                let length = headers
-                    .get("content-length")
-                    .map(|length| length.to_str().unwrap().parse().unwrap())
-                    .unwrap_or(0);
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).await.unwrap();
                 assert_eq!(body, request_body);
-                let response = format!(
-                    "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                    response_body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
+                respond(stream, response_status, response_body).await;
             }
         };
 
@@ -379,3 +1192,7 @@ mod tests {
         .unwrap();
     }
 }
+
+pub mod machines;
+pub mod repositories;
+pub mod setup;

@@ -237,9 +237,9 @@ pub async fn prepare_harness_launch(
 /// shims. Provider launch APIs accept an executable path, so those get a private
 /// launcher rather than depending on the bridge's PATH again.
 pub(super) async fn freeze_node_entrypoints(
-    root: &Path,
+    setup: tempfile::TempDir,
     launch: &mut PreparedHarnessLaunch,
-) -> Result<()> {
+) -> Result<tempfile::TempDir> {
     let bridge_uses_node = uses_env_node(&launch.spec.command).await?;
     let mut providers = Vec::new();
     for name in ["CODEX_PATH", "CLAUDE_CODE_EXECUTABLE", "MUSE_CLI"] {
@@ -250,7 +250,7 @@ pub(super) async fn freeze_node_entrypoints(
         }
     }
     if !bridge_uses_node && providers.is_empty() {
-        return Ok(());
+        return Ok(setup);
     }
     let mut probe = tokio::process::Command::new("node");
     probe
@@ -276,8 +276,10 @@ pub(super) async fn freeze_node_entrypoints(
             .insert(0, launch.spec.command.to_string_lossy().into_owned());
         launch.spec.command = node.clone();
     }
-    let root = root.join("node-entrypoints");
-    let providers = mj_core::runtime::spawn_blocking(move || -> Result<_> {
+    let (providers, setup) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
+        // The blocking writer owns its generation until it finishes, even if
+        // preparation stopped waiting for it.
+        let root = setup.path().join("node-entrypoints");
         let mut launchers = Vec::new();
         if !providers.is_empty() {
             std::fs::create_dir_all(&root)?;
@@ -296,7 +298,7 @@ pub(super) async fn freeze_node_entrypoints(
             super::shell_environment::write_executable(&launcher, &script)?;
             launchers.push((name, launcher));
         }
-        Ok(launchers)
+        Ok((launchers, setup))
     })
     .await
     .context("prepare Node entrypoint launchers")??;
@@ -305,7 +307,7 @@ pub(super) async fn freeze_node_entrypoints(
         launch.environment.insert(name.into(), launcher.clone());
         launch.spec.environment.insert(name.into(), launcher);
     }
-    Ok(())
+    Ok(setup)
 }
 
 async fn uses_env_node(path: &Path) -> Result<bool> {

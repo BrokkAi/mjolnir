@@ -43,6 +43,8 @@ impl DashboardContext {
             let seeded = async {
                 crate::daemon::connect_or_start()
                     .await?
+                    .http()
+                    .await?
                     .stored_projection_tail(session_id.clone(), mj_chat::chat::TAIL_SEED_ITEMS)
                     .await
             }

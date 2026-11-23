@@ -50,40 +50,29 @@ pub(super) fn install_renamed_controller(state: &RuntimeState, controller: Contr
     state.publish_revision();
 }
 
-pub(super) fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot> {
-    let workspace = mj_controller::database::workspace_record(workspace_id)?
-        .with_context(|| format!("unknown workspace {workspace_id:?}"))?;
-    let ids = mj_controller::database::session_ids_for_workspace(workspace_id)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let controller = Controller::load()?;
-    let sessions = controller
-        .state
-        .sessions
-        .values()
-        .filter(|session| session.state.is_active() && ids.contains(&session.id))
-        .map(|session| SessionPreview {
-            id: session.id.clone(),
-            title: session.listed_title().to_owned(),
-            project: session.project_name(&controller.config),
-            harness: session.harness_kind.display_name().to_owned(),
-            state: session.state.as_str().to_owned(),
-            active: session.state.is_active(),
-            updated_at: session.updated_at.clone(),
-        })
-        .collect();
-    let drafts = mj_controller::database::list_detached_drafts(workspace_id)?
-        .into_iter()
-        .map(|draft| draft_preview(draft, &controller.state.sessions))
-        .collect();
-    Ok(WorkspaceSnapshot {
-        workspace,
-        sessions,
-        drafts,
-    })
+impl RuntimeState {
+    pub(crate) async fn list_workspace_drafts(&self) -> Result<Vec<WorkspaceDrafts>> {
+        let drafts = blocking(mj_controller::database::list_all_detached_drafts).await?;
+        let mut grouped: Vec<WorkspaceDrafts> = Vec::new();
+        let sessions = self.session_records();
+        for draft in drafts {
+            let workspace_id = draft.workspace_id.clone();
+            let preview = draft_preview(draft, &sessions);
+            match grouped.last_mut() {
+                Some(group) if group.workspace_id == workspace_id => {
+                    group.drafts.push(preview);
+                }
+                _ => grouped.push(WorkspaceDrafts {
+                    workspace_id,
+                    drafts: vec![preview],
+                }),
+            }
+        }
+        Ok(grouped)
+    }
 }
 
-pub(super) fn draft_preview(
+fn draft_preview(
     draft: mj_core::workspace::DetachedDraft,
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
 ) -> DraftPreview {

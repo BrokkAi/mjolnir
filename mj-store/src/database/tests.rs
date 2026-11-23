@@ -4786,7 +4786,9 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
             assert_eq!(drafts[0].source, "tui-client-a");
             assert_eq!(drafts[0].owner_pid, Some(1234));
             // Explicit recovery is still supported after retiring the seed.
-            let recovered = read_detached_draft_at(&database, &drafts[0].id).unwrap();
+            let recovered = read_detached_draft_at(&database, &drafts[0].id)
+                .unwrap()
+                .unwrap();
             assert_eq!(recovered.session_id, record.id);
             assert_eq!(recovered.text, current);
             assert!(
@@ -5059,12 +5061,16 @@ fn terminal_draft_recovery_makes_an_identical_self_transfer_visible() {
     let draft_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
         .id
         .clone();
-    let recovered = read_detached_draft_at(&database, &draft_id).unwrap();
+    let recovered = read_detached_draft_at(&database, &draft_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(recovered.session_id, record.id);
     assert_eq!(recovered.text, "seed");
 
     assert_eq!(
-        read_detached_draft_at(&database, &draft_id).unwrap(),
+        read_detached_draft_at(&database, &draft_id)
+            .unwrap()
+            .unwrap(),
         recovered
     );
     discard_detached_drafts_at(&database, &workspace.id, Some(&draft_id)).unwrap();
@@ -9843,13 +9849,17 @@ fn terminal_draft_transfer_retires_sources_only_with_a_committed_new_revision() 
         .into_iter()
         .map(|id| RetiredDetachedDraft {
             draft_id: id.clone(),
-            revision: read_detached_draft_at(&path, id).unwrap().revision,
+            revision: read_detached_draft_at(&path, id).unwrap().unwrap().revision,
         })
         .collect::<Vec<_>>();
 
     save(&mut connection, "destination", 3, "merged", sources.clone()).unwrap();
     for source in &sources {
-        assert!(read_detached_draft_at(&path, &source.draft_id).is_ok());
+        assert!(
+            read_detached_draft_at(&path, &source.draft_id)
+                .unwrap()
+                .is_some()
+        );
     }
 
     connection
@@ -9860,7 +9870,11 @@ fn terminal_draft_transfer_retires_sources_only_with_a_committed_new_revision() 
         .unwrap();
     assert!(save(&mut connection, "destination", 4, "merged", sources.clone()).is_err());
     for source in &sources {
-        assert!(read_detached_draft_at(&path, &source.draft_id).is_ok());
+        assert!(
+            read_detached_draft_at(&path, &source.draft_id)
+                .unwrap()
+                .is_some()
+        );
     }
     assert!(
         list_detached_drafts_at(&path, &workspace.id)
@@ -9883,7 +9897,7 @@ fn terminal_draft_transfer_retires_sources_only_with_a_committed_new_revision() 
     .unwrap();
     save(&mut connection, "destination", 4, "merged", sources).unwrap();
 
-    let updated_source = read_detached_draft_at(&path, &revisioned).unwrap();
+    let updated_source = read_detached_draft_at(&path, &revisioned).unwrap().unwrap();
     assert_eq!(updated_source.revision, Some(3));
     assert_eq!(updated_source.text, "newer source edit");
     let visible = list_detached_drafts_at(&path, &workspace.id).unwrap();
@@ -9893,7 +9907,7 @@ fn terminal_draft_transfer_retires_sources_only_with_a_committed_new_revision() 
             .iter()
             .any(|draft| draft.source == "destination" && draft.text == "merged")
     );
-    assert!(read_detached_draft_at(&path, &legacy).is_err());
+    assert!(read_detached_draft_at(&path, &legacy).unwrap().is_none());
 
     save(
         &mut connection,

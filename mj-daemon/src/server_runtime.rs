@@ -19,11 +19,9 @@ use mj_core::remote_git::{display_network_url, display_network_urls};
 use mj_core::state::{MaterializedSession, ProjectSourceIdentity, SessionRecord, State};
 
 use crate::server::{
-    ActionOutcome, BackgroundTaskStopFailure, BackgroundTaskStopRequest, BrowserTranscript,
-    ControllerAction, ControllerRequest, MovePreparationRequest, PreflightFailure,
-    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerActivityDetails,
-    ViewerActivityKind, ViewerBackgroundTask, ViewerMoveRecovery, ViewerQueuedPrompt, ViewerQuota,
-    ViewerSnapshot, ViewerUserShell,
+    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, ResumeQueueDisposition,
+    ServerOptions, ViewerActivityDetails, ViewerActivityKind, ViewerBackgroundTask,
+    ViewerMoveRecovery, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::controller::Controller;
 use mj_controller::quota::ProfileQuota;
@@ -91,6 +89,7 @@ pub(crate) mod preflight;
 use preflight::*;
 mod actions;
 use actions::*;
+mod project_discovery;
 mod project_sources;
 pub(crate) use project_sources::ProjectSourceKey;
 use project_sources::*;

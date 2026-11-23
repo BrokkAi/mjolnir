@@ -13,30 +13,37 @@ use mj_client::daemon::FirstRunSetupReport;
 use mj_core::config::{Config, atomic_write};
 
 /// Returns `None` when automatic setup belongs to an existing installation.
-/// The accepted callback runs under the setup lock, before discovery starts.
+/// The before-save callback runs under the setup lock, after discovery.
 pub fn run_setup(
     config_path: &Path,
     instance_data: &Path,
     project_directory: Option<&Path>,
     executor: &impl CommandExecutor,
     cancelled: &dyn Fn() -> bool,
-    accepted: impl FnOnce(),
+    before_save: impl FnOnce() -> Result<()>,
 ) -> Result<Option<FirstRunSetupReport>> {
-    run_setup_with_discovery(config_path, instance_data, cancelled, accepted, || {
-        let homes = discover_profiles(executor);
-        let cwd = project_directory
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok());
-        let repository = cwd.and_then(|cwd| {
-            let (source, stripped) =
-                mj_core::local_git::discover_project_source(&cwd, executor).ok()?;
-            if stripped {
-                tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
-            }
-            Some(source)
-        });
-        Ok((homes, repository))
-    })
+    run_setup_transaction(
+        config_path,
+        instance_data,
+        cancelled,
+        || {},
+        before_save,
+        || {
+            let homes = discover_profiles(executor);
+            let cwd = project_directory
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok());
+            let repository = cwd.and_then(|cwd| {
+                let (source, stripped) =
+                    mj_core::local_git::discover_project_source(&cwd, executor).ok()?;
+                if stripped {
+                    tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
+                }
+                Some(source)
+            });
+            Ok((homes, repository))
+        },
+    )
 }
 
 /// Whether automatic setup has work to do: a new installation, or one whose
@@ -63,11 +70,30 @@ fn automatic_setup_is_due(marker: &Path, config_path: &Path) -> Result<bool> {
     Ok(!(state.as_deref() == Some(b"complete\n") || (!pending && !existing.is_unconfigured())))
 }
 
+#[cfg(test)]
 fn run_setup_with_discovery(
     config_path: &Path,
     instance_data: &Path,
     cancelled: &dyn Fn() -> bool,
     accepted: impl FnOnce(),
+    discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<String>)>,
+) -> Result<Option<FirstRunSetupReport>> {
+    run_setup_transaction(
+        config_path,
+        instance_data,
+        cancelled,
+        accepted,
+        || Ok(()),
+        discover,
+    )
+}
+
+fn run_setup_transaction(
+    config_path: &Path,
+    instance_data: &Path,
+    cancelled: &dyn Fn() -> bool,
+    accepted: impl FnOnce(),
+    before_save: impl FnOnce() -> Result<()>,
     discover: impl FnOnce() -> Result<(Vec<DiscoveredHome>, Option<String>)>,
 ) -> Result<Option<FirstRunSetupReport>> {
     std::fs::create_dir_all(instance_data).context("create setup state directory")?;
@@ -83,6 +109,7 @@ fn run_setup_with_discovery(
     atomic_write(&marker, b"pending\n")?;
     let (homes, repository) = discover()?;
     ensure!(!cancelled(), "setup cancelled");
+    before_save()?;
     Config::update_to(config_path, |latest| {
         // Choose identifiers against the latest file under its transaction lock.
         // This preserves simultaneous Settings edits and makes reruns additive.

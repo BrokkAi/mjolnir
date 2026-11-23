@@ -590,14 +590,14 @@ fn persist_imported_session_cancellable(
             .archive_path;
         let mut file = tokio::fs::File::open(path).await?;
         let upload_cancelled = std::cell::Cell::new(false);
-        let result = client
-            .upload_and_consume_observed(
-                &mut file,
-                |blob| crate::daemon::DaemonAction::ImportSession {
-                    session: Box::new(session.clone()),
-                    bundle: bundle.clone(),
-                    blob,
+        let http = client.http().await?;
+        let result = http
+            .import_session_observed(
+                mj_client::http::ImportSessionMetadata {
+                    session: Box::new(session),
+                    bundle,
                 },
+                &mut file,
                 |uploading| async move {
                     if let Some((task_id, updates)) = registering {
                         updates
@@ -623,15 +623,13 @@ fn persist_imported_session_cancellable(
             )
             .await;
         match result {
-            Ok(crate::daemon::DaemonReply::Done) => {}
-            Ok(reply) => anyhow::bail!("unexpected import reply: {reply:?}"),
+            Ok(()) => {}
             Err(_) if upload_cancelled.get() => {
                 return Ok(None);
             }
             Err(error) => return Err(error),
         }
-        client
-            .session_record(session_id)
+        http.session_record(session_id)
             .await?
             .context("imported session disappeared")
             .map(Some)

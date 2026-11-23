@@ -324,7 +324,7 @@ pub(super) async fn apply_phone_action(
         }
         ControllerAction::Move { request } => {
             let outcome = services.daemon_runtime.move_session(*request).await?;
-            finish_phone_lifecycle(crate::daemon::DaemonReply::MoveOutcome(outcome))
+            finish_phone_lifecycle(mj_client::http::LifecycleCompletion::MoveOutcome(outcome))
         }
         ControllerAction::Open { .. } => Ok(()),
         ControllerAction::CancelContainerUpgrade { session_id } => {
@@ -530,10 +530,10 @@ pub(super) async fn apply_phone_action(
     }
 }
 
-pub(super) fn finish_phone_lifecycle(reply: crate::daemon::DaemonReply) -> Result<()> {
+pub(super) fn finish_phone_lifecycle(reply: mj_client::http::LifecycleCompletion) -> Result<()> {
     match reply {
-        crate::daemon::DaemonReply::Done => Ok(()),
-        crate::daemon::DaemonReply::MoveOutcome(outcome) => {
+        mj_client::http::LifecycleCompletion::Done => Ok(()),
+        mj_client::http::LifecycleCompletion::MoveOutcome(outcome) => {
             match outcome.outcome.as_str() {
                 "completed" | "unchanged" | "interrupted" => Ok(()),
                 "cancelled" | "failed" => {

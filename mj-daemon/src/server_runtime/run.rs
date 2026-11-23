@@ -1,7 +1,5 @@
 use super::*;
 
-mod project_discovery;
-
 /// Logs how long each web viewer startup step took, and the total so far.
 struct StartupSteps {
     started: std::time::Instant,
@@ -76,13 +74,6 @@ pub(crate) async fn start_api(
     browser_revisions.borrow_and_update();
     let snapshot_rx = daemon_runtime.subscribe_browser_views()?;
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
-    let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
-    let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(32);
-    let (preflight_tx, mut preflight_rx) = tokio::sync::mpsc::channel(32);
-    let (move_preparation_tx, mut move_preparation_rx) = tokio::sync::mpsc::channel(32);
-    let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
-    let (background_task_stop_tx, mut background_task_stop_rx) =
-        tokio::sync::mpsc::channel::<BackgroundTaskStopRequest>(32);
     // Captured before `options` is moved into the server.
     let options_session_ttl = crate::server::default_session_ttl();
     let activity_snapshots = snapshot_rx.clone();
@@ -91,14 +82,7 @@ pub(crate) async fn start_api(
         bind,
         snapshot_rx,
         daemon_runtime.browser_conversations(),
-        crate::server::ServerRequests {
-            action_tx,
-            bundle_tx,
-            receipt_tx,
-            preflight_tx,
-            move_preparation_tx,
-            client_state_tx,
-        },
+        crate::server::ServerRequests { action_tx },
         crate::server::BrowserSource {
             revisions: daemon_runtime.revisions(),
             views: Arc::new({
@@ -107,7 +91,6 @@ pub(crate) async fn start_api(
             }),
         },
     )?;
-    options.set_background_task_stop_tx(background_task_stop_tx);
     options.shutdown = termination.clone();
     options.delegate_image_build_shutdown();
     // Keep signed-in phones and logged-out identities consistent across
@@ -170,22 +153,10 @@ pub(crate) async fn start_api(
         )>();
         let (action_started_tx, mut action_started_rx) =
             tokio::sync::mpsc::unbounded_channel::<PhoneActionStarted>();
-        let (receipt_done_tx, mut receipt_done_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ReadReceiptPersisted>();
-        let (bundle_done_tx, mut bundle_done_rx) =
-            tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
-        let (move_prepared_tx, mut move_prepared_rx) =
-            tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut archive_jobs = tokio::task::JoinSet::new();
         let mut operator_activity_jobs = tokio::task::JoinSet::new();
-        let mut bundle_jobs = tokio::task::JoinSet::new();
-        let mut preflight_jobs = tokio::task::JoinSet::new();
-        let mut move_preparation_jobs = tokio::task::JoinSet::new();
-        let mut background_task_stop_jobs = tokio::task::JoinSet::new();
-        let mut background_task_stop_open = true;
         let mut active_actions = std::collections::BTreeSet::new();
         let mut closing_actions = std::collections::BTreeMap::<String, u64>::new();
-        let mut next_action_id = 0_u64;
         let mut action_cancellations = std::collections::BTreeMap::<u64, PhoneActionControl>::new();
         let mut action_sessions = std::collections::BTreeMap::<u64, String>::new();
         let mut action_replies = PendingActionReplies::default();
@@ -213,53 +184,6 @@ pub(crate) async fn start_api(
             project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
-                request = background_task_stop_rx.recv(), if background_task_stop_open => {
-                    let Some(request) = request else {
-                        background_task_stop_open = false;
-                        tracing::warn!("background-task stop request feed closed while the phone server was running");
-                        continue;
-                    };
-                    let session_control = worker_commands_tx.clone();
-                    let Ok(upgrade_task) = mj_controller::upgrade::activity("background task stop") else { continue };
-                    background_task_stop_jobs.spawn(async move {
-                        let _upgrade_task = upgrade_task;
-                        let result = match session_control.session(&request.session_id).await {
-                            Ok(session) => session
-                                .client()
-                                .stop_background_task(request.background_task_id.clone())
-                                .await
-                                .map_err(|error| {
-                                    tracing::warn!(
-                                        session_id = %request.session_id,
-                                        background_task_id = %request.background_task_id,
-                                        %error,
-                                        "provider rejected background-task stop"
-                                    );
-                                    BackgroundTaskStopFailure::Provider
-                                }),
-                            Err(error) => {
-                                tracing::warn!(
-                                    session_id = %request.session_id,
-                                    %error,
-                                    "could not resolve live session for background-task stop"
-                                );
-                                Err(BackgroundTaskStopFailure::SessionUnavailable)
-                            }
-                        };
-                        if request.reply.send(result).is_err() {
-                            tracing::debug!(
-                                session_id = %request.session_id,
-                                background_task_id = %request.background_task_id,
-                                "background-task stop result dropped after viewer disconnected"
-                            );
-                        }
-                    });
-                }
-                completed = background_task_stop_jobs.join_next(), if !background_task_stop_jobs.is_empty() => {
-                    if let Some(Err(error)) = completed {
-                        tracing::error!(%error, "background-task stop task failed unexpectedly");
-                    }
-                }
                 resolved = project_sources.jobs.join_next(), if !project_sources.jobs.is_empty() => {
                     match resolved {
                         Some(Ok(resolved)) => {
@@ -403,484 +327,6 @@ pub(crate) async fn start_api(
                         ),
                     }
                 }
-                stored = client_state_rx.recv() => {
-                    let Some(stored) = stored else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering viewer state requests");
-                        break;
-                    };
-                    // Every one of these touches SQLite, so each runs on its
-                    // own task. A composer autosaving on a debounce must never
-                    // be able to stall the loop that follows sessions.
-                    let workspace_of = |session_id: &str| {
-                        controller
-                            .state
-                            .sessions
-                            .get(session_id)
-                            .map(|session| session.workspace_id.clone())
-                    };
-                    let bundle_of = |session_id: &str| {
-                        controller
-                            .state
-                            .sessions
-                            .get(session_id)
-                            .map(|session| session.bundle_id.clone())
-                    };
-                    match stored {
-                        crate::server::ClientStateRequest::ContainerSettings { session_id, resource_allocation, mounts, reply } => {
-                            next_action_id = next_action_id.wrapping_add(1).max(1);
-                            let reference = action_reference(next_action_id);
-                            let runtime = daemon_runtime.clone();
-                            move_preparation_jobs.spawn(async move {
-                                let settings = mj_core::state::ContainerSettingsChange { resource_allocation, mounts, mount_history: None };
-                                let result = runtime.set_container_settings(session_id, settings).await.map_err(|error| {
-                                    if let Some(refusal) = mj_core::refusal::Refusal::of(&error) {
-                                        return crate::server::ActionOutcome::Refused(refusal);
-                                    }
-                                    tracing::warn!(%reference, %error, "container settings request failed");
-                                    crate::server::ActionOutcome::Failed { reference }
-                                });
-                                if reply.send(result).is_err() { tracing::debug!("container settings client disconnected"); }
-                            });
-                        }
-                        crate::server::ClientStateRequest::ContainerUpgradePreview { session_id, reply } => {
-                            let runtime = daemon_runtime.clone();
-                            move_preparation_jobs.spawn(async move {
-                                let result = runtime.preview_container_upgrade(session_id).await.map_err(|e| format!("{e:#}"));
-                                if reply.send(result).is_err() { tracing::debug!("container upgrade preview client disconnected"); }
-                            });
-                        }
-                        crate::server::ClientStateRequest::SuspendPreflight { session_id, dry_run, without_checkpoint, reply } => {
-                            let runtime = daemon_runtime.clone();
-                            move_preparation_jobs.spawn(async move {
-                                let result = runtime.suspend_preflight(session_id, dry_run, without_checkpoint).await.map_err(|e| format!("{e:#}"));
-                                if reply.send(result).is_err() { tracing::debug!("suspend preflight client disconnected"); }
-                            });
-                        }
-                        crate::server::ClientStateRequest::PurgeUntracked { request, mut reply } => {
-                            let runtime = daemon_runtime.clone();
-                            // This arm takes no upgrade-gate admission. The
-                            // purge future stays alive after a disconnect so
-                            // the blocking rewrite sees the cancel flag, stops,
-                            // and drops its session admission when it joins.
-                            move_preparation_jobs.spawn(async move {
-                                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let flag = cancel.clone();
-                                let operation = std::panic::AssertUnwindSafe(runtime.purge_untracked(request, flag));
-                                let mut operation = std::pin::pin!(futures::FutureExt::catch_unwind(operation));
-                                // `closed()` borrows `reply` until this block ends, including
-                                // the binding `pin!` shadows. Send only after that borrow ends.
-                                let result = {
-                                    let disconnect = reply.closed();
-                                    tokio::pin!(disconnect);
-                                    loop {
-                                        tokio::select! {
-                                            biased;
-                                            () = &mut disconnect, if !cancel.load(std::sync::atomic::Ordering::Acquire) => {
-                                                cancel.store(true, std::sync::atomic::Ordering::Release);
-                                            }
-                                            result = &mut operation => break result,
-                                        }
-                                    }
-                                };
-                                let result = match result {
-                                    Ok(result) => result,
-                                    Err(payload) => {
-                                        let message = payload
-                                            .downcast_ref::<&str>()
-                                            .copied()
-                                            .map(str::to_owned)
-                                            .or_else(|| payload.downcast_ref::<String>().cloned())
-                                            .unwrap_or_else(|| "unknown panic".to_owned());
-                                        Err(crate::server::api::PurgeUntrackedFailure::Internal(format!(
-                                            "purge untracked panicked: {message}"
-                                        )))
-                                    }
-                                };
-                                if reply.send(result).is_err() {
-                                    tracing::debug!("purge untracked client disconnected");
-                                }
-                            });
-                        }
-
-                        crate::server::ClientStateRequest::Read { client_id, session_id, reply } => {
-                            let workspace = workspace_of(&session_id);
-                            let Ok(upgrade_task) = mj_controller::upgrade::activity("viewer state read") else { continue };
-                            mj_core::runtime::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let upgrade_blocking = _upgrade_task.clone();
-                                let answer = mj_core::runtime::spawn_blocking(move || {
-                                    let _upgrade_blocking = upgrade_blocking;
-                                    let workspace = workspace.context("unknown session")?;
-                                    let state = mj_controller::database::client_session_state(
-                                        &client_id, &workspace, &session_id,
-                                    )?;
-                                    anyhow::Ok(crate::server::ViewerClientState {
-                                        draft: state.draft,
-                                        through_event_ordinal: state.through_event_ordinal,
-                                    })
-                                })
-                                .await;
-                                reply.send(flatten_stored(answer)).ok();
-                            });
-                        }
-                        crate::server::ClientStateRequest::SaveDraft { client_id, session_id, draft, reply } => {
-                            let workspace = workspace_of(&session_id);
-                            let Ok(upgrade_task) = mj_controller::upgrade::activity("draft save") else { continue };
-                            mj_core::runtime::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let upgrade_blocking = _upgrade_task.clone();
-                                let answer = mj_core::runtime::spawn_blocking(move || {
-                                    let _upgrade_blocking = upgrade_blocking;
-                                    let workspace = workspace.context("unknown session")?;
-                                    mj_controller::database::persist_client_draft(
-                                        &client_id, &workspace, &session_id, &draft,
-                                    )
-                                })
-                                .await;
-                                reply.send(flatten_stored(answer)).ok();
-                            });
-                        }
-                        crate::server::ClientStateRequest::MarkWorkspaceRead { client_id, workspace_id, reply } => {
-                            let sessions = controller
-                                .state
-                                .sessions
-                                .values()
-                                .filter(|session| session.workspace_id == workspace_id)
-                                .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
-                                .collect::<Vec<_>>();
-                            let Ok(upgrade_task) = mj_controller::upgrade::activity("workspace read marker") else { continue };
-                            mj_core::runtime::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let upgrade_blocking = _upgrade_task.clone();
-                                let answer = mj_core::runtime::spawn_blocking(move || {
-                                    let _upgrade_blocking = upgrade_blocking;
-                                    for (session_id, through) in sessions {
-                                        // A receipt that would move backwards
-                                        // is not an error; it is a session this
-                                        // viewer had already read past.
-                                        mj_controller::database::persist_read_receipt(
-                                            &client_id, &workspace_id, &session_id, through,
-                                        )
-                                        .ok();
-                                    }
-                                    anyhow::Ok(())
-                                })
-                                .await;
-                                reply.send(flatten_stored(answer)).ok();
-                            });
-                        }
-                        crate::server::ClientStateRequest::History { session_id, query, scope, reply } => {
-                            let bundle = bundle_of(&session_id);
-                            let Ok(upgrade_task) = mj_controller::upgrade::activity("history search") else { continue };
-                            mj_core::runtime::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let upgrade_blocking = _upgrade_task.clone();
-                                let answer = mj_core::runtime::spawn_blocking(move || {
-                                    let _upgrade_blocking = upgrade_blocking;
-                                    let bundle = bundle.context("unknown session")?;
-                                    let scope = match scope.as_str() {
-                                        "session" => mj_controller::database::HistoryScope::Session,
-                                        "all" => mj_controller::database::HistoryScope::All,
-                                        _ => mj_controller::database::HistoryScope::Project,
-                                    };
-                                    let found = mj_controller::database::search_prompt_page(
-                                        &session_id,
-                                        &bundle,
-                                        scope,
-                                        &query,
-                                        None,
-                                        crate::server::MAX_HISTORY_MATCHES,
-                                    )?;
-                                    anyhow::Ok(crate::server::ViewerPromptHistory {
-                                        entries: found
-                                            .entries
-                                            .into_iter()
-                                            .map(|entry| entry.text)
-                                            .collect(),
-                                        truncated: found.next.is_some(),
-                                    })
-                                })
-                                .await;
-                                reply.send(flatten_stored(answer)).ok();
-                            });
-                        }
-                    }
-                }
-                bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
-                    let Some(crate::server::BundleRequest { source, exact_sources, discovered, reply }) = bundle else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
-                        break;
-                    };
-                    // Repository canonicalization and config persistence both
-                    // touch the filesystem. Keep them off this loop, and
-                    // report a panic as a failed request rather than dropping
-                    // the browser's reply.
-                    let done = bundle_done_tx.clone();
-                    let daemon_runtime = daemon_runtime.clone();
-                    let Ok(upgrade_task) = mj_controller::upgrade::activity("bundle creation") else { continue };
-                    bundle_jobs.spawn(async move {
-                        let _upgrade_task = upgrade_task;
-                        let result = match exact_sources {
-                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources, false).await,
-                            None if discovered => daemon_runtime.create_bundle_from_sources(vec![source], true).await,
-                            None => daemon_runtime.create_quick_bundle(source).await,
-                        };
-                        if let Err(error) = done.send(BundleCreated { result, reply }) {
-                            tracing::debug!(%error, "bundle creation finished after the server stopped");
-                        }
-                    });
-                }
-                bundle_done = bundle_done_rx.recv() => {
-                    let Some(BundleCreated { result, reply }) = bundle_done else {
-                        failure = feed_stopped(termination.is_cancelled(), "the bundle creation pipeline stopped while the phone server was running");
-                        break;
-                    };
-                    match result {
-                        Ok(created) => {
-                            let bundle_id = created.bundle_id;
-                            if reply.send(Ok(bundle_id)).is_err() {
-                                tracing::debug!("bundle creation reply dropped after client disconnect");
-                            }
-                        }
-                        Err(error) => {
-                            let failure = match error {
-                                mj_controller::controller::QuickBundleFailure::InvalidSource(
-                                    detail,
-                                ) => {
-                                    tracing::debug!(error = %detail, "phone bundle source was invalid");
-                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::InvalidSource, crate::server::BundleFailure::Refused)
-                                }
-                                mj_controller::controller::QuickBundleFailure::Persistence(
-                                    detail,
-                                ) => {
-                                    tracing::warn!(error = %detail, "phone bundle creation failed");
-                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::Controller, crate::server::BundleFailure::Refused)
-                                }
-                            };
-                            if reply.send(Err(failure)).is_err() {
-                                tracing::debug!("bundle creation failure reply dropped after client disconnect");
-                            }
-                        }
-                    }
-                }
-                bundle_job = bundle_jobs.join_next(), if !bundle_jobs.is_empty() => {
-                    if let Some(Err(error)) = bundle_job {
-                        tracing::warn!(%error, "bundle creation task panicked");
-                    }
-                }
-                preflight = preflight_rx.recv(), if preflight_jobs.len() < MAX_CONCURRENT_PREFLIGHTS => {
-                    let Some(preflight) = preflight else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
-                        break;
-                    };
-                    // A resume preflight asks a different question about the
-                    // same disk, so it runs on the same supervised task set
-                    // and under the same cap as a new-session preflight.
-                    let crate::server::NewPreflightRequest {
-                        profile_id, workspace_id,
-                        additional_mounts,
-                        bundle_id,
-                        target_id,
-                        project_directory,
-                        mut reply,
-                        remote_repairs,
-                    } = match preflight {
-                        crate::server::PreflightRequest::New(request) => request,
-                        crate::server::PreflightRequest::Resume(request) => {
-                            spawn_resume_preflight(
-                                &mut preflight_jobs,
-                                &controller,
-                                request,
-                                &termination,
-                            );
-                            continue;
-                        }
-                        crate::server::PreflightRequest::CompletePath(request) => {
-                            spawn_path_completion(
-                                &mut preflight_jobs,
-                                &controller.config,
-                                request,
-                                &termination,
-                            );
-                            continue;
-                        }
-                        crate::server::PreflightRequest::ProjectCatalog{refresh,retry,reply}=>{
-                            let runtime=daemon_runtime.clone();
-                            preflight_jobs.spawn(async move {
-                                let result=runtime.project_catalog(refresh,retry).await.map_err(|error|format!("{error:#}"));
-                                if reply.send(result).is_err(){tracing::debug!("project catalog reader disconnected");}
-                            });
-                            continue;
-                        }
-                        crate::server::PreflightRequest::DiscoverProjects(request) => {
-                            project_discovery::spawn(&mut preflight_jobs, request, &termination);
-                            continue;
-                        }
-                    };
-                    // Reading a working tree's status or validating a project
-                    // directory touches the disk, so it runs on its own task
-                    // rather than on the loop that has to stay responsive to
-                    // every other feed.
-                    let config = controller.config.clone();
-                    let project_validation = project_directory.is_some();
-                    let task_termination = termination.clone();
-                    // Disposable reads are cancelled with the server during
-                    // handoff. Only confirmed Git repairs mutate machine state.
-                    let upgrade_task = if remote_repairs.is_empty() {
-                        None
-                    } else {
-                        let Ok(work) = mj_controller::upgrade::activity("new-session preflight remote repairs") else { continue };
-                        Some(work)
-                    };
-                    preflight_jobs.spawn(async move {
-                        let _upgrade_task = upgrade_task;
-                        let cancelled = Arc::new(AtomicBool::new(false));
-                        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
-                        let mut blocking = mj_core::runtime::spawn_blocking(move || {
-                            let executor = CancellableProcessExecutor::new(cancelled.clone())
-                                .with_deadline(Duration::from_secs(30));
-                            preflight_new_request(config, mj_client::daemon::NewSessionPreflightRequest {
-                                additional_mounts, bundle_id, target_id, project_directory,
-                                remote_repairs, profile_id, workspace_id,
-                            }, executor).map_err(|error| {
-                                if error.downcast_ref::<InvalidNewMount>().is_some() {
-                                    PreflightFailure::InvalidMount
-                                } else if project_validation {
-                                    PreflightFailure::Validation
-                                } else {
-                                    PreflightFailure::InvalidRepository(format!("{error:#}"))
-                                }
-                            })
-                        });
-                        let answer = tokio::select! {
-                            biased;
-                            _ = task_termination.cancelled() => None,
-                            _ = reply.closed() => None,
-                            answer = &mut blocking => Some(answer),
-                        };
-                        let Some(answer) = answer else {
-                            drop(cancellation_guard);
-                            match blocking.await {
-                                Err(error) => tracing::warn!(%error, "cancelled phone preflight task failed"),
-                                Ok(Err(error)) => tracing::debug!(?error, "phone preflight cancelled"),
-                                Ok(Ok(_)) => {}
-                            }
-                            return;
-                        };
-                        let answer = match answer {
-                            Ok(Ok(answer)) => Ok(answer),
-                            Ok(Err(failure)) => Err(failure),
-                            Err(error) => {
-                                tracing::warn!(%error, "phone preflight task failed");
-                                Err(PreflightFailure::Controller(format!(
-                                    "preflight task failed: {error}"
-                                )))
-                            }
-                        };
-                        if reply.send(answer).is_err() {
-                            tracing::debug!("phone preflight reply dropped after client disconnect");
-                        }
-                    });
-                }
-                preflight_job = preflight_jobs.join_next(), if !preflight_jobs.is_empty() => {
-                    if let Some(Err(error)) = preflight_job {
-                        tracing::warn!(%error, "phone preflight task panicked");
-                    }
-                }
-                preparation = move_preparation_rx.recv() => {
-                    let Some(MovePreparationRequest { selection, reply }) = preparation else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering move preparation requests");
-                        break;
-                    };
-                    // Preparation can inspect archives, target prerequisites,
-                    // and harness capabilities. Keep it supervised and away
-                    // from this feed loop so another browser can still read
-                    // snapshots while a move form is open.
-                    let done = move_prepared_tx.clone();
-                    let daemon_runtime = daemon_runtime.clone();
-                    let Ok(upgrade_task) = mj_controller::upgrade::activity("move preparation") else { continue };
-                    move_preparation_jobs.spawn(async move {
-                        let _upgrade_task = upgrade_task;
-                        let result = daemon_runtime
-                            .prepare_move_session(selection)
-                            .await
-                            .map_err(|error| { tracing::debug!(%error, "move preparation rejected"); mj_core::refusal::Refusal::of(&error) });
-                        if let Err(error) = done.send(MovePrepared { result, reply }) {
-                            tracing::debug!(%error, "move preparation finished after the server stopped");
-                        }
-                    });
-                }
-                prepared = move_prepared_rx.recv() => {
-                    let Some(MovePrepared { result, reply }) = prepared else {
-                        failure = feed_stopped(termination.is_cancelled(), "the move preparation pipeline stopped while the phone server was running");
-                        break;
-                    };
-                    if reply.send(result).is_err() {
-                        tracing::debug!("move preparation reply dropped after client disconnect");
-                    }
-                }
-                move_preparation_job = move_preparation_jobs.join_next(), if !move_preparation_jobs.is_empty() => {
-                    if let Some(Err(error)) = move_preparation_job {
-                        tracing::warn!(%error, "move preparation task failed");
-                    }
-                }
-                receipt = receipt_rx.recv() => {
-                    let Some(ReadReceiptRequest { client_id, session_id, through, reply }) = receipt else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering read receipts");
-                        break;
-                    };
-                    match controller.state.sessions.get(&session_id) {
-                        None => {
-                            if reply.send(Err("unknown session".into())).is_err() {
-                                tracing::debug!(%session_id, "unknown-session read receipt reply dropped after client disconnect");
-                            }
-                        }
-                        Some(session) => {
-                            let workspace_id = session.workspace_id.clone();
-                            let done = receipt_done_tx.clone();
-                            let persisted_session_id = session_id.clone();
-                            let Ok(upgrade_task) = mj_controller::upgrade::activity("read receipt") else { continue };
-                            mj_core::runtime::spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let upgrade_blocking = _upgrade_task.clone();
-                                let joined = mj_core::runtime::spawn_blocking(move || {
-                                    let _upgrade_blocking = upgrade_blocking;
-                                    mj_controller::database::persist_read_receipt(
-                                        &client_id,
-                                        &workspace_id,
-                                        &persisted_session_id,
-                                        through,
-                                    )
-                                })
-                                .await;
-                                let result = match joined {
-                                    Ok(result) => result.map_err(|error| format!("{error:#}")),
-                                    Err(error) => Err(format!("phone read receipt task failed: {error}")),
-                                };
-                                if let Err(error) = done.send(ReadReceiptPersisted { session_id, result, reply }) {
-                                    tracing::debug!(%error, "phone read receipt finished after the server stopped");
-                                }
-                            });
-                        }
-                    }
-                }
-                persisted = receipt_done_rx.recv() => {
-                    let Some(ReadReceiptPersisted { session_id, result, reply }) = persisted else { continue };
-                    match result {
-                        Ok(receipt) => {
-                            let _ = receipt;
-                            if reply.send(Ok(())).is_err() {
-                                tracing::debug!(%session_id, "phone read receipt reply dropped after client disconnect");
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%session_id, "could not persist a phone read receipt: {error}");
-                            if reply.send(Err(error)).is_err() {
-                                tracing::debug!(%session_id, "failed phone read receipt reply dropped after client disconnect");
-                            }
-                        }
-                    }
-                }
                 completed = operator_activity_jobs.join_next(), if !operator_activity_jobs.is_empty() => {
                     if let Some(Err(error)) = completed {
                         tracing::warn!(%error, "operator activity task failed");
@@ -1015,8 +461,7 @@ pub(crate) async fn start_api(
                     let session_control = worker_commands_tx.clone();
                     let daemon_runtime = daemon_runtime.clone();
                     let started = action_started_tx.clone();
-                    next_action_id = next_action_id.wrapping_add(1).max(1);
-                    let action_id = next_action_id;
+                    let action_id = next_phone_action_id();
                     if let ControllerAction::Suspend { session_id, .. } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && workspaces.len() == 1 {
@@ -1278,17 +723,7 @@ pub(crate) async fn start_api(
                 }
             }
         }
-        // Bundle jobs are supervised so shutdown never leaves a detached
-        // request task behind holding the config mutation lock.
         operator_activity_jobs.shutdown().await;
-        bundle_jobs.shutdown().await;
-        // Preflight jobs own cancellation guards for their blocking Git
-        // probes. Aborting them here signals those probes before the server's
-        // request channels disappear.
-        preflight_jobs.shutdown().await;
-        // Preparation tasks may be inspecting an archive or probing a target;
-        // abort and drain them before the HTTP server's channels disappear.
-        move_preparation_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
         mj_controller::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {

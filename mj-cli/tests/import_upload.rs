@@ -104,16 +104,34 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
     )
     .unwrap();
     fs::copy(daemon_data.join("api-token"), client_data.join("api-token")).unwrap();
-    let metadata =
-        serde_json::from_slice(&fs::read(daemon_data.join("daemon.json")).unwrap()).unwrap();
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        mj_client::daemon::DaemonClient::connect(metadata)
-            .await
-            .unwrap()
-            .create_workspace("imports".into())
-            .await
-            .unwrap();
+    let endpoint_path = mj_client::daemon::api_endpoint_path_in(&daemon_data);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let endpoint = loop {
+        if let Some(endpoint) = mj_client::daemon::read_api_endpoint_from(&endpoint_path).unwrap() {
+            break endpoint;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not publish its HTTP endpoint"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    fs::copy(
+        &endpoint_path,
+        mj_client::daemon::api_endpoint_path_in(&client_data),
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let http = runtime.block_on(async {
+        mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", endpoint.address),
+            endpoint.token,
+        )
+        .unwrap()
     });
+    runtime
+        .block_on(http.create_workspace("imports".into()))
+        .unwrap();
     let source = home.join("project");
     fs::create_dir(&source).unwrap();
     for args in [
@@ -155,17 +173,10 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
     let output =
         run(command(&client_data, &client_config).args(["sessions", "--session", id, "--json"]));
     assert!(output.contains(id), "{output}");
-    let metadata =
-        serde_json::from_slice(&fs::read(daemon_data.join("daemon.json")).unwrap()).unwrap();
-    let record = tokio::runtime::Runtime::new().unwrap().block_on(async {
-        mj_client::daemon::DaemonClient::connect(metadata)
-            .await
-            .unwrap()
-            .session_record(id.clone())
-            .await
-            .unwrap()
-            .unwrap()
-    });
+    let record = runtime
+        .block_on(http.session_record(id.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(record.project_directory.as_ref(), Some(&destination));
     assert_eq!(
         record.checkpoint.as_ref().unwrap().archive_path,

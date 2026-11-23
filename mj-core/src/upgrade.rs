@@ -269,6 +269,15 @@ pub struct Work {
     _registration: Arc<Registration>,
 }
 
+impl std::fmt::Debug for Work {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Work")
+            .field("label", &self._registration.label)
+            .finish_non_exhaustive()
+    }
+}
+
 struct Registration {
     gate: Arc<Gate>,
     label: &'static str,

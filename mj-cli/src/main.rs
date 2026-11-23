@@ -758,8 +758,8 @@ struct ListedSession {
 /// read from the runtime feed the dashboard itself follows: each session but
 /// a sub-agent whose parent is active, since suspending the parent stops it.
 /// A sub-agent left behind by a parent that is not is its own root, as a
-/// workspace close counts it. The socket is used rather than the web API so
-/// this works with the web viewer disabled.
+/// workspace close counts it. The loopback API works even when
+/// the web viewer is disabled.
 async fn session_roots(
     client: &mut daemon::DaemonClient,
 ) -> Result<BTreeMap<String, ListedSession>> {
@@ -1502,7 +1502,11 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             && args.subagents.is_none()
             && args.subagent_straightforward.is_none()
             && args.subagent_subtle.is_none()
-            && let Some(record) = daemon.session_record(args.session.clone()).await?
+            && let Some(record) = daemon
+                .http()
+                .await?
+                .session_record(args.session.clone())
+                .await?
             && let Some(mj_core::subagent::SubagentPolicy::Mjolnir {
                 straightforward,
                 subtle,
@@ -1515,7 +1519,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
                 orchestrators: true,
             });
         }
-        daemon.prepare_move_session(selection).await
+        daemon.http().await?.prepare_move_session(selection).await
     }
     .await;
     let preparation = match prepared {
@@ -2151,7 +2155,7 @@ async fn run_workspace_dashboard(
         (startup, None)
     };
     let DashboardStartup {
-        mut daemon,
+        http,
         go: go_mode,
         loaded,
     } = startup;
@@ -2159,7 +2163,7 @@ async fn run_workspace_dashboard(
 
     // Attach only once the dashboard is certain to run, so a startup that
     // fails or is cancelled never leaves an attachment behind.
-    daemon.attach(client_id.clone()).await?;
+    http.attach(client_id.clone()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
     let attachment =
         daemon::maintain_attachment(client_id.clone(), attachment_cancellation.clone());
@@ -2200,8 +2204,8 @@ async fn run_workspace_dashboard(
     let detach_connect_started_at = std::time::Instant::now();
     let detach_connect;
     let mut detach_request = std::time::Duration::ZERO;
-    match daemon::connect_existing().await {
-        Ok(mut current_daemon) => {
+    match async { daemon::connect_existing().await?.http().await }.await {
+        Ok(current_daemon) => {
             detach_connect = detach_connect_started_at.elapsed();
             let detach_request_started_at = std::time::Instant::now();
             if let Err(error) = current_daemon.detach(client_id).await {
@@ -2230,7 +2234,7 @@ fn print_noninteractive_welcome() {
 
 /// What the dashboard needs before it can draw.
 struct DashboardStartup {
-    daemon: daemon::DaemonClient,
+    http: mj_client::http::HttpDaemonClient,
     go: Option<mj_tui::GoMode>,
     /// The store as the dashboard first shows it; absent without a terminal.
     loaded: Option<dashboard::LoadedDashboard>,
@@ -2246,50 +2250,40 @@ async fn start_dashboard(
     interactive: bool,
 ) -> Result<DashboardStartup> {
     let mut daemon = daemon::connect_or_start().await?;
-    let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some(resumed) = resumed_workspace.filter(|resumed| {
-        workspaces
-            .iter()
-            .any(|workspace| workspace.workspace.id == *resumed)
-    }) {
+    let http = daemon.http().await?;
+    let workspaces = http.list_workspaces().await?;
+    let selected = if let Some(resumed) = resumed_workspace
+        .filter(|resumed| workspaces.iter().any(|workspace| workspace.id == *resumed))
+    {
         resumed
     } else if let Some(mode) = &mut go {
-        go::resolve_workspace(&mut daemon, mode).await?
+        go::resolve_workspace(&http, mode).await?
     } else if let Some(requested) = requested_workspace {
         workspaces
             .iter()
-            .find(|candidate| {
-                candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
-            })
-            .map(|candidate| candidate.workspace.id.clone())
-            .ok_or_else(|| {
-                unknown_workspace(
-                    &requested,
-                    workspaces.iter().map(|candidate| &candidate.workspace),
-                )
-            })?
+            .find(|candidate| candidate.name.to_lowercase() == requested.trim().to_lowercase())
+            .map(|candidate| candidate.id.clone())
+            .ok_or_else(|| unknown_workspace(&requested, workspaces.iter()))?
     } else if let Some(workspace) = workspaces
         .iter()
-        .max_by_key(|candidate| &candidate.workspace.last_opened_at)
+        .max_by_key(|candidate| &candidate.last_opened_at)
     {
         // The listing is alphabetical; reopen the most recently opened one.
-        workspace.workspace.id.clone()
+        workspace.id.clone()
     } else {
-        daemon
-            .create_workspace(suggested_workspace_name(&workspaces)?)
+        http.create_workspace(suggested_workspace_name(&workspaces)?)
             .await?
             .id
     };
-    daemon.touch_workspace(selected.clone()).await?;
-    let loaded = if interactive {
+    http.touch_workspace(selected.clone()).await?;
+    let startup_workspaces = if interactive {
         // Listed again: choosing may have created a workspace.
-        let workspaces = daemon
-            .list_workspaces()
-            .await?
-            .into_iter()
-            .map(|listing| listing.workspace)
-            .collect();
-        let startup = daemon
+        Some(http.list_workspaces().await?)
+    } else {
+        None
+    };
+    let loaded = if let Some(workspaces) = startup_workspaces {
+        let startup = http
             .dashboard_startup(client_id.clone(), selected.clone())
             .await?;
         Some(dashboard::LoadedDashboard::from_daemon(
@@ -2298,28 +2292,22 @@ async fn start_dashboard(
     } else {
         None
     };
-    Ok(DashboardStartup { daemon, go, loaded })
+    Ok(DashboardStartup { http, go, loaded })
 }
 
 async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
     let mut daemon = daemon::connect_or_start().await?;
-    let workspaces = daemon.list_workspaces().await?;
+    let http = daemon.http().await?;
+    let workspaces = http.list_workspaces().await?;
     if let Some(requested) = requested {
         return workspaces
             .iter()
-            .find(|candidate| {
-                candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
-            })
-            .map(|candidate| candidate.workspace.id.clone())
-            .ok_or_else(|| {
-                unknown_workspace(
-                    requested,
-                    workspaces.iter().map(|candidate| &candidate.workspace),
-                )
-            });
+            .find(|candidate| candidate.name.to_lowercase() == requested.trim().to_lowercase())
+            .map(|candidate| candidate.id.clone())
+            .ok_or_else(|| unknown_workspace(requested, workspaces.iter()));
     }
     match workspaces.as_slice() {
-        [workspace] => Ok(workspace.workspace.id.clone()),
+        [workspace] => Ok(workspace.id.clone()),
         [] => bail!("no workspace exists; run `mj` to create one"),
         _ => bail!("several workspaces exist; pass `--workspace NAME`"),
     }
@@ -2354,15 +2342,8 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
 /// in a daemon container's volume.
 async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
-        Ok(mut daemon) => daemon
-            .list_workspaces()
+        Ok(mut daemon) => async { daemon.http().await?.list_workspaces().await }
             .await
-            .map(|workspaces| {
-                workspaces
-                    .into_iter()
-                    .map(|listing| listing.workspace)
-                    .collect::<Vec<_>>()
-            })
             .map_err(|error| {
                 tracing::warn!(%error, "could not list workspaces for the refusal");
             })
@@ -2488,7 +2469,7 @@ fn workspace_name_for_directory(directory: &std::path::Path) -> String {
         .collect::<String>()
 }
 
-fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
+fn suggested_workspace_name(workspaces: &[mj_core::workspace::WorkspaceRecord]) -> Result<String> {
     let base = if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())?
         .runtime
         == mj_core::config::DaemonRuntime::Ssh
@@ -2503,7 +2484,7 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
         .iter()
-        .map(|candidate| candidate.workspace.name.to_lowercase())
+        .map(|candidate| candidate.name.to_lowercase())
         .chain([mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()])
         .collect::<std::collections::BTreeSet<_>>();
     if !names.contains(&base.to_lowercase()) {
@@ -2539,12 +2520,11 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             let mut client = daemon::connect_or_start().await?;
             if !matches!(command, AfkCommand::Status) {
                 let away = matches!(command, AfkCommand::On);
-                match client
-                    .request(daemon::DaemonAction::SetOperatorAway { away })
-                    .await?
-                {
-                    daemon::DaemonReply::Done => {}
-                    reply => bail!("unexpected operator away reply: {reply:?}"),
+                let http = client.http().await?;
+                let instance = http.instance_id().await;
+                http.set_operator_away(away).await?;
+                if http.instance_id().await != instance {
+                    client = daemon::connect_existing().await?;
                 }
             }
             let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =

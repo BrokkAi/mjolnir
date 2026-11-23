@@ -118,6 +118,12 @@ mod tests {
 
     #[tokio::test]
     async fn auto_afk_activity_over_transport_invalidates_queued_expiry_without_publication() {
+        let Some(_writer) = super::super::tests::isolated_test_store(
+            module_path!(),
+            "auto_afk_activity_over_transport_invalidates_queued_expiry_without_publication",
+        ) else {
+            return;
+        };
         let state = super::super::tests::test_runtime_state();
         {
             let mut clock = state.config_mutation.lock().await;
@@ -125,50 +131,15 @@ mod tests {
             clock.last_activity = Some(Instant::now() - Duration::from_secs(60));
         }
         let revision = state.revisions.current();
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let metadata = super::super::tests::test_metadata(listener.local_addr().unwrap());
-        let cancellation = CancellationToken::new();
-        let service = mj_core::runtime::spawn({
-            let state = state.clone();
-            let cancellation = cancellation.clone();
-            let metadata = metadata.clone();
-            async move {
-                let mut clients = tokio::task::JoinSet::new();
-                for _ in 0..2 {
-                    let (socket, _) = listener.accept().await.unwrap();
-                    clients.spawn(serve_client(
-                        socket,
-                        metadata.clone(),
-                        state.clone(),
-                        cancellation.clone(),
-                    ));
-                }
-                while let Some(result) = clients.join_next().await {
-                    result.unwrap().unwrap();
-                }
-            }
-        });
-        for request_id in 1..=2 {
-            let mut socket = TcpStream::connect(metadata.address).await.unwrap();
-            write_frame(
-                &mut socket,
-                &RequestEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
-                    request_id,
-                    token: metadata.token.clone(),
-                    action: DaemonAction::RecordOperatorActivity,
-                },
-            )
-            .await
-            .unwrap();
-            let response: ResponseEnvelope = read_frame(&mut socket).await.unwrap();
-            assert!(matches!(response.result.unwrap(), DaemonReply::Done));
+        let (http, cancellation, service) =
+            super::super::tests::start_test_dashboard_http_api(state.clone()).await;
+        for _ in 0..2 {
+            http.record_operator_activity().await.unwrap();
             // The expired timer captured before this accepted request cannot commit.
             state.expire_inactivity(&cancellation).await.unwrap();
             assert!(!state.owner().controller().state.operator_presence.away);
             assert_eq!(state.revisions.current(), revision);
         }
-        service.await.unwrap();
         let mut clock = state.config_mutation.lock().await;
         clock.last_activity = Some(Instant::now() - Duration::from_secs(60));
         let activity = mj_core::runtime::spawn({
@@ -187,6 +158,8 @@ mod tests {
         stale_expiry.await.unwrap().unwrap();
         assert_eq!(state.revisions.current(), revision);
         assert!(!state.owner().controller().state.operator_presence.away);
+        cancellation.cancel();
+        service.await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]

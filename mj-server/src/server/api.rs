@@ -41,8 +41,17 @@
 //! the caller's to fix is a 5xx. Keeping those apart is part of the contract,
 //! because one is a decision for a person and the other is not.
 
+mod dashboard;
+mod terminal_operations;
+pub use dashboard::DashboardBackend;
+use dashboard::dashboard_routes;
+pub use terminal_operations::{
+    MachinesOperations, RepositoriesOperations, SetupOperations, TerminalBytes, TerminalOperations,
+    TerminalStream, TerminalStreams,
+};
 mod events;
 
+use std::future::Future;
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,9 +75,12 @@ use mj_core::relay::CapacityRetry;
 use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
-    ActionOutcome, ApiError, ControllerAction, ControllerRequest, MAX_PROMPT_TEXT_BODY_BYTES,
-    ServerState, ViewerSession, ViewerSnapshot, constant_time_eq, named_body_limit,
-    require_session_record, validate_action, validate_prompt_text,
+    ActionOutcome, AdditionalMount, ApiError, BackgroundTaskStopFailure, BundleFailure,
+    CompletionHost, CompletionKind, ControllerAction, ControllerRequest, CreateBundleResponse,
+    MAX_PROMPT_TEXT_BODY_BYTES, MovePreparation, MoveSelection, PathCompletion, PreflightFailure,
+    PreflightNew, PreflightResume, Refusal, ServerState, SessionResourceAllocation,
+    ViewerClientState, ViewerPromptHistory, ViewerSession, ViewerSnapshot, constant_time_eq,
+    named_body_limit, require_session_record, validate_action, validate_prompt_text,
 };
 
 /// Response header naming the contract version this server speaks. A client
@@ -124,6 +136,43 @@ mod wait;
 use wait::*;
 mod workspaces;
 use workspaces::*;
+
+/// Keep the admission with the task so disconnecting after acceptance cannot
+/// interrupt a mutation between its durable write and its publication.
+async fn run_admitted_mutation<T: Send + 'static>(
+    state: &ServerState,
+    label: &'static str,
+    work: impl Future<Output = Result<T, ApiFailure>> + Send + 'static,
+) -> Result<T, ApiFailure> {
+    let admission = state
+        .upgrade_gate
+        .enter_unless_draining(label)
+        .map_err(|_| ApiFailure::handoff())?;
+    mj_core::runtime::spawn(async move {
+        let _admission = admission;
+        let result = work.await;
+        if let Err(error) = &result {
+            tracing::debug!(label, %error, "daemon HTTP mutation failed");
+        }
+        result
+    })
+    .await
+    .context(label)?
+}
+
+fn require_terminal(
+    state: &ServerState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), ApiFailure> {
+    if loopback_authenticated(state, headers) {
+        Ok(())
+    } else {
+        Err(ApiFailure::new(
+            StatusCode::FORBIDDEN,
+            "terminal authentication is required",
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests;

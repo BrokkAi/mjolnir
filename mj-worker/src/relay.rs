@@ -157,6 +157,8 @@ pub struct RelayCell {
     relay: std::sync::Mutex<DurableRelay>,
     released: tokio::sync::watch::Sender<u64>,
     #[cfg(unix)]
+    pub(crate) preparation_writer: std::sync::Arc<crate::worker_runtime::PreparationGate>,
+    #[cfg(unix)]
     pub(crate) guardian: std::sync::Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>,
 }
 
@@ -165,6 +167,8 @@ impl RelayCell {
         Self {
             relay: std::sync::Mutex::new(relay),
             released: tokio::sync::watch::Sender::new(0),
+            #[cfg(unix)]
+            preparation_writer: Default::default(),
             #[cfg(unix)]
             guardian: Default::default(),
         }

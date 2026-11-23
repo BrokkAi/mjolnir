@@ -468,20 +468,9 @@ pub(super) async fn action(
         mounts,
     } = action
     {
-        let (reply, answer) = tokio::sync::oneshot::channel();
-        state
-            .client_state_tx
-            .send(ClientStateRequest::ContainerSettings {
-                session_id,
-                resource_allocation,
-                mounts,
-                reply,
-            })
-            .await
-            .map_err(|_| ApiError::controller_unavailable())?;
-        return match answer
-            .await
-            .map_err(|_| ApiError::controller_unavailable())?
+        return match viewer_backend(&state)?
+            .set_container_settings(session_id, resource_allocation, mounts)
+            .await?
         {
             Ok(Some(preview)) => Ok(Json(preview).into_response()),
             Ok(None) => Ok(StatusCode::ACCEPTED.into_response()),
@@ -555,11 +544,8 @@ const MAX_BUNDLE_SOURCES: usize = 32;
 pub(super) struct CreateBundleRequest {
     pub(super) source: Option<String>,
     pub(super) sources: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct CreateBundleResponse {
-    pub(super) bundle_id: String,
+    #[serde(default)]
+    pub(super) include_project: bool,
 }
 
 /// Create a quick bundle through the controller's dedicated persistence path.
@@ -568,20 +554,27 @@ pub(super) struct CreateBundleResponse {
 /// next new-session request.
 pub(super) async fn create_bundle(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CreateBundleRequest>,
 ) -> Result<Json<CreateBundleResponse>, ApiError> {
-    let bundle_id = match (request.source, request.sources) {
-        (Some(source), None) => create_quick_bundle(&state, source).await?,
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    let (source, exact_sources) = match (request.source, request.sources) {
+        (Some(source), None) => {
+            validate_bundle_source(&source)?;
+            (source, None)
+        }
         (None, Some(sources)) => {
-            if sources.is_empty() || sources.len() > MAX_BUNDLE_SOURCES {
-                return Err(ApiError::bad_request(
-                    "provide between 1 and 32 repository sources",
-                ));
+            if !direct {
+                if sources.is_empty() || sources.len() > MAX_BUNDLE_SOURCES {
+                    return Err(ApiError::bad_request(
+                        "provide between 1 and 32 repository sources",
+                    ));
+                }
+                for source in &sources {
+                    validate_bundle_source(source)?;
+                }
             }
-            for source in &sources {
-                validate_bundle_source(source)?;
-            }
-            request_bundle(&state, String::new(), Some(sources), false).await?
+            (String::new(), Some(sources))
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -589,18 +582,15 @@ pub(super) async fn create_bundle(
             ));
         }
     };
-    Ok(Json(CreateBundleResponse { bundle_id }))
-}
-
-/// Create or reuse the quick bundle for one repository source.
-///
-/// Used by the viewer's `/api/v1/bundles` route for bundle-backed targets.
-pub(super) async fn create_quick_bundle(
-    state: &ServerState,
-    source: String,
-) -> Result<String, ApiError> {
-    validate_bundle_source(&source)?;
-    request_bundle(state, source, None, false).await
+    create_bundle_response(
+        &state,
+        source,
+        exact_sources,
+        false,
+        request.include_project,
+    )
+    .await
+    .map(Json)
 }
 
 fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
@@ -621,20 +611,36 @@ pub(super) async fn request_bundle(
     exact_sources: Option<Vec<String>>,
     discovered: bool,
 ) -> Result<String, ApiError> {
-    let (reply, result) = tokio::sync::oneshot::channel();
+    create_bundle_response(state, source, exact_sources, discovered, false)
+        .await
+        .map(|created| created.bundle_id)
+}
+
+fn mutation_admission(
+    state: &ServerState,
+    label: &'static str,
+) -> Result<mj_core::upgrade::Work, ApiError> {
     state
-        .bundle_tx
-        .send(BundleRequest {
-            source,
-            exact_sources,
-            discovered,
-            reply,
+        .upgrade_gate
+        .enter_unless_draining(label)
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the Mjolnir daemon is being replaced by an upgrade; ask again",
+            )
+            .with_code(Some(super::api::DAEMON_HANDOFF_CODE))
         })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+}
+
+async fn create_bundle_response(
+    state: &ServerState,
+    source: String,
+    exact_sources: Option<Vec<String>>,
+    discovered: bool,
+    include_project: bool,
+) -> Result<CreateBundleResponse, ApiError> {
+    let admission = mutation_admission(state, "bundle creation")?;
+    viewer_backend(state)?.create_bundle(source, exact_sources, discovered, include_project, admission).await?
         .map_err(|failure| match failure {
             BundleFailure::InvalidSource => ApiError::bad_request(
                 "use a Git URL, GitHub owner/repository, or an existing Git checkout on the controller host",
@@ -727,21 +733,10 @@ pub(super) async fn mark_conversation_read(
             "conversation unavailable while the session is transitioning",
         ));
     }
-    let (reply, result) = tokio::sync::oneshot::channel();
     let client_id = viewer_client_id(&state, &headers).ok_or_else(ApiError::unauthorized)?;
-    state
-        .receipt_tx
-        .send(ReadReceiptRequest {
-            client_id,
-            session_id,
-            through: request.through,
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    viewer_backend(&state)?
+        .mark_conversation_read(client_id, session_id, request.through)
+        .await?
         .map_err(|_| ApiError::new(StatusCode::CONFLICT, "read receipt failed"))?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -755,31 +750,27 @@ type PreflightNewRequest = mj_client::daemon::NewSessionPreflightRequest;
 /// after it has committed.
 pub(super) async fn preflight_new(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<PreflightNewRequest>,
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
-    super::validate_new_preflight(&request, &state.snapshot_rx.borrow())
-        .map_err(ApiError::bad_request)?;
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .preflight_tx
-        .send(PreflightRequest::New(NewPreflightRequest {
-            profile_id: request.profile_id,
-            workspace_id: request.workspace_id,
-            additional_mounts: request.additional_mounts,
-            bundle_id: request.bundle_id,
-            target_id: request.target_id,
-            project_directory: request.project_directory,
-            remote_repairs: request.remote_repairs,
-            reply,
-        }))
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    if !direct {
+        super::validate_new_preflight(&request, &state.snapshot_rx.borrow())
+            .map_err(ApiError::bad_request)?;
+    }
+    let admission = if request.remote_repairs.is_empty() {
+        None
+    } else {
+        Some(mutation_admission(
+            &state,
+            "new-session preflight remote repairs",
+        )?)
+    };
+    viewer_backend(&state)?.preflight_new(request, direct, admission, state.shutdown.clone()).await?
         .map(Json)
         .map_err(|failure| match failure {
+            PreflightFailure::Terminal(message) => ApiError::bad_request(message),
             PreflightFailure::InvalidMount => ApiError::bad_request(
                 "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host",
             ),
@@ -810,6 +801,8 @@ pub(super) struct CompletePathRequest {
     /// own filesystem.
     #[serde(default)]
     pub(super) target_id: Option<String>,
+    #[serde(default)]
+    machine: Option<Box<mj_core::config::Machine>>,
     pub(super) prefix: String,
     #[serde(default)]
     pub(super) kind: CompletionKind,
@@ -822,40 +815,45 @@ pub(super) struct CompletePathRequest {
 /// the reason it failed stays in the log.
 pub(super) async fn complete_path(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CompletePathRequest>,
 ) -> Result<Json<PathCompletion>, ApiError> {
     if request.prefix.len() > MAX_COMPLETION_PREFIX_BYTES {
         return Err(ApiError::bad_request("path prefix is too long"));
     }
-    let host = match request.target_id {
-        Some(target_id) => {
-            require_target(&state.snapshot_rx.borrow(), &target_id)?;
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    let host = match (request.target_id, request.machine) {
+        (_, Some(_)) if !direct => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "terminal authentication is required",
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request("provide a target or a machine"));
+        }
+        (None, Some(machine)) => CompletionHost::Machine(machine),
+        (Some(target_id), None) => {
+            if !direct {
+                require_target(&state.snapshot_rx.borrow(), &target_id)?;
+            }
             CompletionHost::Target(target_id)
         }
-        None => CompletionHost::Local,
+        (None, None) => CompletionHost::Local,
     };
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .preflight_tx
-        .send(PreflightRequest::CompletePath(PathCompletionRequest {
-            host,
-            prefix: request.prefix,
-            kind: request.kind,
-            reply,
-        }))
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
-        .map(Json)
-        .map_err(|error| {
-            tracing::debug!(error = %error, "path completion failed");
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the controller could not list that directory",
-            )
-        })
+    preflight_until_shutdown(
+        &state,
+        viewer_backend(&state)?.complete_path(host, request.prefix, request.kind),
+    )
+    .await?
+    .map(Json)
+    .map_err(|error| {
+        tracing::debug!(error = %error, "path completion failed");
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the controller could not list that directory",
+        )
+    })
 }
 
 pub(super) async fn discover_projects(
@@ -864,19 +862,21 @@ pub(super) async fn discover_projects(
 ) -> Result<Json<mj_import::project_picker::ProjectDiscovery>, ApiError> {
     mj_import::project_picker::validate_request(&request)
         .map_err(|error| ApiError::bad_request(mj_import::project_picker::error_message(&error)))?;
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .preflight_tx
-        .send(PreflightRequest::DiscoverProjects(
-            ProjectDiscoveryPreflight { request, reply },
-        ))
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    preflight_until_shutdown(&state, viewer_backend(&state)?.discover_projects(request))
+        .await?
         .map(Json)
         .map_err(|message| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, message))
+}
+
+async fn preflight_until_shutdown<T, E>(
+    state: &ServerState,
+    operation: impl std::future::Future<Output = Result<Result<T, E>, api::ApiFailure>>,
+) -> Result<Result<T, E>, ApiError> {
+    tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => Err(ApiError::controller_unavailable()),
+        result = operation => result.map_err(ApiError::from),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -904,31 +904,24 @@ pub(super) async fn preflight_resume(
     {
         return Err(ApiError::not_found("unknown session"));
     }
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .preflight_tx
-        .send(PreflightRequest::Resume(ResumePreflightRequest {
-            session_id: request.session_id,
-            target_id: request.target_id,
-            reply,
-        }))
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
-        .map(Json)
-        .map_err(|failure| match failure {
-            PreflightFailure::InvalidMount
-            | PreflightFailure::Validation
-            | PreflightFailure::InvalidRepository(_) => {
-                ApiError::bad_request("this session cannot resume on that target")
-            }
-            PreflightFailure::Controller(_) => ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the controller could not check this checkout",
-            ),
-        })
+    preflight_until_shutdown(
+        &state,
+        viewer_backend(&state)?.preflight_resume(request.session_id, request.target_id),
+    )
+    .await?
+    .map(Json)
+    .map_err(|failure| match failure {
+        PreflightFailure::InvalidMount
+        | PreflightFailure::Validation
+        | PreflightFailure::InvalidRepository(_)
+        | PreflightFailure::Terminal(_) => {
+            ApiError::bad_request("this session cannot resume on that target")
+        }
+        PreflightFailure::Controller(_) => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the controller could not check this checkout",
+        ),
+    })
 }
 
 /// Prepare a move without changing the source session. The returned
@@ -937,18 +930,16 @@ pub(super) async fn preflight_resume(
 /// before interrupting work.
 pub(super) async fn prepare_move(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(selection): Json<MoveSelection>,
 ) -> Result<Json<MovePreparation>, ApiError> {
-    validate_move_selection(&selection, &state.snapshot_rx.borrow())?;
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .move_preparation_tx
-        .send(MovePreparationRequest { selection, reply })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    let preparation = result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    if !direct {
+        validate_move_selection(&selection, &state.snapshot_rx.borrow())?;
+    }
+    let preparation = viewer_backend(&state)?
+        .prepare_move(selection, direct)
+        .await?
         .map_err(|refusal| match refusal {
             Some(refusal) => ApiError::new(StatusCode::CONFLICT, refusal.message().to_owned())
                 .with_code(refusal.code()),
@@ -960,26 +951,20 @@ pub(super) async fn prepare_move(
     Ok(Json(preparation))
 }
 
-/// Ask the state channel one thing and wait for its answer.
-pub(super) async fn ask_client_state<T>(
-    state: &ServerState,
-    build: impl FnOnce(tokio::sync::oneshot::Sender<Result<T, String>>) -> ClientStateRequest,
-) -> Result<T, ApiError> {
-    let (reply, answer) = tokio::sync::oneshot::channel();
+pub(super) fn viewer_backend(state: &ServerState) -> Result<&dyn SubagentBackend, ApiError> {
     state
-        .client_state_tx
-        .send(build(reply))
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    answer
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the controller could not reach stored viewer state",
-            )
-        })
+        .subagent
+        .as_deref()
+        .ok_or_else(ApiError::controller_unavailable)
+}
+
+fn stored_viewer_state<T>(answer: Result<T, String>) -> Result<T, ApiError> {
+    answer.map_err(|_| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the controller could not reach stored viewer state",
+        )
+    })
 }
 
 /// This viewer's draft and read frontier for one session.
@@ -993,12 +978,11 @@ pub(super) async fn client_state(
     let Some(client_id) = viewer_client_id(&state, &headers) else {
         return Ok(Json(ViewerClientState::default()));
     };
-    ask_client_state(&state, |reply| ClientStateRequest::Read {
-        client_id,
-        session_id,
-        reply,
-    })
-    .await
+    stored_viewer_state(
+        viewer_backend(&state)?
+            .client_state(client_id, session_id)
+            .await?,
+    )
     .map(Json)
 }
 
@@ -1030,13 +1014,11 @@ pub(super) async fn save_draft(
             "this viewer has no stored identity; unlock again to keep drafts",
         ));
     };
-    ask_client_state(&state, |reply| ClientStateRequest::SaveDraft {
-        client_id,
-        session_id,
-        draft: request.draft,
-        reply,
-    })
-    .await?;
+    stored_viewer_state(
+        viewer_backend(&state)?
+            .save_draft(client_id, session_id, request.draft)
+            .await?,
+    )?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1052,12 +1034,11 @@ pub(super) async fn mark_workspace_read(
     let Some(client_id) = viewer_client_id(&state, &headers) else {
         return Ok(StatusCode::NO_CONTENT);
     };
-    ask_client_state(&state, |reply| ClientStateRequest::MarkWorkspaceRead {
-        client_id,
-        workspace_id,
-        reply,
-    })
-    .await?;
+    stored_viewer_state(
+        viewer_backend(&state)?
+            .mark_workspace_read(client_id, workspace_id)
+            .await?,
+    )?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1086,13 +1067,11 @@ pub(super) async fn prompt_history(
             "scope must be session, project or all",
         ));
     }
-    ask_client_state(&state, |reply| ClientStateRequest::History {
-        session_id,
-        query: query.q,
-        scope,
-        reply,
-    })
-    .await
+    stored_viewer_state(
+        viewer_backend(&state)?
+            .prompt_history(session_id, query.q, scope)
+            .await?,
+    )
     .map(Json)
 }
 
@@ -1236,19 +1215,9 @@ async fn catalog_response(
     refresh: bool,
     retry: bool,
 ) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .preflight_tx
-        .send(PreflightRequest::ProjectCatalog {
-            refresh,
-            retry,
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    viewer_backend(&state)?
+        .project_catalog(refresh, retry)
+        .await?
         .map(Json)
         .map_err(|error| {
             tracing::warn!(%error,"project catalog read failed");
@@ -1324,20 +1293,9 @@ pub(super) async fn ask_suspend_preflight(
     dry_run: bool,
     without_checkpoint: bool,
 ) -> Result<mj_core::suspend_consent::SuspendPreflight, ApiError> {
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    state
-        .client_state_tx
-        .send(ClientStateRequest::SuspendPreflight {
-            session_id,
-            dry_run,
-            without_checkpoint,
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    answer
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    viewer_backend(state)?
+        .suspend_preflight(session_id, dry_run, without_checkpoint)
+        .await?
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
 }
 

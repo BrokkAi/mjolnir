@@ -23,6 +23,166 @@ impl UploadBody {
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn dashboard_backend(&self) -> Option<Arc<dyn DashboardBackend>> {
+        None
+    }
+
+    fn create_bundle(
+        &self,
+        _source: String,
+        _exact_sources: Option<Vec<String>>,
+        _discovered: bool,
+        _include_project: bool,
+        _admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'_, Result<Result<CreateBundleResponse, BundleFailure>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn preflight_new(
+        &self,
+        _request: mj_client::daemon::NewSessionPreflightRequest,
+        _direct: bool,
+        _admission: Option<mj_core::upgrade::Work>,
+        _shutdown: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'_, Result<Result<PreflightNew, PreflightFailure>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn preflight_resume(
+        &self,
+        _session_id: String,
+        _target_id: String,
+    ) -> BoxFuture<'_, Result<Result<PreflightResume, PreflightFailure>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn complete_path(
+        &self,
+        _host: CompletionHost,
+        _prefix: String,
+        _kind: CompletionKind,
+    ) -> BoxFuture<'_, Result<Result<PathCompletion, String>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn discover_projects(
+        &self,
+        _request: mj_import::project_picker::ProjectDiscoveryRequest,
+    ) -> BoxFuture<
+        '_,
+        Result<Result<mj_import::project_picker::ProjectDiscovery, &'static str>, ApiFailure>,
+    > {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn project_catalog(
+        &self,
+        _refresh: bool,
+        _retry: bool,
+    ) -> BoxFuture<
+        '_,
+        Result<Result<mj_core::project_catalog::ProjectCatalogView, String>, ApiFailure>,
+    > {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn prepare_move(
+        &self,
+        _selection: MoveSelection,
+        _direct: bool,
+    ) -> BoxFuture<'_, Result<Result<MovePreparation, Option<Refusal>>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn mark_conversation_read(
+        &self,
+        _client_id: String,
+        _session_id: String,
+        _through: u64,
+    ) -> BoxFuture<'_, Result<Result<(), String>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn client_state(
+        &self,
+        _client_id: String,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<Result<ViewerClientState, String>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn save_draft(
+        &self,
+        _client_id: String,
+        _session_id: String,
+        _draft: String,
+    ) -> BoxFuture<'_, Result<Result<(), String>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn mark_workspace_read(
+        &self,
+        _client_id: String,
+        _workspace_id: String,
+    ) -> BoxFuture<'_, Result<Result<(), String>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn prompt_history(
+        &self,
+        _session_id: String,
+        _query: String,
+        _scope: String,
+    ) -> BoxFuture<'_, Result<Result<ViewerPromptHistory, String>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn set_container_settings(
+        &self,
+        _session_id: String,
+        _resource_allocation: Option<SessionResourceAllocation>,
+        _mounts: Vec<AdditionalMount>,
+    ) -> BoxFuture<
+        '_,
+        Result<Result<Option<mj_core::state::ContainerUpgradePreview>, ActionOutcome>, ApiFailure>,
+    > {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn container_upgrade_preview(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<Result<mj_core::state::ContainerUpgradePreview, String>, ApiFailure>>
+    {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn suspend_preflight(
+        &self,
+        _session_id: String,
+        _dry_run: bool,
+        _without_checkpoint: bool,
+    ) -> BoxFuture<'_, Result<Result<mj_core::suspend_consent::SuspendPreflight, String>, ApiFailure>>
+    {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
+    fn purge_untracked(
+        &self,
+        _request: PurgeUntrackedRequest,
+    ) -> BoxFuture<'_, Result<Result<PurgeUntrackedResponse, PurgeUntrackedFailure>, ApiFailure>>
+    {
+        Box::pin(async { Err(ApiFailure::unavailable("the controller is unavailable")) })
+    }
+
+    fn stop_background_task(
+        &self,
+        _session_id: String,
+        _background_task_id: String,
+    ) -> BoxFuture<'_, Result<Result<(), BackgroundTaskStopFailure>, ApiFailure>> {
+        Box::pin(async { Err(ApiError::controller_unavailable().into()) })
+    }
+
     fn push_notice(&self, _session_id: &str, _message: String) {}
     /// Current login failures from the daemon's publication; memory only.
     fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
@@ -338,6 +498,34 @@ pub trait SubagentBackend: Send + Sync {
             .await?
         })
     }
+    fn refresh_workspaces(&self) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn close_workspace(
+        &self,
+        _id: String,
+        _admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'_, Result<(), ApiFailure>> {
+        Box::pin(async { Err(ApiFailure::unavailable("workspace close is unavailable")) })
+    }
+
+    fn cancel_workspace_close(&self, _id: &str) -> Result<(), ApiFailure> {
+        Err(ApiFailure::unavailable(
+            "workspace close cancellation is unavailable",
+        ))
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        Box::pin(async { anyhow::bail!("terminal drafts are unavailable") })
+    }
+
+    fn remove_project(&self, _id: String) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { anyhow::bail!("project removal is unavailable") })
+    }
+
     fn set_config(
         &self,
         session_id: String,

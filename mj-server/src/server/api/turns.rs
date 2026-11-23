@@ -1,10 +1,17 @@
 use super::*;
-use crate::server::ClientStateRequest;
 
 #[derive(Default, Deserialize)]
 pub(super) struct NativeHistoryQuery {
     before_position: Option<u64>,
     before_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct NativeAgentHistoryQuery {
+    before_position: Option<u64>,
+    before_id: Option<String>,
+    #[serde(default)]
+    full: bool,
 }
 
 pub(super) async fn transcript_history(
@@ -39,14 +46,22 @@ pub(super) async fn transcript_history(
 
 pub(super) async fn native_agent_history(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Path((owner, child)): Path<(String, String)>,
-    Query(query): Query<NativeHistoryQuery>,
-) -> Result<Json<serde_json::Value>, ApiFailure> {
-    require_session_record(&state.snapshot_rx.borrow(), &owner)?;
+    Query(query): Query<NativeAgentHistoryQuery>,
+) -> Result<Response, ApiFailure> {
+    if query.full {
+        require_terminal(&state, &headers)?;
+    } else {
+        require_session_record(&state.snapshot_rx.borrow(), &owner)?;
+    }
     let before = query.before_position.zip(query.before_id);
     let page = backend(&state)?
         .native_agent_history(owner, child, before)
         .await?;
+    if query.full {
+        return Ok(Json(page).into_response());
+    }
     let items = page
         .items
         .iter()
@@ -62,7 +77,7 @@ pub(super) async fn native_agent_history(
         .collect::<Vec<_>>();
     Ok(Json(
         serde_json::json!({"generation": page.generation_ordinal, "items": items, "has_more": page.has_more}),
-    ))
+    ).into_response())
 }
 
 #[derive(Serialize)]
@@ -855,15 +870,9 @@ pub(super) async fn container_upgrade_preview(
 ) -> Result<Json<mj_core::state::ContainerUpgradePreview>, ApiFailure> {
     crate::server::validate_public_id(&session_id)?;
     require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    state
-        .client_state_tx
-        .send(ClientStateRequest::ContainerUpgradePreview { session_id, reply })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    answer
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    crate::server::handlers::viewer_backend(&state)?
+        .container_upgrade_preview(session_id)
+        .await?
         .map(Json)
         .map_err(ApiFailure::conflict)
 }

@@ -2,7 +2,7 @@
 
 use std::{future::Future, pin::Pin, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use crossterm::event::Event;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -25,7 +25,7 @@ trait ActivityTransport: Send + 'static {
 }
 
 struct DaemonActivityTransport {
-    client: Option<crate::daemon::DaemonClient>,
+    client: Option<mj_client::http::HttpDaemonClient>,
 }
 
 impl ActivityTransport for DaemonActivityTransport {
@@ -34,24 +34,16 @@ impl ActivityTransport for DaemonActivityTransport {
         _generation: u64,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
-            // Keep the stream local until the acknowledgement arrives. If the
-            // enclosing timeout cancels this future, dropping it also drops
-            // the potentially half-consumed connection.
-            let mut client = match self.client.take() {
+            let client = match self.client.take() {
                 Some(client) => client,
-                None => crate::daemon::connect_existing().await?,
+                None => crate::daemon::connect_existing().await?.http().await?,
             };
-            let result = client
-                .request(mj_client::daemon::DaemonAction::RecordOperatorActivity)
-                .await;
-            match result {
-                Ok(mj_client::daemon::DaemonReply::Done) => {
-                    self.client = Some(client);
-                    Ok(())
-                }
-                Ok(reply) => bail!("unexpected activity-report reply {reply:?}"),
-                Err(error) => Err(error).context("record operator activity"),
-            }
+            client
+                .record_operator_activity()
+                .await
+                .context("record operator activity")?;
+            self.client = Some(client);
+            Ok(())
         })
     }
 }

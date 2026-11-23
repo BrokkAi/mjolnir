@@ -30,6 +30,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         ));
 
     Router::new()
+        .merge(dashboard_routes())
+        .merge(terminal_operations::terminal_operation_routes(
+            state.clone(),
+        ))
         .route("/push/key", get(push_key))
         .route("/push/status", get(push_device_status))
         .route("/snapshot", get(viewer::snapshot))
@@ -45,6 +49,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route("/viewer/events", get(viewer::events))
         .route("/bundles", post(viewer::create_bundle))
+        .route(
+            "/bundles/{bundle_id}",
+            axum::routing::delete(remove_project),
+        )
         .route("/preflight/new", post(viewer::preflight_new))
         .route("/preflight/resume", post(viewer::preflight_resume))
         .route("/paths/complete", post(viewer::complete_path))
@@ -115,6 +123,29 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             axum::routing::patch(set_config),
         )
         .route("/workspaces", get(list_workspaces).post(create_workspace))
+        .route("/workspaces/drafts", get(list_workspace_drafts))
+        .route(
+            "/workspaces/{workspace_id}",
+            axum::routing::patch(rename_workspace),
+        )
+        .route("/workspaces/{workspace_id}/touch", post(touch_workspace))
+        .route(
+            "/workspaces/{workspace_id}/close",
+            post(close_workspace).delete(cancel_workspace_close),
+        )
+        .route(
+            "/workspaces/{workspace_id}/drafts/discard",
+            post(discard_drafts),
+        )
+        .route("/drafts/{draft_id}", get(recover_draft))
+        .route(
+            "/sessions/{session_id}/terminal-draft",
+            put(persist_terminal_draft).layer(named_body_limit(mj_client::daemon::MAX_FRAME_BYTES)),
+        )
+        .route(
+            "/sessions/{session_id}/read-receipt",
+            post(persist_read_receipt),
+        )
         .route(
             "/sessions",
             get(list_sessions)

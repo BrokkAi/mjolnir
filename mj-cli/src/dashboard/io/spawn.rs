@@ -139,7 +139,7 @@ pub(crate) fn spawn_background_async<T: Send + 'static>(
 /// drafts query. The per-workspace snapshot this replaced loaded the whole
 /// controller once per workspace for session previews the manager never shows.
 pub(crate) async fn load_workspace_management_entries(
-    daemon: &mut daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
 ) -> Result<Vec<WorkspaceManagementEntry>> {
     let mut entries = workspace_management_listings(daemon).await?;
     fill_workspace_management_drafts(daemon, &mut entries).await?;
@@ -148,20 +148,20 @@ pub(crate) async fn load_workspace_management_entries(
 
 /// The workspace list alone: names and session counts, no drafts.
 async fn workspace_management_listings(
-    daemon: &mut daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
 ) -> Result<Vec<WorkspaceManagementEntry>> {
     let listings = daemon.list_workspaces().await?;
     Ok(listings
         .into_iter()
         .map(|listing| WorkspaceManagementEntry {
-            workspace: listing.workspace,
+            workspace: listing,
             drafts: Vec::new(),
         })
         .collect())
 }
 
 async fn fill_workspace_management_drafts(
-    daemon: &mut daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
     entries: &mut [WorkspaceManagementEntry],
 ) -> Result<()> {
     for group in daemon.list_workspace_drafts().await? {
@@ -215,8 +215,8 @@ pub(crate) fn spawn_workspace_management_load(
         updates,
         None,
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
-            let mut entries = workspace_management_listings(&mut daemon).await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
+            let mut entries = workspace_management_listings(&daemon).await?;
             // Names first: the dialog opens on this answer while the drafts
             // query runs. The supervised task's own answer carries the details.
             let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
@@ -229,7 +229,7 @@ pub(crate) fn spawn_workspace_management_load(
                     ..Default::default()
                 }),
             });
-            fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
+            fill_workspace_management_drafts(&daemon, &mut entries).await?;
             Ok(WorkspaceManagementResult {
                 entries: Some(entries),
                 ..Default::default()
@@ -251,6 +251,8 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
         SAVE_ACK_TIMEOUT,
         async move {
             Ok(daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .workspace_layouts(workspace_ids)
                 .await?
@@ -275,6 +277,8 @@ pub(crate) fn spawn_workspace_layouts_load(
         async move {
             Ok(daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .workspace_layouts(workspace_ids)
                 .await?
                 .conversation_layouts
@@ -297,10 +301,10 @@ pub(crate) fn spawn_workspace_create(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             let workspace = daemon.create_workspace(name).await?;
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 select_workspace: Some(workspace.id),
                 ..Default::default()
             })
@@ -321,10 +325,10 @@ pub(crate) fn spawn_workspace_rename(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             daemon.rename_workspace(workspace_id, name).await?;
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 select_workspace: None,
                 ..Default::default()
             })
@@ -343,6 +347,8 @@ pub(crate) fn spawn_workspace_close_cancel(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .cancel_workspace_close(workspace_id)
                 .await
         },
@@ -360,7 +366,7 @@ pub(crate) fn spawn_workspace_close(
     mj_core::runtime::spawn(async move {
         let closing_workspace_id = workspace_id.clone();
         let work = mj_core::runtime::spawn(async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             daemon.close_workspace(workspace_id).await
         });
         let result = blocking_result("closing workspace", work.await);
@@ -388,8 +394,12 @@ pub(crate) fn spawn_workspace_draft_recovery(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
-            let (session_id, text, revision) = daemon.recover_draft(draft_id.clone()).await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
+            let mj_client::http::RecoveredDraft {
+                session_id,
+                text,
+                revision,
+            } = daemon.recover_draft(draft_id.clone()).await?;
             Ok(WorkspaceManagementResult {
                 recovered_draft: Some((
                     RetiredDetachedDraft { draft_id, revision },
@@ -412,9 +422,9 @@ pub(crate) fn spawn_workspace_drafts_reload(
         updates,
         None,
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 ..Default::default()
             })
         },
@@ -435,7 +445,7 @@ pub(crate) fn spawn_workspace_draft_discard(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             let single = draft_id.is_some();
             let count = daemon.discard_drafts(workspace_id, draft_id).await?;
             let message = if single {
@@ -453,7 +463,7 @@ pub(crate) fn spawn_workspace_draft_discard(
                 }),
             });
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 ..Default::default()
             })
         },
@@ -498,6 +508,34 @@ where
         drop(guard);
     });
     (cancelled, worker)
+}
+
+/// Drop the HTTP request on cancellation so its reply channel closes and
+/// the daemon can stop any disposable machine work behind it.
+pub(crate) fn spawn_cancellable_http<T: Send + 'static>(
+    tracker: CriticalOperationTracker,
+    label: &'static str,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+) -> Arc<AtomicBool> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = tracker.begin_cancellable(label, cancelled.clone());
+    let worker_cancelled = cancelled.clone();
+    mj_core::runtime::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work));
+        let result = tokio::select! {
+            joined = task => blocking_result(label, joined),
+            () = async {
+                while !worker_cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            } => Err("operation cancelled".into()),
+        };
+        report(label, &updates, to_update(result));
+        drop(guard);
+    });
+    cancelled
 }
 
 /// Discover and save first-run configuration without blocking terminal input.
@@ -565,14 +603,12 @@ pub(crate) fn spawn_availability_check(updates: UnboundedSender<DashboardIoUpdat
         updates,
         SAVE_ACK_TIMEOUT,
         async {
-            match daemon::connect_existing()
+            daemon::connect_existing()
                 .await?
-                .request(daemon::DaemonAction::CheckAvailability)
+                .http()
                 .await?
-            {
-                daemon::DaemonReply::Done => Ok(()),
-                _ => anyhow::bail!("daemon returned an unexpected availability acknowledgement"),
-            }
+                .check_availability()
+                .await
         },
         DashboardIoUpdate::AvailabilityCheckRequested,
     );
@@ -586,12 +622,10 @@ pub(crate) fn spawn_profile_login_statuses(
     spawn_io(
         "reading profile sign-in status",
         updates,
-        move || match machine_request(
-            mj_client::daemon::DaemonAction::ProfileLoginStatuses,
-            Arc::new(AtomicBool::new(false)),
-        )? {
-            mj_client::daemon::DaemonReply::ProfileLoginStatuses(statuses) => Ok(statuses),
-            _ => anyhow::bail!("daemon returned an unexpected profile login status reply"),
+        move || {
+            machine_request(Arc::new(AtomicBool::new(false)), |http| async move {
+                http.profile_login_statuses().await
+            })
         },
         move |result| DashboardIoUpdate::ProfileLoginStatuses { generation, result },
     )
@@ -611,12 +645,10 @@ pub(crate) fn spawn_setup_discovery(
             DetectScope::Runtimes => "detecting runtimes",
         },
         updates,
-        move |cancelled| match machine_request(
-            mj_client::daemon::DaemonAction::DiscoverSetup { scope, machines },
-            cancelled,
-        )? {
-            mj_client::daemon::DaemonReply::SetupDiscovery(report) => Ok(*report),
-            _ => anyhow::bail!("daemon returned an unexpected discovery reply"),
+        move |cancelled| {
+            machine_request(cancelled, |http| async move {
+                http.discover_setup(scope, machines).await
+            })
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
     )
@@ -685,21 +717,9 @@ pub(crate) fn spawn_spinner_style_save(
         updates,
         move || {
             mj_core::runtime::block_on(async move {
-                let mut client = daemon::connect_or_start().await?;
-                match client
-                    .request(mj_client::daemon::DaemonAction::SaveSpinnerStyle { style })
-                    .await?
-                {
-                    mj_client::daemon::DaemonReply::Done => {}
-                    reply => anyhow::bail!("unexpected spinner save reply: {reply:?}"),
-                }
-                match client
-                    .request(mj_client::daemon::DaemonAction::Configuration)
-                    .await?
-                {
-                    mj_client::daemon::DaemonReply::Configuration(config) => Ok(*config),
-                    reply => anyhow::bail!("unexpected configuration reply: {reply:?}"),
-                }
+                let client = daemon::connect_or_start().await?.http().await?;
+                client.save_spinner_style(style).await?;
+                client.config().await
             })?
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
@@ -756,7 +776,15 @@ impl LifecycleSubmission {
         client: &mut daemon::DaemonClient,
         request: daemon::SessionLifecycleRequest,
     ) -> Result<daemon::LifecycleReceipt> {
-        let receipt = client.start_session_lifecycle(request).await?;
+        self.submit_receipt(client.start_session_lifecycle(request))
+            .await
+    }
+
+    pub(super) async fn submit_receipt(
+        self,
+        request: impl std::future::Future<Output = Result<daemon::LifecycleReceipt>>,
+    ) -> Result<daemon::LifecycleReceipt> {
+        let receipt = request.await?;
         self.release();
         Ok(receipt)
     }
@@ -867,6 +895,8 @@ pub(crate) fn spawn_stopped_subagent_transcript(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
                 .await
         },
@@ -895,7 +925,7 @@ pub(crate) fn spawn_notification_message_read(
             updates,
             SAVE_ACK_TIMEOUT,
             async move {
-                let mut daemon = daemon::connect_or_start().await?;
+                let daemon = daemon::connect_or_start().await?.http().await?;
                 let item = match source {
                     mj_tui::NotificationReadSource::Item(stable_id) => {
                         daemon.stored_transcript_item(session_id, stable_id).await?
@@ -913,8 +943,7 @@ pub(crate) fn spawn_notification_message_read(
                             &item.stable_id,
                         )
                     }
-                    mj_client::daemon::StoredTranscriptItem::Missing
-                    | mj_client::daemon::StoredTranscriptItem::Unsupported => None,
+                    mj_client::daemon::StoredTranscriptItem::Missing => None,
                 })
             },
             move |result| DashboardIoUpdate::NotificationMessageRead {
@@ -948,6 +977,8 @@ pub(crate) fn spawn_stored_session_summary(
             SAVE_ACK_TIMEOUT,
             async move {
                 let summary = daemon::connect_or_start()
+                    .await?
+                    .http()
                     .await?
                     .stored_session_summary(session_id.clone())
                     .await?
@@ -1007,6 +1038,8 @@ pub(crate) fn spawn_dashboard_rename(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .set_session_title(renamed_session_id, requested_title)
                 .await
         },
@@ -1028,6 +1061,8 @@ pub(crate) fn spawn_dashboard_notifications_ignored(
         SAVE_ACK_TIMEOUT,
         async move {
             daemon::connect_existing()
+                .await?
+                .http()
                 .await?
                 .set_session_notifications_ignored(session_id, ignored)
                 .await
@@ -1052,6 +1087,8 @@ pub(crate) fn spawn_dashboard_change_workspace(
         SAVE_ACK_TIMEOUT,
         async move {
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .set_session_workspace(moved_session_id, workspace_id)
                 .await
@@ -1095,6 +1132,8 @@ pub(crate) fn spawn_config_rename(
                 daemon.rename_target(old_id, new_id).await?;
             }
             daemon
+                .http()
+                .await?
                 .stored_session_metadata()
                 .await
                 .map(DashboardMetadata::from)
@@ -1154,7 +1193,7 @@ pub(crate) fn spawn_quota_probe_request(
 pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,
     pub(crate) resource_allocation: Option<mj_core::state::SessionResourceAllocation>,
-    pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
+    pub(crate) additional_mounts: Vec<mj_core::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
 }
 
@@ -1178,6 +1217,8 @@ pub(crate) fn spawn_dashboard_container_settings(
                 mount_history,
             } = request;
             let preview = daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .set_session_container_settings(
                     session_id,
@@ -1229,6 +1270,8 @@ pub(crate) fn spawn_terminal_draft_persist(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .persist_terminal_draft(
                     client_id,
                     persisted_session_id,
@@ -1269,6 +1312,8 @@ pub(crate) fn spawn_read_receipt_persist(
             // Give projection persistence or a reconnect time to catch up.
             tokio::time::sleep(retry_delay).await;
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .persist_read_receipt(client_id, workspace_id, persisted_session_id, through)
                 .await
@@ -1313,7 +1358,7 @@ pub(crate) fn spawn_create_bundle(
         updates,
         Duration::from_secs(60),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             let created = daemon.create_project(sources).await?;
             Ok(CreatedBundleUpdate {
                 bundle: created.project.bundle,
@@ -1340,6 +1385,8 @@ pub(crate) fn spawn_remove_bundle(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .remove_project(bundle_id)
                 .await
         },
@@ -1365,6 +1412,8 @@ pub(crate) fn spawn_imported_session_apply(
             let _archive_directory = imported._archive_directory;
             let mut client = daemon::connect_or_start().await?;
             let published = client
+                .http()
+                .await?
                 .session_record_with_verdict(imported.session_id)
                 .await?
                 .context("imported session disappeared")?;
@@ -1398,7 +1447,14 @@ pub(crate) fn spawn_resume_candidates(
         "load suspended sessions",
         updates,
         SAVE_ACK_TIMEOUT,
-        async { daemon::connect_or_start().await?.resume_candidates().await },
+        async {
+            daemon::connect_or_start()
+                .await?
+                .http()
+                .await?
+                .resume_candidates()
+                .await
+        },
         move |result| DashboardIoUpdate::ResumeCandidates {
             discovery_id,
             result: Box::new(result),
@@ -1419,6 +1475,8 @@ pub(crate) fn spawn_resume_record(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .session_record_with_verdict(requested)
                 .await
         },
@@ -1435,24 +1493,17 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     mj_core::runtime::spawn_blocking(move || {
-        let sizes = match machine_request(
-            mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
-                paths: targets.clone(),
-            },
-            Arc::new(AtomicBool::new(false)),
-        ) {
-            Ok(mj_client::daemon::DaemonReply::CheckpointArchiveSizes(sizes)) => sizes,
-            result => {
-                let error = match result {
-                    Err(error) => format!("{error:#}"),
-                    Ok(reply) => format!("unexpected archive size reply: {reply:?}"),
-                };
-                targets
-                    .keys()
-                    .map(|id| (id.clone(), Err(error.clone())))
-                    .collect()
-            }
-        };
+        let paths = targets.clone();
+        let sizes = machine_request(Arc::new(AtomicBool::new(false)), |http| async move {
+            http.checkpoint_archive_sizes(paths).await
+        })
+        .unwrap_or_else(|error| {
+            let error = format!("{error:#}");
+            targets
+                .keys()
+                .map(|id| (id.clone(), Err(error.clone())))
+                .collect()
+        });
         report(
             "checkpoint archive sizes",
             &updates,
@@ -1662,19 +1713,25 @@ async fn await_daemon_creation(
     session_id: &str,
     cancelled: &AtomicBool,
 ) -> Result<LifecycleSuccess> {
-    follow_create_wait(session_id, cancelled, daemon::connect_or_start).await
+    follow_create_wait(session_id, cancelled, || async {
+        daemon::connect_or_start()
+            .await?
+            .wait_create_session(session_id.to_owned())
+            .await
+    })
+    .await
 }
 
 /// The loop of [`await_daemon_creation`], with the way it reaches a daemon
 /// given, so a test can answer it from a fake daemon.
-async fn follow_create_wait<Connect, Connecting>(
+async fn follow_create_wait<Wait, Waiting>(
     session_id: &str,
     cancelled: &AtomicBool,
-    connect: Connect,
+    wait: Wait,
 ) -> Result<LifecycleSuccess>
 where
-    Connect: Fn() -> Connecting,
-    Connecting: std::future::Future<Output = Result<mj_client::daemon::DaemonClient>>,
+    Wait: Fn() -> Waiting,
+    Waiting: std::future::Future<Output = Result<()>>,
 {
     const RETRY_DELAY: Duration = Duration::from_millis(250);
     // Every wait below, including the connection and the backoff, is watched
@@ -1688,12 +1745,8 @@ where
         // One attempt, with no reconnect inside the client: a daemon that
         // stops drops the connection, and this loop starts the next daemon
         // through `connect`.
-        let attempt = async {
-            let mut daemon = connect().await?;
-            daemon.wait_create_session(session_id.to_owned()).await
-        };
         let error = tokio::select! {
-            outcome = attempt => match outcome {
+            outcome = wait() => match outcome {
                 Ok(()) => return Ok(LifecycleSuccess::Created),
                 Err(error) => error,
             },
@@ -1772,6 +1825,8 @@ pub(crate) fn spawn_wiki_search(
                                 return Ok(Default::default());
                             }
                             daemon::connect_or_start()
+                                .await?
+                                .http()
                                 .await?
                                 .session_text_search(live_query)
                                 .await
@@ -1876,6 +1931,8 @@ pub(crate) fn spawn_sessions_text_search(
             tokio::time::sleep(WIKI_SEARCH_DEBOUNCE).await;
             let result = supervised_wiki_task("searching session conversations", async move {
                 daemon::connect_or_start()
+                    .await?
+                    .http()
                     .await?
                     .session_text_search(query)
                     .await
@@ -2020,15 +2077,12 @@ pub(crate) fn spawn_dashboard_restore_session(
 
 /// Each disposable read owns a connection. Superseding the input closes that
 /// connection, allowing the daemon to stop its executor and reap its children.
-pub(crate) fn machine_request(
-    action: mj_client::daemon::DaemonAction,
+pub(crate) fn machine_request<T, F: std::future::Future<Output = Result<T>>>(
     cancelled: Arc<AtomicBool>,
-) -> Result<mj_client::daemon::DaemonReply> {
+    send: impl FnOnce(mj_client::http::HttpDaemonClient) -> F,
+) -> Result<T> {
     mj_core::runtime::block_on(async move {
-        let request = async move {
-            let mut client = daemon::connect_or_start().await?;
-            client.request(action).await
-        };
+        let request = async move { send(daemon::connect_or_start().await?.http().await?).await };
         tokio::pin!(request);
         loop {
             tokio::select! {
@@ -2175,64 +2229,52 @@ mod wiki_search_tests {
 #[cfg(test)]
 mod create_wait_tests {
     use super::*;
-    use mj_client::daemon::{
-        DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
-        RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
-    };
+    use mj_client::http::HttpDaemonClient;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    fn metadata(address: std::net::SocketAddr) -> DaemonMetadata {
-        DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address,
-            token: "create-wait-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        }
-    }
-
-    /// A fake daemon that serves one scripted answer per connection: `None`
-    /// reads the request and drops the connection.
     async fn serve(
-        script: Vec<Option<std::result::Result<DaemonReply, String>>>,
-    ) -> (DaemonMetadata, tokio::task::JoinHandle<()>) {
+        script: Vec<Option<(&str, &str)>>,
+    ) -> (HttpDaemonClient, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = metadata(listener.local_addr().unwrap());
+        let client = HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "create-test",
+        )
+        .unwrap();
+        let script: Vec<_> = script.into_iter().map(|entry| entry.map(|(status, body)| format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))).collect();
         let server = mj_core::runtime::spawn(async move {
             for answer in script {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(
-                    request.action,
-                    DaemonAction::WaitCreateSession { .. }
-                ));
-                if let Some(result) = answer {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result,
-                        },
-                    )
-                    .await
-                    .unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    line.trim_end(),
+                    "POST /api/v1/sessions/session-1/create/wait HTTP/1.1"
+                );
+                loop {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if let Some(answer) = answer {
+                    stream.write_all(answer.as_bytes()).await.unwrap();
                 }
             }
         });
-        (metadata, server)
+        (client, server)
     }
 
     /// Dropped connections, then the answer: the wait reconnects each time
     /// and ends Finished.
     #[tokio::test]
     async fn the_create_wait_reconnects_after_a_dropped_connection() {
-        let (metadata, server) = serve(vec![None, None, Some(Ok(DaemonReply::Done))]).await;
+        let (client, server) = serve(vec![None, None, Some(("204 No Content", ""))]).await;
         let cancelled = AtomicBool::new(false);
         let outcome = follow_create_wait("session-1", &cancelled, || {
-            DaemonClient::connect(metadata.clone())
+            client.wait_create_session("session-1".into())
         })
         .await
         .unwrap();
@@ -2242,10 +2284,11 @@ mod create_wait_tests {
 
     #[tokio::test]
     async fn a_refusal_ends_the_create_wait_with_its_reason() {
-        let (metadata, server) = serve(vec![Some(Err("clone refused".to_owned()))]).await;
+        let (client, server) =
+            serve(vec![Some(("409 Conflict", r#"{"error":"clone refused"}"#))]).await;
         let cancelled = AtomicBool::new(false);
         let error = follow_create_wait("session-1", &cancelled, || {
-            DaemonClient::connect(metadata.clone())
+            client.wait_create_session("session-1".into())
         })
         .await
         .err()

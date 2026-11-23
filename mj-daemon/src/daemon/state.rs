@@ -136,6 +136,7 @@ impl RuntimeState {
             availability_requested: tokio::sync::Notify::new(),
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
+            login_terminals: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
@@ -170,6 +171,22 @@ impl RuntimeState {
 
     pub(crate) fn projects(&self) -> Arc<mj_controller::project_catalog::Catalog> {
         self.projects.clone()
+    }
+
+    pub(crate) async fn stop_viewer_background_task(
+        &self,
+        session_id: String,
+        background_task_id: String,
+    ) -> Result<(), crate::server::BackgroundTaskStopFailure> {
+        use crate::server::BackgroundTaskStopFailure;
+        let session = self.session_manager.session(&session_id).await.map_err(|error| {
+            tracing::warn!(%session_id, %error, "could not resolve live session for background-task stop");
+            BackgroundTaskStopFailure::SessionUnavailable
+        })?;
+        session.client().stop_background_task(background_task_id.clone()).await.map_err(|error| {
+            tracing::warn!(%session_id, %background_task_id, %error, "provider rejected background-task stop");
+            BackgroundTaskStopFailure::Provider
+        })
     }
 
     pub async fn project_catalog(

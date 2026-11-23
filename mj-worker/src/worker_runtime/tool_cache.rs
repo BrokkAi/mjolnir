@@ -156,7 +156,7 @@ pub(super) fn prepare(cwd: &Path, environment: &mut BTreeMap<String, String>) ->
         "MJ_BUILD_TOOL_BIN".into(),
         bin.to_string_lossy().into_owned(),
     );
-    super::shell_environment::configure(&private.join("shell-env"), environment)?;
+    super::shell_environment::configure_if_needed(&private.join("shell-env"), environment)?;
     Ok(())
 }
 

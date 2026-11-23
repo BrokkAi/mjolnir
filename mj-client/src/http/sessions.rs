@@ -1,9 +1,9 @@
-use super::{HttpApiError, HttpDaemonClient};
+use super::{HttpApiError, HttpDaemonClient, encode_segment};
 use crate::daemon::{
     RegisteredSession, WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo,
     WikiSyncStatus,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use mj_core::attachment::AttachmentRef;
 use mj_core::local_git::SessionGitStatus;
 use mj_core::state::{ContainerUpgradePreview, ContainerUpgradeRequest, SessionResourceAllocation};
@@ -53,17 +53,7 @@ pub struct StopBackgroundTaskRequest {
     pub background_task_id: String,
 }
 
-fn encode_segment(segment: &str) -> Result<String> {
-    // The URL parser resolves dot segments even when percent-encoded.
-    ensure!(
-        !matches!(segment, "" | "." | ".."),
-        "invalid API path segment"
-    );
-    let encoded: String = url::form_urlencoded::byte_serialize(segment.as_bytes()).collect();
-    Ok(encoded.replace('+', "%20"))
-}
-
-fn session_path(id: &str, suffix: &str) -> Result<String> {
+pub(super) fn session_path(id: &str, suffix: &str) -> Result<String> {
     Ok(format!("/api/v1/sessions/{}{suffix}", encode_segment(id)?))
 }
 
@@ -74,7 +64,7 @@ fn wiki_path(id: &str, suffix: &str) -> Result<String> {
     ))
 }
 
-fn optional<T>(result: Result<T>) -> Result<Option<T>> {
+pub(super) fn optional<T>(result: Result<T>) -> Result<Option<T>> {
     match result {
         Err(error)
             if error
@@ -144,11 +134,11 @@ impl HttpDaemonClient {
     }
 
     pub async fn wiki_sync_request(&self) -> Result<WikiSyncStatus> {
-        self.post_empty("/api/v1/wiki/sync").await
+        self.post_empty_once("/api/v1/wiki/sync").await
     }
 
     pub async fn wiki_sync_watch(&self, epoch: &str, after: u64) -> Result<WikiSyncStatus> {
-        self.get_json_query(
+        self.get_json_query_once(
             "/api/v1/wiki/sync/watch",
             &[("epoch", epoch), ("after", &after.to_string())],
         )
@@ -156,7 +146,7 @@ impl HttpDaemonClient {
     }
 
     pub async fn wiki_search(&self, query: &str, limit: usize) -> Result<WikiSearchPage> {
-        self.get_json_query(
+        self.get_json_query_once(
             "/api/v1/wiki/search",
             &[("q", query), ("limit", &limit.to_string())],
         )

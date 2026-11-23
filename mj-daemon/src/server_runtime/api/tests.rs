@@ -9161,7 +9161,7 @@ impl ExportRuntime for ListingExports {
         self.0.records.get(id).cloned()
     }
 
-    fn delegation_listing_projection(&self) -> Result<Option<RuntimeProjection>> {
+    fn runtime_projection(&self) -> Result<Option<RuntimeProjection>> {
         Ok(Some(self.0.clone()))
     }
 

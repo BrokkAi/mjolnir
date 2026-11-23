@@ -1542,17 +1542,13 @@ async fn infer_new_session_inputs(
 
     if workspace_id.is_none() {
         let known_empty = listed.as_ref().is_some_and(Vec::is_empty);
-        let workspaces: Vec<_> = listed
-            .unwrap_or_default()
-            .into_iter()
-            .map(|workspace| crate::daemon::WorkspaceListing { workspace })
-            .collect();
+        let workspaces = listed.unwrap_or_default();
         if local && let Ok(directory) = folder() {
             workspace_id = crate::go::inferred_workspace(&workspaces, &directory).await?;
         }
         if workspace_id.is_none() {
             if let [only] = workspaces.as_slice() {
-                workspace_id = Some(only.workspace.id.clone());
+                workspace_id = Some(only.id.clone());
             } else if known_empty {
                 open.push("--workspace NAME (this instance has none yet. Create one with `mj workspaces create NAME`)".to_owned());
             } else if workspaces.is_empty() {
@@ -1560,7 +1556,7 @@ async fn infer_new_session_inputs(
             } else {
                 let names = workspaces
                     .iter()
-                    .map(|entry| entry.workspace.name.as_str())
+                    .map(|entry| entry.name.as_str())
                     .collect::<Vec<_>>();
                 open.push(format!("--workspace NAME (one of: {})", names.join(", ")));
             }
@@ -3176,7 +3172,7 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
 /// Explicit credential output for callers authenticating outside the CLI.
 pub(crate) async fn api_token() -> Result<()> {
     let mut client = crate::daemon::connect_or_start().await?;
-    println!("{}", client.api_credential().await?);
+    println!("{}", client.http().await?.api_credential().await?);
     Ok(())
 }
 
@@ -3539,7 +3535,7 @@ const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 /// Own a dedicated connection: a deadline abandons its in-flight exchange,
 /// while quota control requests continue on their original connection.
 async fn pump_quota_feed(
-    mut daemon: mj_client::daemon::DaemonClient,
+    daemon: mj_client::http::HttpDaemonClient,
     mut cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
     mut metadata: mj_client::runtime_feed::RuntimeMetadata,
     deadline: std::time::Instant,
@@ -3601,7 +3597,7 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         daemon.refresh_quota().await?;
         let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
         let pumped = pump_quota_feed(
-            mj_client::daemon::connect_existing().await?,
+            daemon.http().await?,
             cursor,
             metadata,
             deadline,
@@ -3629,7 +3625,7 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
             daemon.probe_quota_profiles(probe.clone(), false).await?;
             let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
             let pumped = pump_quota_feed(
-                mj_client::daemon::connect_existing().await?,
+                daemon.http().await?,
                 cursor,
                 metadata,
                 deadline,
@@ -5911,33 +5907,42 @@ mod tests {
         let (received, waiting) = tokio::sync::oneshot::channel();
         let server = mj_core::runtime::spawn(async move {
             let (mut control, _) = listener.accept().await.unwrap();
-            let (mut feed, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut feed).await.unwrap();
-            assert!(matches!(
-                request.action,
-                DaemonAction::RuntimeChanges { .. }
-            ));
-            received.send(()).unwrap();
-            let mut byte = [0];
-            assert_eq!(feed.read(&mut byte).await.unwrap(), 0);
             let request: RequestEnvelope = read_frame(&mut control).await.unwrap();
-            assert!(matches!(
-                request.action,
-                DaemonAction::ProbeQuotaProfiles { .. }
-            ));
+            assert!(matches!(request.action, DaemonAction::Identity));
             write_frame(
                 &mut control,
                 &ResponseEnvelope {
                     protocol_version: request.protocol_version,
                     request_id: request.request_id,
-                    result: Ok(DaemonReply::Done),
+                    result: Ok(DaemonReply::Identity(mj_client::daemon::DaemonIdentity {
+                        instance_id: "test".into(),
+                        build_version: "test".into(),
+                        placement: DaemonPlacement::Host,
+                    })),
                 },
             )
             .await
             .unwrap();
         });
         let mut control = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let feed = DaemonClient::connect(metadata).await.unwrap();
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let feed = mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", http.local_addr().unwrap()),
+            "quota-test",
+        )
+        .unwrap();
+        let http_server = mj_core::runtime::spawn(async move {
+            let (mut feed, _) = http.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let count = feed.read(&mut request).await.unwrap();
+            assert!(request[..count].starts_with(b"POST /api/v1/runtime/changes "));
+            received.send(()).unwrap();
+            loop {
+                if feed.read(&mut request).await.unwrap() == 0 {
+                    break;
+                }
+            }
+        });
         let observed = mj_client::runtime_feed::RuntimeMetadata::default();
         let pump = pump_quota_feed(
             feed,
@@ -5955,11 +5960,9 @@ mod tests {
         tokio::time::advance(QUOTA_REFRESH_WAIT + std::time::Duration::from_secs(1)).await;
         let (_, latest) = pump.await.unwrap();
         assert_eq!(latest, observed);
-        control
-            .probe_quota_profiles(vec!["disabled".into()], false)
-            .await
-            .unwrap();
+        control.identity().await.unwrap();
         server.await.unwrap();
+        http_server.await.unwrap();
     }
 
     #[test]

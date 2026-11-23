@@ -23,18 +23,34 @@ use mj_core::subagent::{ReportState, bounded_report};
 use mj_controller::quota::ProfileQuota;
 
 use crate::server::api::{
-    BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
+    ApiFailure, BundleExport, ExportError, PurgeUntrackedFailure, PurgeUntrackedRequest,
+    PurgeUntrackedResponse, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
     TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
+};
+use crate::server::{
+    ActionOutcome, BackgroundTaskStopFailure, BundleFailure, CreateBundleResponse,
+    MAX_HISTORY_MATCHES, PreflightFailure, PreflightNew, PreflightResume, ViewerClientState,
+    ViewerPromptHistory,
 };
 use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::runtime_feed::RuntimeProjection;
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
-use mj_controller::controller::{Controller, SessionExportLayout};
+use mj_controller::controller::{
+    Controller, QuickBundleCreation, QuickBundleFailure, SessionExportLayout,
+};
 use mj_controller::targets::{
     self, CancellableProcessExecutor, CommandExecutor, CommandOutput, agent_working_directory_at,
     target_join,
 };
+use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
+use mj_core::refusal::Refusal;
 use mj_core::relay::RelayCommand;
+use mj_core::state::{
+    ContainerSettingsChange, ContainerUpgradePreview, MovePreparation, MoveSelection,
+    SessionResourceAllocation,
+};
+use mj_core::suspend_consent::SuspendPreflight;
+use mj_core::targets::AdditionalMount;
 
 mod fetch_transfer;
 mod oracle;
@@ -54,6 +70,83 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn dashboard_backend(self: Arc<Self>) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
+        None
+    }
+
+    fn stop_viewer_background_task(
+        &self,
+        _session_id: String,
+        _background_task_id: String,
+    ) -> BoxFuture<'_, Result<(), BackgroundTaskStopFailure>> {
+        Box::pin(async { Err(BackgroundTaskStopFailure::SessionUnavailable) })
+    }
+
+    fn purge_untracked(
+        self: Arc<Self>,
+        _request: PurgeUntrackedRequest,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'static, Result<PurgeUntrackedResponse, PurgeUntrackedFailure>> {
+        Box::pin(async {
+            Err(PurgeUntrackedFailure::Internal(
+                "controller unavailable".into(),
+            ))
+        })
+    }
+
+    fn suspend_preflight(
+        self: Arc<Self>,
+        _session_id: String,
+        _dry_run: bool,
+        _without_checkpoint: bool,
+    ) -> BoxFuture<'static, Result<SuspendPreflight, anyhow::Error>> {
+        Box::pin(async { Err(anyhow!("controller unavailable")) })
+    }
+
+    fn preview_container_upgrade(
+        self: Arc<Self>,
+        _session_id: String,
+    ) -> BoxFuture<'static, Result<ContainerUpgradePreview, anyhow::Error>> {
+        Box::pin(async { Err(anyhow!("controller unavailable")) })
+    }
+
+    fn set_container_settings(
+        self: Arc<Self>,
+        _session_id: String,
+        _settings: ContainerSettingsChange,
+    ) -> BoxFuture<'static, Result<Option<ContainerUpgradePreview>, anyhow::Error>> {
+        Box::pin(async { Err(anyhow!("controller unavailable")) })
+    }
+
+    fn project_catalog(
+        self: Arc<Self>,
+        _refresh: bool,
+        _retry: bool,
+    ) -> BoxFuture<'static, Result<mj_core::project_catalog::ProjectCatalogView, anyhow::Error>>
+    {
+        Box::pin(async { Err(anyhow!("controller unavailable")) })
+    }
+
+    fn prepare_move(
+        self: Arc<Self>,
+        _selection: MoveSelection,
+    ) -> BoxFuture<'static, Result<MovePreparation, anyhow::Error>> {
+        Box::pin(async { Err(anyhow!("controller unavailable")) })
+    }
+
+    fn create_viewer_bundle(
+        self: Arc<Self>,
+        _source: String,
+        _exact_sources: Option<Vec<String>>,
+        _discovered: bool,
+    ) -> BoxFuture<'static, Result<QuickBundleCreation, QuickBundleFailure>> {
+        Box::pin(async {
+            Err(QuickBundleFailure::Persistence(anyhow!(
+                "controller unavailable"
+            )))
+        })
+    }
+
     fn push_notice(&self, _session_id: &str, _message: String) {}
     fn workspace_admission(
         &self,
@@ -165,7 +258,7 @@ pub trait ExportRuntime: Send + Sync {
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
 
-    fn delegation_listing_projection(&self) -> Result<Option<RuntimeProjection>> {
+    fn runtime_projection(&self) -> Result<Option<RuntimeProjection>> {
         Ok(None)
     }
 
@@ -268,6 +361,28 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    fn close_workspace(
+        self: Arc<Self>,
+        _id: String,
+        _admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { bail!("workspace close is unavailable") })
+    }
+
+    fn cancel_workspace_close(&self, _id: &str) -> Result<()> {
+        bail!("workspace close cancellation is unavailable")
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        Box::pin(async { bail!("terminal drafts are unavailable") })
+    }
+
+    fn remove_project(&self, _id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("project removal is unavailable") })
+    }
+
     fn session_working_context(
         &self,
         _session_id: String,
@@ -340,6 +455,89 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn dashboard_backend(self: Arc<Self>) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
+        Some(self)
+    }
+
+    fn stop_viewer_background_task(
+        &self,
+        session_id: String,
+        background_task_id: String,
+    ) -> BoxFuture<'_, Result<(), BackgroundTaskStopFailure>> {
+        Box::pin(RuntimeState::stop_viewer_background_task(
+            self,
+            session_id,
+            background_task_id,
+        ))
+    }
+
+    fn purge_untracked(
+        self: Arc<Self>,
+        request: PurgeUntrackedRequest,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'static, Result<PurgeUntrackedResponse, PurgeUntrackedFailure>> {
+        Box::pin(async move { RuntimeState::purge_untracked(&self, request, cancelled).await })
+    }
+
+    fn suspend_preflight(
+        self: Arc<Self>,
+        session_id: String,
+        dry_run: bool,
+        without_checkpoint: bool,
+    ) -> BoxFuture<'static, Result<SuspendPreflight, anyhow::Error>> {
+        Box::pin(async move {
+            RuntimeState::suspend_preflight(&self, session_id, dry_run, without_checkpoint).await
+        })
+    }
+
+    fn preview_container_upgrade(
+        self: Arc<Self>,
+        session_id: String,
+    ) -> BoxFuture<'static, Result<ContainerUpgradePreview, anyhow::Error>> {
+        Box::pin(async move { RuntimeState::preview_container_upgrade(&self, session_id).await })
+    }
+
+    fn set_container_settings(
+        self: Arc<Self>,
+        session_id: String,
+        settings: ContainerSettingsChange,
+    ) -> BoxFuture<'static, Result<Option<ContainerUpgradePreview>, anyhow::Error>> {
+        Box::pin(
+            async move { RuntimeState::set_container_settings(&self, session_id, settings).await },
+        )
+    }
+
+    fn project_catalog(
+        self: Arc<Self>,
+        refresh: bool,
+        retry: bool,
+    ) -> BoxFuture<'static, Result<mj_core::project_catalog::ProjectCatalogView, anyhow::Error>>
+    {
+        Box::pin(async move { RuntimeState::project_catalog(&self, refresh, retry).await })
+    }
+
+    fn prepare_move(
+        self: Arc<Self>,
+        selection: MoveSelection,
+    ) -> BoxFuture<'static, Result<MovePreparation, anyhow::Error>> {
+        Box::pin(async move { self.prepare_move_session(selection).await })
+    }
+
+    fn create_viewer_bundle(
+        self: Arc<Self>,
+        source: String,
+        exact_sources: Option<Vec<String>>,
+        discovered: bool,
+    ) -> BoxFuture<'static, Result<QuickBundleCreation, QuickBundleFailure>> {
+        Box::pin(async move {
+            match exact_sources {
+                Some(sources) => self.create_bundle_from_sources(sources, false).await,
+                None if discovered => self.create_bundle_from_sources(vec![source], true).await,
+                None => self.create_quick_bundle(source).await,
+            }
+        })
+    }
+
     fn push_notice(&self, session_id: &str, message: String) {
         RuntimeState::push_notice(self, session_id, message);
     }
@@ -500,7 +698,7 @@ impl ExportRuntime for RuntimeState {
         RuntimeState::session_record(self, session_id)
     }
 
-    fn delegation_listing_projection(&self) -> Result<Option<RuntimeProjection>> {
+    fn runtime_projection(&self) -> Result<Option<RuntimeProjection>> {
         self.runtime_publication().map(Some)
     }
 
@@ -592,6 +790,30 @@ impl ExportRuntime for RuntimeState {
 
     fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(RuntimeState::refresh_workspaces(self))
+    }
+
+    fn close_workspace(
+        self: Arc<Self>,
+        id: String,
+        admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(
+            async move { RuntimeState::close_workspace_with_admission(&self, id, admission).await },
+        )
+    }
+
+    fn cancel_workspace_close(&self, id: &str) -> Result<()> {
+        RuntimeState::cancel_workspace_close(self, id)
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        Box::pin(RuntimeState::list_workspace_drafts(self))
+    }
+
+    fn remove_project(&self, id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(RuntimeState::remove_project(self, id))
     }
 
     fn session_working_context(
@@ -734,6 +956,8 @@ const CLAP_USAGE_EXIT_CODE: i32 = 2;
 /// The backend the `/api/v1` routes drive sessions through.
 pub struct ApiBackend {
     sessions: SessionControl,
+    bundle_slots: Arc<tokio::sync::Semaphore>,
+    preflight_slots: Arc<tokio::sync::Semaphore>,
     /// The daemon operations the export path needs: session records, and the
     /// checkpoint a bundle export is read from.
     exports: Arc<dyn ExportRuntime>,
@@ -962,6 +1186,12 @@ impl ApiBackend {
     ) -> Self {
         Self {
             sessions,
+            bundle_slots: Arc::new(tokio::sync::Semaphore::new(
+                super::MAX_CONCURRENT_BUNDLE_CREATIONS,
+            )),
+            preflight_slots: Arc::new(tokio::sync::Semaphore::new(
+                super::MAX_CONCURRENT_PREFLIGHTS,
+            )),
             exports,
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
             quota_publications: None,
@@ -1602,7 +1832,7 @@ impl ApiBackend {
             SubagentToolAction::ListTargets => {
                 let projection = self
                     .exports
-                    .delegation_listing_projection()?
+                    .runtime_projection()?
                     .context("target listing is unavailable")?;
                 list_targets(
                     &projection,
@@ -1647,7 +1877,7 @@ impl ApiBackend {
                     .map(|(id, summary, progress)| (id, (summary, progress)))
                     .collect::<BTreeMap<_, _>>();
                 let now_ms = u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0);
-                let projection = self.exports.delegation_listing_projection()?;
+                let projection = self.exports.runtime_projection()?;
                 let active_children = projection
                     .as_ref()
                     .map_or_else(BTreeMap::new, live_direct_children);
@@ -4471,7 +4701,560 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
         .unwrap_or_else(|| format!("{purpose} was refused by the target"))
 }
 
+impl ApiBackend {
+    fn viewer_projection(&self) -> Result<RuntimeProjection, ApiFailure> {
+        self.exports
+            .runtime_projection()
+            .map_err(|error| {
+                tracing::warn!(%error, "viewer could not read daemon publication");
+                viewer_unavailable()
+            })?
+            .ok_or_else(viewer_unavailable)
+    }
+
+    async fn preflight_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.preflight_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("preflight semaphore stays open")
+    }
+}
+
+fn viewer_unavailable() -> ApiFailure {
+    ApiFailure::unavailable("controller unavailable")
+}
+
+fn viewer_activity(label: &'static str) -> Result<mj_core::upgrade::Work, ApiFailure> {
+    mj_controller::upgrade::activity(label).map_err(|_| viewer_unavailable())
+}
+
+fn join_viewer_task<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, ApiFailure> {
+    result.map_err(|error| {
+        tracing::warn!(%error, "viewer request task failed");
+        viewer_unavailable()
+    })
+}
+
+async fn stored_viewer_work<T: Send + 'static>(
+    label: &'static str,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<Result<T, String>, ApiFailure> {
+    let admission = viewer_activity(label)?;
+    Ok(super::flatten_stored(
+        mj_core::runtime::spawn_blocking(move || {
+            let _admission = admission;
+            work()
+        })
+        .await,
+    ))
+}
+
+async fn saved_project(
+    created: &QuickBundleCreation,
+) -> Result<mj_core::project_catalog::SavedProject> {
+    let bundle_id = created.bundle_id.clone();
+    let bundle = created
+        .config
+        .bundles
+        .get(&bundle_id)
+        .context("created project is missing")?
+        .clone();
+    let project = mj_core::runtime::spawn_blocking(move || {
+        mj_controller::project_catalog::snapshot(
+            &bundle,
+            &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+            false,
+        )
+    })
+    .await??;
+    Ok(mj_core::project_catalog::SavedProject {
+        bundle_id,
+        name: project.name(),
+        project,
+    })
+}
+
+fn bundle_failure(error: QuickBundleFailure) -> crate::server::BundleFailure {
+    match error {
+        QuickBundleFailure::InvalidSource(detail) => {
+            tracing::debug!(error = %detail, "phone bundle source was invalid");
+            Refusal::of(&detail).map_or(BundleFailure::InvalidSource, BundleFailure::Refused)
+        }
+        QuickBundleFailure::Persistence(detail) => {
+            tracing::warn!(error = %detail, "phone bundle creation failed");
+            Refusal::of(&detail).map_or(BundleFailure::Controller, BundleFailure::Refused)
+        }
+    }
+}
+
 impl SubagentBackend for ApiBackend {
+    fn dashboard_backend(&self) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
+        self.exports.clone().dashboard_backend()
+    }
+
+    fn create_bundle(
+        &self,
+        source: String,
+        exact_sources: Option<Vec<String>>,
+        discovered: bool,
+        include_project: bool,
+        admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'_, Result<Result<CreateBundleResponse, BundleFailure>, ApiFailure>> {
+        let exports = self.exports.clone();
+        let slots = self.bundle_slots.clone();
+        Box::pin(async move {
+            // Once accepted, publication finishes even if the HTTP client disconnects.
+            join_viewer_task(
+                mj_core::runtime::spawn(async move {
+                    let _admission = admission;
+                    let _slot = slots
+                        .acquire_owned()
+                        .await
+                        .expect("bundle semaphore stays open");
+                    let created = exports
+                        .create_viewer_bundle(source, exact_sources, discovered)
+                        .await
+                        .map_err(bundle_failure)?;
+                    let project = if include_project {
+                        Some(saved_project(&created).await.map_err(|error| {
+                            tracing::warn!(%error, "created bundle snapshot failed");
+                            BundleFailure::Controller
+                        })?)
+                    } else {
+                        None
+                    };
+                    Ok(CreateBundleResponse {
+                        bundle_id: created.bundle_id,
+                        project,
+                    })
+                })
+                .await,
+            )
+        })
+    }
+
+    fn preflight_new(
+        &self,
+        request: mj_client::daemon::NewSessionPreflightRequest,
+        direct: bool,
+        admission: Option<mj_core::upgrade::Work>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'_, Result<Result<PreflightNew, PreflightFailure>, ApiFailure>> {
+        let slots = self.preflight_slots.clone();
+        Box::pin(async move {
+            let config = self.viewer_projection()?.metadata.installed_config();
+            let project_validation = request.project_directory.is_some();
+            let work = move |cancelled| {
+                let executor = CancellableProcessExecutor::new(cancelled)
+                    .with_deadline(Duration::from_secs(30));
+                super::preflight_new_request(config, request, executor).map_err(|error| {
+                    if direct {
+                        PreflightFailure::Terminal(format!("{error:#}"))
+                    } else if error.downcast_ref::<super::InvalidNewMount>().is_some() {
+                        PreflightFailure::InvalidMount
+                    } else if project_validation {
+                        PreflightFailure::Validation
+                    } else {
+                        PreflightFailure::InvalidRepository(format!("{error:#}"))
+                    }
+                })
+            };
+            let admitted = admission.is_some();
+            let operation = async move {
+                let slot = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return Err(viewer_unavailable()),
+                    permit = slots.acquire_owned() => permit.expect("preflight semaphore stays open"),
+                };
+                let blocking = super::preflight::cancellable_blocking(slot, move |cancelled| {
+                    let _admission = admission;
+                    work(cancelled)
+                });
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => Err(viewer_unavailable()),
+                    answer = blocking => Ok(answer),
+                }
+            };
+            // An admitted remote repair survives HTTP disconnect. Daemon
+            // shutdown still cancels its process and the blocking closure
+            // retains the upgrade permit until it exits.
+            let answer = if admitted {
+                join_viewer_task(mj_core::runtime::spawn(operation).await)??
+            } else {
+                operation.await?
+            };
+            Ok(answer.unwrap_or_else(|error| {
+                tracing::warn!(%error, "phone preflight task failed");
+                Err(PreflightFailure::Controller(format!(
+                    "preflight task failed: {error}"
+                )))
+            }))
+        })
+    }
+
+    fn preflight_resume(
+        &self,
+        session_id: String,
+        target_id: String,
+    ) -> BoxFuture<'_, Result<Result<PreflightResume, PreflightFailure>, ApiFailure>> {
+        Box::pin(async move {
+            let slot = self.preflight_slot().await;
+            let publication = self.viewer_projection()?;
+            let config = publication.metadata.installed_config();
+            let state = mj_core::state::State {
+                sessions: publication.records,
+                environment_owners: publication.environment_owners,
+                ..Default::default()
+            };
+            Ok(
+                super::preflight::cancellable_blocking(slot, move |cancelled| {
+                    super::run_resume_preflight(config, state, &session_id, &target_id, cancelled)
+                })
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "phone resume preflight task failed");
+                    PreflightFailure::Controller(format!("resume preflight task failed: {error}"))
+                }),
+            )
+        })
+    }
+
+    fn complete_path(
+        &self,
+        host: CompletionHost,
+        prefix: String,
+        kind: CompletionKind,
+    ) -> BoxFuture<'_, Result<Result<PathCompletion, String>, ApiFailure>> {
+        Box::pin(async move {
+            let slot = self.preflight_slot().await;
+            let config = self.viewer_projection()?.metadata.installed_config();
+            Ok(
+                super::preflight::cancellable_blocking(slot, move |cancelled| {
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(Duration::from_secs(5));
+                    super::config_only_controller(config)
+                        .complete_path(&host, &prefix, kind, &executor)
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "phone path completion task failed");
+                    Err(format!("path completion task failed: {error}"))
+                }),
+            )
+        })
+    }
+
+    fn discover_projects(
+        &self,
+        request: mj_controller::project_picker::ProjectDiscoveryRequest,
+    ) -> BoxFuture<
+        '_,
+        Result<Result<mj_controller::project_picker::ProjectDiscovery, &'static str>, ApiFailure>,
+    > {
+        Box::pin(async move {
+            let slot = self.preflight_slot().await;
+            Ok(super::project_discovery::discover(slot, request).await)
+        })
+    }
+
+    fn project_catalog(
+        &self,
+        refresh: bool,
+        retry: bool,
+    ) -> BoxFuture<
+        '_,
+        Result<Result<mj_core::project_catalog::ProjectCatalogView, String>, ApiFailure>,
+    > {
+        Box::pin(async move {
+            Ok(self
+                .exports
+                .clone()
+                .project_catalog(refresh, retry)
+                .await
+                .map_err(|error| format!("{error:#}")))
+        })
+    }
+
+    fn prepare_move(
+        &self,
+        selection: MoveSelection,
+        direct: bool,
+    ) -> BoxFuture<'_, Result<Result<MovePreparation, Option<Refusal>>, ApiFailure>> {
+        let exports = self.exports.clone();
+        Box::pin(async move {
+            let admission = viewer_activity("move preparation")?;
+            join_viewer_task(
+                mj_core::runtime::spawn(async move {
+                    let _admission = admission;
+                    exports.prepare_move(selection).await.map_err(|error| {
+                        tracing::debug!(%error, "move preparation rejected");
+                        Refusal::of(&error)
+                            .or_else(|| direct.then(|| Refusal::precondition(format!("{error:#}"))))
+                    })
+                })
+                .await,
+            )
+        })
+    }
+
+    fn mark_conversation_read(
+        &self,
+        client_id: String,
+        session_id: String,
+        through: u64,
+    ) -> BoxFuture<'_, Result<Result<(), String>, ApiFailure>> {
+        Box::pin(async move {
+            let Some(record) = self.exports.session_record(&session_id) else {
+                return Ok(Err("unknown session".into()));
+            };
+            let admission = viewer_activity("read receipt")?;
+            let result = mj_core::runtime::spawn_blocking(move || {
+                let _admission = admission;
+                mj_controller::database::persist_read_receipt(
+                    &client_id,
+                    &record.workspace_id,
+                    &session_id,
+                    through,
+                )
+            })
+            .await;
+            let answer = match result {
+                Ok(result) => result.map(|_| ()).map_err(|error| format!("{error:#}")),
+                Err(error) => Err(format!("phone read receipt task failed: {error}")),
+            };
+            if let Err(error) = &answer {
+                tracing::warn!(%error, "could not persist a phone read receipt");
+            }
+            Ok(answer)
+        })
+    }
+
+    fn client_state(
+        &self,
+        client_id: String,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Result<ViewerClientState, String>, ApiFailure>> {
+        Box::pin(async move {
+            let record = self.exports.session_record(&session_id);
+            stored_viewer_work("viewer state read", move || {
+                let workspace = record.context("unknown session")?.workspace_id;
+                let state = mj_controller::database::client_session_state(
+                    &client_id,
+                    &workspace,
+                    &session_id,
+                )?;
+                Ok(ViewerClientState {
+                    draft: state.draft,
+                    through_event_ordinal: state.through_event_ordinal,
+                })
+            })
+            .await
+        })
+    }
+
+    fn save_draft(
+        &self,
+        client_id: String,
+        session_id: String,
+        draft: String,
+    ) -> BoxFuture<'_, Result<Result<(), String>, ApiFailure>> {
+        Box::pin(async move {
+            let record = self.exports.session_record(&session_id);
+            stored_viewer_work("draft save", move || {
+                let workspace = record.context("unknown session")?.workspace_id;
+                mj_controller::database::persist_client_draft(
+                    &client_id,
+                    &workspace,
+                    &session_id,
+                    &draft,
+                )
+            })
+            .await
+        })
+    }
+
+    fn mark_workspace_read(
+        &self,
+        client_id: String,
+        workspace_id: String,
+    ) -> BoxFuture<'_, Result<Result<(), String>, ApiFailure>> {
+        Box::pin(async move {
+            let records = self.viewer_projection()?.records;
+            stored_viewer_work("workspace read marker", move || {
+                for session in records
+                    .values()
+                    .filter(|session| session.workspace_id == workspace_id)
+                {
+                    // A receipt can be behind the frontier this viewer already read.
+                    mj_controller::database::persist_read_receipt(
+                        &client_id,
+                        &workspace_id,
+                        &session.id,
+                        session.viewed_through_event_ordinal,
+                    )
+                    .ok();
+                }
+                Ok(())
+            })
+            .await
+        })
+    }
+
+    fn prompt_history(
+        &self,
+        session_id: String,
+        query: String,
+        scope: String,
+    ) -> BoxFuture<'_, Result<Result<ViewerPromptHistory, String>, ApiFailure>> {
+        Box::pin(async move {
+            let record = self.exports.session_record(&session_id);
+            stored_viewer_work("history search", move || {
+                let bundle = record.context("unknown session")?.bundle_id;
+                use mj_controller::database::{HistoryScope, search_prompt_page};
+                let scope = match scope.as_str() {
+                    "session" => HistoryScope::Session,
+                    "all" => HistoryScope::All,
+                    _ => HistoryScope::Project,
+                };
+                let found = search_prompt_page(
+                    &session_id,
+                    &bundle,
+                    scope,
+                    &query,
+                    None,
+                    MAX_HISTORY_MATCHES,
+                )?;
+                Ok(ViewerPromptHistory {
+                    entries: found.entries.into_iter().map(|entry| entry.text).collect(),
+                    truncated: found.next.is_some(),
+                })
+            })
+            .await
+        })
+    }
+
+    fn set_container_settings(
+        &self,
+        session_id: String,
+        resource_allocation: Option<SessionResourceAllocation>,
+        mounts: Vec<AdditionalMount>,
+    ) -> BoxFuture<
+        '_,
+        Result<Result<Option<mj_core::state::ContainerUpgradePreview>, ActionOutcome>, ApiFailure>,
+    > {
+        let exports = self.exports.clone();
+        Box::pin(async move {
+            let reference =
+                new_command_id("container-settings").map_err(|_| viewer_unavailable())?;
+            let settings = ContainerSettingsChange {
+                resource_allocation,
+                mounts,
+                mount_history: None,
+            };
+            match exports.set_container_settings(session_id, settings).await {
+                Ok(preview) => Ok(Ok(preview)),
+                Err(error) => {
+                    if let Some(refusal) = Refusal::of(&error) {
+                        if refusal.code() == Some(mj_core::upgrade::HANDOFF_REFUSAL_CODE) {
+                            return Err(ApiFailure::handoff());
+                        }
+                        return Ok(Err(ActionOutcome::Refused(refusal)));
+                    }
+                    tracing::warn!(%reference, %error, "container settings request failed");
+                    Ok(Err(ActionOutcome::Failed { reference }))
+                }
+            }
+        })
+    }
+
+    fn container_upgrade_preview(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Result<mj_core::state::ContainerUpgradePreview, String>, ApiFailure>>
+    {
+        Box::pin(async move {
+            Ok(self
+                .exports
+                .clone()
+                .preview_container_upgrade(session_id)
+                .await
+                .map_err(|error| format!("{error:#}")))
+        })
+    }
+
+    fn suspend_preflight(
+        &self,
+        session_id: String,
+        dry_run: bool,
+        without_checkpoint: bool,
+    ) -> BoxFuture<'_, Result<Result<mj_core::suspend_consent::SuspendPreflight, String>, ApiFailure>>
+    {
+        Box::pin(async move {
+            Ok(self
+                .exports
+                .clone()
+                .suspend_preflight(session_id, dry_run, without_checkpoint)
+                .await
+                .map_err(|error| format!("{error:#}")))
+        })
+    }
+
+    fn purge_untracked(
+        &self,
+        request: PurgeUntrackedRequest,
+    ) -> BoxFuture<'_, Result<Result<PurgeUntrackedResponse, PurgeUntrackedFailure>, ApiFailure>>
+    {
+        let exports = self.exports.clone();
+        Box::pin(async move {
+            let cancelled = Arc::default();
+            let cancellation = super::ProcessCancellationGuard(Arc::clone(&cancelled));
+            // The rewrite must finish observing cancellation before releasing session admission.
+            let result = mj_core::runtime::spawn(exports.purge_untracked(request, cancelled)).await;
+            drop(cancellation);
+            Ok(result.unwrap_or_else(|error| {
+                let message = if error.is_panic() {
+                    let payload = error.into_panic();
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown panic");
+                    format!("purge untracked panicked: {message}")
+                } else {
+                    return Err(PurgeUntrackedFailure::Unavailable {
+                        message: "the controller is unavailable".into(),
+                        handoff: false,
+                    });
+                };
+                Err(PurgeUntrackedFailure::Internal(message))
+            }))
+        })
+    }
+
+    fn stop_background_task(
+        &self,
+        session_id: String,
+        background_task_id: String,
+    ) -> BoxFuture<'_, Result<Result<(), BackgroundTaskStopFailure>, ApiFailure>> {
+        let exports = self.exports.clone();
+        Box::pin(async move {
+            let admission = viewer_activity("background task stop")?;
+            // Keep the upgrade activity through the worker's acknowledgement.
+            join_viewer_task(
+                mj_core::runtime::spawn(async move {
+                    let _admission = admission;
+                    exports
+                        .stop_viewer_background_task(session_id, background_task_id)
+                        .await
+                })
+                .await,
+            )
+        })
+    }
+
     fn push_notice(&self, session_id: &str, message: String) {
         self.exports.push_notice(session_id, message);
     }
@@ -4631,6 +5414,40 @@ impl SubagentBackend for ApiBackend {
             self.exports.refresh_workspaces().await?;
             Ok(workspace)
         })
+    }
+
+    fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
+        self.exports.refresh_workspaces()
+    }
+
+    fn close_workspace(
+        &self,
+        id: String,
+        admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'_, std::result::Result<(), ApiFailure>> {
+        Box::pin(async move {
+            self.exports
+                .clone()
+                .close_workspace(id, admission)
+                .await
+                .map_err(|error| ApiFailure::conflict(format!("{error:#}")))
+        })
+    }
+
+    fn cancel_workspace_close(&self, id: &str) -> std::result::Result<(), ApiFailure> {
+        self.exports
+            .cancel_workspace_close(id)
+            .map_err(|error| ApiFailure::conflict(format!("{error:#}")))
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        self.exports.list_workspace_drafts()
+    }
+
+    fn remove_project(&self, id: String) -> BoxFuture<'_, Result<()>> {
+        self.exports.remove_project(id)
     }
 
     fn profile_config(

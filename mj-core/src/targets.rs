@@ -1941,6 +1941,10 @@ impl CancellableProcessExecutor {
         )
     }
 
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
+    }
+
     pub fn cancel_on_drop(&self) -> ProcessCancellationGuard {
         ProcessCancellationGuard(self.cancelled.clone())
     }

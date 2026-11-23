@@ -139,43 +139,15 @@ impl ApiClient {
         client: &mut daemon::DaemonClient,
         identity: &mj_client::daemon::DaemonIdentity,
     ) -> Result<Self> {
-        if let Some((base_url, token)) = client.direct_api_endpoint(identity)? {
-            let http = http_client(None, None)?;
-            probe_api(&http, &base_url).await?;
-            let mut api = Self::with_http(base_url, token, http);
-            api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
-            api.daemon_instance = Some(identity.instance_id.clone());
-            api._ssh_lease = client.ssh_lease();
-            return Ok(api);
-        }
-
-        let access = daemon::wait_for_web_access(client).await?;
-        let mj_client::web::WebViewerAccess::Ready {
-            viewer_url,
-            certificate_sha256,
-            local_address,
-            ..
-        } = access
-        else {
-            unreachable!("wait_for_web_access returns only Ready")
-        };
-        let (viewer_url, resolver) = if let Some(connector) = client.connector()
-            && connector.is_ssh()
-        {
-            connector.validate_viewer_url(&viewer_url).await?;
-            (viewer_url, None)
-        } else {
-            let local_address = local_address.context(
-                "the daemon did not publish a local web viewer address; restart the daemon",
-            )?;
-            route_viewer_to_local_socket(&viewer_url, local_address)?
-        };
-        let http = http_client(certificate_sha256.as_deref(), resolver)?;
-        probe_api(&http, &viewer_url).await?;
-        let token = client.api_credential().await?;
-        let mut api = Self::with_http(viewer_url, token, http);
+        let (base_url, token) = client.direct_api_endpoint(identity)?.context(
+            "the daemon did not publish its loopback HTTP API endpoint; restart the daemon",
+        )?;
+        let http = http_client(None, None)?;
+        probe_api(&http, &base_url).await?;
+        let mut api = Self::with_http(base_url, token, http);
         api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
         api.daemon_instance = Some(identity.instance_id.clone());
+        api._ssh_lease = client.ssh_lease();
         Ok(api)
     }
 
@@ -1058,6 +1030,7 @@ fn build_http_client(
 
 /// Preserve a DNS authority for HTTP Host and TLS SNI while sending the
 /// connection to the daemon-published local listener.
+#[cfg(test)]
 fn route_viewer_to_local_socket(
     viewer_url: &str,
     local_address: SocketAddr,
