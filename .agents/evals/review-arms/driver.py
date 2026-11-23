@@ -477,9 +477,13 @@ def _quota_status(profile, percent, *, scope=None, weekly=False, strict=False, s
     short_remaining = None
     if short is not None:
         left = [w.get("remaining_percent") for w in short]
-        if not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left):
+        if not left and report.get("harness") == "claude":
+            # Claude omits the 5-hour window while idle before first use (mj-tui quota_pools.rs).
+            short_remaining = 100
+        elif not left or any(type(value) not in {int, float} or not 0 <= value <= 100 for value in left):
             return None, f"{profile}: no usable 5-hour quota report ({json.dumps(report)[:300]})"
-        short_remaining = min(left)
+        else:
+            short_remaining = min(left)
         if short_remaining <= short_floor:
             return None, f"{profile}: {short_remaining}% 5-hour remaining, requires above {short_floor}%"
     return (remaining, short_remaining), None
