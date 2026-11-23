@@ -157,7 +157,7 @@ func (ClaudeLauncherManaged) locate(ctx context.Context, environment map[string]
 	if err != nil {
 		return claudeProgram{}, ClaudeUsageErrorRefresh{Value: err.Error()}
 	}
-	return program, nil
+	return *program, nil
 }
 
 func (l ClaudeLauncherProgram) locate(ctx context.Context, environment map[string]string) (claudeProgram, error) {
@@ -165,7 +165,7 @@ func (l ClaudeLauncherProgram) locate(ctx context.Context, environment map[strin
 	if err != nil {
 		return claudeProgram{}, ClaudeUsageErrorRefresh{Value: err.Error()}
 	}
-	return claudeProgram{Command: command, Environment: map[string]string{}}, nil
+	return claudeProgram{command: command, environment: map[string]string{}}, nil
 }
 
 type claudeProgram = quotaProgram
