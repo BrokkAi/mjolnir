@@ -27,9 +27,9 @@ Background work finished
   │                                                                          │
   │   PROVIDER     PROFILE   WEEKLY      5H                                  │
   │   ▸ ANTHROPIC  claude-1  refreshing                                      │
-  │   ▾ OPENAI     codex-1   refreshing                                      │
-  │                codex-1   refreshing                                      │
-  │                codex-2   refreshing                                      │
+  │   ▸ OPENAI     codex-1   refreshing                                      │
+  │                                                                          │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -99,9 +99,9 @@ Background work finished
 ╭ Sess  │                                                                                  │       │
 │ Crea  │   PROVIDER     PROFILE   WEEKLY      5H                                          │       │
 │hel ─  │   ▸ ANTHROPIC  claude-1  refreshing                                              │       │
-│› · A  │   ▾ OPENAI     codex-1   refreshing                                              │       │
-│  Idl  │                codex-1   refreshing                                              │       │
-│  │ N  │                codex-2   refreshing                                              │       │
+│› · A  │   ▸ OPENAI     codex-1   refreshing                                              │       │
+│  Idl  │                                                                                  │       │
+│  │ N  │                                                                                  │       │
 │  │    │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
@@ -186,9 +186,9 @@ Background work finished
 │ Create   Open   │                                                                                  │                 │
 │hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
 │› · ACP pretty   │   ▸ ANTHROPIC  claude-1  refreshing                                              │                 │
-│  Idle  podman   │   ▾ OPENAI     codex-1   refreshing                                              │                 │
-│  │ No messages  │                codex-1   refreshing                                              │                 │
-│  │              │                codex-2   refreshing                                              │                 │
+│  Idle  podman   │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│  │ No messages  │                                                                                  │                 │
+│  │              │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -299,9 +299,9 @@ Background work finished
 │  │                        │                                                                                  │                           │
 │                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
 │                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
-│                           │   ▾ OPENAI     codex-1   refreshing                                              │                           │
-│                           │                codex-1   refreshing                                              │                           │
-│                           │                codex-2   refreshing                                              │                           │
+│                           │   ▸ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -457,9 +457,9 @@ Background work finished
 │                                                         │                                                                                  │                                                         │
 │                                                         │   PROVIDER     PROFILE   WEEKLY      5H                                          │                                                         │
 │                                                         │   ▸ ANTHROPIC  claude-1  refreshing                                              │                                                         │
-│                                                         │   ▾ OPENAI     codex-1   refreshing                                              │                                                         │
-│                                                         │                codex-1   refreshing                                              │                                                         │
-│                                                         │                codex-2   refreshing                                              │  versation.                                             │
+│                                                         │   ▸ OPENAI     codex-1   refreshing                                              │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │  versation.                                             │
 │                                                         │                                                                                  │                                                         │
 │                                                         │                                                                                  │                                                         │
 │                                                         │                                                                                  │                                                         │

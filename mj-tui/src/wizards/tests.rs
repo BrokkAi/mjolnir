@@ -676,7 +676,8 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
         .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
-    open_new_session_wizard(&mut dashboard);
+    dashboard.quota_providers.settle();
+    ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     dashboard.apply_project_directory_check(missing, Some(false));
@@ -1655,7 +1656,7 @@ fn new_session_profile_step_aligns_its_columns() {
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     dashboard.quota_providers.settle();
     ready_open_new_wizard(&mut dashboard);
-    // ANTHROPIC starts expanded for the initially selected claude-1; expand
+    // The fixture selects claude-1 explicitly; expand
     // MOONSHOT too so both providers' rows are visible for column alignment.
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Down));
@@ -1935,9 +1936,8 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
         },
     )]);
     dashboard.begin_new();
-    // running_session() opens on codex-1 under OPENAI; move up to ANTHROPIC and
+    // running_session() opens on the collapsed OPENAI header; move up to ANTHROPIC and
     // expand it so claude-1's quota columns are shown.
-    ready_key(&mut dashboard, key(KeyCode::Up));
     ready_key(&mut dashboard, key(KeyCode::Up));
     ready_key(&mut dashboard, key(KeyCode::Right));
     let lines = captured_drawn(&mut dashboard, 120, 30);
@@ -4017,7 +4017,15 @@ fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in
 /// tests concerned with other behavior. No availability answer is needed:
 /// until one arrives, everything configured is offered.
 fn ready_open_new_wizard(dashboard: &mut DashboardState) -> DashboardAction {
-    open_new_session_wizard(dashboard)
+    let action = open_new_session_wizard(dashboard);
+    // These scenarios exercise a concrete profile's later steps. Select it
+    // explicitly now that opening the picker leaves provider groups collapsed.
+    if matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile && wizard.focused_provider.is_some())
+    {
+        ready_key(dashboard, key(KeyCode::Right));
+        ready_key(dashboard, key(KeyCode::Right));
+    }
+    action
 }
 
 fn ready_key(dashboard: &mut DashboardState, event: crossterm::event::KeyEvent) -> DashboardAction {
@@ -5980,6 +5988,10 @@ fn golden_project_picker() {
 fn golden_profile_picker_table() {
     for (label, run) in [
         (
+            "new_session_remembers_provider_expansion",
+            new_session_remembers_provider_expansion as fn(),
+        ),
+        (
             "new_session_profile_step_aligns_its_columns",
             new_session_profile_step_aligns_its_columns as fn(),
         ),
@@ -6003,6 +6015,35 @@ fn golden_profile_picker_table() {
         "profile-picker-table",
         &take_golden_output(),
     );
+}
+
+fn new_session_remembers_provider_expansion() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open_new_session_wizard(&mut dashboard);
+    assert!(new_wizard(&dashboard).expanded_providers.is_empty());
+    captured_drawn(&mut dashboard, 120, 30);
+    // Expand a different provider from the recent launch's OPENAI selection.
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    let expanded = new_wizard(&dashboard).expanded_providers.clone();
+    assert!(!expanded.is_empty());
+    // Move onto a concrete profile, then reopen: its provider stays expanded.
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    open_new_session_wizard(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).expanded_providers, expanded);
+    captured_drawn(&mut dashboard, 120, 30);
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Left));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    open_new_session_wizard(&mut dashboard);
+    assert!(new_wizard(&dashboard).expanded_providers.is_empty());
+    assert!(
+        new_wizard(&dashboard)
+            .effective_expanded_providers(&dashboard)
+            .is_empty()
+    );
+    captured_drawn(&mut dashboard, 120, 30);
 }
 
 fn new_session_wizard_keeps_its_frame_across_steps() {

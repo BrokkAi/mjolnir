@@ -245,6 +245,7 @@ impl WizardDraft for NewWizard {
 
     fn set_profile(&mut self, index: usize) {
         self.profile = index;
+        self.focused_provider = None;
     }
 
     fn target(&self) -> usize {
@@ -1114,6 +1115,9 @@ impl DashboardState {
     /// Puts a wizard draft back on screen unchanged.
     pub(crate) fn keep<W: WizardDraft>(&mut self, wizard: W) -> DashboardAction {
         self.mode = wizard.into_mode();
+        if let Mode::New(wizard) = &self.mode {
+            self.new_wizard_expanded_providers = wizard.expanded_providers.clone();
+        }
         DashboardAction::None
     }
 }

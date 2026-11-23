@@ -129,10 +129,9 @@ impl DashboardState {
             remembered.as_ref(),
             self.state.last_oracle_choice_for(profile_id),
         );
-        let mut expanded_providers = std::collections::BTreeSet::new();
-        if let Some(provider) = NewWizard::provider_for_profile(self, profile) {
-            expanded_providers.insert(provider);
-        }
+        let expanded_providers = self.new_wizard_expanded_providers.clone();
+        let focused_provider = NewWizard::provider_for_profile(self, profile)
+            .filter(|provider| !expanded_providers.contains(provider));
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
             worktree_options: None,
@@ -142,7 +141,7 @@ impl DashboardState {
 
             profile,
             expanded_providers,
-            focused_provider: None,
+            focused_provider,
             bundle,
             target,
             target_step_skipped: false,
@@ -499,7 +498,7 @@ impl DashboardState {
         match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::New(mut wizard) => {
                 wizard.set_profile_step_skipped(true);
-                wizard.profile = 0;
+                wizard.set_profile(0);
                 self.advance_new_wizard(wizard)
             }
             Mode::Resume(mut wizard) => {
