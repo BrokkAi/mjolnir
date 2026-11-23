@@ -76,7 +76,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();
 
@@ -164,6 +164,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -222,6 +223,7 @@ async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() 
         let controller = Controller {
             config,
             state: State {
+                environment_owners: [(session_id.clone(), session_id.clone())].into(),
                 sessions: [(session_id.clone(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -1429,7 +1431,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
@@ -2874,6 +2875,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
             let controller = Controller {
                 config,
                 state: State {
+                    environment_owners: [(id.into(), id.into())].into(),
                     sessions: [(id.into(), session)].into_iter().collect(),
                     ..State::default()
                 },
@@ -3023,6 +3025,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         let mut controller = Controller {
             config,
             state: State {
+                environment_owners: [(id.into(), id.into())].into(),
                 sessions: [(id.into(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -3284,6 +3287,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
         let mut controller = Controller {
             config,
             state: State {
+                environment_owners: [(session_id.clone(), session_id.clone())].into(),
                 sessions: [(session_id.clone(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -3623,6 +3627,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -3789,6 +3794,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -3825,6 +3831,10 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn resolve_move_keep_dir_matches_worker_startup_for_subdirs_nested_repos_and_plain_dirs() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");

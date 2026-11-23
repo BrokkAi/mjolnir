@@ -144,6 +144,109 @@ func (v *DaemonMetadata) UnmarshalJSON(data []byte) error {
 	return daemonDecodeStruct(data, (*plain)(v), true)
 }
 
+const ContainerOwnerSchema uint32 = 1
+
+// ContainerDaemonRecord is the launch credentials for a container daemon,
+// including before it is ready.
+type ContainerDaemonRecord struct {
+	// Schema defaults to ContainerOwnerSchema when absent.
+	Schema          uint32             `json:"schema" serde:"default"`
+	ProtocolVersion *uint32            `json:"protocol_version,omitempty"`
+	Runtime         core.DaemonRuntime `json:"runtime"`
+	ContainerID     string             `json:"container_id"`
+	ContainerName   string             `json:"container_name"`
+	Address         netip.AddrPort     `json:"address"`
+	Token           string             `json:"token"`
+	StartedAt       string             `json:"started_at"`
+}
+
+func (v *ContainerDaemonRecord) UnmarshalJSON(data []byte) error {
+	type plain ContainerDaemonRecord
+	decoded := plain{Schema: ContainerOwnerSchema}
+	if err := daemonDecodeStruct(data, &decoded, false); err != nil {
+		return err
+	}
+	*v = ContainerDaemonRecord(decoded)
+	return nil
+}
+
+func (v ContainerDaemonRecord) Matches(metadata *DaemonMetadata) bool {
+	return v.Address == metadata.Address && v.Token == metadata.Token
+}
+
+func ContainerOwnerPath() string {
+	return filepath.Join(core.DataDir(), "daemon-container.json")
+}
+
+// ReadContainerOwner is the recorded container daemon, nil when none is.
+func ReadContainerOwner() (*ContainerDaemonRecord, error) {
+	return readContainerOwnerAt(ContainerOwnerPath())
+}
+
+func readContainerOwnerAt(path string) (*ContainerDaemonRecord, error) {
+	body, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var record ContainerDaemonRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return &record, nil
+}
+
+func WriteContainerOwner(record *ContainerDaemonRecord) error {
+	path := ContainerOwnerPath()
+	parent := filepath.Dir(path)
+	if parent == path {
+		return errors.New("container owner path has no parent")
+	}
+	if err := core.CreateOwnerOnlyDirectory(parent); err != nil {
+		return err
+	}
+	body, err := daemonMarshalPretty(record)
+	if err != nil {
+		return err
+	}
+	return core.AtomicWriteExisting(path, body)
+}
+
+// RemoveContainerOwnerIfMatching removes the record of the container daemon
+// at address with token, leaving a replacement's record alone. The caller
+// serializes owner changes with the daemon startup lock.
+func RemoveContainerOwnerIfMatching(address netip.AddrPort, token string) error {
+	return removeContainerOwnerAt(ContainerOwnerPath(), address, token)
+}
+
+func removeContainerOwnerAt(path string, address netip.AddrPort, token string) error {
+	record, err := readContainerOwnerAt(path)
+	if err != nil {
+		return err
+	}
+	if record != nil && record.Address == address && record.Token == token {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// daemonMarshalPretty encodes v as serde_json::to_vec_pretty does: two-space
+// indentation, no HTML escaping, no trailing newline.
+func daemonMarshalPretty(v any) ([]byte, error) {
+	var buffer strings.Builder
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSuffix(buffer.String(), "\n")), nil
+}
+
 // DaemonEndpoint is the process-private credentials returned by
 // `mj daemon endpoint --json`. This is not local PID metadata and must never
 // be written to daemon.json.
@@ -832,7 +935,14 @@ func (v *WorkspaceSnapshot) UnmarshalJSON(data []byte) error {
 }
 
 type RuntimeSessionView struct {
-	Attention core.SessionAttention `json:"attention"`
+	// Materialized is the full queue and form bodies, for in-process
+	// viewers. Terminal clients receive them through their transcript tails;
+	// never serialized.
+	Materialized *core.SharedSnapshot[RuntimeMaterializedSession] `json:"-"`
+	// MaterializedOnly marks a retained projection for a session with no
+	// relay view. Never serialized.
+	MaterializedOnly bool                  `json:"-"`
+	Attention        core.SessionAttention `json:"attention"`
 	// PolicyConfigKeys are config selectors owned by the target permission
 	// policy.
 	PolicyConfigKeys           []string                                         `json:"policy_config_keys" serde:"default"`
@@ -853,6 +963,15 @@ func (v RuntimeSessionView) MarshalJSON() ([]byte, error) {
 func (v *RuntimeSessionView) UnmarshalJSON(data []byte) error {
 	type plain RuntimeSessionView
 	return daemonDecodeStruct(data, (*plain)(v), true)
+}
+
+// RuntimeMaterializedSession is the part of a session's projection an
+// in-process viewer reads from the runtime feed.
+type RuntimeMaterializedSession struct {
+	Execution           core.MaterializedExecutionState
+	LastActivityAtMs    *int64
+	QueuedPrompts       []core.QueuedPrompt
+	PendingElicitations []core.ElicitationRequest
 }
 
 // RuntimeSessionViewFromManaged is the runtime feed's view of a managed
@@ -904,7 +1023,6 @@ const (
 	RuntimeLifecycleKindSuspend        RuntimeLifecycleKind = "suspend"
 	RuntimeLifecycleKindResume         RuntimeLifecycleKind = "resume"
 	RuntimeLifecycleKindMove           RuntimeLifecycleKind = "move"
-	RuntimeLifecycleKindForceStop      RuntimeLifecycleKind = "force_stop"
 	RuntimeLifecycleKindDestroyStopped RuntimeLifecycleKind = "destroy_stopped"
 	RuntimeLifecycleKindForceDestroy   RuntimeLifecycleKind = "force_destroy"
 	// RuntimeLifecycleKindStopSubagent is a sub-agent stopped and removed
@@ -917,13 +1035,13 @@ const (
 func (k *RuntimeLifecycleKind) UnmarshalText(text []byte) error {
 	switch value := RuntimeLifecycleKind(text); value {
 	case RuntimeLifecycleKindCreate, RuntimeLifecycleKindSuspend, RuntimeLifecycleKindResume,
-		RuntimeLifecycleKindMove, RuntimeLifecycleKindForceStop, RuntimeLifecycleKindDestroyStopped,
+		RuntimeLifecycleKindMove, RuntimeLifecycleKindDestroyStopped,
 		RuntimeLifecycleKindForceDestroy, RuntimeLifecycleKindStopSubagent, RuntimeLifecycleKindCleanup:
 		*k = value
 		return nil
 	}
 	return daemonUnknownVariant(string(text), []string{"create", "suspend", "resume", "move",
-		"force_stop", "destroy_stopped", "force_destroy", "stop_subagent", "cleanup"})
+		"destroy_stopped", "force_destroy", "stop_subagent", "cleanup"})
 }
 
 type RuntimeLifecycleView struct {
@@ -978,9 +1096,11 @@ type SessionLifecycleRequest interface {
 }
 
 type SessionLifecycleRequestSuspend struct {
-	SessionID                  string `json:"session_id"`
-	AcknowledgeUnpublishedWork bool   `json:"acknowledge_unpublished_work"`
-	IgnoreNestedRepositories   bool   `json:"ignore_nested_repositories"`
+	SessionID           string                `json:"session_id"`
+	DiscardUntracked    core.UntrackedConsent `json:"discard_untracked" serde:"default"`
+	AbortOperations     core.OperationConsent `json:"abort_operations" serde:"default"`
+	WithoutCheckpoint   bool                  `json:"without_checkpoint" serde:"default"`
+	ConfirmNoCheckpoint bool                  `json:"confirm_no_checkpoint,omitempty"`
 }
 
 type SessionLifecycleRequestRestart struct {
@@ -996,26 +1116,18 @@ type SessionLifecycleRequestMove struct {
 	Request core.MoveSessionRequest
 }
 
-type SessionLifecycleRequestDiscard struct {
-	SessionID  string                  `json:"session_id"`
-	Checkpoint core.CheckpointMetadata `json:"checkpoint"`
-}
-
 type SessionLifecycleRequestDestroyStopped struct {
-	SessionID    string `json:"session_id"`
-	DeleteBranch bool   `json:"delete_branch"`
+	SessionID string `json:"session_id"`
 }
 
 type SessionLifecycleRequestForceDestroy struct {
-	SessionID    string `json:"session_id"`
-	DeleteBranch bool   `json:"delete_branch"`
+	SessionID string `json:"session_id"`
 }
 
 func (SessionLifecycleRequestSuspend) isSessionLifecycleRequest()        {}
 func (SessionLifecycleRequestRestart) isSessionLifecycleRequest()        {}
 func (SessionLifecycleRequestResume) isSessionLifecycleRequest()         {}
 func (SessionLifecycleRequestMove) isSessionLifecycleRequest()           {}
-func (SessionLifecycleRequestDiscard) isSessionLifecycleRequest()        {}
 func (SessionLifecycleRequestDestroyStopped) isSessionLifecycleRequest() {}
 func (SessionLifecycleRequestForceDestroy) isSessionLifecycleRequest()   {}
 
@@ -1035,11 +1147,6 @@ func (v SessionLifecycleRequestResume) MarshalJSON() ([]byte, error) {
 
 func (v SessionLifecycleRequestMove) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentValue("operation", "options", "move", v.Request)
-}
-
-func (v SessionLifecycleRequestDiscard) MarshalJSON() ([]byte, error) {
-	type plain SessionLifecycleRequestDiscard
-	return daemonAdjacentStruct("operation", "options", "discard", plain(v))
 }
 
 func (v SessionLifecycleRequestDestroyStopped) MarshalJSON() ([]byte, error) {
@@ -1076,14 +1183,12 @@ func UnmarshalSessionLifecycleRequestJSON(data []byte) (SessionLifecycleRequest,
 			return nil, err
 		}
 		return v, nil
-	case "discard":
-		return daemonStructVariant[SessionLifecycleRequestDiscard, SessionLifecycleRequest](body, "options")
 	case "destroy_stopped":
 		return daemonStructVariant[SessionLifecycleRequestDestroyStopped, SessionLifecycleRequest](body, "options")
 	case "force_destroy":
 		return daemonStructVariant[SessionLifecycleRequestForceDestroy, SessionLifecycleRequest](body, "options")
 	}
-	return nil, daemonUnknownVariant(name, []string{"suspend", "restart", "resume", "move", "discard",
+	return nil, daemonUnknownVariant(name, []string{"suspend", "restart", "resume", "move",
 		"destroy_stopped", "force_destroy"})
 }
 
@@ -1093,8 +1198,6 @@ func SessionLifecycleRequestSessionID(request SessionLifecycleRequest) string {
 	case SessionLifecycleRequestSuspend:
 		return v.SessionID
 	case SessionLifecycleRequestRestart:
-		return v.SessionID
-	case SessionLifecycleRequestDiscard:
 		return v.SessionID
 	case SessionLifecycleRequestDestroyStopped:
 		return v.SessionID
@@ -1190,14 +1293,18 @@ type CreateSessionRequest struct {
 	NoGithubCredentials bool `json:"no_github_credentials,omitempty" serde:"default"`
 	// NotificationsIgnored starts with notifications ignored; see
 	// core.SessionRecord.NotificationsIgnored.
-	NotificationsIgnored bool                   `json:"notifications_ignored,omitempty" serde:"default"`
-	InitialPrompt        *string                `json:"initial_prompt" serde:"default"`
-	WorkspaceID          string                 `json:"workspace_id"`
-	ProfileID            string                 `json:"profile_id"`
-	BundleID             string                 `json:"bundle_id"`
-	ProjectDirectory     *string                `json:"project_directory"`
-	TargetTemplateID     string                 `json:"target_template_id"`
-	AdditionalMounts     []core.AdditionalMount `json:"additional_mounts"`
+	NotificationsIgnored bool    `json:"notifications_ignored,omitempty" serde:"default"`
+	InitialPrompt        *string `json:"initial_prompt" serde:"default"`
+	WorkspaceID          string  `json:"workspace_id"`
+	ProfileID            string  `json:"profile_id"`
+	// Provider: when ProfileID is empty and this is set, load-balance across
+	// enabled profiles belonging to this provider instead of
+	// `[[subagents.primary]]`. Nil is none.
+	Provider         core.QuotaProvider     `json:"provider,omitempty"`
+	BundleID         string                 `json:"bundle_id"`
+	ProjectDirectory *string                `json:"project_directory"`
+	TargetTemplateID string                 `json:"target_template_id"`
+	AdditionalMounts []core.AdditionalMount `json:"additional_mounts"`
 	// ResourceAllocation is nil for none (Rust's Option).
 	ResourceAllocation   core.SessionResourceAllocation `json:"resource_allocation" serde:"default"`
 	Title                string                         `json:"title"`
@@ -1892,6 +1999,10 @@ type DaemonActionGoStartupSession struct {
 // latest CPU, RAM and filesystem readings. Added in protocol 101.
 type DaemonActionHostCapacity struct{}
 
+// DaemonActionRefreshCapacity re-reads the daemon probe definitions and
+// samples every host.
+type DaemonActionRefreshCapacity struct{}
+
 // DaemonActionRefreshQuota asks the daemon's quota poller to probe now. The daemon is the
 // only process that probes; the result arrives in the runtime feed. Added in
 // protocol 43.
@@ -1931,6 +2042,10 @@ type DaemonActionRenameProfile struct {
 type DaemonActionRenameTarget struct {
 	OldID string `json:"old_id"`
 	NewID string `json:"new_id"`
+}
+
+type DaemonActionInterruptAll struct {
+	SessionID string `json:"session_id"`
 }
 
 type DaemonActionSubmitSessionCommand struct {
@@ -2007,15 +2122,18 @@ type DaemonActionWaitSessionLifecycle struct {
 	Receipt LifecycleReceipt
 }
 
-type DaemonActionSuspendSession struct {
-	SessionID                  string `json:"session_id"`
-	AcknowledgeUnpublishedWork bool   `json:"acknowledge_unpublished_work" serde:"default"`
+type DaemonActionSuspendPreflight struct {
+	SessionID         string `json:"session_id"`
+	DryRun            bool   `json:"dry_run" serde:"default"`
+	WithoutCheckpoint bool   `json:"without_checkpoint" serde:"default"`
 }
 
-// DaemonActionIgnoreNestedRepositoriesAndSuspend explicitly omits untracked nested Git
-// repositories from this suspension.
-type DaemonActionIgnoreNestedRepositoriesAndSuspend struct {
-	SessionID string `json:"session_id"`
+type DaemonActionSuspendSession struct {
+	SessionID           string                `json:"session_id"`
+	DiscardUntracked    core.UntrackedConsent `json:"discard_untracked" serde:"default"`
+	AbortOperations     core.OperationConsent `json:"abort_operations" serde:"default"`
+	WithoutCheckpoint   bool                  `json:"without_checkpoint" serde:"default"`
+	ConfirmNoCheckpoint bool                  `json:"confirm_no_checkpoint,omitempty"`
 }
 
 type DaemonActionRestartSession struct {
@@ -2056,23 +2174,12 @@ type DaemonActionMoveSources struct {
 	CleanupOperationID *string `json:"cleanup_operation_id"`
 }
 
-type DaemonActionDiscardSinceCheckpoint struct {
-	SessionID  string                  `json:"session_id"`
-	Checkpoint core.CheckpointMetadata `json:"checkpoint"`
-}
-
 type DaemonActionDestroyStoppedSession struct {
 	SessionID string `json:"session_id"`
-	// DeleteBranch says whether to delete the session's managed git branch as
-	// well. The branch can hold work the user still wants, so destroying keeps
-	// it unless the request asks for the deletion.
-	DeleteBranch bool `json:"delete_branch"`
 }
 
 type DaemonActionForceDestroySession struct {
 	SessionID string `json:"session_id"`
-	// DeleteBranch is as in DaemonActionDestroyStoppedSession.
-	DeleteBranch bool `json:"delete_branch"`
 }
 
 type DaemonActionCancelLifecycle struct {
@@ -2089,143 +2196,144 @@ type DaemonActionRecoverDraft struct {
 
 type DaemonActionStop struct{}
 
-func (DaemonActionDismissNotification) isDaemonAction()                {}
-func (DaemonActionProveIdentity) isDaemonAction()                      {}
-func (DaemonActionLoginTerminal) isDaemonAction()                      {}
-func (DaemonActionPreviewBuildCache) isDaemonAction()                  {}
-func (DaemonActionInstallMbx) isDaemonAction()                         {}
-func (DaemonActionPreflightNewSession) isDaemonAction()                {}
-func (DaemonActionValidateProjectDirectory) isDaemonAction()           {}
-func (DaemonActionCheckpointArchiveSizes) isDaemonAction()             {}
-func (DaemonActionSaveSpinnerStyle) isDaemonAction()                   {}
-func (DaemonActionSetQuotaPreferences) isDaemonAction()                {}
-func (DaemonActionTestTarget) isDaemonAction()                         {}
-func (DaemonActionProfileLoginStatuses) isDaemonAction()               {}
-func (DaemonActionCheckAvailability) isDaemonAction()                  {}
-func (DaemonActionDiscoverSetup) isDaemonAction()                      {}
-func (DaemonActionCompletePath) isDaemonAction()                       {}
-func (DaemonActionCheckProjectDirectories) isDaemonAction()            {}
-func (DaemonActionDiscoverProjects) isDaemonAction()                   {}
-func (DaemonActionResolveContainerPath) isDaemonAction()               {}
-func (DaemonActionResolveSetupPath) isDaemonAction()                   {}
-func (DaemonActionValidateMountSource) isDaemonAction()                {}
-func (DaemonActionValidateSessionMounts) isDaemonAction()              {}
-func (DaemonActionUploadChunk) isDaemonAction()                        {}
-func (DaemonActionInstallAttachment) isDaemonAction()                  {}
-func (DaemonActionTranscriptionAvailable) isDaemonAction()             {}
-func (DaemonActionTranscribeAudio) isDaemonAction()                    {}
-func (DaemonActionRecordOperatorActivity) isDaemonAction()             {}
-func (DaemonActionSetOperatorAway) isDaemonAction()                    {}
-func (DaemonActionNativeAgentHistory) isDaemonAction()                 {}
-func (DaemonActionPing) isDaemonAction()                               {}
-func (DaemonActionPrepareUpgrade) isDaemonAction()                     {}
-func (DaemonActionUpgradeBlockers) isDaemonAction()                    {}
-func (DaemonActionIdentity) isDaemonAction()                           {}
-func (DaemonActionConfiguration) isDaemonAction()                      {}
-func (DaemonActionFirstRunSetupDue) isDaemonAction()                   {}
-func (DaemonActionRunFirstRunSetup) isDaemonAction()                   {}
-func (DaemonActionRunFirstRunSetupIn) isDaemonAction()                 {}
-func (DaemonActionRunDoctor) isDaemonAction()                          {}
-func (DaemonActionNewSessionRemoteRepairs) isDaemonAction()            {}
-func (DaemonActionRepairRepositoryRemotes) isDaemonAction()            {}
-func (DaemonActionSessionProjectSource) isDaemonAction()               {}
-func (DaemonActionStatus) isDaemonAction()                             {}
-func (DaemonActionWebViewerAccess) isDaemonAction()                    {}
-func (DaemonActionApiCredential) isDaemonAction()                      {}
-func (DaemonActionGitIdentity) isDaemonAction()                        {}
-func (DaemonActionSetGitIdentity) isDaemonAction()                     {}
-func (DaemonActionRecoverWebViewer) isDaemonAction()                   {}
-func (DaemonActionInspectWebListener) isDaemonAction()                 {}
-func (DaemonActionListWorkspaces) isDaemonAction()                     {}
-func (DaemonActionListWorkspaceDrafts) isDaemonAction()                {}
-func (DaemonActionCreateWorkspace) isDaemonAction()                    {}
-func (DaemonActionRenameWorkspace) isDaemonAction()                    {}
-func (DaemonActionTouchWorkspace) isDaemonAction()                     {}
-func (DaemonActionCloseWorkspace) isDaemonAction()                     {}
-func (DaemonActionCancelWorkspaceClose) isDaemonAction()               {}
-func (DaemonActionDeleteWorkspace) isDaemonAction()                    {}
-func (DaemonActionAttach) isDaemonAction()                             {}
-func (DaemonActionDetach) isDaemonAction()                             {}
-func (DaemonActionPersistReadReceipt) isDaemonAction()                 {}
-func (DaemonActionPersistTerminalDraft) isDaemonAction()               {}
-func (DaemonActionRecordAbandonedPrompt) isDaemonAction()              {}
-func (DaemonActionSaveSidebarSize) isDaemonAction()                    {}
-func (DaemonActionSaveWorkspacePaneSizes) isDaemonAction()             {}
-func (DaemonActionSaveWorkspaceLayout) isDaemonAction()                {}
-func (DaemonActionImportSession) isDaemonAction()                      {}
-func (DaemonActionSetSessionTitle) isDaemonAction()                    {}
-func (DaemonActionSetSessionNotificationsIgnored) isDaemonAction()     {}
-func (DaemonActionSetSessionWorkspace) isDaemonAction()                {}
-func (DaemonActionSetSessionContainerSettings) isDaemonAction()        {}
-func (DaemonActionMarkSessionTargetMissing) isDaemonAction()           {}
-func (DaemonActionCheckpointSession) isDaemonAction()                  {}
-func (DaemonActionProjectCatalog) isDaemonAction()                     {}
-func (DaemonActionCreateProject) isDaemonAction()                      {}
-func (DaemonActionRemoveProject) isDaemonAction()                      {}
-func (DaemonActionWikiSyncRequest) isDaemonAction()                    {}
-func (DaemonActionWikiSyncWatch) isDaemonAction()                      {}
-func (DaemonActionWikiSearch) isDaemonAction()                         {}
-func (DaemonActionSessionTextSearch) isDaemonAction()                  {}
-func (DaemonActionWikiBrief) isDaemonAction()                          {}
-func (DaemonActionWikiHits) isDaemonAction()                           {}
-func (DaemonActionWikiSession) isDaemonAction()                        {}
-func (DaemonActionWikiRestore) isDaemonAction()                        {}
-func (DaemonActionScanRecovery) isDaemonAction()                       {}
-func (DaemonActionAdoptRecovery) isDaemonAction()                      {}
-func (DaemonActionDestroyRecovery) isDaemonAction()                    {}
-func (DaemonActionSnapshot) isDaemonAction()                           {}
-func (DaemonActionDashboardStartup) isDaemonAction()                   {}
-func (DaemonActionWorkspaceLayouts) isDaemonAction()                   {}
-func (DaemonActionStoredSessionMetadata) isDaemonAction()              {}
-func (DaemonActionStoredProjectionTail) isDaemonAction()               {}
-func (DaemonActionStoredTranscriptItem) isDaemonAction()               {}
-func (DaemonActionStoredAgentMessageThrough) isDaemonAction()          {}
-func (DaemonActionStoredSessionSummary) isDaemonAction()               {}
-func (DaemonActionResumeRepositoryPreflight) isDaemonAction()          {}
-func (DaemonActionReplaceResumeRepositoryOrigin) isDaemonAction()      {}
-func (DaemonActionArchiveSpacePreview) isDaemonAction()                {}
-func (DaemonActionSaveSetup) isDaemonAction()                          {}
-func (DaemonActionRuntimeChanges) isDaemonAction()                     {}
-func (DaemonActionSessionTail) isDaemonAction()                        {}
-func (DaemonActionResumeCandidates) isDaemonAction()                   {}
-func (DaemonActionSessionRecord) isDaemonAction()                      {}
-func (DaemonActionGoStartupSession) isDaemonAction()                   {}
-func (DaemonActionHostCapacity) isDaemonAction()                       {}
-func (DaemonActionRefreshQuota) isDaemonAction()                       {}
-func (DaemonActionProbeQuotaProfiles) isDaemonAction()                 {}
-func (DaemonActionSubagentOptions) isDaemonAction()                    {}
-func (DaemonActionWarmProfileCapabilities) isDaemonAction()            {}
-func (DaemonActionRenameProfile) isDaemonAction()                      {}
-func (DaemonActionRenameTarget) isDaemonAction()                       {}
-func (DaemonActionSubmitSessionCommand) isDaemonAction()               {}
-func (DaemonActionQueueStartupPrompt) isDaemonAction()                 {}
-func (DaemonActionWithdrawStartupPrompt) isDaemonAction()              {}
-func (DaemonActionStartupPromptOutcomes) isDaemonAction()              {}
-func (DaemonActionSyncSession) isDaemonAction()                        {}
-func (DaemonActionRespondElicitation) isDaemonAction()                 {}
-func (DaemonActionStopBackgroundTask) isDaemonAction()                 {}
-func (DaemonActionStartTurnReview) isDaemonAction()                    {}
-func (DaemonActionResolveTurnReview) isDaemonAction()                  {}
-func (DaemonActionStartSessionLifecycle) isDaemonAction()              {}
-func (DaemonActionWaitSessionLifecycle) isDaemonAction()               {}
-func (DaemonActionSuspendSession) isDaemonAction()                     {}
-func (DaemonActionIgnoreNestedRepositoriesAndSuspend) isDaemonAction() {}
-func (DaemonActionRestartSession) isDaemonAction()                     {}
-func (DaemonActionPreviewContainerUpgrade) isDaemonAction()            {}
-func (DaemonActionUpgradeContainer) isDaemonAction()                   {}
-func (DaemonActionStartCreateSession) isDaemonAction()                 {}
-func (DaemonActionWaitCreateSession) isDaemonAction()                  {}
-func (DaemonActionResumeSession) isDaemonAction()                      {}
-func (DaemonActionPrepareMoveSession) isDaemonAction()                 {}
-func (DaemonActionMoveSession) isDaemonAction()                        {}
-func (DaemonActionMoveSources) isDaemonAction()                        {}
-func (DaemonActionDiscardSinceCheckpoint) isDaemonAction()             {}
-func (DaemonActionDestroyStoppedSession) isDaemonAction()              {}
-func (DaemonActionForceDestroySession) isDaemonAction()                {}
-func (DaemonActionCancelLifecycle) isDaemonAction()                    {}
-func (DaemonActionCancelContainerUpgrade) isDaemonAction()             {}
-func (DaemonActionRecoverDraft) isDaemonAction()                       {}
-func (DaemonActionStop) isDaemonAction()                               {}
+func (DaemonActionDismissNotification) isDaemonAction()            {}
+func (DaemonActionProveIdentity) isDaemonAction()                  {}
+func (DaemonActionLoginTerminal) isDaemonAction()                  {}
+func (DaemonActionPreviewBuildCache) isDaemonAction()              {}
+func (DaemonActionInstallMbx) isDaemonAction()                     {}
+func (DaemonActionPreflightNewSession) isDaemonAction()            {}
+func (DaemonActionValidateProjectDirectory) isDaemonAction()       {}
+func (DaemonActionCheckpointArchiveSizes) isDaemonAction()         {}
+func (DaemonActionSaveSpinnerStyle) isDaemonAction()               {}
+func (DaemonActionSetQuotaPreferences) isDaemonAction()            {}
+func (DaemonActionTestTarget) isDaemonAction()                     {}
+func (DaemonActionProfileLoginStatuses) isDaemonAction()           {}
+func (DaemonActionCheckAvailability) isDaemonAction()              {}
+func (DaemonActionDiscoverSetup) isDaemonAction()                  {}
+func (DaemonActionCompletePath) isDaemonAction()                   {}
+func (DaemonActionCheckProjectDirectories) isDaemonAction()        {}
+func (DaemonActionDiscoverProjects) isDaemonAction()               {}
+func (DaemonActionResolveContainerPath) isDaemonAction()           {}
+func (DaemonActionResolveSetupPath) isDaemonAction()               {}
+func (DaemonActionValidateMountSource) isDaemonAction()            {}
+func (DaemonActionValidateSessionMounts) isDaemonAction()          {}
+func (DaemonActionUploadChunk) isDaemonAction()                    {}
+func (DaemonActionInstallAttachment) isDaemonAction()              {}
+func (DaemonActionTranscriptionAvailable) isDaemonAction()         {}
+func (DaemonActionTranscribeAudio) isDaemonAction()                {}
+func (DaemonActionRecordOperatorActivity) isDaemonAction()         {}
+func (DaemonActionSetOperatorAway) isDaemonAction()                {}
+func (DaemonActionNativeAgentHistory) isDaemonAction()             {}
+func (DaemonActionPing) isDaemonAction()                           {}
+func (DaemonActionPrepareUpgrade) isDaemonAction()                 {}
+func (DaemonActionUpgradeBlockers) isDaemonAction()                {}
+func (DaemonActionIdentity) isDaemonAction()                       {}
+func (DaemonActionConfiguration) isDaemonAction()                  {}
+func (DaemonActionFirstRunSetupDue) isDaemonAction()               {}
+func (DaemonActionRunFirstRunSetup) isDaemonAction()               {}
+func (DaemonActionRunFirstRunSetupIn) isDaemonAction()             {}
+func (DaemonActionRunDoctor) isDaemonAction()                      {}
+func (DaemonActionNewSessionRemoteRepairs) isDaemonAction()        {}
+func (DaemonActionRepairRepositoryRemotes) isDaemonAction()        {}
+func (DaemonActionSessionProjectSource) isDaemonAction()           {}
+func (DaemonActionStatus) isDaemonAction()                         {}
+func (DaemonActionWebViewerAccess) isDaemonAction()                {}
+func (DaemonActionApiCredential) isDaemonAction()                  {}
+func (DaemonActionGitIdentity) isDaemonAction()                    {}
+func (DaemonActionSetGitIdentity) isDaemonAction()                 {}
+func (DaemonActionRecoverWebViewer) isDaemonAction()               {}
+func (DaemonActionInspectWebListener) isDaemonAction()             {}
+func (DaemonActionListWorkspaces) isDaemonAction()                 {}
+func (DaemonActionListWorkspaceDrafts) isDaemonAction()            {}
+func (DaemonActionCreateWorkspace) isDaemonAction()                {}
+func (DaemonActionRenameWorkspace) isDaemonAction()                {}
+func (DaemonActionTouchWorkspace) isDaemonAction()                 {}
+func (DaemonActionCloseWorkspace) isDaemonAction()                 {}
+func (DaemonActionCancelWorkspaceClose) isDaemonAction()           {}
+func (DaemonActionDeleteWorkspace) isDaemonAction()                {}
+func (DaemonActionAttach) isDaemonAction()                         {}
+func (DaemonActionDetach) isDaemonAction()                         {}
+func (DaemonActionPersistReadReceipt) isDaemonAction()             {}
+func (DaemonActionPersistTerminalDraft) isDaemonAction()           {}
+func (DaemonActionRecordAbandonedPrompt) isDaemonAction()          {}
+func (DaemonActionSaveSidebarSize) isDaemonAction()                {}
+func (DaemonActionSaveWorkspacePaneSizes) isDaemonAction()         {}
+func (DaemonActionSaveWorkspaceLayout) isDaemonAction()            {}
+func (DaemonActionImportSession) isDaemonAction()                  {}
+func (DaemonActionSetSessionTitle) isDaemonAction()                {}
+func (DaemonActionSetSessionNotificationsIgnored) isDaemonAction() {}
+func (DaemonActionSetSessionWorkspace) isDaemonAction()            {}
+func (DaemonActionSetSessionContainerSettings) isDaemonAction()    {}
+func (DaemonActionMarkSessionTargetMissing) isDaemonAction()       {}
+func (DaemonActionCheckpointSession) isDaemonAction()              {}
+func (DaemonActionProjectCatalog) isDaemonAction()                 {}
+func (DaemonActionCreateProject) isDaemonAction()                  {}
+func (DaemonActionRemoveProject) isDaemonAction()                  {}
+func (DaemonActionWikiSyncRequest) isDaemonAction()                {}
+func (DaemonActionWikiSyncWatch) isDaemonAction()                  {}
+func (DaemonActionWikiSearch) isDaemonAction()                     {}
+func (DaemonActionSessionTextSearch) isDaemonAction()              {}
+func (DaemonActionWikiBrief) isDaemonAction()                      {}
+func (DaemonActionWikiHits) isDaemonAction()                       {}
+func (DaemonActionWikiSession) isDaemonAction()                    {}
+func (DaemonActionWikiRestore) isDaemonAction()                    {}
+func (DaemonActionScanRecovery) isDaemonAction()                   {}
+func (DaemonActionAdoptRecovery) isDaemonAction()                  {}
+func (DaemonActionDestroyRecovery) isDaemonAction()                {}
+func (DaemonActionSnapshot) isDaemonAction()                       {}
+func (DaemonActionDashboardStartup) isDaemonAction()               {}
+func (DaemonActionWorkspaceLayouts) isDaemonAction()               {}
+func (DaemonActionStoredSessionMetadata) isDaemonAction()          {}
+func (DaemonActionStoredProjectionTail) isDaemonAction()           {}
+func (DaemonActionStoredTranscriptItem) isDaemonAction()           {}
+func (DaemonActionStoredAgentMessageThrough) isDaemonAction()      {}
+func (DaemonActionStoredSessionSummary) isDaemonAction()           {}
+func (DaemonActionResumeRepositoryPreflight) isDaemonAction()      {}
+func (DaemonActionReplaceResumeRepositoryOrigin) isDaemonAction()  {}
+func (DaemonActionArchiveSpacePreview) isDaemonAction()            {}
+func (DaemonActionSaveSetup) isDaemonAction()                      {}
+func (DaemonActionRuntimeChanges) isDaemonAction()                 {}
+func (DaemonActionSessionTail) isDaemonAction()                    {}
+func (DaemonActionResumeCandidates) isDaemonAction()               {}
+func (DaemonActionSessionRecord) isDaemonAction()                  {}
+func (DaemonActionGoStartupSession) isDaemonAction()               {}
+func (DaemonActionHostCapacity) isDaemonAction()                   {}
+func (DaemonActionRefreshCapacity) isDaemonAction()                {}
+func (DaemonActionRefreshQuota) isDaemonAction()                   {}
+func (DaemonActionProbeQuotaProfiles) isDaemonAction()             {}
+func (DaemonActionSubagentOptions) isDaemonAction()                {}
+func (DaemonActionWarmProfileCapabilities) isDaemonAction()        {}
+func (DaemonActionRenameProfile) isDaemonAction()                  {}
+func (DaemonActionRenameTarget) isDaemonAction()                   {}
+func (DaemonActionInterruptAll) isDaemonAction()                   {}
+func (DaemonActionSubmitSessionCommand) isDaemonAction()           {}
+func (DaemonActionQueueStartupPrompt) isDaemonAction()             {}
+func (DaemonActionWithdrawStartupPrompt) isDaemonAction()          {}
+func (DaemonActionStartupPromptOutcomes) isDaemonAction()          {}
+func (DaemonActionSyncSession) isDaemonAction()                    {}
+func (DaemonActionRespondElicitation) isDaemonAction()             {}
+func (DaemonActionStopBackgroundTask) isDaemonAction()             {}
+func (DaemonActionStartTurnReview) isDaemonAction()                {}
+func (DaemonActionResolveTurnReview) isDaemonAction()              {}
+func (DaemonActionStartSessionLifecycle) isDaemonAction()          {}
+func (DaemonActionWaitSessionLifecycle) isDaemonAction()           {}
+func (DaemonActionSuspendPreflight) isDaemonAction()               {}
+func (DaemonActionSuspendSession) isDaemonAction()                 {}
+func (DaemonActionRestartSession) isDaemonAction()                 {}
+func (DaemonActionPreviewContainerUpgrade) isDaemonAction()        {}
+func (DaemonActionUpgradeContainer) isDaemonAction()               {}
+func (DaemonActionStartCreateSession) isDaemonAction()             {}
+func (DaemonActionWaitCreateSession) isDaemonAction()              {}
+func (DaemonActionResumeSession) isDaemonAction()                  {}
+func (DaemonActionPrepareMoveSession) isDaemonAction()             {}
+func (DaemonActionMoveSession) isDaemonAction()                    {}
+func (DaemonActionMoveSources) isDaemonAction()                    {}
+func (DaemonActionDestroyStoppedSession) isDaemonAction()          {}
+func (DaemonActionForceDestroySession) isDaemonAction()            {}
+func (DaemonActionCancelLifecycle) isDaemonAction()                {}
+func (DaemonActionCancelContainerUpgrade) isDaemonAction()         {}
+func (DaemonActionRecoverDraft) isDaemonAction()                   {}
+func (DaemonActionStop) isDaemonAction()                           {}
 
 func (v DaemonActionDismissNotification) MarshalJSON() ([]byte, error) {
 	type plain DaemonActionDismissNotification
@@ -2707,6 +2815,10 @@ func (DaemonActionHostCapacity) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentJSON("action", "arguments", "host_capacity", nil)
 }
 
+func (DaemonActionRefreshCapacity) MarshalJSON() ([]byte, error) {
+	return daemonAdjacentJSON("action", "arguments", "refresh_capacity", nil)
+}
+
 func (DaemonActionRefreshQuota) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentJSON("action", "arguments", "refresh_quota", nil)
 }
@@ -2734,6 +2846,11 @@ func (v DaemonActionRenameProfile) MarshalJSON() ([]byte, error) {
 func (v DaemonActionRenameTarget) MarshalJSON() ([]byte, error) {
 	type plain DaemonActionRenameTarget
 	return daemonAdjacentStruct("action", "arguments", "rename_target", plain(v))
+}
+
+func (v DaemonActionInterruptAll) MarshalJSON() ([]byte, error) {
+	type plain DaemonActionInterruptAll
+	return daemonAdjacentStruct("action", "arguments", "interrupt_all", plain(v))
 }
 
 func (v DaemonActionSubmitSessionCommand) MarshalJSON() ([]byte, error) {
@@ -2794,9 +2911,9 @@ func (v DaemonActionSuspendSession) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentStruct("action", "arguments", "suspend_session", plain(v))
 }
 
-func (v DaemonActionIgnoreNestedRepositoriesAndSuspend) MarshalJSON() ([]byte, error) {
-	type plain DaemonActionIgnoreNestedRepositoriesAndSuspend
-	return daemonAdjacentStruct("action", "arguments", "ignore_nested_repositories_and_suspend", plain(v))
+func (v DaemonActionSuspendPreflight) MarshalJSON() ([]byte, error) {
+	type plain DaemonActionSuspendPreflight
+	return daemonAdjacentStruct("action", "arguments", "suspend_preflight", plain(v))
 }
 
 func (v DaemonActionRestartSession) MarshalJSON() ([]byte, error) {
@@ -2837,11 +2954,6 @@ func (v DaemonActionMoveSession) MarshalJSON() ([]byte, error) {
 func (v DaemonActionMoveSources) MarshalJSON() ([]byte, error) {
 	type plain DaemonActionMoveSources
 	return daemonAdjacentStruct("action", "arguments", "move_sources", plain(v))
-}
-
-func (v DaemonActionDiscardSinceCheckpoint) MarshalJSON() ([]byte, error) {
-	type plain DaemonActionDiscardSinceCheckpoint
-	return daemonAdjacentStruct("action", "arguments", "discard_since_checkpoint", plain(v))
 }
 
 func (v DaemonActionDestroyStoppedSession) MarshalJSON() ([]byte, error) {
@@ -2978,12 +3090,14 @@ var daemonActionVariantNames = []string{
 	"session_record",
 	"go_startup_session",
 	"host_capacity",
+	"refresh_capacity",
 	"refresh_quota",
 	"probe_quota_profiles",
 	"subagent_options",
 	"warm_profile_capabilities",
 	"rename_profile",
 	"rename_target",
+	"interrupt_all",
 	"submit_session_command",
 	"queue_startup_prompt",
 	"withdraw_startup_prompt",
@@ -2995,8 +3109,8 @@ var daemonActionVariantNames = []string{
 	"resolve_turn_review",
 	"start_session_lifecycle",
 	"wait_session_lifecycle",
+	"suspend_preflight",
 	"suspend_session",
-	"ignore_nested_repositories_and_suspend",
 	"restart_session",
 	"preview_container_upgrade",
 	"upgrade_container",
@@ -3006,7 +3120,6 @@ var daemonActionVariantNames = []string{
 	"prepare_move_session",
 	"move_session",
 	"move_sources",
-	"discard_since_checkpoint",
 	"destroy_stopped_session",
 	"force_destroy_session",
 	"cancel_lifecycle",
@@ -3239,6 +3352,8 @@ func UnmarshalDaemonActionJSON(data []byte) (DaemonAction, error) {
 		return daemonStructVariant[DaemonActionGoStartupSession, DaemonAction](body, "arguments")
 	case "host_capacity":
 		return DaemonActionHostCapacity{}, nil
+	case "refresh_capacity":
+		return DaemonActionRefreshCapacity{}, nil
 	case "refresh_quota":
 		return DaemonActionRefreshQuota{}, nil
 	case "probe_quota_profiles":
@@ -3251,6 +3366,8 @@ func UnmarshalDaemonActionJSON(data []byte) (DaemonAction, error) {
 		return daemonStructVariant[DaemonActionRenameProfile, DaemonAction](body, "arguments")
 	case "rename_target":
 		return daemonStructVariant[DaemonActionRenameTarget, DaemonAction](body, "arguments")
+	case "interrupt_all":
+		return daemonStructVariant[DaemonActionInterruptAll, DaemonAction](body, "arguments")
 	case "submit_session_command":
 		return daemonStructVariant[DaemonActionSubmitSessionCommand, DaemonAction](body, "arguments")
 	case "queue_startup_prompt":
@@ -3281,10 +3398,10 @@ func UnmarshalDaemonActionJSON(data []byte) (DaemonAction, error) {
 			return nil, err
 		}
 		return v, nil
+	case "suspend_preflight":
+		return daemonStructVariant[DaemonActionSuspendPreflight, DaemonAction](body, "arguments")
 	case "suspend_session":
 		return daemonStructVariant[DaemonActionSuspendSession, DaemonAction](body, "arguments")
-	case "ignore_nested_repositories_and_suspend":
-		return daemonStructVariant[DaemonActionIgnoreNestedRepositoriesAndSuspend, DaemonAction](body, "arguments")
 	case "restart_session":
 		return daemonStructVariant[DaemonActionRestartSession, DaemonAction](body, "arguments")
 	case "preview_container_upgrade":
@@ -3323,8 +3440,6 @@ func UnmarshalDaemonActionJSON(data []byte) (DaemonAction, error) {
 		return v, nil
 	case "move_sources":
 		return daemonStructVariant[DaemonActionMoveSources, DaemonAction](body, "arguments")
-	case "discard_since_checkpoint":
-		return daemonStructVariant[DaemonActionDiscardSinceCheckpoint, DaemonAction](body, "arguments")
 	case "destroy_stopped_session":
 		return daemonStructVariant[DaemonActionDestroyStoppedSession, DaemonAction](body, "arguments")
 	case "force_destroy_session":
@@ -3466,6 +3581,10 @@ type DaemonReply interface {
 	isDaemonReply()
 }
 
+type DaemonReplyInterruptedAll struct {
+	Result InterruptAllResult
+}
+
 type DaemonReplyAdoptionInstalled struct {
 	SessionID string `json:"session_id"`
 }
@@ -3497,12 +3616,6 @@ type DaemonReplyCheckpointArchiveSizes struct {
 
 type DaemonReplySetupDiscovery struct {
 	Detection SetupDetection
-}
-
-// DaemonReplyAvailability is decoded with environment sources only, as Rust's
-// deserialize_availability does.
-type DaemonReplyAvailability struct {
-	Checked AvailabilityChecked
 }
 
 type DaemonReplyProfileLoginStatuses struct {
@@ -3712,7 +3825,7 @@ type DaemonReplyGoStartupSession struct {
 }
 
 type DaemonReplySessionRecord struct {
-	Record *core.SessionRecord
+	Record *SessionRecordWithVerdict
 }
 
 // DaemonReplyReplyChunk is one transport fragment of a chunked reply (see
@@ -3729,6 +3842,10 @@ type DaemonReplyRegisteredSession struct {
 
 type DaemonReplyContainerUpgradePreview struct {
 	Preview core.ContainerUpgradePreview
+}
+
+type DaemonReplySuspendPreflight struct {
+	Preflight core.SuspendPreflight
 }
 
 type DaemonReplyMovePreparation struct {
@@ -3801,6 +3918,7 @@ type DaemonReplyStartupPromptOutcomes struct {
 
 type DaemonReplyDone struct{}
 
+func (DaemonReplyInterruptedAll) isDaemonReply()                  {}
 func (DaemonReplyAdoptionInstalled) isDaemonReply()               {}
 func (DaemonReplyAdoptionWaiting) isDaemonReply()                 {}
 func (DaemonReplyIdentityProof) isDaemonReply()                   {}
@@ -3809,7 +3927,6 @@ func (DaemonReplyBuildCachePreview) isDaemonReply()               {}
 func (DaemonReplyMbxInstalled) isDaemonReply()                    {}
 func (DaemonReplyCheckpointArchiveSizes) isDaemonReply()          {}
 func (DaemonReplySetupDiscovery) isDaemonReply()                  {}
-func (DaemonReplyAvailability) isDaemonReply()                    {}
 func (DaemonReplyProfileLoginStatuses) isDaemonReply()            {}
 func (DaemonReplyNewSessionPreflight) isDaemonReply()             {}
 func (DaemonReplyPathCompletion) isDaemonReply()                  {}
@@ -3864,6 +3981,7 @@ func (DaemonReplySessionRecord) isDaemonReply()                   {}
 func (DaemonReplyReplyChunk) isDaemonReply()                      {}
 func (DaemonReplyRegisteredSession) isDaemonReply()               {}
 func (DaemonReplyContainerUpgradePreview) isDaemonReply()         {}
+func (DaemonReplySuspendPreflight) isDaemonReply()                {}
 func (DaemonReplyMovePreparation) isDaemonReply()                 {}
 func (DaemonReplyMoveOutcome) isDaemonReply()                     {}
 func (DaemonReplyMoveSources) isDaemonReply()                     {}
@@ -3882,6 +4000,10 @@ func (DaemonReplyPromptWithdrawn) isDaemonReply()                 {}
 func (DaemonReplyStartupPromptIdentityConflict) isDaemonReply()   {}
 func (DaemonReplyStartupPromptOutcomes) isDaemonReply()           {}
 func (DaemonReplyDone) isDaemonReply()                            {}
+
+func (v DaemonReplyInterruptedAll) MarshalJSON() ([]byte, error) {
+	return daemonAdjacentValue("reply", "value", "interrupted_all", v.Result)
+}
 
 func (v DaemonReplyAdoptionInstalled) MarshalJSON() ([]byte, error) {
 	type plain DaemonReplyAdoptionInstalled
@@ -3911,10 +4033,6 @@ func (v DaemonReplyCheckpointArchiveSizes) MarshalJSON() ([]byte, error) {
 
 func (v DaemonReplySetupDiscovery) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentValue("reply", "value", "setup_discovery", v.Detection)
-}
-
-func (v DaemonReplyAvailability) MarshalJSON() ([]byte, error) {
-	return daemonAdjacentValue("reply", "value", "availability", v.Checked)
 }
 
 func (v DaemonReplyProfileLoginStatuses) MarshalJSON() ([]byte, error) {
@@ -4125,6 +4243,10 @@ func (v DaemonReplyContainerUpgradePreview) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentValue("reply", "value", "container_upgrade_preview", v.Preview)
 }
 
+func (v DaemonReplySuspendPreflight) MarshalJSON() ([]byte, error) {
+	return daemonAdjacentValue("reply", "value", "suspend_preflight", v.Preflight)
+}
+
 func (v DaemonReplyMovePreparation) MarshalJSON() ([]byte, error) {
 	return daemonAdjacentValue("reply", "value", "move_preparation", v.Preparation)
 }
@@ -4200,6 +4322,7 @@ func (DaemonReplyDone) MarshalJSON() ([]byte, error) {
 // daemonreplyVariantNames lists the wire names in declaration order, for
 // unknown-variant errors.
 var daemonReplyVariantNames = []string{
+	"interrupted_all",
 	"adoption_installed",
 	"adoption_waiting",
 	"identity_proof",
@@ -4208,7 +4331,6 @@ var daemonReplyVariantNames = []string{
 	"mbx_installed",
 	"checkpoint_archive_sizes",
 	"setup_discovery",
-	"availability",
 	"profile_login_statuses",
 	"new_session_preflight",
 	"path_completion",
@@ -4263,6 +4385,7 @@ var daemonReplyVariantNames = []string{
 	"reply_chunk",
 	"registered_session",
 	"container_upgrade_preview",
+	"suspend_preflight",
 	"move_preparation",
 	"move_outcome",
 	"move_sources",
@@ -4291,6 +4414,12 @@ func UnmarshalDaemonReplyJSON(data []byte) (DaemonReply, error) {
 		return nil, err
 	}
 	switch name {
+	case "interrupted_all":
+		var v DaemonReplyInterruptedAll
+		if err := daemonDecodeRequired(body, "value", &v.Result); err != nil {
+			return nil, err
+		}
+		return v, nil
 	case "adoption_installed":
 		return daemonStructVariant[DaemonReplyAdoptionInstalled, DaemonReply](body, "value")
 	case "adoption_waiting":
@@ -4323,8 +4452,6 @@ func UnmarshalDaemonReplyJSON(data []byte) (DaemonReply, error) {
 			return nil, err
 		}
 		return v, nil
-	case "availability":
-		return decodeDaemonReplyAvailability(body)
 	case "profile_login_statuses":
 		var v DaemonReplyProfileLoginStatuses
 		if err := daemonDecodeRequired(body, "value", &v.Statuses); err != nil {
@@ -4637,6 +4764,12 @@ func UnmarshalDaemonReplyJSON(data []byte) (DaemonReply, error) {
 			return nil, err
 		}
 		return v, nil
+	case "suspend_preflight":
+		var v DaemonReplySuspendPreflight
+		if err := daemonDecodeRequired(body, "value", &v.Preflight); err != nil {
+			return nil, err
+		}
+		return v, nil
 	case "move_preparation":
 		var v DaemonReplyMovePreparation
 		if err := daemonDecodeRequired(body, "value", &v.Preparation); err != nil {
@@ -4765,19 +4898,6 @@ func decodeDaemonReplyIdentityProof(body json.RawMessage) (DaemonReply, error) {
 	return DaemonReplyIdentityProof{Mac: mac}, nil
 }
 
-// decodeDaemonReplyAvailability reads the checked availability with
-// environment sources only, as Rust's deserialize_availability does.
-func decodeDaemonReplyAvailability(body json.RawMessage) (DaemonReply, error) {
-	var v DaemonReplyAvailability
-	err := core.WithEnvironmentSourcesOnly(func() error {
-		return daemonDecodeRequired(body, "value", &v.Checked)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v, nil
-}
-
 func (v DaemonReplyStoredProjectionTail) MarshalJSON() ([]byte, error) {
 	body := []byte("null")
 	if v.Tail != nil {
@@ -4830,6 +4950,35 @@ func DaemonReplyIsChunked(reply DaemonReply) bool {
 		return true
 	}
 	return false
+}
+
+type InterruptAllResult struct {
+	Requested uint64 `json:"requested"`
+	// Failures are (session id, error) pairs, serialized as two-element
+	// arrays.
+	Failures []DaemonPair[string, string] `json:"failures"`
+}
+
+func (v InterruptAllResult) MarshalJSON() ([]byte, error) {
+	type plain InterruptAllResult
+	return daemonMarshalStruct(plain(v))
+}
+
+func (v *InterruptAllResult) UnmarshalJSON(data []byte) error {
+	type plain InterruptAllResult
+	return daemonDecodeStruct(data, (*plain)(v), false)
+}
+
+// SessionRecordWithVerdict is an on-demand record and its verdict from the
+// same capture.
+type SessionRecordWithVerdict struct {
+	Record  core.SessionRecord `json:"record"`
+	Verdict SessionVerdict     `json:"verdict"`
+}
+
+func (v *SessionRecordWithVerdict) UnmarshalJSON(data []byte) error {
+	type plain SessionRecordWithVerdict
+	return daemonDecodeStruct(data, (*plain)(v), true)
 }
 
 // ResumeCandidates is what the resume dialog lists, read on demand.
@@ -4903,7 +5052,52 @@ const ResumeCandidateTitleChars = 200
 // build rows here, so a row reads the same whichever of them held the
 // record.
 func ResumeCandidateOf(record *core.SessionRecord, config *core.Config) ResumeCandidate {
-	panic("unported: mj-client/src/daemon.rs ResumeCandidate::of")
+	timestampMs := func(timestamp string) *int64 {
+		parsed, ok := core.ParseChronoRFC3339(timestamp)
+		if !ok {
+			return nil
+		}
+		millis := parsed.UnixMilli()
+		return &millis
+	}
+	title := []rune(record.ListedTitle())
+	if len(title) > ResumeCandidateTitleChars {
+		title = title[:ResumeCandidateTitleChars]
+	}
+	var lastActivityMs *int64
+	if record.Checkpoint != nil {
+		lastActivityMs = timestampMs(record.Checkpoint.CreatedAt)
+	}
+	if lastActivityMs == nil {
+		lastActivityMs = timestampMs(record.UpdatedAt)
+	}
+	var publication *core.PublicationState
+	if state, ok := record.PublicationState(); ok {
+		publication = &state
+	}
+	var checkpointArchive *string
+	if record.Checkpoint != nil && record.State == core.SessionStateStopped {
+		archive := record.Checkpoint.ArchivePath
+		checkpointArchive = &archive
+	}
+	// An omitted managed checkout kind is a worktree, as serde's default
+	// reads it.
+	owned := record.RecordCheckout().ManagedWorktree()
+	worktreeCheckout := owned != nil &&
+		(owned.Kind == core.ManagedCheckoutKindWorktree || owned.Kind == "")
+	return ResumeCandidate{
+		SessionID:         record.ID,
+		State:             record.State,
+		LastProfile:       record.LastProfile,
+		Title:             string(title),
+		Origin:            record.ProjectTarget(config, record.TargetTemplateID),
+		Project:           record.ProjectName(config),
+		HasCheckpoint:     record.Checkpoint != nil,
+		LastActivityMs:    lastActivityMs,
+		Publication:       publication,
+		CheckpointArchive: checkpointArchive,
+		WorktreeCheckout:  worktreeCheckout,
+	}
 }
 
 type DaemonStatus struct {
@@ -5143,7 +5337,67 @@ func ReadFrame[T any](r io.Reader) (T, error) {
 // it. All fragments belong to the same response; disconnects discard partial
 // state.
 func ReadResponse(r io.Reader) (ResponseEnvelope, error) {
-	panic("unported: mj-client/src/daemon.rs read_response")
+	response, err := ReadFrame[ResponseEnvelope](r)
+	if err != nil {
+		return ResponseEnvelope{}, err
+	}
+	if _, chunked := response.Result.Ok.(DaemonReplyReplyChunk); response.Result.Err != nil || !chunked {
+		return response, nil
+	}
+	protocolVersion := response.ProtocolVersion
+	requestID := response.RequestID
+	var body []byte
+	for {
+		if response.ProtocolVersion != protocolVersion || response.RequestID != requestID {
+			return ResponseEnvelope{}, errors.New("daemon crossed reply fragment identities")
+		}
+		chunk, ok := response.Result.Ok.(DaemonReplyReplyChunk)
+		if response.Result.Err != nil || !ok {
+			return ResponseEnvelope{}, errors.New("daemon interrupted a chunked reply")
+		}
+		if len(chunk.Bytes) == 0 {
+			return ResponseEnvelope{}, errors.New("empty reply fragment")
+		}
+		body = append(body, chunk.Bytes...)
+		if chunk.Finished {
+			break
+		}
+		if response, err = ReadFrame[ResponseEnvelope](r); err != nil {
+			return ResponseEnvelope{}, err
+		}
+	}
+	reply, err := UnmarshalDaemonReplyJSON(body)
+	if err != nil {
+		return ResponseEnvelope{}, err
+	}
+	if !DaemonReplyIsChunked(reply) {
+		return ResponseEnvelope{}, errors.New("daemon chunked a reply that is never chunked")
+	}
+	return ResponseEnvelope{
+		ProtocolVersion: protocolVersion,
+		RequestID:       requestID,
+		Result:          DaemonOk(reply),
+	}, nil
+}
+
+// daemonWatch closes stream when ctx ends, as dropping the Rust future that
+// owns an exchange drops its connection. The returned release stops watching
+// and reports whether the stream is still intact; after false the stream is
+// closed and must never be reused.
+func daemonWatch(ctx context.Context, stream net.Conn) (release func() bool) {
+	return context.AfterFunc(ctx, func() { _ = stream.Close() })
+}
+
+// daemonAbandon drops a stream whose exchange failed, so it can never carry
+// another request, and reports why: the caller's cancellation when ctx
+// ended, otherwise err.
+func daemonAbandon(ctx context.Context, stream net.Conn, release func() bool, err error) error {
+	release()
+	_ = stream.Close()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // DaemonClient is one authenticated control connection to a daemon.
@@ -5175,7 +5429,40 @@ func DaemonClientConnect(ctx context.Context, metadata DaemonMetadata) (*DaemonC
 // before any request carries the token. The tunnel may have exited since an
 // earlier proof, and another process may now hold its port.
 func daemonClientConnectProven(ctx context.Context, metadata DaemonMetadata) (*DaemonClient, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::connect_proven")
+	client, err := DaemonClientConnect(ctx, metadata)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := client.takeStream()
+	if err != nil {
+		return nil, err
+	}
+	proven, err := proveStream(ctx, stream, client.metadata.Token)
+	if err != nil {
+		_ = stream.Close()
+		return nil, err
+	}
+	if !proven {
+		_ = stream.Close()
+		return nil, fmt.Errorf("the SSH tunnel's local port %s did not prove it reaches the daemon", client.metadata.Address)
+	}
+	client.stream = stream
+	return client, nil
+}
+
+// Close drops the control connection, as dropping the Rust client does.
+func (c *DaemonClient) Close() {
+	if c.stream != nil {
+		_ = c.stream.Close()
+		c.stream = nil
+	}
+}
+
+// replace makes this client the reconnected one, dropping its own
+// connection (Rust's `*self = reconnect().await?`).
+func (c *DaemonClient) replace(next *DaemonClient) {
+	c.Close()
+	*c = *next
 }
 
 // Connector is the connector-owned SSH origin; never inferred from
@@ -5202,7 +5489,21 @@ func (c *DaemonClient) Endpoint(ctx context.Context) (DaemonEndpoint, error) {
 // management requests must reach daemons of any protocol version, and the
 // frozen subset encodes identically across all of them.
 func (c *DaemonClient) Request(ctx context.Context, action DaemonAction) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::request")
+	connector := c.connector
+	previous := c.metadata
+	return c.requestWithReconnect(ctx, action, func(ctx context.Context) (*DaemonClient, error) {
+		if connector != nil {
+			return connector.refresh(ctx, previous)
+		}
+		for {
+			if client, err := ConnectExisting(ctx); err == nil {
+				return client, nil
+			}
+			if err := daemonSleep(ctx, 250*time.Millisecond); err != nil {
+				return nil, err
+			}
+		}
+	})
 }
 
 func (c *DaemonClient) requestWithReconnect(
@@ -5210,14 +5511,98 @@ func (c *DaemonClient) requestWithReconnect(
 	action DaemonAction,
 	reconnect func(context.Context) (*DaemonClient, error),
 ) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::request_with_reconnect")
+	for {
+		response, err := c.requestOnce(ctx, action)
+		if err != nil {
+			return nil, err
+		}
+		_, pending := response.(DaemonReplyUpgradePending)
+		if _, prepare := action.(DaemonActionPrepareUpgrade); !pending || prepare {
+			return response, nil
+		}
+		// Only an explicit refusal guarantees non-admission. Never replay
+		// arbitrary mutations after a lost acknowledgement.
+		if err := daemonSleep(ctx, 100*time.Millisecond); err != nil {
+			return nil, err
+		}
+		client, err := reconnect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.replace(client)
+	}
+}
+
+// daemonSleep waits for duration, or for ctx to end.
+func daemonSleep(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Upload streams raw bytes on this connection. The returned blob is
 // connection-scoped; consume it before disconnecting. Delivery failures are
-// never replayed.
+// never replayed. Cancelling ctx drops the connection; a read blocked in
+// reader still ends only when reader returns.
 func (c *DaemonClient) Upload(ctx context.Context, reader io.Reader) (string, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::upload")
+	stream, err := c.takeStream()
+	if err != nil {
+		return "", err
+	}
+	release := daemonWatch(ctx, stream)
+	digest := sha256.New()
+	requestID := c.nextRequestID
+	c.nextRequestID++
+	buffer := make([]byte, 64*1024)
+	send := func(bytes []byte, sha *string) error {
+		return WriteFrame(stream, RequestEnvelope{
+			ProtocolVersion: c.metadata.ProtocolVersion,
+			RequestID:       requestID,
+			Token:           c.metadata.Token,
+			Action:          DaemonActionUploadChunk{Bytes: bytes, Sha256: sha},
+		})
+	}
+	for {
+		n, readErr := reader.Read(buffer)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", daemonAbandon(ctx, stream, release, readErr)
+		}
+		if n > 0 {
+			digest.Write(buffer[:n])
+			if err := send(append([]byte(nil), buffer[:n]...), nil); err != nil {
+				return "", daemonAbandon(ctx, stream, release, err)
+			}
+		}
+		if readErr != nil {
+			// The end of the source: an empty fragment carries the digest of
+			// every byte sent.
+			sum := core.LowerHex(digest.Sum(nil))
+			if err := send([]byte{}, &sum); err != nil {
+				return "", daemonAbandon(ctx, stream, release, err)
+			}
+			break
+		}
+	}
+	if !release() {
+		_ = stream.Close()
+		return "", ctx.Err()
+	}
+	response, err := c.finishExchange(ctx, stream, requestID)
+	if err != nil {
+		return "", err
+	}
+	if response.Result.Err != nil {
+		return "", errors.New(*response.Result.Err)
+	}
+	if blob, ok := response.Result.Ok.(DaemonReplyBlobUploaded); ok {
+		return blob.Blob, nil
+	}
+	return "", fmt.Errorf("unexpected blob upload reply %s", daemonReplyDebug(response.Result.Ok))
 }
 
 // UploadAndConsume uploads and consumes on one connection. Only explicit
@@ -5261,11 +5646,114 @@ func (c *DaemonClient) uploadAndConsumeObservedWithReconnect(
 	phase func(ctx context.Context, uploading bool) error,
 	cancel <-chan struct{},
 ) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::upload_and_consume_observed_with_reconnect")
+	start, err := reader.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, err
+	}
+	if err := phase(ctx, true); err != nil {
+		return nil, err
+	}
+	// The upload and the reconnection run under a context that cancel also
+	// ends, as Rust selects on cancel around both.
+	errUploadCancelled := errors.New("upload cancelled")
+	cancellable, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	go func() {
+		select {
+		case <-cancel:
+			stop(errUploadCancelled)
+		case <-cancellable.Done():
+		}
+	}()
+	interrupted := func(err error) error {
+		if ctx.Err() == nil && errors.Is(context.Cause(cancellable), errUploadCancelled) {
+			return errUploadCancelled
+		}
+		return err
+	}
+	cancelled := func() bool {
+		select {
+		case <-cancel:
+			return true
+		default:
+			return false
+		}
+	}
+	for {
+		// Cancellation is checked first, before the upload takes the
+		// connection.
+		if cancelled() {
+			return nil, errUploadCancelled
+		}
+		blob, err := c.Upload(cancellable, reader)
+		if err != nil {
+			return nil, interrupted(err)
+		}
+		if err := phase(ctx, false); err != nil {
+			return nil, err
+		}
+		reply, err := c.requestOnce(ctx, action(blob))
+		if err != nil {
+			return nil, err
+		}
+		if _, pending := reply.(DaemonReplyUpgradePending); !pending {
+			return reply, nil
+		}
+		if err := phase(ctx, true); err != nil {
+			return nil, err
+		}
+		if cancelled() {
+			return nil, errUploadCancelled
+		}
+		if err := daemonSleep(cancellable, 100*time.Millisecond); err != nil {
+			return nil, interrupted(err)
+		}
+		client, err := reconnect(cancellable)
+		if err != nil {
+			return nil, interrupted(err)
+		}
+		c.replace(client)
+		if _, err := reader.Seek(start, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// RequestSingle exchanges one request on this connection, exposing an
+// upgrade refusal to the caller.
+func (c *DaemonClient) RequestSingle(ctx context.Context, action DaemonAction) (DaemonReply, error) {
+	return c.requestOnce(ctx, action)
 }
 
 func (c *DaemonClient) requestOnce(ctx context.Context, action DaemonAction) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::request_once")
+	stream, err := c.takeStream()
+	if err != nil {
+		return nil, err
+	}
+	release := daemonWatch(ctx, stream)
+	requestID := c.nextRequestID
+	c.nextRequestID++
+	err = WriteFrame(stream, RequestEnvelope{
+		ProtocolVersion: c.metadata.ProtocolVersion,
+		RequestID:       requestID,
+		Token:           c.metadata.Token,
+		Action:          action,
+	})
+	if err != nil {
+		return nil, daemonAbandon(ctx, stream, release, transportLost(err))
+	}
+	if !release() {
+		_ = stream.Close()
+		return nil, ctx.Err()
+	}
+	response, err := c.finishExchange(ctx, stream, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if response.Result.Err != nil {
+		return nil, DaemonRefusal{Message: *response.Result.Err}
+	}
+	return response.Result.Ok, nil
 }
 
 // takeStream hands the connection to one exchange. The exchange owns framing
@@ -5282,7 +5770,24 @@ func (c *DaemonClient) takeStream() (net.Conn, error) {
 }
 
 func (c *DaemonClient) finishExchange(ctx context.Context, stream net.Conn, requestID uint64) (ResponseEnvelope, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::finish_exchange")
+	release := daemonWatch(ctx, stream)
+	response, err := ReadResponse(stream)
+	if err != nil {
+		return ResponseEnvelope{}, daemonAbandon(ctx, stream, release, transportLost(err))
+	}
+	if response.ProtocolVersion != c.metadata.ProtocolVersion {
+		return ResponseEnvelope{}, daemonAbandon(ctx, stream, release, errors.New("daemon changed protocol"))
+	}
+	if response.RequestID != requestID {
+		return ResponseEnvelope{}, daemonAbandon(ctx, stream, release,
+			fmt.Errorf("daemon crossed request IDs: expected %d, received %d", requestID, response.RequestID))
+	}
+	if !release() {
+		_ = stream.Close()
+		return ResponseEnvelope{}, ctx.Err()
+	}
+	c.stream = stream
+	return response, nil
 }
 
 func (c *DaemonClient) Identity(ctx context.Context) (DaemonIdentity, error) {
@@ -5410,6 +5915,13 @@ func (c *DaemonClient) HostCapacity(ctx context.Context) ([]core.HostCapacityRow
 	reply, err := c.Request(ctx, DaemonActionHostCapacity{})
 	matched, err := daemonExpect[DaemonReplyHostCapacity](reply, err, "unexpected host-capacity reply")
 	return matched.Rows, err
+}
+
+// RefreshCapacity asks the daemon to refresh host capacity. Readings arrive
+// on the feed.
+func (c *DaemonClient) RefreshCapacity(ctx context.Context) error {
+	reply, err := c.Request(ctx, DaemonActionRefreshCapacity{})
+	return daemonExpectDone(reply, err, "unexpected refresh-capacity reply")
 }
 
 // RefreshQuota asks the daemon to probe every profile that is not on hold.
@@ -5709,7 +6221,59 @@ func (c *DaemonClient) AdoptRecovery(
 	adoption RecoveryAdoptionRequest,
 	progress func(RecoveryAdoptionProgress),
 ) error {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::adopt_recovery")
+	stream, err := c.takeStream()
+	if err != nil {
+		return err
+	}
+	release := daemonWatch(ctx, stream)
+	requestID := c.nextRequestID
+	c.nextRequestID++
+	err = WriteFrame(stream, RequestEnvelope{
+		ProtocolVersion: c.metadata.ProtocolVersion,
+		RequestID:       requestID,
+		Token:           c.metadata.Token,
+		Action:          DaemonActionAdoptRecovery{Request: adoption},
+	})
+	if err != nil {
+		return daemonAbandon(ctx, stream, release, transportLost(err))
+	}
+	for {
+		response, err := ReadResponse(stream)
+		if err != nil {
+			return daemonAbandon(ctx, stream, release, fmt.Errorf(
+				"adoption connection ended before completion; check mj sessions, then rerun recover adopt if needed: %w",
+				transportLost(err)))
+		}
+		if response.ProtocolVersion != c.metadata.ProtocolVersion {
+			return daemonAbandon(ctx, stream, release, errors.New("daemon changed protocol"))
+		}
+		if response.RequestID != requestID {
+			return daemonAbandon(ctx, stream, release,
+				fmt.Errorf("daemon crossed request IDs: expected %d, received %d", requestID, response.RequestID))
+		}
+		if response.Result.Err == nil {
+			switch reply := response.Result.Ok.(type) {
+			case DaemonReplyAdoptionWaiting:
+				progress(RecoveryAdoptionProgressWaiting{Blockers: reply.Blockers, DestroyCommand: reply.DestroyCommand})
+				continue
+			case DaemonReplyAdoptionInstalled:
+				progress(RecoveryAdoptionProgressInstalled{SessionID: reply.SessionID})
+				continue
+			}
+		}
+		if !release() {
+			_ = stream.Close()
+			return ctx.Err()
+		}
+		c.stream = stream
+		if response.Result.Err != nil {
+			return errors.New(*response.Result.Err)
+		}
+		if _, done := response.Result.Ok.(DaemonReplyDone); done {
+			return nil
+		}
+		return fmt.Errorf("unexpected recovery-adoption reply %s", daemonReplyDebug(response.Result.Ok))
+	}
 }
 
 func (c *DaemonClient) DestroyRecovery(ctx context.Context, sessionID, targetID, confirmation string, allInstances bool) error {
@@ -5845,6 +6409,14 @@ func (c *DaemonClient) ResumeCandidates(ctx context.Context) (ResumeCandidates, 
 }
 
 func (c *DaemonClient) SessionRecord(ctx context.Context, sessionID string) (*core.SessionRecord, error) {
+	session, err := c.SessionRecordWithVerdict(ctx, sessionID)
+	if err != nil || session == nil {
+		return nil, err
+	}
+	return &session.Record, nil
+}
+
+func (c *DaemonClient) SessionRecordWithVerdict(ctx context.Context, sessionID string) (*SessionRecordWithVerdict, error) {
 	reply, err := c.Request(ctx, DaemonActionSessionRecord{SessionID: sessionID})
 	matched, err := daemonExpect[DaemonReplySessionRecord](reply, err, "unexpected session record reply")
 	return matched.Record, err
@@ -5948,28 +6520,69 @@ func (c *DaemonClient) StopBackgroundTask(ctx context.Context, sessionID, backgr
 
 // StartSessionLifecycle submits once and retains the receipt; a lost reply
 // does not permit replay.
+//
+// Any failure other than the daemon's refusal is a
+// LifecycleAdmissionUnconfirmed carrying the failure's text, but not its
+// type, as Rust's anyhow context does.
 func (c *DaemonClient) StartSessionLifecycle(ctx context.Context, request SessionLifecycleRequest) (LifecycleReceipt, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::start_session_lifecycle")
+	sessionID := SessionLifecycleRequestSessionID(request)
+	reply, err := c.Request(ctx, DaemonActionStartSessionLifecycle{Request: request})
+	if err != nil {
+		var refusal DaemonRefusal
+		if errors.As(err, &refusal) {
+			return LifecycleReceipt{}, err
+		}
+		return LifecycleReceipt{}, fmt.Errorf("%s: %w", err, LifecycleAdmissionUnconfirmed{SessionID: sessionID})
+	}
+	if accepted, ok := reply.(DaemonReplyLifecycleAccepted); ok {
+		return accepted.Receipt, nil
+	}
+	return LifecycleReceipt{}, fmt.Errorf("unexpected lifecycle acceptance reply %s: %w",
+		daemonReplyDebug(reply), LifecycleAdmissionUnconfirmed{SessionID: sessionID})
 }
 
 // WaitSessionLifecycle observes exactly this operation. Abandoning the
 // observer never cancels it.
+//
+// A failure to observe is a LifecycleObservationUnavailable carrying the
+// failure's text, but not its type: a refused observation is not the
+// operation's refusal. Only a captured operation failure is a DaemonRefusal.
 func (c *DaemonClient) WaitSessionLifecycle(ctx context.Context, receipt LifecycleReceipt) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::wait_session_lifecycle")
+	reply, err := c.Request(ctx, DaemonActionWaitSessionLifecycle{Receipt: receipt})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", err, LifecycleObservationUnavailable{Receipt: receipt})
+	}
+	switch reply := reply.(type) {
+	case DaemonReplyDone, DaemonReplyMoveOutcome:
+		return reply, nil
+	case DaemonReplyLifecycleFailed:
+		return nil, DaemonRefusal{Message: reply.Detail}
+	case DaemonReplyLifecycleObservationUnavailable:
+		return nil, LifecycleObservationUnavailable{Receipt: reply.Receipt}
+	}
+	return nil, fmt.Errorf("unexpected lifecycle completion reply %s: %w",
+		daemonReplyDebug(reply), LifecycleObservationUnavailable{Receipt: receipt})
+}
+
+func (c *DaemonClient) SuspendPreflight(ctx context.Context, sessionID string, dryRun, withoutCheckpoint bool) (core.SuspendPreflight, error) {
+	reply, err := c.Request(ctx, DaemonActionSuspendPreflight{
+		SessionID: sessionID, DryRun: dryRun, WithoutCheckpoint: withoutCheckpoint,
+	})
+	matched, err := daemonExpect[DaemonReplySuspendPreflight](reply, err, "unexpected suspend-preflight reply")
+	return matched.Preflight, err
 }
 
 func (c *DaemonClient) SuspendSession(ctx context.Context, sessionID string) error {
-	return c.SuspendSessionWithAck(ctx, sessionID, false)
+	return c.SuspendSessionWithConsent(ctx, sessionID, core.SuspendConsent{})
 }
 
-func (c *DaemonClient) IgnoreNestedRepositoriesAndSuspend(ctx context.Context, sessionID string) error {
-	reply, err := c.Request(ctx, DaemonActionIgnoreNestedRepositoriesAndSuspend{SessionID: sessionID})
-	return daemonExpectDone(reply, err, "unexpected ignore-and-suspend reply")
-}
-
-func (c *DaemonClient) SuspendSessionWithAck(ctx context.Context, sessionID string, acknowledgeUnpublishedWork bool) error {
+func (c *DaemonClient) SuspendSessionWithConsent(ctx context.Context, sessionID string, consent core.SuspendConsent) error {
 	reply, err := c.Request(ctx, DaemonActionSuspendSession{
-		SessionID: sessionID, AcknowledgeUnpublishedWork: acknowledgeUnpublishedWork,
+		SessionID:           sessionID,
+		DiscardUntracked:    consent.DiscardUntracked,
+		AbortOperations:     consent.AbortOperations,
+		WithoutCheckpoint:   consent.WithoutCheckpoint,
+		ConfirmNoCheckpoint: consent.ConfirmNoCheckpoint,
 	})
 	return daemonExpectDone(reply, err, "unexpected close-session reply")
 }
@@ -6010,18 +6623,13 @@ func (c *DaemonClient) ResumeSession(ctx context.Context, request ResumeSessionR
 	return daemonExpectDone(reply, err, "unexpected resume-session reply")
 }
 
-func (c *DaemonClient) DiscardSinceCheckpoint(ctx context.Context, sessionID string, checkpoint core.CheckpointMetadata) error {
-	reply, err := c.Request(ctx, DaemonActionDiscardSinceCheckpoint{SessionID: sessionID, Checkpoint: checkpoint})
-	return daemonExpectDone(reply, err, "unexpected force-stop reply")
-}
-
-func (c *DaemonClient) DestroyStoppedSession(ctx context.Context, sessionID string, deleteBranch bool) error {
-	reply, err := c.Request(ctx, DaemonActionDestroyStoppedSession{SessionID: sessionID, DeleteBranch: deleteBranch})
+func (c *DaemonClient) DestroyStoppedSession(ctx context.Context, sessionID string) error {
+	reply, err := c.Request(ctx, DaemonActionDestroyStoppedSession{SessionID: sessionID})
 	return daemonExpectDone(reply, err, "unexpected destroy-stopped reply")
 }
 
-func (c *DaemonClient) ForceDestroySession(ctx context.Context, sessionID string, deleteBranch bool) error {
-	reply, err := c.Request(ctx, DaemonActionForceDestroySession{SessionID: sessionID, DeleteBranch: deleteBranch})
+func (c *DaemonClient) ForceDestroySession(ctx context.Context, sessionID string) error {
+	reply, err := c.Request(ctx, DaemonActionForceDestroySession{SessionID: sessionID})
 	return daemonExpectDone(reply, err, "unexpected force-destroy reply")
 }
 
@@ -6114,6 +6722,9 @@ func (m *ManagementClient) ProtocolVersion() uint32 {
 func (m *ManagementClient) Metadata() DaemonMetadata {
 	return m.inner.metadata
 }
+
+// Close drops the management connection, as dropping the Rust client does.
+func (m *ManagementClient) Close() { m.inner.Close() }
 
 func (m *ManagementClient) Identity(ctx context.Context) (DaemonIdentity, error) {
 	return m.inner.Identity(ctx)
@@ -6258,9 +6869,33 @@ const (
 	// QuiescentAdoptionProtocol: adoption streams cancellable quiescence
 	// waits before its atomic install.
 	QuiescentAdoptionProtocol = SuspendOnlyCheckpointProtocol + 1
-	// ProtocolVersion: tool permission forms name their transcript call,
-	// which older clients reject.
-	ProtocolVersion = QuiescentAdoptionProtocol + 1
+	// ToolPermissionCallProtocol: tool permission forms name their
+	// transcript call, which older clients reject.
+	ToolPermissionCallProtocol = QuiescentAdoptionProtocol + 1
+	// RuntimeHostCapacityProtocol: the runtime feed carries host capacity,
+	// and clients can refresh it.
+	RuntimeHostCapacityProtocol = ToolPermissionCallProtocol + 1
+	// RuntimeAvailabilityProtocol: availability checks are requested
+	// independently of their runtime feed results.
+	RuntimeAvailabilityProtocol        = RuntimeHostCapacityProtocol + 1
+	RuntimeSessionMaterializedProtocol = RuntimeAvailabilityProtocol + 1
+	RuntimeSessionVerdictsProtocol     = RuntimeSessionMaterializedProtocol + 1
+	RuntimeShellInterruptProtocol      = RuntimeSessionVerdictsProtocol + 1
+	// RuntimeReviewIdentityProtocol: a review view names its review and the
+	// repositories it covers, and a session can have several open. Older
+	// readers reject the new fields.
+	RuntimeReviewIdentityProtocol = RuntimeShellInterruptProtocol + 1
+	// SuspendConsentProtocol: typed suspend consent, suspend preflight, and
+	// removal of publication consent and delete_branch.
+	SuspendConsentProtocol  = RuntimeReviewIdentityProtocol + 1
+	MoveOriginDeltaProtocol = SuspendConsentProtocol + 1
+	// SupervisorsProtocol: supervisor delegation adds `supervisors` on
+	// session creation/move and runtime feed.
+	SupervisorsProtocol = MoveOriginDeltaProtocol + 1
+	// OrchestratorsProtocol: orchestrator opt-in is part of the delegation
+	// policy.
+	OrchestratorsProtocol = SupervisorsProtocol + 1
+	ProtocolVersion       = OrchestratorsProtocol
 	// RemovedCheckpointMessage is the guidance for clients sending the
 	// removed checkpoint action.
 	RemovedCheckpointMessage = "The checkpoint action was removed; suspend saves the session."
@@ -6295,8 +6930,9 @@ func DaemonActionIsCancellableMachineAction(action DaemonAction) bool {
 	}
 	switch action.(type) {
 	case DaemonActionInstallMbx, DaemonActionPreviewBuildCache, DaemonActionCheckpointArchiveSizes,
-		DaemonActionTestTarget, DaemonActionProfileLoginStatuses, DaemonActionCheckAvailability,
-		DaemonActionDiscoverSetup, DaemonActionPreflightNewSession, DaemonActionValidateProjectDirectory,
+		DaemonActionTestTarget, DaemonActionProfileLoginStatuses,
+		DaemonActionDiscoverSetup, DaemonActionPreflightNewSession, DaemonActionSuspendPreflight,
+		DaemonActionValidateProjectDirectory,
 		DaemonActionCompletePath, DaemonActionCheckProjectDirectories, DaemonActionDiscoverProjects,
 		DaemonActionResolveContainerPath, DaemonActionResolveSetupPath, DaemonActionValidateMountSource,
 		DaemonActionValidateSessionMounts:
@@ -6399,6 +7035,10 @@ func reconnectAfterUploadRefusal(ctx context.Context) (*DaemonClient, error) {
 // `{reply:?}` does.
 func daemonReplyDebug(reply DaemonReply) string {
 	name := strings.TrimPrefix(fmt.Sprintf("%T", reply), "client.DaemonReply")
+	// A unit variant prints as its bare name.
+	if value := reflect.ValueOf(reply); value.Kind() == reflect.Struct && value.NumField() == 0 {
+		return name
+	}
 	return fmt.Sprintf("%s%+v", name, reply)
 }
 
@@ -6785,6 +7425,7 @@ func daemonRegister[I any](decode func([]byte) (I, error)) {
 
 func init() {
 	daemonRegister(core.UnmarshalMachineJSON)
+	daemonRegister(core.UnmarshalQuotaProviderJSON)
 	daemonRegister(core.UnmarshalTargetTemplateJSON)
 	daemonRegister(core.UnmarshalLoginStatus)
 	daemonRegister(core.UnmarshalNotificationDismissal)

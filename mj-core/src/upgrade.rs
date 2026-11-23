@@ -1,0 +1,949 @@
+//! Admission for process-owned work during an automatic daemon handoff.
+//! Waiting never cancels existing work. The last idle check and closing
+//! admission are one decision, so new work cannot race the process exit.
+//!
+//! The handoff waits only for short control operations. Work that can take
+//! minutes but is safe to stop, such as a recovery copy, the preparation for
+//! a worker upgrade, or a SessionWiki sync, does not hold admission: the
+//! handoff cancels it and the next daemon starts it again. Once a handoff is
+//! waiting, the gate drains: it refuses new deferrable work, so the set of
+//! holders can only shrink. While it waits, the daemon log names each blocker
+//! with its count and age. A hold may carry a [`Describe`] handle, which the
+//! notice asks for the work's identity and current stage when it renders, so
+//! the owner of that fact stays the only place that records it.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How long draining lasts after the most recent handoff attempt. The
+/// upgrading client retries every quarter second, so a lapse means it gave up,
+/// and deferrable work may start again.
+const DRAIN_LAPSE: Duration = Duration::from_secs(10);
+
+/// How often a waiting handoff names its blockers again in the daemon log.
+const WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many holds of one label a notice describes before it counts the rest.
+const NAMED_HOLDS: usize = 3;
+
+const STARTUP_RECOVERY_LABEL: &str = "daemon startup recovery";
+
+/// The label a session destroy holds admission under.
+pub const DESTROY_LABEL: &str = "session destroy";
+
+/// A refused control admission has made no mutation and may wait for handoff.
+pub const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
+
+/// How long a stop or handoff waits for destroys in flight before it goes
+/// ahead and abandons them. The client waits longer than this for the daemon
+/// to exit (`STOP_DRAIN_TIMEOUT`).
+pub const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+pub struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
+
+#[derive(Default)]
+struct State {
+    closed: bool,
+    /// The sessions whose destroy holds admission, one entry per hold.
+    destroying: Vec<String>,
+    /// When a stop or handoff first found a destroy still running.
+    destroy_wait_started: Option<Instant>,
+    /// Tests shorten [`DESTROY_WAIT_BOUND`].
+    destroy_wait_bound: Option<Duration>,
+    /// When the most recent handoff attempt found work still running.
+    drain_requested: Option<Instant>,
+    /// When the current handoff wait began, and when it last named its
+    /// blockers in the log.
+    handoff_wait: Option<(Instant, Instant)>,
+    /// Each hold by label, keyed by admission order.
+    active: BTreeMap<&'static str, BTreeMap<u64, Hold>>,
+    next_hold: u64,
+    // Test synchronization only; never part of admission policy.
+    resumable_waiters: usize,
+}
+
+struct Hold {
+    began: Instant,
+    describer: Option<Arc<dyn Describe>>,
+}
+
+/// What a hold is doing, as its owner reports it when a notice renders.
+pub struct HoldDetail {
+    /// Which work this is, such as `create e5dfbd99`.
+    pub subject: String,
+    /// What the work is doing now, if its owner knows.
+    pub stage: Option<String>,
+}
+
+/// Held by an admission so a waiting handoff can name the work. The
+/// implementation reads the live fact from its owner on every call; the gate
+/// never copies it.
+pub trait Describe: Send + Sync {
+    fn describe(&self) -> HoldDetail;
+}
+
+impl State {
+    /// Whether the destroys still running should be waited for. Refuses new
+    /// deferrable work while it does.
+    fn destroy_wait_holds(&mut self) -> bool {
+        let started = *self.destroy_wait_started.get_or_insert_with(Instant::now);
+        let bound = self.destroy_wait_bound.unwrap_or(DESTROY_WAIT_BOUND);
+        if started.elapsed() < bound {
+            return true;
+        }
+        tracing::warn!(
+            sessions = ?self.destroying,
+            bound_seconds = bound.as_secs_f64(),
+            "daemon stops with session destroys unfinished; each session comes back and needs `mj destroy` again"
+        );
+        false
+    }
+
+    /// True when every active hold is a destroy.
+    fn holds_only_destroys_or_nothing(&self) -> bool {
+        self.active.keys().all(|label| *label == DESTROY_LABEL)
+    }
+
+    fn draining(&self) -> bool {
+        self.drain_requested
+            .is_some_and(|requested| requested.elapsed() < DRAIN_LAPSE)
+    }
+
+    fn blockers(&self) -> Vec<Blocker> {
+        self.active
+            .iter()
+            .filter_map(|(label, holds)| {
+                // Admission order is start order, so the first hold is oldest.
+                let (_, oldest) = holds.first_key_value()?;
+                Some(Blocker {
+                    label,
+                    count: holds.len(),
+                    age: oldest.began.elapsed(),
+                    named: holds
+                        .values()
+                        .filter_map(|hold| {
+                            Some(NamedHold {
+                                describer: hold.describer.clone()?,
+                                age: hold.began.elapsed(),
+                            })
+                        })
+                        .take(NAMED_HOLDS)
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    /// Decide whether a refused handoff reports its blockers now: when the
+    /// wait begins, then every [`WAIT_REPORT_INTERVAL`], so a long wait always
+    /// names its cause. The caller logs the report after it releases the gate,
+    /// because describing a hold reads other owners' state.
+    fn refused_handoff_report(&mut self) -> Option<RefusedHandoff> {
+        let now = Instant::now();
+        let (started, reported) = match self.handoff_wait {
+            // A wait whose client stopped asking has ended; this is a new one.
+            Some(wait) if self.draining() => wait,
+            _ => {
+                self.handoff_wait = Some((now, now));
+                return Some(RefusedHandoff {
+                    blockers: self.blockers(),
+                    waited_seconds: None,
+                });
+            }
+        };
+        if now.duration_since(reported) >= WAIT_REPORT_INTERVAL {
+            self.handoff_wait = Some((started, now));
+            return Some(RefusedHandoff {
+                blockers: self.blockers(),
+                waited_seconds: Some(started.elapsed().as_secs()),
+            });
+        }
+        None
+    }
+}
+
+struct RefusedHandoff {
+    blockers: Vec<Blocker>,
+    /// Absent for the first report of a wait.
+    waited_seconds: Option<u64>,
+}
+
+impl RefusedHandoff {
+    fn log(&self) {
+        let blockers = describe(&self.blockers);
+        match self.waited_seconds {
+            None => tracing::info!(
+                %blockers,
+                "daemon upgrade handoff is waiting for daemon-owned work"
+            ),
+            Some(waited_seconds) => tracing::info!(
+                %blockers,
+                waited_seconds,
+                "daemon upgrade handoff is still waiting for daemon-owned work"
+            ),
+        }
+    }
+}
+
+/// One label of work holding admission open: how many holds, how long the
+/// oldest has run, and the oldest few holds that can describe themselves.
+#[derive(Clone)]
+pub struct Blocker {
+    pub label: &'static str,
+    pub count: usize,
+    pub age: Duration,
+    named: Vec<NamedHold>,
+}
+
+#[derive(Clone)]
+struct NamedHold {
+    describer: Arc<dyn Describe>,
+    age: Duration,
+}
+
+fn format_age(age: Duration) -> String {
+    let seconds = age.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        _ => format!("{}m {:02}s", seconds / 60, seconds % 60),
+    }
+}
+
+impl Blocker {
+    /// The label, with the count appended when it is held more than once.
+    fn counted_label(&self) -> String {
+        match self.count {
+            1 => self.label.to_owned(),
+            count => format!("{} x{count}", self.label),
+        }
+    }
+}
+
+impl std::fmt::Display for Blocker {
+    /// `SessionWiki sync (12s)`, `session lifecycle x2 (oldest 1m 05s)`, and,
+    /// for holds that describe themselves, `session lifecycle x5: create
+    /// e5dfbd99 (install worker binary, 84m 42s); and 4 more`. Rendering asks
+    /// each described hold for its live detail, so call it without the gate held.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.named.is_empty() {
+            let age = format_age(self.age);
+            return match self.count {
+                1 => write!(formatter, "{} ({age})", self.label),
+                count => write!(formatter, "{} x{count} (oldest {age})", self.label),
+            };
+        }
+        write!(formatter, "{}", self.label)?;
+        if self.count > 1 {
+            write!(formatter, " x{}", self.count)?;
+        }
+        for (index, hold) in self.named.iter().enumerate() {
+            let detail = hold.describer.describe();
+            let age = format_age(hold.age);
+            let separator = if index == 0 { ": " } else { "; " };
+            match detail.stage {
+                Some(stage) => write!(formatter, "{separator}{} ({stage}, {age})", detail.subject)?,
+                None => write!(formatter, "{separator}{} ({age})", detail.subject)?,
+            }
+        }
+        match self.count - self.named.len() {
+            0 => Ok(()),
+            more => write!(formatter, "; and {more} more"),
+        }
+    }
+}
+
+fn describe(blockers: &[Blocker]) -> String {
+    blockers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One admitted operation. Clones share it: the operation is counted once
+/// however many tasks hold a clone, and it ends when the last clone drops.
+#[derive(Clone)]
+pub struct Work {
+    _registration: Arc<Registration>,
+}
+
+struct Registration {
+    gate: Arc<Gate>,
+    label: &'static str,
+    hold: u64,
+    destroying: Option<String>,
+}
+
+impl Gate {
+    fn publish(&self) {
+        self.1.notify_waiters();
+        self.2.notify_all();
+    }
+
+    /// Resumable work owns no admission while handoff drains. The same lock
+    /// decides whether to resume control or yield to a closed daemon.
+    pub fn enter_after_draining(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        loop {
+            anyhow::ensure!(
+                !state.closed,
+                crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                    .with_code(HANDOFF_REFUSAL_CODE)
+            );
+            if !state.draining() {
+                return Ok(self.register_as(&mut state, label, None, None));
+            }
+            // This is the owner's existing lapse deadline, not a polling
+            // interval or a bound on the resumable operation.
+            let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
+            let track_waiters = cfg!(test) || crate::test_hooks::test_fixtures_enabled();
+            if track_waiters {
+                state.resumable_waiters += 1;
+                self.1.notify_waiters();
+            }
+            (state, _) = self
+                .2
+                .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if track_waiters {
+                state.resumable_waiters -= 1;
+            }
+        }
+    }
+
+    /// Resumable background observers wait on this owner's exact drain
+    /// deadline and publication, without holding daemon admission.
+    pub async fn wait_after_draining(&self) -> bool {
+        loop {
+            let changed = self.1.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let deadline = {
+                let state = self.lock();
+                if state.closed {
+                    return false;
+                }
+                if !state.draining() {
+                    return true;
+                }
+                state.drain_requested.expect("draining has a request") + DRAIN_LAPSE
+            };
+            tokio::select! {
+                () = changed => {},
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {},
+            }
+        }
+    }
+
+    async fn wait_for_startup_recovery(&self) {
+        loop {
+            let changed = self.1.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.lock().active.contains_key(STARTUP_RECOVERY_LABEL) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    #[doc(hidden)]
+    pub async fn wait_for_resumable_waiter_for_test(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lock().resumable_waiters > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn expire_drain_for_test(&self) {
+        self.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        self.publish();
+    }
+
+    pub fn is_open(&self) -> bool {
+        !self.lock().closed
+    }
+
+    /// Whether a handoff is waiting, or has already happened. Deferrable work
+    /// that has not started yet should not start.
+    pub fn is_draining(&self) -> bool {
+        let state = self.lock();
+        state.closed || state.draining()
+    }
+
+    /// Publish a drain from the same owner that decides admission. Queued,
+    /// unaccepted requests release their outer client hold when this wakes.
+    pub fn begin_draining(&self) {
+        self.lock().drain_requested = Some(Instant::now());
+        self.publish();
+    }
+
+    pub async fn wait_until_draining(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_draining() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Admit a short control operation. The handoff waits for it. Refused
+    /// only once the handoff has happened.
+    pub fn enter(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
+        self.enter_described(label, None)
+    }
+
+    /// [`Self::enter`] for work that can name itself in the wait notice.
+    pub fn enter_described(
+        self: &Arc<Self>,
+        label: &'static str,
+        describer: Option<Arc<dyn Describe>>,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        anyhow::ensure!(
+            !state.closed,
+            crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
+        Ok(self.register_as(&mut state, label, None, describer))
+    }
+
+    /// Admit work the handoff waits for but that can be put off. Refused while
+    /// a handoff is waiting, so this work cannot keep extending the wait.
+    pub fn enter_unless_draining(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
+        self.enter_unless_draining_described(label, None)
+    }
+
+    /// [`Self::enter_unless_draining`] for work that can name itself.
+    pub fn enter_unless_draining_described(
+        self: &Arc<Self>,
+        label: &'static str,
+        describer: Option<Arc<dyn Describe>>,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        anyhow::ensure!(
+            !state.closed,
+            crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
+        anyhow::ensure!(
+            !state.draining(),
+            crate::refusal::Refusal::precondition("a daemon upgrade handoff is waiting")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
+        Ok(self.register_as(&mut state, label, None, describer))
+    }
+
+    /// Admit the destroy of `session_id`. The handoff and the graceful stop
+    /// wait for it, but only up to [`DESTROY_WAIT_BOUND`].
+    pub fn enter_destroy(self: &Arc<Self>, session_id: &str) -> anyhow::Result<Work> {
+        self.enter_destroy_mode(session_id, false)
+    }
+
+    pub fn enter_destroy_unless_draining(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> anyhow::Result<Work> {
+        self.enter_destroy_mode(session_id, true)
+    }
+
+    fn enter_destroy_mode(
+        self: &Arc<Self>,
+        session_id: &str,
+        deferrable: bool,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        anyhow::ensure!(
+            !state.closed && (!deferrable || !state.draining()),
+            crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
+        state.destroying.push(session_id.to_owned());
+        Ok(self.register_as(&mut state, DESTROY_LABEL, Some(session_id.to_owned()), None))
+    }
+
+    fn register_as(
+        self: &Arc<Self>,
+        state: &mut State,
+        label: &'static str,
+        destroying: Option<String>,
+        describer: Option<Arc<dyn Describe>>,
+    ) -> Work {
+        let hold = state.next_hold;
+        state.next_hold += 1;
+        state.active.entry(label).or_default().insert(
+            hold,
+            Hold {
+                began: Instant::now(),
+                describer,
+            },
+        );
+        Work {
+            _registration: Arc::new(Registration {
+                gate: self.clone(),
+                label,
+                hold,
+                destroying,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_destroy_wait_bound(bound: Duration) -> Arc<Self> {
+        let gate = Arc::new(Self::default());
+        gate.lock().destroy_wait_bound = Some(bound);
+        gate
+    }
+
+    /// Whether a stop should still wait for destroys. Starts the wait on the
+    /// first call that finds one. Once the bound has passed it logs the
+    /// destroys it abandons and answers no.
+    pub fn destroys_hold_the_stop(&self) -> bool {
+        let mut state = self.lock();
+        if state.destroying.is_empty() {
+            return false;
+        }
+        state.drain_requested = Some(Instant::now());
+        let holds = state.destroy_wait_holds();
+        drop(state);
+        self.publish();
+        holds
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The work holding admission open, sorted by label, with a count
+    /// appended when a label is held more than once.
+    #[doc(hidden)]
+    pub fn active_labels(&self) -> Vec<String> {
+        self.blockers().iter().map(Blocker::counted_label).collect()
+    }
+
+    /// The work holding admission open, sorted by label, with how long each
+    /// label's oldest hold has run. A waiting handoff names these.
+    pub fn blockers(&self) -> Vec<Blocker> {
+        self.lock().blockers()
+    }
+
+    /// Called only for automatic replacement, never explicit Stop. A refusal
+    /// starts or extends draining.
+    pub fn try_close(&self) -> bool {
+        let mut state = self.lock();
+        if state.closed {
+            return true;
+        }
+        if !state.holds_only_destroys_or_nothing()
+            || (!state.destroying.is_empty() && state.destroy_wait_holds())
+        {
+            let report = state.refused_handoff_report();
+            state.drain_requested = Some(Instant::now());
+            drop(state);
+            self.publish();
+            if let Some(report) = report {
+                report.log();
+            }
+            return false;
+        }
+        // Logged on every close, so a handoff's start is on record even when
+        // nothing made it wait.
+        tracing::info!(
+            waited_seconds = state
+                .handoff_wait
+                .take()
+                .map_or(0.0, |(started, _)| started.elapsed().as_secs_f64()),
+            "daemon upgrade handoff closed admission; the daemon is shutting down"
+        );
+        state.closed = true;
+        drop(state);
+        self.publish();
+        true
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let mut state = self.gate.lock();
+        if let Some(session_id) = &self.destroying
+            && let Some(index) = state.destroying.iter().position(|id| id == session_id)
+        {
+            state.destroying.remove(index);
+        }
+        if state.destroying.is_empty() {
+            state.destroy_wait_started = None;
+        }
+        let holds = state
+            .active
+            .get_mut(self.label)
+            .expect("registered upgrade work");
+        holds.remove(&self.hold);
+        if holds.is_empty() {
+            state.active.remove(self.label);
+            if self.label == STARTUP_RECOVERY_LABEL {
+                drop(state);
+                self.gate.1.notify_waiters();
+            }
+        }
+    }
+}
+
+pub fn gate() -> &'static Arc<Gate> {
+    static GATE: OnceLock<Arc<Gate>> = OnceLock::new();
+    GATE.get_or_init(Default::default)
+}
+
+pub fn activity(label: &'static str) -> anyhow::Result<Work> {
+    gate().enter(label)
+}
+
+pub fn startup_recovery() -> anyhow::Result<Work> {
+    activity(STARTUP_RECOVERY_LABEL)
+}
+
+/// Observe the startup hold used by handoff without taking admission.
+pub async fn wait_for_startup_recovery() {
+    gate().wait_for_startup_recovery().await;
+}
+
+pub fn activity_unless_draining(label: &'static str) -> anyhow::Result<Work> {
+    gate().enter_unless_draining(label)
+}
+
+pub fn activity_described(
+    label: &'static str,
+    describer: Arc<dyn Describe>,
+) -> anyhow::Result<Work> {
+    gate().enter_described(label, Some(describer))
+}
+
+pub fn activity_unless_draining_described(
+    label: &'static str,
+    describer: Arc<dyn Describe>,
+) -> anyhow::Result<Work> {
+    gate().enter_unless_draining_described(label, Some(describer))
+}
+
+pub fn destroy_activity(session_id: &str) -> anyhow::Result<Work> {
+    gate().enter_destroy(session_id)
+}
+
+pub fn destroy_activity_unless_draining(session_id: &str) -> anyhow::Result<Work> {
+    gate().enter_destroy_unless_draining(session_id)
+}
+
+pub fn is_draining() -> bool {
+    gate().is_draining()
+}
+
+#[doc(hidden)]
+pub fn active_labels() -> Vec<String> {
+    gate().active_labels()
+}
+
+/// What a waiting handoff names: each blocking label with its count and age,
+/// and the oldest few holds that can describe themselves.
+pub fn blockers() -> Vec<Blocker> {
+    gate().blockers()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn web_push_cutover_waits_for_the_last_startup_recovery_hold() {
+        let gate = Arc::new(Gate::default());
+        let startup = gate.enter(STARTUP_RECOVERY_LABEL).unwrap();
+        let recovery = startup.clone();
+        let unrelated = gate.enter("other control work").unwrap();
+        let waiting = gate.wait_for_startup_recovery();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(startup);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(recovery);
+        assert!(futures::poll!(&mut waiting).is_ready());
+        assert_eq!(gate.active_labels(), ["other control work"]);
+        drop(unrelated);
+    }
+
+    #[test]
+    fn handoff_waits_for_every_owner_and_closes_admission_atomically() {
+        let gate = Arc::new(Gate::default());
+        let provisioning = gate.enter("provisioning").unwrap();
+        for _ in 0..1000 {
+            assert!(!gate.try_close());
+        }
+        let steering = gate.enter("steering").unwrap();
+        drop(provisioning);
+        assert!(!gate.try_close());
+        drop(steering);
+        assert!(gate.try_close());
+        assert!(gate.enter("new operation").is_err());
+        assert!(gate.try_close(), "handoff admission is idempotent");
+    }
+
+    #[test]
+    fn active_labels_name_each_blocker_and_count_repeats() {
+        let gate = Arc::new(Gate::default());
+        assert!(gate.active_labels().is_empty());
+        let first = gate.enter("session lifecycle").unwrap();
+        let second = gate.enter("session lifecycle").unwrap();
+        let request = gate.enter("client request").unwrap();
+        assert_eq!(
+            gate.active_labels(),
+            vec![
+                "client request".to_owned(),
+                "session lifecycle x2".to_owned()
+            ]
+        );
+        drop(second);
+        assert_eq!(
+            gate.active_labels(),
+            vec!["client request".to_owned(), "session lifecycle".to_owned()]
+        );
+        drop(first);
+        drop(request);
+        assert!(gate.active_labels().is_empty());
+    }
+
+    // Hard-won: c87e5e88: upgrades waited minutes without explaining the oldest blocker.
+    #[test]
+    fn blockers_carry_the_age_of_each_labels_oldest_hold() {
+        let gate = Arc::new(Gate::default());
+        let oldest = gate.enter("session lifecycle").unwrap();
+        let newer = gate.enter("session lifecycle").unwrap();
+        let sync = gate.enter("SessionWiki sync").unwrap();
+        // Backdate rather than sleep: the oldest lifecycle hold began 65s ago.
+        {
+            let mut state = gate.lock();
+            let holds = state.active.get_mut("session lifecycle").unwrap();
+            let first = holds.values_mut().next().unwrap();
+            first.began -= Duration::from_secs(65);
+        }
+        assert_eq!(
+            gate.blockers()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [
+                "SessionWiki sync (0s)",
+                "session lifecycle x2 (oldest 1m 05s)"
+            ]
+        );
+        // Releasing the oldest hold makes the newer one the label's age.
+        drop(oldest);
+        let lifecycle = gate.blockers()[1].clone();
+        assert_eq!((lifecycle.label, lifecycle.count), ("session lifecycle", 1));
+        assert!(lifecycle.age < Duration::from_secs(60), "{lifecycle}");
+        drop((newer, sync));
+        assert!(gate.blockers().is_empty());
+    }
+
+    // Hard-won: c87e5e88: long daemon handoffs gave no explanation of what they awaited.
+    #[test]
+    fn a_waiting_handoff_names_its_blockers_in_the_log_and_reports_when_it_closes() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let gate = Arc::new(Gate::default());
+        let held = gate.enter("SessionWiki sync").unwrap();
+        for _ in 0..10 {
+            assert!(!gate.try_close());
+        }
+        let waiting = log.at(tracing::Level::INFO);
+        assert_eq!(
+            waiting.len(),
+            1,
+            "a wait is named once, not on every attempt: {waiting:?}"
+        );
+        assert!(
+            waiting[0].contains("SessionWiki sync (0s)"),
+            "the log names the blocker and its age: {waiting:?}"
+        );
+        // Past the report interval the still-waiting handoff names it again.
+        {
+            let mut state = gate.lock();
+            let (started, reported) = state.handoff_wait.unwrap();
+            state.handoff_wait = Some((
+                started - WAIT_REPORT_INTERVAL,
+                reported - WAIT_REPORT_INTERVAL,
+            ));
+        }
+        assert!(!gate.try_close());
+        let waiting = log.at(tracing::Level::INFO);
+        assert_eq!(waiting.len(), 2, "{waiting:?}");
+        assert!(waiting[1].contains("still waiting"), "{waiting:?}");
+        drop(held);
+        assert!(gate.try_close());
+        let closed = log.at(tracing::Level::INFO);
+        assert!(
+            closed[2].contains("closed admission"),
+            "the log says when the wait ended: {closed:?}"
+        );
+    }
+
+    // Hard-won: 4b1b60b5: new deferrable work could keep an upgrade waiting indefinitely.
+    #[test]
+    fn a_waiting_handoff_refuses_deferrable_work_but_admits_control_work() {
+        let gate = Arc::new(Gate::default());
+        let running = gate.enter("session lifecycle").unwrap();
+        let deferrable = gate.enter_unless_draining("worker swap").unwrap();
+        assert!(!gate.is_draining());
+        assert!(!gate.try_close());
+        assert!(gate.is_draining());
+        assert!(gate.enter_unless_draining("worker swap").is_err());
+        let control = gate.enter("client request").unwrap();
+        drop((running, deferrable, control));
+        assert!(gate.try_close());
+        assert!(gate.enter_unless_draining("worker swap").is_err());
+    }
+
+    #[test]
+    fn draining_lapses_when_the_handoff_stops_asking() {
+        let gate = Arc::new(Gate::default());
+        let running = gate.enter("session lifecycle").unwrap();
+        assert!(!gate.try_close());
+        gate.expire_drain_for_test();
+        assert!(!gate.is_draining());
+        assert!(gate.enter_unless_draining("worker swap").is_ok());
+        drop(running);
+    }
+
+    // Hard-won: bcbba06e: daemon restart interrupted accepted destroys and restored sessions as running.
+    #[test]
+    fn a_handoff_waits_for_a_destroy_until_the_bound_and_then_abandons_it_with_a_warning() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        // The bound is long and the wait is backdated rather than slept, so
+        // machine load cannot make the first assertions run past the bound.
+        let bound = Duration::from_secs(60);
+        let gate = Gate::with_destroy_wait_bound(bound);
+        let destroy = gate.enter_destroy("aaaa1111").unwrap();
+        assert_eq!(gate.active_labels(), vec![DESTROY_LABEL.to_owned()]);
+        assert!(!gate.try_close(), "a destroy in flight holds the handoff");
+        assert!(gate.is_draining());
+        assert!(gate.destroys_hold_the_stop());
+        assert!(log.at(tracing::Level::WARN).is_empty());
+        let started = gate.lock().destroy_wait_started.expect("the wait began");
+        gate.lock().destroy_wait_started = Some(started - bound - Duration::from_secs(1));
+        assert!(!gate.destroys_hold_the_stop());
+        assert!(gate.try_close(), "past the bound the gate proceeds");
+        let warnings = log.at(tracing::Level::WARN);
+        assert!(
+            warnings.iter().any(|line| line.contains("aaaa1111")),
+            "the warning names the abandoned session: {warnings:?}"
+        );
+        drop(destroy);
+    }
+
+    #[test]
+    fn other_work_still_holds_the_handoff_past_the_destroy_bound() {
+        let gate = Gate::with_destroy_wait_bound(Duration::ZERO);
+        let destroy = gate.enter_destroy("aaaa1111").unwrap();
+        let lifecycle = gate.enter("session lifecycle").unwrap();
+        assert!(!gate.try_close());
+        drop(lifecycle);
+        assert!(gate.try_close());
+        drop(destroy);
+    }
+
+    #[test]
+    fn a_finished_destroy_lets_the_handoff_close_without_a_warning() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let gate = Gate::with_destroy_wait_bound(Duration::from_secs(60));
+        let destroy = gate.enter_destroy("aaaa1111").unwrap();
+        assert!(!gate.try_close());
+        drop(destroy);
+        assert!(!gate.destroys_hold_the_stop());
+        assert!(gate.try_close());
+        assert!(log.at(tracing::Level::WARN).is_empty());
+    }
+
+    #[test]
+    fn clones_of_one_operation_count_once_and_hold_until_the_last_drops() {
+        let gate = Arc::new(Gate::default());
+        let work = gate.enter("web action").unwrap();
+        let clone = work.clone();
+        assert_eq!(gate.active_labels(), vec!["web action".to_owned()]);
+        drop(work);
+        assert!(!gate.try_close());
+        drop(clone);
+        assert!(gate.try_close());
+    }
+
+    #[test]
+    fn concurrent_admission_either_owns_work_or_observes_a_committed_handoff() {
+        for _ in 0..100 {
+            let gate = Arc::new(Gate::default());
+            let thread_gate = gate.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let thread_barrier = barrier.clone();
+            let worker = std::thread::spawn(move || {
+                thread_barrier.wait();
+                thread_gate.enter("request")
+            });
+            barrier.wait();
+            let closed = gate.try_close();
+            let admitted = worker.join().unwrap();
+            assert_ne!(closed, admitted.is_ok());
+            drop(admitted);
+            assert!(gate.try_close());
+        }
+    }
+    // Hard-won: 5b46f3845: queued client admission could not observe a draining handoff.
+    #[tokio::test]
+    async fn drain_publication_wakes_existing_and_late_waiters() {
+        let gate = Arc::new(Gate::default());
+        let held = gate.enter("client request").unwrap();
+        let mut waiting = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(!gate.try_close());
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
+        assert!(
+            gate.enter_destroy_unless_draining("queued-destroy")
+                .is_err()
+        );
+        let mut late = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut late).is_ready());
+        let mut resumed = Box::pin(gate.wait_after_draining());
+        assert!(futures::poll!(&mut resumed).is_pending());
+        gate.expire_drain_for_test();
+        assert!(
+            resumed.await,
+            "lapse resumes background recovery without admission"
+        );
+        gate.begin_draining();
+        let mut shutdown = Box::pin(gate.wait_after_draining());
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        drop(held);
+        assert!(gate.try_close());
+        assert!(
+            !shutdown.await,
+            "closure retires the old daemon's observers"
+        );
+        let gate = Arc::new(Gate::default());
+        let mut closing = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut closing).is_pending());
+        assert!(gate.try_close());
+        tokio::time::timeout(Duration::from_secs(1), closing)
+            .await
+            .unwrap();
+    }
+}

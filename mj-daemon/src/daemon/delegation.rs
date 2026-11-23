@@ -23,7 +23,7 @@ enum ChildCompletion {
     /// handback. The verdict wakes the child; this checks again if the review
     /// ends without waking it (a cancel).
     AwaitingReview,
-    /// The child is a supervisor with live depth-2 workers or undelivered
+    /// The child is a orchestrator with live depth-2 workers or undelivered
     /// `SubagentFinished` mail; no handback reminder, no parent notice, no park.
     AwaitingChildren,
     /// The daemon began handing off before the completion could be admitted;
@@ -342,6 +342,7 @@ async fn run(
                                 SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
+                                    | SubagentToolAction::SpawnOrchestrator { .. }
                                     | SubagentToolAction::RequestReview { .. }
                                     | SubagentToolAction::AskOracle { .. }
                                     | SubagentToolAction::OverrideReview { .. }
@@ -764,12 +765,12 @@ async fn settle_child(
     if review_open {
         return Ok(ChildCompletion::AwaitingReview);
     }
-    // A supervisor with live depth-2 workers or undelivered finish mail is
+    // A orchestrator with live depth-2 workers or undelivered finish mail is
     // waiting for its children, not forgetting to hand back.
-    if relation.supervisor {
-        let supervisor_id = child_id.clone();
+    if relation.orchestrator {
+        let orchestrator_id = child_id.clone();
         let active = mj_core::runtime::spawn_blocking(move || {
-            crate::server_runtime::api::supervisor_active_children_sync(&supervisor_id)
+            crate::server_runtime::api::orchestrator_active_children_sync(&orchestrator_id)
         })
         .await??;
         if !active.is_empty() {
@@ -1783,20 +1784,20 @@ mod tests {
             Self::with_report_backend(name, true).await
         }
 
-        async fn new_supervisor(name: &str) -> Self {
-            Self::with_report_backend_and_supervisor(name, true, true).await
+        async fn new_orchestrator(name: &str) -> Self {
+            Self::with_report_backend_and_orchestrator(name, true, true).await
         }
 
         /// `report_backend` says whether to install the test's own report
         /// backend; a test that runs the delegation loop leaves it to the loop.
         async fn with_report_backend(name: &str, report_backend: bool) -> Self {
-            Self::with_report_backend_and_supervisor(name, report_backend, false).await
+            Self::with_report_backend_and_orchestrator(name, report_backend, false).await
         }
 
-        async fn with_report_backend_and_supervisor(
+        async fn with_report_backend_and_orchestrator(
             name: &str,
             report_backend: bool,
-            supervisor: bool,
+            orchestrator: bool,
         ) -> Self {
             let workspace = mj_controller::database::create_workspace(name).unwrap();
             let parent = crate::daemon::tests::runtime_test_session(
@@ -1812,7 +1813,7 @@ mod tests {
             mj_controller::database::save_session(&parent).unwrap();
             let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
             relation.handback_tool = true;
-            relation.supervisor = supervisor;
+            relation.orchestrator = orchestrator;
             mj_controller::database::save_subagent_session(&child, &relation).unwrap();
             let manager =
                 crate::daemon::tests::TestRemoteManager::for_sessions(&["child", "parent"]).await;
@@ -2556,21 +2557,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_awaits_live_depth_two_children_and_undelivered_mail() {
+    async fn orchestrator_awaits_live_depth_two_children_and_undelivered_mail() {
         if !isolated(
-            "supervisor_awaits_live_depth_two_children_and_undelivered_mail",
-            "delegation-supervisor-awaiting-children",
+            "orchestrator_awaits_live_depth_two_children_and_undelivered_mail",
+            "delegation-orchestrator-awaiting-children",
         ) {
             return;
         }
         let _writer = mj_controller::database::install_isolated_test_writer();
-        let mut held = HeldChild::new_supervisor("supervisor").await;
+        let mut held = HeldChild::new_orchestrator("orchestrator").await;
         let sup_session = mj_controller::database::load_state()
             .unwrap()
             .sessions
             .remove("child")
             .unwrap();
-        // Add a live depth-2 worker under the supervisor.
+        // Add a live depth-2 worker under the orchestrator.
         let mut d2_session = sup_session.clone();
         d2_session.id = "depth2-worker".into();
         d2_session.state = mj_core::state::SessionState::Running;
@@ -2591,7 +2592,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         };
         mj_controller::database::save_subagent_session(&d2_session, &d2_record).unwrap();
         held.state.owner().edit_sessions(|sessions| {
@@ -2602,7 +2603,7 @@ mod tests {
         let turn = turn_at("sup-turn-1", 10, now, None);
         held.child_ended(&turn).await;
 
-        // While depth-2 worker has_live_worker(), supervisor yields AwaitingChildren:
+        // While depth-2 worker has_live_worker(), orchestrator yields AwaitingChildren:
         // no handback reminder, no parent notice, no park.
         let (done, sent) = held.settle(None, &turn).await;
         assert!(matches!(done, ChildCompletion::AwaitingChildren));
@@ -2618,7 +2619,7 @@ mod tests {
         assert!(sent_again.is_empty(), "{sent_again:?}");
 
         // Park depth-2 worker, but leave an undelivered SubagentFinished mailbox row:
-        // supervisor still yields AwaitingChildren.
+        // orchestrator still yields AwaitingChildren.
         d2_session.state = mj_core::state::SessionState::Parked;
         mj_controller::database::save_session(&d2_session).unwrap();
         held.state.owner().edit_sessions(|sessions| {

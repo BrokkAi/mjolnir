@@ -10,12 +10,16 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 
@@ -147,19 +151,108 @@ func (b RuntimeBootstrap) IntoReplica() RuntimeReplica {
 	return RuntimeReplica{Cursor: &cursor, Projection: b.Projection}
 }
 
+// SessionVerdict is session facts and action offers from the daemon's
+// capture. Every field defaults when absent (serde default).
+type SessionVerdict struct {
+	Transition         *core.SessionTransitionKind `json:"transition"`
+	TransitionFailure  *core.SessionTransitionKind `json:"transition_failure"`
+	LiveDashboard      bool                        `json:"live_dashboard"`
+	NeedsPerson        bool                        `json:"needs_person"`
+	MoveQueueHeld      bool                        `json:"move_queue_held"`
+	Idle               bool                        `json:"idle"`
+	Working            bool                        `json:"working"`
+	ActiveWork         bool                        `json:"active_work"`
+	Unfinished         bool                        `json:"unfinished"`
+	Interrupt          bool                        `json:"interrupt"`
+	InterruptShell     bool                        `json:"interrupt_shell,omitempty"`
+	InterruptMember    bool                        `json:"interrupt_member"`
+	InterruptAll       bool                        `json:"interrupt_all"`
+	InterruptCount     int                         `json:"interrupt_count"`
+	Stop               SessionOffer                `json:"stop"`
+	Restart            SessionOffer                `json:"restart"`
+	MoveSession        SessionOffer                `json:"move_session"`
+	ChangeWorkspace    SessionOffer                `json:"change_workspace"`
+	ContainerSettings  SessionOffer                `json:"container_settings"`
+	Resume             SessionOffer                `json:"resume"`
+	WorkingChildren    int                         `json:"working_children"`
+	UnfinishedChildren int                         `json:"unfinished_children"`
+}
+
+func (v SessionVerdict) MarshalJSON() ([]byte, error) {
+	type plain SessionVerdict
+	return feedMarshalJSON(plain(v))
+}
+
+// Equal is Rust's derived PartialEq.
+func (v SessionVerdict) Equal(other SessionVerdict) bool {
+	left, right := v, other
+	left.Transition, right.Transition = nil, nil
+	left.TransitionFailure, right.TransitionFailure = nil, nil
+	return left == right && quotaOptionalEqual(v.Transition, other.Transition) &&
+		quotaOptionalEqual(v.TransitionFailure, other.TransitionFailure)
+}
+
+// SessionOffer is whether a session action is offered, and why not.
+// Serialized snake_case; the zero value is the default, Hidden.
+type SessionOffer int
+
+const (
+	SessionOfferHidden SessionOffer = iota
+	SessionOfferReady
+	SessionOfferMoveQueueHeld
+	SessionOfferTransitioning
+	SessionOfferTransitionFailed
+	SessionOfferOperationInProgress
+	SessionOfferNoRecoveryCopy
+	SessionOfferNoOtherWorkspace
+	SessionOfferActive
+	SessionOfferMoveEnvironmentRetained
+)
+
+var sessionOfferNames = [...]string{
+	"hidden", "ready", "move_queue_held", "transitioning", "transition_failed",
+	"operation_in_progress", "no_recovery_copy", "no_other_workspace", "active",
+	"move_environment_retained",
+}
+
+func (o SessionOffer) MarshalText() ([]byte, error) {
+	if o < 0 || int(o) >= len(sessionOfferNames) {
+		return nil, fmt.Errorf("unknown session offer %d", o)
+	}
+	return []byte(sessionOfferNames[o]), nil
+}
+
+func (o *SessionOffer) UnmarshalText(text []byte) error {
+	index := slices.Index(sessionOfferNames[:], string(text))
+	if index < 0 {
+		quoted := make([]string, len(sessionOfferNames))
+		for i, name := range sessionOfferNames {
+			quoted[i] = "`" + name + "`"
+		}
+		return fmt.Errorf("unknown variant `%s`, expected one of %s", text, strings.Join(quoted, ", "))
+	}
+	*o = SessionOffer(index)
+	return nil
+}
+
+// Offered is whether the action is offered.
+func (o SessionOffer) Offered() bool { return o == SessionOfferReady }
+
 // RuntimeProjection is the daemon's runtime publication.
 type RuntimeProjection struct {
 	SubagentParents sortedStringSet `json:"subagent_parents"`
 	// Revision is the legacy ordering shared with one-shot management
 	// responses.
-	Revision     uint64                                            `json:"revision"`
-	Records      core.SnapshotMap[string, core.SessionRecord]      `json:"records"`
-	Subagents    core.SnapshotMap[string, core.SubagentMetadata]   `json:"subagents"`
-	Sessions     core.SnapshotMap[string, RuntimeSessionView]      `json:"sessions"`
-	Moves        core.SnapshotMap[string, core.MoveOperation]      `json:"moves"`
-	NativeAgents core.SnapshotMap[string, core.NativeAgentSummary] `json:"native_agents"`
-	SessionCPU   core.SnapshotMap[string, SessionCpuView]          `json:"session_cpu"`
-	Metadata     RuntimeMetadata                                   `json:"metadata"`
+	Revision          uint64                                            `json:"revision"`
+	Records           core.SnapshotMap[string, core.SessionRecord]      `json:"records"`
+	EnvironmentOwners core.SnapshotMap[string, string]                  `json:"environment_owners"`
+	Subagents         core.SnapshotMap[string, core.SubagentMetadata]   `json:"subagents"`
+	Sessions          core.SnapshotMap[string, RuntimeSessionView]      `json:"sessions"`
+	Verdicts          core.SnapshotMap[string, SessionVerdict]          `json:"verdicts"`
+	Moves             core.SnapshotMap[string, core.MoveOperation]      `json:"moves"`
+	NativeAgents      core.SnapshotMap[string, core.NativeAgentSummary] `json:"native_agents"`
+	SessionCPU        core.SnapshotMap[string, SessionCpuView]          `json:"session_cpu"`
+	Metadata          RuntimeMetadata                                   `json:"metadata"`
 	// Transcripts is each live session's transcript tail. Never part of a
 	// snapshot frame: sixty tails can be hundreds of megabytes. A client
 	// fetches the tails it needs at its cursor, then follows them through
@@ -173,7 +266,89 @@ func (p RuntimeProjection) MarshalJSON() ([]byte, error) {
 	if value.SubagentParents == nil {
 		value.SubagentParents = sortedStringSet{}
 	}
-	return feedMarshalJSON(value)
+	encoded, err := feedMarshalJSON(value)
+	if err != nil {
+		return nil, err
+	}
+	return feedOmitEmptyMembers(encoded, "environment_owners")
+}
+
+// feedOmitEmptyMembers removes each named member whose value is an empty
+// object or list: serde's skip_serializing_if = "is_empty" on a map that Go
+// encodes as a struct, where omitempty does not apply.
+func feedOmitEmptyMembers(encoded []byte, names ...string) ([]byte, error) {
+	value, err := jsonvalue.Parse(encoded)
+	if err != nil {
+		return nil, err
+	}
+	object, ok := value.(jsonvalue.Object)
+	if !ok {
+		return encoded, nil
+	}
+	changed := false
+	for _, name := range names {
+		member, found := object.Get(name)
+		if !found {
+			continue
+		}
+		empty := false
+		switch typed := member.(type) {
+		case jsonvalue.Object:
+			empty = len(typed) == 0
+		case []any:
+			empty = len(typed) == 0
+		}
+		if empty {
+			object.Delete(name)
+			changed = true
+		}
+	}
+	if !changed {
+		return encoded, nil
+	}
+	return jsonvalue.Marshal(object)
+}
+
+// Equal is Rust's derived PartialEq.
+func (p *RuntimeProjection) Equal(other *RuntimeProjection) bool {
+	return maps.Equal(p.SubagentParents, other.SubagentParents) && p.Revision == other.Revision &&
+		p.Records.Equal(other.Records, feedJSONEqual[core.SessionRecord]) &&
+		p.EnvironmentOwners.Equal(other.EnvironmentOwners, feedComparableEqual[string]) &&
+		p.Subagents.Equal(other.Subagents, feedJSONEqual[core.SubagentMetadata]) &&
+		p.Sessions.Equal(other.Sessions, runtimeSessionViewEqual) &&
+		p.Verdicts.Equal(other.Verdicts, sessionVerdictEqual) &&
+		p.Moves.Equal(other.Moves, feedJSONEqual[core.MoveOperation]) &&
+		p.NativeAgents.Equal(other.NativeAgents, feedJSONEqual[core.NativeAgentSummary]) &&
+		p.SessionCPU.Equal(other.SessionCPU, feedJSONEqual[SessionCpuView]) &&
+		p.Metadata.Equal(&other.Metadata) &&
+		p.Transcripts.Equal(other.Transcripts, sessionTailEqual)
+}
+
+// feedJSONEqual is a type's PartialEq read as the values' serialized forms,
+// for the record types the feed only compares.
+func feedJSONEqual[T any](a, b *T) bool {
+	if a == b {
+		return true
+	}
+	left, leftErr := settingsToValue(a)
+	right, rightErr := settingsToValue(b)
+	return leftErr == nil && rightErr == nil && settingsEqual(left, right)
+}
+
+func feedComparableEqual[T comparable](a, b *T) bool { return *a == *b }
+
+func sessionVerdictEqual(a, b *SessionVerdict) bool { return a.Equal(*b) }
+
+// runtimeSessionViewEqual is RuntimeSessionView's PartialEq: its serialized
+// fields and the in-process ones serde skips.
+func runtimeSessionViewEqual(a, b *RuntimeSessionView) bool {
+	if (a.Materialized == nil) != (b.Materialized == nil) {
+		return false
+	}
+	if a.Materialized != nil && !a.Materialized.Equal(*b.Materialized, feedJSONEqual[RuntimeMaterializedSession]) {
+		return false
+	}
+	return a.MaterializedOnly == b.MaterializedOnly && feedJSONEqual(a, b)
 }
 
 func (p *RuntimeProjection) UnmarshalJSON(data []byte) error {
@@ -213,11 +388,69 @@ type scopeSelection struct {
 }
 
 func scopeSelectionOf(full *RuntimeProjection, parents map[string]struct{}) scopeSelection {
-	panic("unported: mj-client/src/runtime_feed.rs ScopeSelection::of")
+	operations := map[string]struct{}{}
+	for _, operation := range full.Metadata.Lifecycles {
+		operations[operation.SessionID] = struct{}{}
+	}
+	for id, operation := range full.Moves.All() {
+		if operation.IsActive() {
+			operations[id] = struct{}{}
+		}
+	}
+	ancestors := maps.Clone(parents)
+	if ancestors == nil {
+		ancestors = map[string]struct{}{}
+	}
+	for parent := range parents {
+		id := parent
+		seen := map[string]struct{}{}
+		for {
+			if _, repeated := seen[id]; repeated {
+				break
+			}
+			seen[id] = struct{}{}
+			relation := full.Subagents.GetShared(id)
+			if relation == nil {
+				break
+			}
+			ancestors[relation.ParentSessionID] = struct{}{}
+			id = relation.ParentSessionID
+		}
+	}
+	return scopeSelection{operations: operations, ancestors: ancestors}
 }
 
 func (s *scopeSelection) keeps(full *RuntimeProjection, parents map[string]struct{}, id string) bool {
-	panic("unported: mj-client/src/runtime_feed.rs ScopeSelection::keeps")
+	record := full.Records.GetShared(id)
+	if record == nil {
+		return false
+	}
+	relation := full.Subagents.GetShared(id)
+	inFamily := false
+	if relation != nil {
+		_, inFamily = parents[relation.ParentSessionID]
+	}
+	var live bool
+	if relation == nil {
+		live = record.State != core.SessionStateStopped
+	} else {
+		live = record.State != core.SessionStateStopped && record.State != core.SessionStateParked
+	}
+	// Notification membership is the daemon's served answer, including
+	// stopped sessions that have no live Sessions-pane row.
+	notification := false
+	if relation == nil {
+		if attention := full.Metadata.SessionAttention.GetShared(id); attention != nil {
+			switch *attention {
+			case core.SessionAttentionNeedsInput, core.SessionAttentionImportant,
+				core.SessionAttentionFailed, core.SessionAttentionUnreachable:
+				notification = true
+			}
+		}
+	}
+	_, operation := s.operations[id]
+	_, ancestor := s.ancestors[id]
+	return notification || operation || (!record.Archived && (live || inFamily || ancestor))
 }
 
 // keepsRelation: relationships stay for counts and navigation unless their
@@ -234,20 +467,157 @@ func keepsRelation(full *RuntimeProjection, id string, rowKept bool) bool {
 
 // NewScopedProjection scopes full to the families parents opened.
 func NewScopedProjection(full *RuntimeProjection, parents map[string]struct{}) ScopedProjection {
-	panic("unported: mj-client/src/runtime_feed.rs ScopedProjection::new")
+	if parents == nil {
+		parents = map[string]struct{}{}
+	}
+	selection := scopeSelectionOf(full, parents)
+	result := *full
+	result.Records = full.Records.Filtered(func(id string, _ *core.SessionRecord) bool {
+		return selection.keeps(full, parents, id)
+	})
+	result.SubagentParents = sortedStringSet(parents)
+	kept := result.Records
+	result.EnvironmentOwners = full.EnvironmentOwners.Filtered(func(id string, _ *string) bool {
+		return kept.ContainsKey(id)
+	})
+	result.Subagents.Retain(func(id string, _ *core.SubagentMetadata) bool {
+		return keepsRelation(full, id, kept.ContainsKey(id))
+	})
+	result.Sessions = full.Sessions.Filtered(func(id string, view *RuntimeSessionView) bool {
+		return kept.ContainsKey(id) && !view.MaterializedOnly
+	})
+	result.Verdicts = full.Verdicts.Filtered(func(id string, _ *SessionVerdict) bool {
+		if kept.ContainsKey(id) {
+			return true
+		}
+		agent := full.NativeAgents.GetShared(id)
+		return agent != nil && kept.ContainsKey(agent.Agent.OwnerSessionID)
+	})
+	result.Moves = full.Moves.Filtered(func(id string, _ *core.MoveOperation) bool { return kept.ContainsKey(id) })
+	result.SessionCPU = full.SessionCPU.Filtered(func(id string, _ *SessionCpuView) bool { return kept.ContainsKey(id) })
+	result.Transcripts = full.Transcripts.Filtered(func(id string, _ *SessionTail) bool { return kept.ContainsKey(id) })
+	result.NativeAgents = full.NativeAgents.Filtered(func(_ string, agent *core.NativeAgentSummary) bool {
+		return kept.ContainsKey(agent.Agent.OwnerSessionID)
+	})
+	return ScopedProjection{Projection: result, selection: selection}
 }
 
 // Advance scopes after given that s scopes before. Only sessions whose rows
 // or selection inputs changed are visited, and unchanged rows keep their
 // shared records, so a delta from s costs what changed.
 func (s *ScopedProjection) Advance(before, after *RuntimeProjection) ScopedProjection {
-	panic("unported: mj-client/src/runtime_feed.rs ScopedProjection::advance")
+	parents := map[string]struct{}(s.Projection.SubagentParents)
+	if parents == nil {
+		parents = map[string]struct{}{}
+	}
+	selection := scopeSelectionOf(after, parents)
+	result := s.Projection
+	result.Revision = after.Revision
+	result.Metadata = after.Metadata
+
+	candidates := map[string]struct{}{}
+	for id := range before.Records.Changes(after.Records, feedJSONEqual[core.SessionRecord]) {
+		candidates[id] = struct{}{}
+	}
+	for id := range before.Subagents.Changes(after.Subagents, feedJSONEqual[core.SubagentMetadata]) {
+		candidates[id] = struct{}{}
+	}
+	for id := range before.Metadata.SessionAttention.Changes(after.Metadata.SessionAttention, feedComparableEqual[core.SessionAttention]) {
+		candidates[id] = struct{}{}
+	}
+	for _, sets := range [][2]map[string]struct{}{
+		{s.selection.operations, selection.operations},
+		{s.selection.ancestors, selection.ancestors},
+	} {
+		for id := range sets[0] {
+			if _, both := sets[1][id]; !both {
+				candidates[id] = struct{}{}
+			}
+		}
+		for id := range sets[1] {
+			if _, both := sets[0][id]; !both {
+				candidates[id] = struct{}{}
+			}
+		}
+	}
+	moved := map[string]struct{}{}
+	for _, id := range slices.Sorted(maps.Keys(candidates)) {
+		keep := selection.keeps(after, parents, id)
+		if result.Records.ContainsKey(id) != keep {
+			moved[id] = struct{}{}
+		}
+		result.Records.CopyEntry(after.Records, id, keep)
+		result.Subagents.CopyEntry(after.Subagents, id, keepsRelation(after, id, keep))
+	}
+
+	records := result.Records
+	followRecords(&result.EnvironmentOwners, before.EnvironmentOwners, after.EnvironmentOwners, records, moved, feedComparableEqual[string])
+	sessionIDs := maps.Clone(moved)
+	for id := range before.Sessions.Changes(after.Sessions, runtimeSessionViewEqual) {
+		sessionIDs[id] = struct{}{}
+	}
+	for _, id := range slices.Sorted(maps.Keys(sessionIDs)) {
+		view := after.Sessions.GetShared(id)
+		keep := records.ContainsKey(id) && view != nil && !view.MaterializedOnly
+		result.Sessions.CopyEntry(after.Sessions, id, keep)
+	}
+	followRecords(&result.Moves, before.Moves, after.Moves, records, moved, feedJSONEqual[core.MoveOperation])
+	followRecords(&result.SessionCPU, before.SessionCPU, after.SessionCPU, records, moved, feedJSONEqual[SessionCpuView])
+	followRecords(&result.Transcripts, before.Transcripts, after.Transcripts, records, moved, sessionTailEqual)
+	var owned []string
+	for owner := range moved {
+		owned = append(owned, core.OwnerViewIDPrefix(owner))
+	}
+	agents := map[string]struct{}{}
+	for id := range before.NativeAgents.Changes(after.NativeAgents, feedJSONEqual[core.NativeAgentSummary]) {
+		agents[id] = struct{}{}
+	}
+	for _, prefix := range owned {
+		for id := range core.SnapshotMapKeysWithPrefix(after.NativeAgents, prefix) {
+			agents[id] = struct{}{}
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(agents)) {
+		agent := after.NativeAgents.GetShared(id)
+		keep := agent != nil && records.ContainsKey(agent.Agent.OwnerSessionID)
+		result.NativeAgents.CopyEntry(after.NativeAgents, id, keep)
+	}
+	verdicts := maps.Clone(moved)
+	for id := range before.Verdicts.Changes(after.Verdicts, sessionVerdictEqual) {
+		verdicts[id] = struct{}{}
+	}
+	for _, prefix := range owned {
+		for id := range core.SnapshotMapKeysWithPrefix(after.Verdicts, prefix) {
+			verdicts[id] = struct{}{}
+		}
+		for id := range core.SnapshotMapKeysWithPrefix(before.Verdicts, prefix) {
+			verdicts[id] = struct{}{}
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(verdicts)) {
+		keep := records.ContainsKey(id)
+		if !keep {
+			agent := after.NativeAgents.GetShared(id)
+			keep = agent != nil && records.ContainsKey(agent.Agent.OwnerSessionID)
+		}
+		result.Verdicts.CopyEntry(after.Verdicts, id, keep)
+	}
+	return ScopedProjection{Projection: result, selection: selection}
 }
 
 // followRecords brings a per-session map to after for sessions whose entry
 // changed or whose record entered or left the scope. eq is T's PartialEq.
 func followRecords[T any](scoped *core.SnapshotMap[string, T], before, after core.SnapshotMap[string, T], records core.SnapshotMap[string, core.SessionRecord], moved map[string]struct{}, eq func(a, b *T) bool) {
-	panic("unported: mj-client/src/runtime_feed.rs follow_records")
+	changed := maps.Clone(moved)
+	if changed == nil {
+		changed = map[string]struct{}{}
+	}
+	for id := range before.Changes(after, eq) {
+		changed[id] = struct{}{}
+	}
+	for _, id := range slices.Sorted(maps.Keys(changed)) {
+		scoped.CopyEntry(after, id, records.ContainsKey(id))
+	}
 }
 
 // RuntimeContainerCapacity is the daemon's hard container budget for one
@@ -328,13 +698,50 @@ func (c *NotificationCard) ItemDestination(session string, item int) string {
 // ItemIdentity is the durable notify-once key shared by the ledger and
 // delayed alerts.
 func (c *NotificationCard) ItemIdentity(session string, item int) (string, bool) {
-	panic("unported: mj-client/src/runtime_feed.rs NotificationCard::item_identity")
+	var identity []any
+	switch {
+	case item < len(c.Entries):
+		entry := &c.Entries[item]
+		switch message := entry.Message.(type) {
+		case core.EntryMessageFound:
+			identity = []any{"message", session, message.Value}
+		case core.EntryMessageNone:
+			identity = []any{"completion", session, entry.CompletedOrdinal}
+		default:
+			return "", false
+		}
+	case item == len(c.Entries):
+		if c.Form == nil {
+			return "", false
+		}
+		// An unknown raise time is not an identity: keying it with 0 would
+		// make a just-answered form look like a new one and alert again.
+		if c.Form.RaisedAtMs == 0 {
+			return "", false
+		}
+		identity = []any{"form", c.ItemDestination(session, item), c.Form.RequestID, c.Form.RaisedAtMs}
+	default:
+		return "", false
+	}
+	encoded, err := jsonvalue.Marshal(identity)
+	if err != nil {
+		panic(fmt.Sprintf("a notification identity serializes: %v", err))
+	}
+	return string(encoded), true
 }
 
 // ShownQuestion is the newest shown stack question, even when a live form
 // shares the card.
 func (c *NotificationCard) ShownQuestion() *core.NotificationStackEntry {
-	panic("unported: mj-client/src/runtime_feed.rs NotificationCard::shown_question")
+	if _, stack := c.Dismissal.(core.NotificationDismissalStack); !stack {
+		return nil
+	}
+	for i := len(c.Entries) - 1; i >= 0; i-- {
+		if c.Entries[i].Kind == core.NotificationKindNeedsInput {
+			return &c.Entries[i]
+		}
+	}
+	return nil
 }
 
 // CardFormSource is a form's provenance, explicit because harness request
@@ -455,6 +862,9 @@ type RuntimeMetadata struct {
 	OperatorPresence    core.OperatorPresence                                 `json:"operator_presence"`
 	ProfileCapabilities core.SharedSnapshot[core.ProfileCapabilitiesSnapshot] `json:"profile_capabilities"`
 	Config              core.SharedSnapshot[core.Config]                      `json:"config"`
+	// Availability is the daemon's verdict on every profile and target.
+	// Absent from a daemon that predates it, which reads as nothing known.
+	Availability core.SharedSnapshot[RuntimeAvailability] `json:"availability"`
 	// DefaultTargets is the ids in Config.Targets that the daemon supplied
 	// as default candidates rather than the user's file naming them. Config
 	// never serializes this set (it is not file content), so the feed
@@ -465,11 +875,18 @@ type RuntimeMetadata struct {
 	DefaultTargets sortedStringSet `json:"default_targets"`
 	// LastSubagentPolicies is also read from the legacy
 	// `last_subagent_policy` (core.DeserializePolicyMap).
-	LastSubagentPolicies map[string]core.SubagentPolicy `json:"last_subagent_policies"`
-	WorkspaceNames       map[string]string              `json:"workspace_names"`
-	Lifecycles           []RuntimeLifecycleView         `json:"lifecycles"`
-	Reviews              []RuntimeReviewView            `json:"reviews"`
-	Notices              []RuntimeNotice                `json:"notices"`
+	LastSubagentPolicies map[string]core.SubagentPolicy                   `json:"last_subagent_policies"`
+	WorkspaceNames       map[string]string                                `json:"workspace_names"`
+	Workspaces           []core.WorkspaceRecord                           `json:"workspaces,omitempty"`
+	ContainerSizes       core.SnapshotMap[string, core.HostContainerSize] `json:"container_sizes"`
+	LastOracleChoices    map[string]bool                                  `json:"last_oracle_choices,omitempty"`
+	// MountHistory is read by the browser directly from the capture. Native
+	// paths may contain bytes JSON cannot represent, so it is never
+	// serialized.
+	MountHistory core.SnapshotMap[string, []string] `json:"-"`
+	Lifecycles   []RuntimeLifecycleView             `json:"lifecycles"`
+	Reviews      []RuntimeReviewView                `json:"reviews"`
+	Notices      []RuntimeNotice                    `json:"notices"`
 	// UIRequests is requests to change the dashboard made on the person's
 	// behalf, newest last. Bounded like Notices; see ui_request.go.
 	UIRequests []UiRequest `json:"ui_requests,omitempty"`
@@ -479,6 +896,9 @@ type RuntimeMetadata struct {
 	// full. The daemon's storage board is the only judge; a daemon that
 	// predates the field sends none.
 	Storage core.SharedSnapshot[[]core.TargetStorageView] `json:"storage"`
+	// HostCapacities is the CPU, memory and filesystem readings from the
+	// daemon capacity service.
+	HostCapacities core.SharedSnapshot[[]RuntimeHostCapacity] `json:"host_capacities"`
 	// ContainerCapacities is the hard container headroom for each probed
 	// deployment host. The daemon includes in-memory resume and move
 	// reservations; terminal surfaces must not recompute this from records
@@ -528,8 +948,16 @@ func (m RuntimeMetadata) MarshalJSON() ([]byte, error) {
 	if value.ContainerUpgradeSessions == nil {
 		value.ContainerUpgradeSessions = sortedStringSet{}
 	}
+	// An unset configuration is Rust's Default for SharedSnapshot<Config>:
+	// Config::default().
+	if value.Config.PtrEq(core.SharedSnapshot[core.Config]{}) {
+		value.Config = core.NewSharedSnapshot(core.DefaultConfig())
+	}
 	if *value.Storage.Get() == nil {
 		value.Storage = core.NewSharedSnapshot([]core.TargetStorageView{})
+	}
+	if *value.HostCapacities.Get() == nil {
+		value.HostCapacities = core.NewSharedSnapshot([]RuntimeHostCapacity{})
 	}
 	if *value.ContainerCapacities.Get() == nil {
 		value.ContainerCapacities = core.NewSharedSnapshot(map[string]RuntimeContainerCapacity{})
@@ -537,7 +965,39 @@ func (m RuntimeMetadata) MarshalJSON() ([]byte, error) {
 	if *value.LaunchRecency.Get() == nil {
 		value.LaunchRecency = core.NewSharedSnapshot([]LaunchRecency{})
 	}
-	return feedMarshalJSON(value)
+	encoded, err := feedMarshalJSON(value)
+	if err != nil {
+		return nil, err
+	}
+	return feedOmitEmptyMembers(encoded, "container_sizes")
+}
+
+// Equal is Rust's derived PartialEq: the serialized fields and the mount
+// history serde skips.
+func (m *RuntimeMetadata) Equal(other *RuntimeMetadata) bool {
+	if !m.MountHistory.Equal(other.MountHistory, func(a, b *[]string) bool { return slices.Equal(*a, *b) }) {
+		return false
+	}
+	if !m.Availability.Equal(other.Availability, func(a, b *RuntimeAvailability) bool {
+		return feedJSONEqual(&a.Browser, &b.Browser)
+	}) {
+		return false
+	}
+	return feedJSONEqual(m, other)
+}
+
+// RuntimeHostCapacity is one host or fleet and whether the daemon owes it a
+// manual refresh.
+type RuntimeHostCapacity struct {
+	Reading        core.HostCapacityRow        `json:"reading"`
+	Refreshing     bool                        `json:"refreshing"`
+	DiskTotalBytes *uint64                     `json:"disk_total_bytes,omitempty"`
+	Last1h         *core.CapacityWindowSummary `json:"last_1h,omitempty"`
+}
+
+func (c *RuntimeHostCapacity) UnmarshalJSON(data []byte) error {
+	type plain RuntimeHostCapacity
+	return feedDecodeStruct(data, (*plain)(c), false, "reading", "refreshing")
 }
 
 // UnmarshalJSON applies serde's defaults, reads the policies through
@@ -595,7 +1055,15 @@ func (m *RuntimeMetadata) UnmarshalJSON(data []byte) error {
 // InstalledConfig is the configuration a client installs: the published
 // config with the daemon's default-candidate set.
 func (m *RuntimeMetadata) InstalledConfig() core.Config {
-	panic("unported: mj-client/src/runtime_feed.rs RuntimeMetadata::installed_config")
+	config := core.DefaultConfig()
+	if !m.Config.PtrEq(core.SharedSnapshot[core.Config]{}) {
+		config = *m.Config.Get()
+	}
+	config.DefaultTargets = maps.Clone(map[string]struct{}(m.DefaultTargets))
+	if config.DefaultTargets == nil {
+		config.DefaultTargets = map[string]struct{}{}
+	}
+	return config
 }
 
 // LaunchRecency is the newest creation time among the sessions launched with
@@ -617,7 +1085,43 @@ func (r *LaunchRecency) UnmarshalJSON(data []byte) error {
 // profile and target that any session used. A creation time that does not
 // parse ranks below every other.
 func LaunchRecencyOf(records core.SnapshotMap[string, core.SessionRecord]) []LaunchRecency {
-	panic("unported: mj-client/src/runtime_feed.rs launch_recency")
+	// A creation time that does not parse is Rust's None, which orders
+	// below every Some.
+	created := func(record *core.SessionRecord) (int64, bool) {
+		timestamp, err := time.Parse(time.RFC3339Nano, record.CreatedAt)
+		if err != nil {
+			return 0, false
+		}
+		return timestamp.UnixMilli(), true
+	}
+	type key struct{ bundle, profile, target string }
+	newest := map[key]*core.SessionRecord{}
+	for record := range records.Values() {
+		k := key{record.BundleID, record.LastProfile, record.TargetTemplateID}
+		held, found := newest[k]
+		if !found {
+			newest[k] = record
+			continue
+		}
+		recordTime, recordOK := created(record)
+		heldTime, heldOK := created(held)
+		if recordOK && (!heldOK || recordTime > heldTime) {
+			newest[k] = record
+		}
+	}
+	keys := slices.SortedFunc(maps.Keys(newest), func(a, b key) int {
+		return cmp.Or(strings.Compare(a.bundle, b.bundle), strings.Compare(a.profile, b.profile), strings.Compare(a.target, b.target))
+	})
+	recency := make([]LaunchRecency, 0, len(keys))
+	for _, k := range keys {
+		recency = append(recency, LaunchRecency{
+			BundleID:         k.bundle,
+			LastProfile:      k.profile,
+			TargetTemplateID: k.target,
+			NewestCreatedAt:  newest[k].CreatedAt,
+		})
+	}
+	return recency
 }
 
 // TailKey is where an item sits in a transcript: its creating ordinal, then
@@ -687,7 +1191,15 @@ type SessionTail struct {
 // SessionTailOf is the newest limit items of a published projection. window
 // describes what materialized.Transcript already leaves out.
 func SessionTailOf(materialized *core.MaterializedSession, window *core.ProjectionWindow, limit int) SessionTail {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTail::of")
+	tail := SessionTail{
+		Header: transcriptHeader(materialized),
+		Window: *window,
+	}
+	if position, ok := materialized.LatestPersonPosition(); ok {
+		tail.LatestUserPosition = &position
+	}
+	tail.Publish(materialized, window, limit)
+	return tail
 }
 
 // Publish brings this tail to a newly published projection. Items whose
@@ -695,22 +1207,142 @@ func SessionTailOf(materialized *core.MaterializedSession, window *core.Projecti
 // content keeps the old one, so a projection reloaded from the store reports
 // only the items whose content differs.
 func (t *SessionTail) Publish(materialized *core.MaterializedSession, window *core.ProjectionWindow, limit int) {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTail::publish")
+	t.LatestUserPosition = nil
+	if position, ok := materialized.LatestPersonPosition(); ok {
+		t.LatestUserPosition = &position
+	}
+	start := max(len(materialized.Transcript)-limit, 0)
+	// The daemon calls this for every view it publishes, so it walks the
+	// held items and the published ones side by side in key order, and
+	// allocates only for what changed. The published transcript is already
+	// in this order but for ties, which the sort settles.
+	kept := slices.Clone(materialized.Transcript[start:])
+	slices.SortStableFunc(kept, func(left, right *core.TranscriptItem) int {
+		return compareTailKeys(tailKey(left), tailKey(right))
+	})
+	held := slices.Collect(t.Items.Keys())
+	next := 0
+	var gone []TailMapKey
+	var changed []*core.TranscriptItem
+	for _, item := range kept {
+		key := tailKey(item)
+		for next < len(held) && compareTailKeys(held[next].TailKey(), key) < 0 {
+			gone = append(gone, held[next])
+			next++
+		}
+		if next < len(held) && compareTailKeys(held[next].TailKey(), key) == 0 {
+			heldItem := t.Items.GetShared(held[next])
+			next++
+			// Pointer equality first, then contents.
+			if *heldItem == item || transcriptItemEqual(*heldItem, item) {
+				continue
+			}
+		}
+		changed = append(changed, item)
+	}
+	gone = append(gone, held[next:]...)
+	for _, key := range gone {
+		t.Items.Remove(key)
+	}
+	for _, item := range changed {
+		t.Items.Insert(tailKey(item).MapKey(), item)
+	}
+	if !sameHeader(&t.Header, materialized) {
+		t.Header = transcriptHeader(materialized)
+	}
+	published := *window
+	published.OmittedItems = window.OmittedItems + start
+	if !projectionWindowEqual(&t.Window, &published) {
+		t.Window = published
+	}
+}
+
+// compareTailKeys orders tail keys as Rust orders the (u64, String) tuple.
+func compareTailKeys(a, b TailKey) int {
+	return cmp.Or(cmp.Compare(a.Position, b.Position), strings.Compare(a.StableID, b.StableID))
+}
+
+// projectionWindowEqual is ProjectionWindow's PartialEq.
+func projectionWindowEqual(a, b *core.ProjectionWindow) bool {
+	return quotaOptionalEqual(a.LatestUnreadEventOrdinal, b.LatestUnreadEventOrdinal) &&
+		a.OmittedItems == b.OmittedItems &&
+		quotaOptionalEqual(a.ProvisionalTitle, b.ProvisionalTitle) &&
+		quotaOptionalEqual(a.LatestTurnStartPosition, b.LatestTurnStartPosition)
 }
 
 // Materialized is the projection this tail stands for, transcript included.
 func (t *SessionTail) Materialized() core.MaterializedSession {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTail::materialized")
+	materialized := t.Header
+	materialized.Transcript = slices.Collect(t.itemValues())
+	return materialized
+}
+
+// itemValues is the tail's items in key order.
+func (t *SessionTail) itemValues() iter.Seq[*core.TranscriptItem] {
+	return func(yield func(*core.TranscriptItem) bool) {
+		for item := range t.Items.Values() {
+			if !yield(*item) {
+				return
+			}
+		}
+	}
 }
 
 // ChangeFrom is what turns before into this tail. A receiver that holds
 // nothing yet is never assumed by a delta: see TranscriptChangeRefetch.
 func (t *SessionTail) ChangeFrom(before *SessionTail) TranscriptChange {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTail::change_from")
+	var items TranscriptItems
+	for key, entry := range before.Items.Changes(t.Items, transcriptItemPointerEqual) {
+		if entry != nil {
+			items.Upserts = append(items.Upserts, *entry)
+		} else {
+			items.Removes = append(items.Removes, key.TailKey())
+		}
+	}
+	if !materializedEqual(&before.Header, &t.Header) {
+		header := t.Header
+		items.Header = &header
+	}
+	if !projectionWindowEqual(&before.Window, &t.Window) {
+		window := t.Window
+		items.Window = &window
+	}
+	return TranscriptChange{Kind: TranscriptChangeItems, Items: items}
+}
+
+// transcriptItemPointerEqual is Arc<TranscriptItem>'s PartialEq: the same
+// pointer, or equal contents.
+func transcriptItemPointerEqual(a, b **core.TranscriptItem) bool {
+	return *a == *b || transcriptItemEqual(*a, *b)
+}
+
+// materializedEqual is MaterializedSession's PartialEq, read as the two
+// projections' serialized forms.
+func materializedEqual(a, b *core.MaterializedSession) bool {
+	return feedJSONEqual(a, b)
 }
 
 func (t *SessionTail) apply(change TranscriptItems) {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTail::apply")
+	if change.Header != nil {
+		t.Header = *change.Header
+	}
+	for _, key := range change.Removes {
+		t.Items.Remove(key.MapKey())
+	}
+	for _, item := range change.Upserts {
+		t.Items.Insert(tailKey(item).MapKey(), item)
+	}
+	if change.Window != nil {
+		t.Window = *change.Window
+	}
+}
+
+// sessionTailEqual is SessionTail's PartialEq.
+func sessionTailEqual(a, b *SessionTail) bool {
+	return quotaOptionalEqual(a.LatestUserPosition, b.LatestUserPosition) &&
+		materializedEqual(&a.Header, &b.Header) &&
+		projectionWindowEqual(&a.Window, &b.Window) &&
+		a.Items.Equal(b.Items, transcriptItemPointerEqual)
 }
 
 func tailKey(item *core.TranscriptItem) TailKey {
@@ -720,11 +1352,15 @@ func tailKey(item *core.TranscriptItem) TailKey {
 // transcriptHeader is the parts of a projection a tail keeps besides its
 // items.
 func transcriptHeader(materialized *core.MaterializedSession) core.MaterializedSession {
-	panic("unported: mj-client/src/runtime_feed.rs transcript_header")
+	header := *materialized
+	header.Transcript = nil
+	return header
 }
 
 func sameHeader(header, materialized *core.MaterializedSession) bool {
-	panic("unported: mj-client/src/runtime_feed.rs same_header")
+	left, right := *header, *materialized
+	left.Transcript, right.Transcript = nil, nil
+	return materializedEqual(&left, &right)
 }
 
 // SessionTailReplyKind is which answer a tail request got.
@@ -752,7 +1388,12 @@ type SessionTailReply struct {
 
 // SessionTailReplyOf is Rust's SessionTailReply::of.
 func SessionTailReplyOf(tail *SessionTail) SessionTailReply {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTailReply::of")
+	header := tail.Header
+	items := slices.Collect(tail.itemValues())
+	if items == nil {
+		items = []*core.TranscriptItem{}
+	}
+	return SessionTailReply{Kind: SessionTailReplyTail, Header: &header, Window: tail.Window, Items: items}
 }
 
 func (r SessionTailReply) MarshalJSON() ([]byte, error) {
@@ -829,7 +1470,13 @@ func feedTag(data []byte, tag string) (string, error) {
 // SessionTailFromParts is a tail received whole, keeping each item's
 // pointer.
 func SessionTailFromParts(header core.MaterializedSession, window core.ProjectionWindow, items []*core.TranscriptItem) SessionTail {
-	panic("unported: mj-client/src/runtime_feed.rs SessionTail::from_parts")
+	var tail SessionTail
+	for _, item := range items {
+		tail.Items.Insert(tailKey(item).MapKey(), item)
+	}
+	tail.Header = header
+	tail.Window = window
+	return tail
 }
 
 // TranscriptItems is the item changes to one session's tail between two feed
@@ -1069,15 +1716,17 @@ func (c *KeyedTranscriptChange) UnmarshalJSON(data []byte) error {
 
 // RuntimeDelta is what changed between two feed versions.
 type RuntimeDelta struct {
-	Revision     *uint64                             `json:"revision"`
-	Records      KeyChanges[core.SessionRecord]      `json:"records"`
-	Subagents    KeyChanges[core.SubagentMetadata]   `json:"subagents"`
-	Sessions     KeyChanges[RuntimeSessionView]      `json:"sessions"`
-	Moves        KeyChanges[core.MoveOperation]      `json:"moves"`
-	NativeAgents KeyChanges[core.NativeAgentSummary] `json:"native_agents"`
-	SessionCPU   KeyChanges[SessionCpuView]          `json:"session_cpu"`
-	Metadata     *RuntimeMetadata                    `json:"metadata"`
-	Transcripts  []KeyedTranscriptChange             `json:"transcripts,omitempty"`
+	Revision          *uint64                             `json:"revision"`
+	Records           KeyChanges[core.SessionRecord]      `json:"records"`
+	EnvironmentOwners KeyChanges[string]                  `json:"environment_owners,omitempty"`
+	Subagents         KeyChanges[core.SubagentMetadata]   `json:"subagents"`
+	Sessions          KeyChanges[RuntimeSessionView]      `json:"sessions"`
+	Verdicts          KeyChanges[SessionVerdict]          `json:"verdicts"`
+	Moves             KeyChanges[core.MoveOperation]      `json:"moves"`
+	NativeAgents      KeyChanges[core.NativeAgentSummary] `json:"native_agents"`
+	SessionCPU        KeyChanges[SessionCpuView]          `json:"session_cpu"`
+	Metadata          *RuntimeMetadata                    `json:"metadata"`
+	Transcripts       []KeyedTranscriptChange             `json:"transcripts,omitempty"`
 }
 
 func (d RuntimeDelta) MarshalJSON() ([]byte, error) {
@@ -1085,6 +1734,9 @@ func (d RuntimeDelta) MarshalJSON() ([]byte, error) {
 	value := plain(d)
 	if value.Records == nil {
 		value.Records = KeyChanges[core.SessionRecord]{}
+	}
+	if value.Verdicts == nil {
+		value.Verdicts = KeyChanges[SessionVerdict]{}
 	}
 	if value.Subagents == nil {
 		value.Subagents = KeyChanges[core.SubagentMetadata]{}
@@ -1209,23 +1861,91 @@ func (f *RuntimeFrame) UnmarshalJSON(data []byte) error {
 
 // RuntimeDeltaBetween is Rust's RuntimeDelta::between.
 func RuntimeDeltaBetween(before, after *RuntimeProjection) RuntimeDelta {
-	panic("unported: mj-client/src/runtime_feed.rs RuntimeDelta::between")
+	delta := RuntimeDelta{
+		Records:           changes(before.Records, after.Records, feedJSONEqual[core.SessionRecord]),
+		EnvironmentOwners: changes(before.EnvironmentOwners, after.EnvironmentOwners, feedComparableEqual[string]),
+		Subagents:         changes(before.Subagents, after.Subagents, feedJSONEqual[core.SubagentMetadata]),
+		Sessions:          changes(before.Sessions, after.Sessions, runtimeSessionViewEqual),
+		Verdicts:          changes(before.Verdicts, after.Verdicts, sessionVerdictEqual),
+		Moves:             changes(before.Moves, after.Moves, feedJSONEqual[core.MoveOperation]),
+		NativeAgents:      changes(before.NativeAgents, after.NativeAgents, feedJSONEqual[core.NativeAgentSummary]),
+		SessionCPU:        changes(before.SessionCPU, after.SessionCPU, feedJSONEqual[SessionCpuView]),
+	}
+	if before.Revision != after.Revision {
+		revision := after.Revision
+		delta.Revision = &revision
+	}
+	if !before.Metadata.Equal(&after.Metadata) {
+		metadata := after.Metadata
+		delta.Metadata = &metadata
+	}
+	for id, tail := range before.Transcripts.Changes(after.Transcripts, sessionTailEqual) {
+		var change TranscriptChange
+		held := before.Transcripts.GetShared(id)
+		switch {
+		case tail != nil && held != nil:
+			change = tail.ChangeFrom(held)
+		case tail != nil:
+			// A tail the receiver cannot hold yet is fetched, not sent whole
+			// inside a delta.
+			change = TranscriptChange{Kind: TranscriptChangeRefetch}
+		default:
+			change = TranscriptChange{Kind: TranscriptChangeRemoved}
+		}
+		delta.Transcripts = append(delta.Transcripts, KeyedTranscriptChange{ID: id, Change: change})
+	}
+	return delta
 }
 
 func (d *RuntimeDelta) IsEmpty() bool {
-	return d.Revision == nil && len(d.Records) == 0 && len(d.Subagents) == 0 &&
-		len(d.Sessions) == 0 && len(d.Moves) == 0 && len(d.NativeAgents) == 0 &&
-		len(d.SessionCPU) == 0 && d.Metadata == nil && len(d.Transcripts) == 0
+	return d.Revision == nil && len(d.Records) == 0 && len(d.EnvironmentOwners) == 0 &&
+		len(d.Subagents) == 0 && len(d.Sessions) == 0 && len(d.Verdicts) == 0 &&
+		len(d.Moves) == 0 && len(d.NativeAgents) == 0 && len(d.SessionCPU) == 0 &&
+		d.Metadata == nil && len(d.Transcripts) == 0
 }
 
 func (d *RuntimeDelta) apply(projection *RuntimeProjection) {
-	panic("unported: mj-client/src/runtime_feed.rs RuntimeDelta::apply")
+	if d.Revision != nil {
+		projection.Revision = *d.Revision
+	}
+	applyKeys(&projection.Records, d.Records)
+	applyKeys(&projection.EnvironmentOwners, d.EnvironmentOwners)
+	applyKeys(&projection.Subagents, d.Subagents)
+	applyKeys(&projection.Sessions, d.Sessions)
+	applyKeys(&projection.Verdicts, d.Verdicts)
+	applyKeys(&projection.Moves, d.Moves)
+	applyKeys(&projection.NativeAgents, d.NativeAgents)
+	applyKeys(&projection.SessionCPU, d.SessionCPU)
+	if d.Metadata != nil {
+		projection.Metadata = *d.Metadata
+	}
+	// Only the tails this receiver holds are followed; the others are
+	// fetched when needed, at a cursor of their own.
+	for _, entry := range d.Transcripts {
+		switch entry.Change.Kind {
+		case TranscriptChangeItems:
+			if tail := projection.Transcripts.GetMut(entry.ID); tail != nil {
+				tail.apply(entry.Change.Items)
+			}
+		default:
+			projection.Transcripts.Remove(entry.ID)
+		}
+	}
 }
 
 // changes is what turns before into after, record by record; eq is T's
 // PartialEq.
 func changes[T any](before, after core.SnapshotMap[string, T], eq func(a, b *T) bool) KeyChanges[T] {
-	panic("unported: mj-client/src/runtime_feed.rs changes")
+	var result KeyChanges[T]
+	for id, value := range before.Changes(after, eq) {
+		change := KeyChange[T]{ID: id}
+		if value != nil {
+			copied := *value
+			change.Value = &copied
+		}
+		result = append(result, change)
+	}
+	return result
 }
 
 func applyKeys[T any](m *core.SnapshotMap[string, T], changes KeyChanges[T]) {
@@ -1247,7 +1967,44 @@ type RuntimeReplica struct {
 // Apply validates the entire cursor before applying any part of a
 // publication.
 func (r *RuntimeReplica) Apply(frame RuntimeFrame) (bool, error) {
-	panic("unported: mj-client/src/runtime_feed.rs RuntimeReplica::apply")
+	retainAlerts := func(after, through uint64) {
+		r.Projection.Metadata.AlertEvents = slices.DeleteFunc(r.Projection.Metadata.AlertEvents, func(event AlertEvent) bool {
+			return !(event.Sequence > after && event.Sequence <= through)
+		})
+	}
+	switch frame.Kind {
+	case RuntimeFrameSnapshot:
+		acknowledged := r.Projection.Metadata.AlertHighSequence
+		if r.Cursor != nil {
+			acknowledged = r.Cursor.AlertSequence
+		}
+		r.Projection = *frame.Projection
+		retainAlerts(acknowledged, frame.Cursor.AlertSequence)
+		cursor := frame.Cursor
+		r.Cursor = &cursor
+		return true, nil
+	case RuntimeFrameDelta:
+		from, cursor := frame.From, frame.Cursor
+		if r.Cursor != nil && r.Cursor.Equal(cursor) {
+			r.Projection.Metadata.AlertEvents = nil
+			return false, nil
+		}
+		if r.Cursor == nil || !r.Cursor.Equal(from) {
+			return false, errors.New("runtime cursor gap")
+		}
+		if !(from.Incarnation == cursor.Incarnation && (from.Sequence < cursor.Sequence ||
+			(from.Sequence == cursor.Sequence && from.AlertSequence < cursor.AlertSequence))) {
+			return false, errors.New("invalid runtime cursor transition")
+		}
+		r.Projection.Metadata.AlertEvents = nil
+		frame.Changes.apply(&r.Projection)
+		retainAlerts(from.AlertSequence, cursor.AlertSequence)
+		r.Cursor = &cursor
+		return true, nil
+	}
+	r.Projection.Metadata.AlertEvents = nil
+	r.Cursor = nil
+	return false, nil
 }
 
 // serializeClientProjection writes projection without the internal
@@ -1269,7 +2026,8 @@ func serializeClientProjection(projection any) ([]byte, error) {
 	outcome, ok := object.Get("last_turn_outcome")
 	if outcomeObject, isObject := outcome.(jsonvalue.Object); ok && isObject {
 		outcomeObject = outcomeObject.Clone()
-		outcomeObject.Delete("answered_through")
+		// serde_json's Map::remove with preserve_order is a swap remove.
+		outcomeObject.SwapDelete("answered_through")
 		object.Set("last_turn_outcome", outcomeObject)
 	}
 	return jsonvalue.Marshal(object)

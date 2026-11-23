@@ -77,6 +77,13 @@ pub fn is_restart_continuation(command_id: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with("restart-"))
 }
 
+/// Whether `command_id` is a mailbox wake, or the restart continuation that
+/// carries one. A wake restored from a checkpoint runs as a plain prompt, so
+/// its ID is what still says what it is.
+pub fn carries_mailbox_wake(command_id: &str) -> bool {
+    GeneratedPrompt::of(carried_command(command_id)) == Some(GeneratedPrompt::MailboxWake)
+}
+
 pub const USER_BYTES: usize = 32 * 1024;
 pub const ASSISTANT_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;

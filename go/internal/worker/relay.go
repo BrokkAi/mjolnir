@@ -20,37 +20,54 @@
 package worker
 
 import (
+	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/BrokkAi/acp-go/jsonvalue"
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
+// InPlaceHarnessRestartDecision is whether an in-place harness restart
+// still has to run for its operation.
+type InPlaceHarnessRestartDecision int
+
+const (
+	InPlaceHarnessRestartProceed InPlaceHarnessRestartDecision = iota
+	InPlaceHarnessRestartAlreadyRestarted
+)
+
 // HarnessTurnPolicy is whether this relay models turns the harness starts on
 // its own.
 //
-// Only Claude Code's adapter marks the end of such a turn today (an origin
-// key on the settling usage_update), so every other harness keeps the
-// behaviour it had before harness turns existed. See
-// .agents/docs/claude-autonomous-turns.md.
+// The harness-specific policy chooses which signals open and settle a turn.
+// See .agents/docs/claude-autonomous-turns.md.
 type HarnessTurnPolicy int
 
 const (
 	HarnessTurnPolicyDisabled HarnessTurnPolicy = iota
 	HarnessTurnPolicyClaudeAdapter
 	HarnessTurnPolicyCodexAdapter
+	HarnessTurnPolicyAntigravity
 )
 
 // SteeringDeliveryMode is how this harness receives an accepted steer.
@@ -62,19 +79,20 @@ const (
 	// carry waking events through its ordinary durable prompt queue and
 	// safe-boundary steering instead.
 	SteeringDeliveryModeAcpWithMailbox
-	SteeringDeliveryModeClaudePostToolBatch
-	SteeringDeliveryModeClaudeTurnEnd
+	SteeringDeliveryModeHookPostToolBatch
+	SteeringDeliveryModeHookTurnEnd
 )
 
 // steeringDeliveryModeForHarness is SteeringDeliveryMode::for_harness.
-func steeringDeliveryModeForHarness(harness core.HarnessKind, claudeHook bool) SteeringDeliveryMode {
+func steeringDeliveryModeForHarness(harness core.HarnessKind, boundaryHook bool) SteeringDeliveryMode {
+	hookHarness := harness == core.HarnessKindClaude || harness == core.HarnessKindAntigravity
 	switch {
 	case harness == core.HarnessKindDsh:
 		return SteeringDeliveryModeAcpWithMailbox
-	case harness == core.HarnessKindClaude && claudeHook:
-		return SteeringDeliveryModeClaudePostToolBatch
-	case harness == core.HarnessKindClaude:
-		return SteeringDeliveryModeClaudeTurnEnd
+	case hookHarness && boundaryHook:
+		return SteeringDeliveryModeHookPostToolBatch
+	case hookHarness:
+		return SteeringDeliveryModeHookTurnEnd
 	default:
 		return SteeringDeliveryModeAcp
 	}
@@ -103,6 +121,7 @@ const (
 	// BackgroundWorkPolicyKimiTasks: Kimi's native detached-agent set,
 	// together with hosted terminals.
 	BackgroundWorkPolicyKimiTasks
+	BackgroundWorkPolicyAntigravityTasks
 )
 
 // LiveBaselineResult is what a live baseline reservation receives: the cut,
@@ -166,6 +185,10 @@ type RelayCell struct {
 	mu       sync.Mutex
 	relay    *DurableRelay
 	released *relayReleaseWatch
+	// guardian holds the worker's pending guardian reviews for the daemon,
+	// across relay connections. Rust keeps it on Unix only, where the live
+	// guardian relay is served.
+	guardian *GuardianEndpoint
 }
 
 // relayReleaseWatch is the Go form of the tokio watch channel carrying the
@@ -185,7 +208,7 @@ func (w *relayReleaseWatch) bump() {
 }
 
 func NewRelayCell(relay *DurableRelay) *RelayCell {
-	return &RelayCell{relay: relay, released: &relayReleaseWatch{changed: make(chan struct{})}}
+	return &RelayCell{relay: relay, released: &relayReleaseWatch{changed: make(chan struct{})}, guardian: &GuardianEndpoint{}}
 }
 
 // Lock takes the relay for a possible change. Unlock the guard to release
@@ -334,6 +357,9 @@ type DurableRelay struct {
 	// from the journal: every bridge start records its own AgentInitialized.
 	sessionSetup   bool
 	checkpointOnly bool
+	// inPlaceHarnessRestartInFlight is the active in-place harness restart
+	// operation ID, serialized with the hold.
+	inPlaceHarnessRestartInFlight *string
 	// reviewerAdmissions: live reviewer leases share this owner's atomic
 	// checkpoint decision.
 	reviewerAdmissions    map[uint64]string
@@ -382,10 +408,15 @@ type DurableRelay struct {
 	// journalCleanupPending retries physical prefix cleanup once after
 	// reopen, or after a failed GC.
 	journalCleanupPending bool
-	pendingLiveBaselines  []PendingLiveBaseline
-	pendingNativeResumes  []PendingNativeResume
-	acpActivity           core.AcpActivityClock
-	stepClock             *core.StepClock
+	// journalAppendFailure: a failed rollback left the on-disk append
+	// boundary unknown.
+	journalAppendFailure *string
+	// journalAppendFault is a test-only injected append failure.
+	journalAppendFault   *journalAppendFault
+	pendingLiveBaselines []PendingLiveBaseline
+	pendingNativeResumes []PendingNativeResume
+	acpActivity          core.AcpActivityClock
+	stepClock            *core.StepClock
 	// harnessTurns is whether harness announcements or output with no prompt
 	// open a turn. The runtime sets this from the configured harness right
 	// after open.
@@ -403,10 +434,12 @@ type DurableRelay struct {
 	foregroundTools *core.ToolsInFlight
 	turnContext     *transcript.TurnContext
 	verdictHarness  *core.HarnessKind
+	jevDisabled     bool
 	// authenticationLoginPath is read only by the Unix worker control runtime.
 	authenticationLoginPath *string
 	loginIdentity           *ClaudeLoginIdentity
 	repliedVerdict          RepliedVerdictState
+	recoversChildQuota      bool
 	// airTasks are adapter-owned tasks, keyed by their owning session and
 	// task identity (airTaskKey).
 	airTasks map[string]*AirTaskEntry
@@ -421,6 +454,7 @@ type DurableRelay struct {
 	// adapter answers a stop with a plain agent chunk and no model cycle, so
 	// no result would settle a harness turn opened for that chunk.
 	claudePendingStops map[string]map[string]struct{}
+	antigravityWork    antigravityWorkState
 	// kimiBackgroundTasks are Kimi detached agents and processes confirmed by
 	// its native journal.
 	kimiBackgroundTasks map[string]KimiTaskEntry
@@ -430,7 +464,7 @@ type DurableRelay struct {
 	kimiProvisionalTasks map[string]KimiProvisionalTask
 	kimiObservedTaskIDs  map[string]struct{}
 	kimiObservedToolIDs  map[string]struct{}
-	// backgroundWorkKnown is whether Kimi's provider-owned background work is
+	// backgroundWorkKnown is whether provider-owned background work is
 	// synchronized. Other policies leave this nil.
 	backgroundWorkKnown *bool
 	// handbackVerdictClient is the classifier the sub-agent handback check
@@ -498,7 +532,39 @@ func (r *DurableRelay) liveBaselinePending() bool {
 }
 
 func (r *DurableRelay) serviceLiveBaselines() {
-	panic("unported: mj-worker/src/relay.rs service_live_baselines")
+	kept := r.pendingLiveBaselines[:0]
+	for _, request := range r.pendingLiveBaselines {
+		if request.reply != nil && !request.reply.closed.Load() {
+			kept = append(kept, request)
+		}
+	}
+	clear(r.pendingLiveBaselines[len(kept):])
+	r.pendingLiveBaselines = kept
+	waiting := false
+	for _, request := range r.pendingLiveBaselines {
+		if request.reply != nil {
+			waiting = true
+			break
+		}
+	}
+	if !waiting || !r.quiescentForAdoption() {
+		return
+	}
+	baseline, err := r.LiveSessionBaseline()
+	cut := LiveBaselineResult{Baseline: baseline, Err: err}
+	for i := range r.pendingLiveBaselines {
+		reply := r.pendingLiveBaselines[i].reply
+		if reply == nil {
+			continue
+		}
+		r.pendingLiveBaselines[i].reply = nil
+		// The reply channel holds the one result; a receiver that gave up
+		// leaves it unread, as a send to a dropped oneshot is ignored.
+		select {
+		case reply.result <- cut:
+		default:
+		}
+	}
 }
 
 func (r *DurableRelay) nativeGoalResumeSent(resumeID uint64, goal *core.GoalSnapshot) {
@@ -525,11 +591,176 @@ func (r *DurableRelay) quiescentForAdoption() bool {
 }
 
 func (r *DurableRelay) adoptionBlockers() []string {
-	panic("unported: mj-worker/src/relay.rs adoption_blockers")
+	var blockers []string
+	if r.turnInProgress() || r.hasHeldClaudeTurn() {
+		if len(r.snapshot.AssessmentQuestions) == 0 {
+			blockers = append(blockers, "the worker's current turn to finish")
+		} else {
+			blockers = append(blockers, "the worker's current turn, blocked on a pending question or approval, to finish")
+		}
+	}
+	if r.turnCancellationPending() {
+		blockers = append(blockers, "the pending turn cancellation to finish")
+	}
+	if r.snapshot.ClearContextInProgress() {
+		blockers = append(blockers, "the worker's context reset (/clear) to finish")
+	}
+	goalResume := len(r.pendingNativeResumes) > 0
+	for _, dispatch := range r.snapshot.Dispatches {
+		control, ok := dispatch.Command.(core.RelayCommandGoalControl)
+		if ok && control.Action == core.GoalControlActionResume &&
+			(dispatch.State == core.RelayDispatchStatePending || dispatch.State == core.RelayDispatchStateInFlight) {
+			goalResume = true
+			break
+		}
+	}
+	if goalResume {
+		blockers = append(blockers, "the accepted native goal resume to finish")
+	}
+	if r.configurationDispatchInProgress() {
+		blockers = append(blockers, "the in-flight configuration change to finish")
+	}
+	for _, tool := range r.foregroundTools.Snapshot() {
+		name := tool.ToolCallID
+		if tool.Title != nil {
+			name = *tool.Title
+		}
+		blockers = append(blockers, fmt.Sprintf("foreground tool %s to finish", name))
+	}
+	for _, id := range slices.Sorted(maps.Keys(r.snapshot.ActiveUserShells)) {
+		shell := r.snapshot.ActiveUserShells[id]
+		if shell.StartedAtMs != nil {
+			blockers = append(blockers, fmt.Sprintf("running shell %s to finish", core.RustDebugString(shell.Command)))
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(r.activeAgentTerminals)) {
+		blockers = append(blockers, fmt.Sprintf("live harness terminal %s to exit", core.RustDebugString(r.activeAgentTerminals[id].Command)))
+	}
+	slices.Sort(blockers)
+	return blockers
 }
 
 func (r *DurableRelay) LiveSessionBaseline() (core.LiveSessionBaseline, error) {
-	panic("unported: mj-worker/src/relay.rs live_session_baseline")
+	state := r.OperationalState()
+	if !r.quiescentForAdoption() {
+		return core.LiveSessionBaseline{}, errors.New("live recovery cut requires a quiescent worker")
+	}
+	state.Execution = core.RelayExecutionStateIdle
+	state.ActivityTurnStartedAtMs = nil
+	queue := make([]core.LiveQueuedCommand, 0, len(r.snapshot.QueuedPrompts))
+	for _, queued := range r.snapshot.QueuedPrompts {
+		dispatch, ok := r.snapshot.Dispatches[queued.CommandID]
+		if !ok {
+			return core.LiveSessionBaseline{}, fmt.Errorf("queued command %s has no dispatch", queued.CommandID)
+		}
+		var accepted *uint64
+		if receipt, ok := r.snapshot.HandledCommands[queued.CommandID]; ok {
+			ordinal := receipt.AcceptedOrdinal
+			accepted = &ordinal
+		}
+		queue = append(queue, core.LiveQueuedCommand{
+			CommandID:       queued.CommandID,
+			Command:         dispatch.Command,
+			CreatedAtMs:     queued.CreatedAtMs,
+			AcceptedOrdinal: accepted,
+		})
+	}
+	delivered := []core.LiveQueuedCommand{}
+	for _, initial := range r.initialCommands {
+		if _, prompt := initial.Command.(core.RelayCommandPrompt); !prompt ||
+			!relaySortedSetContains(r.snapshot.InitialCommandIDs, initial.CommandID) ||
+			slices.ContainsFunc(r.snapshot.QueuedPrompts, func(queued core.StoredQueuedRelayCommand) bool {
+				return queued.CommandID == initial.CommandID
+			}) {
+			continue
+		}
+		receipt, received := r.snapshot.HandledCommands[initial.CommandID]
+		var wasDelivered bool
+		switch {
+		case !received:
+			// A legacy pin prevents reseeding, but acceptance alone cannot
+			// distinguish delivery from removal before dispatch.
+			wasDelivered = false
+		case receipt.Failure != nil && *receipt.Failure == "queued command was removed":
+			wasDelivered = false
+		default:
+			_, promptOutcome := receipt.Outcome.(core.RelayCommandOutcomePrompt)
+			// Receipts do not distinguish failure before/after start.
+			// Preserve the delivered interpretation for every failure
+			// except queue removal.
+			wasDelivered = promptOutcome || receipt.Failure != nil
+		}
+		if !wasDelivered {
+			continue
+		}
+		var createdAtMs int64
+		if active := state.ActivePrompt; active != nil && active.CommandID == initial.CommandID {
+			createdAtMs = active.CreatedAtMs
+		}
+		var accepted *uint64
+		if received {
+			ordinal := receipt.AcceptedOrdinal
+			accepted = &ordinal
+		}
+		delivered = append(delivered, core.LiveQueuedCommand{
+			CommandID: initial.CommandID,
+			// Startup owns the original brief even after terminal receipt
+			// compaction. Receipts decide delivery, never display content.
+			Command:         initial.Command,
+			CreatedAtMs:     createdAtMs,
+			AcceptedOrdinal: accepted,
+		})
+	}
+	liveQuestions := r.operatorAway.liveQuestions()
+	questions := []core.ElicitationRequest{}
+	unavailable := 0
+	for _, id := range slices.Sorted(maps.Keys(r.snapshot.PendingElicitations)) {
+		body := r.snapshot.PendingElicitations[id]
+		live, isLive := liveQuestions[id]
+		if body != nil && isLive && reflect.DeepEqual(live, *body) {
+			questions = append(questions, *body)
+		}
+		if isLive && body == nil {
+			unavailable++
+		}
+	}
+	var nativeAgentReplay *[]core.NativeAgent
+	if r.snapshot.NativeAgentReplay != nil {
+		agents := make([]core.NativeAgent, 0, len(r.snapshot.NativeAgentReplay))
+		for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgentReplay)) {
+			agents = append(agents, r.snapshot.NativeAgentReplay[id])
+		}
+		nativeAgentReplay = &agents
+	}
+	var evidence *core.NativeSessionUseEvidence
+	if r.snapshot.NativeUseEvidence != nil {
+		copied := *r.snapshot.NativeUseEvidence
+		evidence = &copied
+	}
+	return core.LiveSessionBaseline{
+		DeliveredInitialPrompts: delivered,
+		State:                   state,
+		Queue:                   queue,
+		Questions:               questions,
+		UnavailableQuestions:    unavailable,
+		NativeAgentReplay:       nativeAgentReplay,
+		NativeUseEvidence:       evidence,
+	}, nil
+}
+
+// relaySortedSetContains is BTreeSet::contains on a sorted, unique slice.
+func relaySortedSetContains(values []string, value string) bool {
+	_, found := slices.BinarySearch(values, value)
+	return found
+}
+
+// relaySortedSetInsert is BTreeSet::insert on a sorted, unique slice.
+func relaySortedSetInsert(values []string, value string) []string {
+	index, found := slices.BinarySearch(values, value)
+	if found {
+		return values
+	}
+	return slices.Insert(values, index, value)
 }
 
 // DurableRelayOpen is DurableRelay::open. The Unix worker is the only
@@ -560,11 +791,529 @@ func DurableRelayOpenForCheckpointWithInitialCommands(root, sessionID, relayVers
 }
 
 func durableRelayDiscardQueuedPromptsBeforeStart(root, sessionID, commandID string) error {
-	panic("unported: mj-worker/src/relay.rs discard_queued_prompts_before_start")
+	relay, err := durableRelayOpenWithHarness(root, sessionID, core.PackageVersion, true, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, refusal, err := relay.submitCommand(commandID, core.RelayCommandClearQueuedPrompts{})
+	if err != nil {
+		return err
+	}
+	if refusal != nil {
+		return fmt.Errorf("discard queued prompts before startup: %s", refusal.Message)
+	}
+	return nil
+}
+
+// readLegacyRelaySnapshot reads relay-state.json. Legacy snapshots stored
+// pretty JSON and duplicated terminal bodies, so the read is bounded
+// independently of the compact write budget.
+func readLegacyRelaySnapshot(statePath string) (core.RelaySnapshot, error) {
+	file, err := os.Open(statePath)
+	if err != nil {
+		return core.RelaySnapshot{}, err
+	}
+	defer file.Close()
+	bytes, err := io.ReadAll(io.LimitReader(file, int64(core.RelaySnapshotByteBudget*4+1)))
+	if err != nil {
+		return core.RelaySnapshot{}, fmt.Errorf("read %s: %w", statePath, err)
+	}
+	if err := core.EnsureByteBudget(len(bytes), core.RelaySnapshotByteBudget*4, "legacy relay snapshot"); err != nil {
+		return core.RelaySnapshot{}, err
+	}
+	var snapshot core.RelaySnapshot
+	if err := json.Unmarshal(bytes, &snapshot); err != nil {
+		return core.RelaySnapshot{}, fmt.Errorf("parse %s: %w", statePath, err)
+	}
+	return snapshot, nil
+}
+
+// restoredRelaySnapshot is the first snapshot of a relay restored from a
+// checkpoint, or a fresh one when nothing was restored.
+func restoredRelaySnapshot(root, sessionID string) (core.RelaySnapshot, error) {
+	snapshot := core.NewRelaySnapshot(sessionID)
+	restored, err := readRestoredRelaySeed(root)
+	if err != nil || restored == nil {
+		return snapshot, err
+	}
+	snapshot.AssessmentContext = nil
+	if len(restored.AssessmentState) > 0 && string(restored.AssessmentState) != "null" {
+		state, err := core.CheckpointDecode(restored.AssessmentState)
+		if err != nil {
+			return snapshot, err
+		}
+		snapshot.AssessmentContext = state.Context
+		snapshot.Assessment = state.Assessment
+		snapshot.Continuation = state.Continuation
+		snapshot.CapacityRetry = state.CapacityRetry
+		snapshot.TurnCompletion = state.TurnCompletion
+		if open := state.OpenRequest; open != nil {
+			snapshot.Request = open.Request
+			snapshot.PersonInputThrough = open.PersonInputThrough
+		} else {
+			seedLegacyOpenRequest(&snapshot)
+		}
+	}
+	snapshot.LatestOrdinal = restored.EventFrontier
+	if restored.NotificationStack != nil {
+		snapshot.NotificationStack = *restored.NotificationStack
+		seedMissingNotificationTime(&snapshot)
+	} else {
+		seedLegacyNotificationStack(&snapshot)
+	}
+	snapshot.LatestDigest = restored.EventFrontierDigest
+	snapshot.AcknowledgedThrough = restored.EventFrontier
+	snapshot.AcknowledgedDigest = restored.EventFrontierDigest
+	snapshot.RecoveryFloorOrdinal = restored.EventFrontier
+	snapshot.RecoveryFloorDigest = restored.EventFrontierDigest
+	// The accepted model and effort the worker pins on its first bridge
+	// start, exactly as it does after a restart.
+	for key, value := range restored.AcceptedConfig {
+		snapshot.Config[key] = value
+	}
+	snapshot.RestoredNativeSessionUnused = restored.NativeSessionUnused
+	if evidence := restored.NativeUseEvidence; evidence != nil {
+		snapshot.NativeSessionUsed = evidence.Usage == core.NativeSessionUseUsed
+		copied := *evidence
+		snapshot.NativeUseEvidence = &copied
+	} else if restored.NativeSessionUnused {
+		snapshot.RecordNativeUse(core.NativeSessionUseUnused)
+	} else {
+		snapshot.RecordNativeUse(core.NativeSessionUseUnknown)
+	}
+	for _, queued := range restored.QueuedPrompts {
+		if !core.ValidCommandID(queued.CommandID) {
+			return snapshot, errors.New("invalid restored queued command ID")
+		}
+		if len(queued.Content) == 0 {
+			return snapshot, fmt.Errorf("restored queued command %s is empty", queued.CommandID)
+		}
+		if _, duplicate := snapshot.HandledCommands[queued.CommandID]; duplicate {
+			return snapshot, fmt.Errorf("restored canonical session contains duplicate queued command %s", queued.CommandID)
+		}
+		var payload core.StoredQueuedRelayPayload
+		var command core.RelayCommand
+		switch queued.Kind.Kind {
+		case core.CanonicalQueuedCommandKindSetConfig:
+			payload = core.StoredQueuedRelayPayloadSetConfig{Key: queued.Kind.Key, Value: queued.Kind.Value}
+			command = core.RelayCommandSetConfig{Key: queued.Kind.Key, Value: queued.Kind.Value}
+		default:
+			prompt := make([]acpschema.ContentBlock, 0, len(queued.Content))
+			for _, content := range queued.Content {
+				var block acpschema.ContentBlock
+				if err := json.Unmarshal(content, &block); err != nil {
+					return snapshot, fmt.Errorf("decode ACP content for restored queued command %s: %w", queued.CommandID, err)
+				}
+				prompt = append(prompt, block)
+			}
+			payload = core.StoredQueuedRelayPayloadPrompt{Prompt: prompt}
+			command = core.RelayCommandPrompt{Prompt: slices.Clone(prompt)}
+		}
+		snapshot.HandledCommands[queued.CommandID] = core.HandledRelayCommand{
+			Command:         command,
+			AcceptedOrdinal: restored.EventFrontier,
+		}
+		snapshot.Dispatches[queued.CommandID] = core.RelayDispatchRecord{
+			Command: command,
+			State:   core.RelayDispatchStateQueued,
+		}
+		snapshot.QueuedPrompts = append(snapshot.QueuedPrompts, core.StoredQueuedRelayCommand{
+			CommandID:   queued.CommandID,
+			Payload:     payload,
+			CreatedAtMs: queued.QueuedAtMs,
+		})
+	}
+	// The archived worker's mail, as the restore policy selected it. A
+	// claimed context may name a prompt the controller admits later under
+	// the same command ID; dispatch finds it there before that prompt starts.
+	if mailbox := restored.Mailbox; mailbox != nil {
+		snapshot.PendingMailboxEvents = mailbox.PendingEvents
+		snapshot.DeliveredMailboxEventKeys = mailbox.DeliveredEventKeys
+		snapshot.MailboxPromptContexts = mailbox.PromptContexts
+	}
+	return snapshot, nil
+}
+
+// upgradeRelaySnapshot upgrades an older snapshot in place. The stored
+// frontier digests stay valid: each is recomputed with the formula matching
+// the record's format. Newly owned state is seeded before the schema marker
+// advances; the next persist writes the current version.
+func upgradeRelaySnapshot(snapshot *core.RelaySnapshot) {
+	if snapshot.FormatVersion < 23 {
+		seedLegacyOpenRequest(snapshot)
+	}
+	if snapshot.FormatVersion < 24 && snapshot.HarnessTurn != nil {
+		started := snapshot.Continuation.AutonomousTurnStarted
+		snapshot.HarnessTurn.Autonomous = started != nil && *started == snapshot.HarnessTurn.FirstOrdinal
+	}
+	// An older worker recorded a withdrawn continuation only as the quota
+	// flag, so a retry stays blocked for a session already in that state at
+	// upgrade.
+	if snapshot.FormatVersion < 25 && snapshot.Continuation.QuotaSuppressed && snapshot.Continuation.WithdrawnOrdinal == nil {
+		withdrawn := snapshot.LatestOrdinal
+		snapshot.Continuation.WithdrawnOrdinal = &withdrawn
+	}
+	if snapshot.FormatVersion < 27 {
+		seedLegacyNotificationStack(snapshot)
+	}
+	if snapshot.FormatVersion < 28 {
+		// Old Moves had no explicit pins. Keep their acceptance receipts
+		// until the daemon has reconciled its durable operation owner.
+		snapshot.LegacyCommandRetention = true
+	}
+	seedMissingNotificationTime(snapshot)
+	snapshot.FormatVersion = core.RelayStateVersion
+	// Older snapshots can still identify a live turn, even though they did
+	// not retain its start through subsequent background work.
+	switch {
+	case snapshot.ActivePrompt != nil:
+		started := snapshot.ActivePrompt.StartedAtMs
+		snapshot.ActivityTurnStartedAtMs = &started
+	case snapshot.HarnessTurn != nil:
+		started := snapshot.HarnessTurn.StartedAtMs
+		snapshot.ActivityTurnStartedAtMs = &started
+	}
+}
+
+// relayPromptText is the text a prompt command carries, its text blocks
+// joined by newlines; false for a command without a prompt.
+func relayPromptText(command core.RelayCommand) (string, bool) {
+	prompt, ok := core.RelayCommandPromptBlocks(command)
+	if !ok {
+		return "", false
+	}
+	var texts []string
+	for _, block := range prompt {
+		if block.Kind == acpschema.ContentBlockKindText && block.Text != nil {
+			texts = append(texts, block.Text.Text)
+		}
+	}
+	return strings.Join(texts, "\n"), true
 }
 
 func durableRelayOpenWithHarness(root, sessionID, relayVersion string, checkpointOnly bool, harness *core.HarnessKind, initialCommands []core.InitialWorkerCommand) (*DurableRelay, error) {
-	panic("unported: mj-worker/src/relay.rs open_with_harness")
+	if err := validateIdentifier(sessionID, "session ID"); err != nil {
+		return nil, err
+	}
+	if err := core.CreateOwnerOnlyDirectory(filepath.Join(root, core.RelayJournalDir)); err != nil {
+		return nil, fmt.Errorf("create relay state directory %s: %w", root, err)
+	}
+
+	statePath := filepath.Join(root, core.RelayStateFile)
+	_, statErr := os.Stat(statePath)
+	stateExisted := statErr == nil
+	var snapshot core.RelaySnapshot
+	if stateExisted {
+		var err error
+		snapshot, err = readLegacyRelaySnapshot(statePath)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot.FormatVersion > core.RelayStateVersion {
+			return nil, fmt.Errorf("relay state schema %d is newer than supported schema %d", snapshot.FormatVersion, core.RelayStateVersion)
+		}
+		upgradeRelaySnapshot(&snapshot)
+		if snapshot.SessionID != sessionID {
+			return nil, fmt.Errorf("relay state belongs to session %s, not %s", snapshot.SessionID, sessionID)
+		}
+	} else {
+		var err error
+		snapshot, err = restoredRelaySnapshot(root, sessionID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Startup pins live until destroy. Upgrade from the lifetime prompt
+	// watermark, which /clear never resets: startup's final brief is the
+	// first accepted prompt, so that watermark proves the whole prefix.
+	// Pre-watermark states use their legacy native-use proof instead.
+	// Without it, retain only accepted receipt IDs and complete a crashed
+	// selector prefix normally. Missing selectors are idempotent settings.
+	// This also finishes migration first opened without launch arguments.
+	startupOwnerCount := len(snapshot.InitialCommandIDs)
+	for _, initial := range initialCommands {
+		_, handled := snapshot.HandledCommands[initial.CommandID]
+		if snapshot.LatestPromptAcceptedOrdinal != nil || snapshot.NativeSessionUsed || handled {
+			snapshot.InitialCommandIDs = relaySortedSetInsert(snapshot.InitialCommandIDs, initial.CommandID)
+		}
+	}
+	registeredStartupOwners := len(snapshot.InitialCommandIDs) != startupOwnerCount
+	compactedTerminalCommands, err := snapshot.CompactTerminalCommands()
+	if err != nil {
+		return nil, err
+	}
+	assignedStoreID := snapshot.StoreID == nil
+	if assignedStoreID {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, fmt.Errorf("generate worker store identity: %w", err)
+		}
+		// Rust formats u128::from_le_bytes(random) as 32 hex digits.
+		slices.Reverse(random[:])
+		storeID := hex.EncodeToString(random[:])
+		snapshot.StoreID = &storeID
+	}
+	if err := core.ValidateRelaySnapshotFrontiers(&snapshot); err != nil {
+		return nil, err
+	}
+	// Upgrade native-use evidence before discarding the old retained prefix.
+	upgradingNative := snapshot.NativeSessionID != nil && snapshot.NativeUseEvidence == nil
+	upgradingQuestions := false
+	for _, id := range snapshot.AssessmentQuestions {
+		if _, ok := snapshot.PendingElicitations[id]; !ok {
+			upgradingQuestions = true
+			break
+		}
+	}
+	upgradingHistory := upgradingNative || upgradingQuestions
+	retainedThrough := snapshot.RetainedThrough()
+	if upgradingHistory {
+		retainedThrough = min(snapshot.AcknowledgedThrough, snapshot.RecoveryFloorOrdinal)
+	}
+	retainedDigest := snapshot.RetainedDigest()
+	if upgradingHistory && snapshot.RecoveryFloorOrdinal < snapshot.AcknowledgedThrough {
+		retainedDigest = snapshot.RecoveryFloorDigest
+	}
+	snapshotOrdinal := snapshot.LatestOrdinal
+	missingNativeHistory := upgradingNative
+	journalSpans, hotEvents, err := openRelayJournal(
+		filepath.Join(root, core.RelayJournalDir),
+		retainedThrough,
+		retainedDigest,
+		snapshotOrdinal,
+		&snapshot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Shipped retry records were command-bound. Read them forward once; all
+	// new transitions use the turn-owned assessment state machine.
+	migratedAssessment := snapshot.Assessment == nil && snapshot.RetryAssessment != nil
+	if migratedAssessment {
+		old := snapshot.RetryAssessment
+		snapshot.RetryAssessment = nil
+		var completion core.CompletionEvidence
+		if old.Evidence.Completion != nil {
+			completion = *old.Evidence.Completion
+		} else {
+			completion = core.CompletionEvidenceBounded("legacy_completed_turn", nil)
+		}
+		assessment := core.TurnAssessmentPending(old.CommandID, old.Ordinal, core.EpochMillis(), completion)
+		evidence := old.Evidence
+		assessment.Evidence = &evidence
+		snapshot.Assessment = &assessment
+	}
+	if err := core.EnsureSerializedBudget(snapshot.OperationalState(), core.RelayStateByteBudget, "relay operational state"); err != nil {
+		return nil, err
+	}
+
+	steeringDeliveryMode := SteeringDeliveryModeAcp
+	if harness != nil {
+		steeringDeliveryMode = steeringDeliveryModeForHarness(*harness, false)
+	}
+	var startupCommands []core.InitialWorkerCommand
+	if !checkpointOnly {
+		startupCommands = slices.Clone(initialCommands)
+	}
+	workerBuild := core.WorkerBuildID()
+	relay := &DurableRelay{
+		operatorAway:           &OperatorAway{},
+		root:                   root,
+		relayVersion:           relayVersion,
+		workerBuild:            &workerBuild,
+		harnessReadyMs:         new(atomic.Int64),
+		checkpointOnly:         checkpointOnly,
+		reviewerAdmissions:     map[uint64]string{},
+		initialCommands:        startupCommands,
+		steeringDeliveryMode:   steeringDeliveryMode,
+		snapshot:               snapshot,
+		journalSpans:           journalSpans,
+		hotEvents:              hotEvents,
+		journalCleanupPending:  true,
+		acpActivity:            core.NewAcpActivityClock(),
+		stepClock:              &core.StepClock{},
+		foregroundTools:        &core.ToolsInFlight{},
+		turnContext:            &transcript.TurnContext{},
+		jevDisabled:            core.DisabledByEnvironment(),
+		loginIdentity:          &ClaudeLoginIdentity{},
+		airTasks:               map[string]*AirTaskEntry{},
+		claudePendingStops:     map[string]map[string]struct{}{},
+		kimiBackgroundTasks:    map[string]KimiTaskEntry{},
+		kimiProvisionalTasks:   map[string]KimiProvisionalTask{},
+		kimiObservedTaskIDs:    map[string]struct{}{},
+		kimiObservedToolIDs:    map[string]struct{}{},
+		activeAgentTerminals:   map[string]core.ActiveAgentTerminal{},
+		closedAgentTerminals:   map[string]struct{}{},
+		agentTerminalToolCalls: map[string]string{},
+		knownBackgroundWork:    map[string]struct{}{},
+	}
+	recoveredNativeHistory := missingNativeHistory && relay.recoverNativeHistoryEvidence()
+	recoveredQuestions := upgradingQuestions && relay.recoverPendingElicitations()
+	// Startup already reads the active journal into the bounded hot window.
+	// Reuse it: old sealed history must not make worker startup slow or fail.
+	if !checkpointOnly {
+		relay.restoreTurnContext()
+	}
+	relay.turnContext.SetAuthorizationContext(relay.snapshot.AuthorizationContext())
+	// Live-only work cannot be reconstructed on reopen. Nor can replay prove
+	// an idle transition that was not yet saved with the snapshot.
+	replayed := relay.snapshot.LatestOrdinal > snapshotOrdinal
+	idle := relay.activityIsIdle()
+	if relay.snapshot.ActivityWasIdle == nil || *relay.snapshot.ActivityWasIdle != idle {
+		relay.snapshot.IdleSinceMs = nil
+		relay.snapshot.ActivityWasIdle = &idle
+	}
+	if idle {
+		relay.snapshot.ActivityTurnStartedAtMs = nil
+	}
+	_, statErr = os.Stat(statePath)
+	if statErr != nil || replayed || assignedStoreID || recoveredNativeHistory || recoveredQuestions ||
+		migratedAssessment || compactedTerminalCommands || registeredStartupOwners {
+		if err := relay.persistSnapshot(); err != nil {
+			if recoveredQuestions {
+				ids := slices.Sorted(maps.Keys(relay.snapshot.PendingElicitations))
+				quoted := make([]string, len(ids))
+				for i, id := range ids {
+					quoted[i] = core.RustDebugString(id)
+				}
+				return nil, fmt.Errorf("save upgraded worker pending questions [%s]: %w", strings.Join(quoted, ", "), err)
+			}
+			return nil, fmt.Errorf("save recovered worker snapshot: %w", err)
+		}
+	}
+	// Complete an ACK's interrupted file collection before any startup append
+	// can try sealing an acknowledged active file with no live span. Evidence
+	// upgrades above are durable before their old files disappear.
+	if err := relay.garbageCollectRelayHistory(); err != nil {
+		return nil, err
+	}
+	if !checkpointOnly {
+		if err := relay.returnMailboxHookLease(core.MailboxHookLeaseReturnReasonWorkerRestart); err != nil {
+			return nil, err
+		}
+	}
+	if err := relay.adoptUnqueuedQueueCommands(); err != nil {
+		return nil, err
+	}
+	if err := relay.ensureInitialCommandsSucceeded(); err != nil {
+		return nil, err
+	}
+	if err := relay.seedInitialCommands(); err != nil {
+		return nil, err
+	}
+	if err := relay.recoverNonterminalCommands(); err != nil {
+		return nil, err
+	}
+	if err := relay.ensureInitialCommandsSucceeded(); err != nil {
+		return nil, err
+	}
+	if _, _, err := relay.promoteNextQueuedCommand(); err != nil {
+		return nil, err
+	}
+	if !checkpointOnly {
+		// No locator task survives a worker process. Record the final
+		// no-result observation for any request interrupted by the restart.
+		var pending []uint64
+		for _, entry := range relay.snapshot.NotificationStack.Entries {
+			if _, locating := entry.Message.(core.EntryMessageLocating); locating {
+				pending = append(pending, entry.CompletedOrdinal)
+			}
+		}
+		for _, completed := range pending {
+			if _, err := relay.finishQuestionLocator(completed, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return relay, nil
+}
+
+// restoreTurnContext rebuilds the process-local turn context from the hot
+// window of the journal startup already read.
+func (r *DurableRelay) restoreTurnContext() {
+	// The queue observation may be collected before delivery. The durable
+	// dispatch still owns the active prompt and its boundary. A nil value is
+	// a prompt whose body is unavailable, distinct from an empty prompt.
+	prompts := map[string]*string{}
+	for id, dispatch := range r.snapshot.Dispatches {
+		if text, ok := relayPromptText(dispatch.Command); ok {
+			prompts[id] = &text
+		}
+	}
+	ensurePrompt := func(commandID string) {
+		if _, ok := prompts[commandID]; !ok {
+			prompts[commandID] = nil
+		}
+	}
+	// The relay owner persists autonomous identity in the open turn and its
+	// settled record; native starts inside prompts are not assistant-message
+	// boundaries.
+	autonomousStarts := map[uint64]struct{}{}
+	if turn := r.snapshot.AutonomousHarnessTurn(); turn != nil {
+		autonomousStarts[turn.FirstOrdinal] = struct{}{}
+	}
+	// Terminal records retain command kinds after dispatch bodies are gone.
+	// Their starts still establish boundaries; an unavailable body stays
+	// distinct from an empty prompt.
+	for _, event := range r.hotEvents {
+		switch observation := event.Observation.(type) {
+		case core.RelayObservationHarnessTurnSettled:
+			if observation.Autonomous != nil {
+				autonomousStarts[observation.Autonomous.StartOrdinal] = struct{}{}
+			}
+		case core.RelayObservationCommandCompleted:
+			_, promptOutcome := observation.Outcome.(core.RelayCommandOutcomePrompt)
+			if (observation.Command != nil && *observation.Command == core.RelayCommandKindPrompt) || promptOutcome {
+				ensurePrompt(observation.CommandID)
+			}
+		case core.RelayObservationCommandRejected:
+			if observation.Command == core.RelayCommandKindPrompt {
+				ensurePrompt(observation.CommandID)
+			}
+		case core.RelayObservationCommandInterrupted:
+			if observation.Command == core.RelayCommandKindPrompt {
+				ensurePrompt(observation.CommandID)
+			}
+			if observation.ContinuationID != nil {
+				ensurePrompt(*observation.ContinuationID)
+			}
+		}
+	}
+	earlierHistoryOmitted := (len(r.hotEvents) == 0 || r.hotEvents[0].Ordinal > 1) && r.snapshot.LatestOrdinal > 0
+	if earlierHistoryOmitted {
+		r.turnContext.MarkEarlierHistoryOmitted()
+	}
+	for _, event := range r.hotEvents {
+		if _, ok := autonomousStarts[event.Ordinal]; ok {
+			r.turnContext.ObserveAutonomousTurnStart()
+		}
+		if queued, ok := event.Observation.(core.RelayObservationCommandQueued); ok {
+			if text, ok := relayPromptText(queued.Command); ok {
+				prompts[queued.CommandID] = &text
+			}
+		}
+		var prompt *string
+		delivered := false
+		if commandID, ok := transcript.DeliveredPromptCommandID(event.Observation); ok {
+			prompt, delivered = prompts[commandID]
+			delete(prompts, commandID)
+		} else if completed, ok := event.Observation.(core.RelayObservationCommandCompleted); ok {
+			delete(prompts, completed.CommandID)
+		}
+		if delivered {
+			commandID, _ := transcript.DeliveredPromptCommandID(event.Observation)
+			r.turnContext.ObservePromptDelivery(&commandID, prompt)
+		} else {
+			r.turnContext.ObserveRelay(event.Observation, nil)
+		}
+	}
+	// The latest persisted human instructions govern every turn, including
+	// mailbox wakes and restart continuations. Use what remains in that
+	// history, without matching an executing request ID.
+	if history := r.snapshot.AuthorizationContext(); history != nil {
+		r.turnContext.RestoreUserPromptTail(history)
+	}
 }
 
 // seedInitialCommands completes the creation prefix before publishing any
@@ -572,14 +1321,65 @@ func durableRelayOpenWithHarness(root, sessionID, relayVersion string, checkpoin
 // journaled. Once a turn has run, receipt compaction must never cause
 // initialization again.
 func (r *DurableRelay) seedInitialCommands() error {
-	panic("unported: mj-worker/src/relay.rs seed_initial_commands")
+	if len(r.initialCommands) == 0 {
+		return nil
+	}
+	last := r.initialCommands[len(r.initialCommands)-1]
+	if relaySortedSetContains(r.snapshot.InitialCommandIDs, last.CommandID) {
+		return nil
+	}
+	if _, prompt := last.Command.(core.RelayCommandPrompt); !prompt || last.Optional {
+		return errors.New("initial input must end with the original prompt")
+	}
+	commands := slices.Clone(r.initialCommands)
+	for position, initial := range commands {
+		if _, setConfig := initial.Command.(core.RelayCommandSetConfig); position+1 != len(commands) && !setConfig {
+			return errors.New("initial input before the brief must be configuration")
+		}
+		if relaySortedSetContains(r.snapshot.InitialCommandIDs, initial.CommandID) {
+			continue
+		}
+		_, refusal, err := r.submitCommand(initial.CommandID, initial.Command)
+		if err != nil {
+			return err
+		}
+		if refusal != nil {
+			return fmt.Errorf("initialize worker command %s: %s", initial.CommandID, refusal.Message)
+		}
+		r.snapshot.InitialCommandIDs = relaySortedSetInsert(r.snapshot.InitialCommandIDs, initial.CommandID)
+	}
+	// No endpoint is published during seeding. A crash before this write
+	// recovers the accepted IDs from their ordinary journal receipts.
+	return r.persistSnapshot()
 }
 
 // ensureInitialCommandsSucceeded: a failed required creation command cannot
 // release the original brief or any follow-up. Its journaled failure also
 // stops a restarted worker.
 func (r *DurableRelay) ensureInitialCommandsSucceeded() error {
-	panic("unported: mj-worker/src/relay.rs ensure_initial_commands_succeeded")
+	for _, initial := range r.initialCommands {
+		if _, setConfig := initial.Command.(core.RelayCommandSetConfig); initial.Optional || !setConfig {
+			continue
+		}
+		receipt, ok := r.snapshot.HandledCommands[initial.CommandID]
+		if ok && receipt.Failure != nil {
+			return fmt.Errorf("initial worker command %s (%s) failed: %s",
+				initial.CommandID, relayCommandKindDebug(core.RelayCommandKindOf(initial.Command)), *receipt.Failure)
+		}
+	}
+	return nil
+}
+
+// relayCommandKindDebug renders a command kind as Rust's {:?} does: the
+// variant name.
+func relayCommandKindDebug(kind core.RelayCommandKind) string {
+	var name strings.Builder
+	for _, word := range strings.Split(string(kind), "_") {
+		if word != "" {
+			name.WriteString(strings.ToUpper(word[:1]) + word[1:])
+		}
+	}
+	return name.String()
 }
 
 // adoptUnqueuedQueueCommands adopts queueable commands that an earlier relay
@@ -587,7 +1387,65 @@ func (r *DurableRelay) ensureInitialCommandsSucceeded() error {
 // dispatch through the control path, so a command accepted just before an
 // upgrade would otherwise stay accepted forever without ever being promoted.
 func (r *DurableRelay) adoptUnqueuedQueueCommands() error {
-	panic("unported: mj-worker/src/relay.rs adopt_unqueued_queue_commands")
+	type acceptedQueued struct {
+		accepted uint64
+		queued   core.StoredQueuedRelayCommand
+	}
+	var adopted []acceptedQueued
+	for _, commandID := range slices.Sorted(maps.Keys(r.snapshot.Dispatches)) {
+		dispatch := r.snapshot.Dispatches[commandID]
+		if dispatch.State != core.RelayDispatchStateQueued ||
+			!core.RelayCommandIsQueueEntry(dispatch.Command) ||
+			slices.ContainsFunc(r.snapshot.QueuedPrompts, func(queued core.StoredQueuedRelayCommand) bool {
+				return queued.CommandID == commandID
+			}) {
+			continue
+		}
+		handled, ok := r.snapshot.HandledCommands[commandID]
+		if !ok {
+			continue
+		}
+		var payload core.StoredQueuedRelayPayload
+		switch command := dispatch.Command.(type) {
+		case core.RelayCommandPrompt, core.RelayCommandHandbackReminder, core.RelayCommandHoldFollowUp,
+			core.RelayCommandMailboxWake, core.RelayCommandContinueAuthorizedWork, core.RelayCommandResumeAfterQuota:
+			prompt, _ := core.RelayCommandPromptBlocks(command)
+			payload = core.StoredQueuedRelayPayloadPrompt{Prompt: slices.Clone(prompt)}
+		case core.RelayCommandSetConfig:
+			payload = core.StoredQueuedRelayPayloadSetConfig{Key: command.Key, Value: command.Value}
+		default:
+			continue
+		}
+		adopted = append(adopted, acceptedQueued{
+			accepted: handled.AcceptedOrdinal,
+			queued: core.StoredQueuedRelayCommand{
+				CommandID:   commandID,
+				Payload:     payload,
+				CreatedAtMs: core.EpochMillis(),
+			},
+		})
+	}
+	if len(adopted) == 0 {
+		return nil
+	}
+	ordered := make([]acceptedQueued, 0, len(r.snapshot.QueuedPrompts)+len(adopted))
+	for _, queued := range r.snapshot.QueuedPrompts {
+		var accepted uint64
+		if handled, ok := r.snapshot.HandledCommands[queued.CommandID]; ok {
+			accepted = handled.AcceptedOrdinal
+		}
+		ordered = append(ordered, acceptedQueued{accepted: accepted, queued: queued})
+	}
+	ordered = append(ordered, adopted...)
+	slices.SortStableFunc(ordered, func(a, b acceptedQueued) int {
+		return cmp.Compare(a.accepted, b.accepted)
+	})
+	queue := make([]core.StoredQueuedRelayCommand, 0, len(ordered))
+	for _, entry := range ordered {
+		queue = append(queue, entry.queued)
+	}
+	r.snapshot.QueuedPrompts = queue
+	return r.persistSnapshot()
 }
 
 // originatingCommandID is called while the worker owner is held through
@@ -603,7 +1461,62 @@ func (r *DurableRelay) originatingCommandID() (string, bool) {
 }
 
 func (r *DurableRelay) OperationalState() core.RelayOperationalState {
-	panic("unported: mj-worker/src/relay.rs operational_state")
+	state := r.snapshot.OperationalState()
+	if kind, limited := core.CurrentRateLimit(); limited {
+		state.JevRateLimit = &kind
+	}
+	ready := r.isAcpReady()
+	state.ACPReady = &ready
+	state.CheckpointOnly = r.checkpointOnly
+	state.SteeringSupported = r.EffectiveSteeringSupported()
+	if r.mailboxDeliveryMode != nil {
+		mode := *r.mailboxDeliveryMode
+		state.MailboxDelivery = &mode
+	}
+	// Harness-initiated turns have no owned prompt ID. Keep their existing
+	// explicit interrupt surface; queue steering always needs an owned turn.
+	if r.snapshot.ActivePrompt != nil || r.snapshot.HarnessTurn == nil {
+		controls := r.turnControls()
+		state.TurnControls = &controls
+	}
+	if at, ok := r.acpActivity.LastAtMs(); ok {
+		state.LastACPActivityAtMs = &at
+	}
+	state.CurrentStepStartedAtMs = r.stepClock.StartedAtMs()
+	state.ToolsInFlight = r.foregroundTools.Snapshot()
+	state.ForegroundToolStartedAtMs = r.foregroundTools.NewestStartedAtMs()
+	terminals := make([]core.ActiveAgentTerminal, 0, len(r.activeAgentTerminals))
+	for _, id := range slices.Sorted(maps.Keys(r.activeAgentTerminals)) {
+		terminals = append(terminals, r.activeAgentTerminals[id])
+	}
+	state.ActiveAgentTerminals = terminals
+	state.NativeAgentCount = r.nativeAgentCount()
+	state.ClearContext = r.supportsClearContext()
+	state.BackgroundCommands = r.backgroundCommands()
+	if r.backgroundWorkKnown != nil {
+		known := *r.backgroundWorkKnown
+		state.BackgroundWorkKnown = &known
+	}
+	// Answer the activity question once, here, where every fact is in hand.
+	// Consumers read this instead of each deriving their own.
+	facts := r.ActivityFacts()
+	state.ExpectedContinuation = facts.ExpectedContinuation
+	state.InferredIdleSinceMs = facts.InferredIdleSinceMs
+	state.TaskSettledAtMs = facts.TaskSettledAtMs
+	state.BackgroundNeeded = facts.BackgroundNeeded
+	state.Activity = core.Classify(&facts)
+	// The worker alone decides whether it still owes a retry of a failed
+	// turn (the durable intent, apart from its submit gate); the daemon only
+	// reads the answer. authentication_retry_waiting is retired.
+	if r.verdictHarness != nil && *r.verdictHarness == core.HarnessKindClaude {
+		_, state.HeldLoginFingerprint = r.loginIdentity.snapshot()
+	} else {
+		state.HeldLoginFingerprint = r.loginIdentity.fileFingerprint()
+	}
+	if _, rejected, ok := r.authenticationRetryIntent(); ok {
+		state.AuthenticationRetryIntent = &rejected
+	}
+	return state
 }
 
 // isAcpReady is whether the ACP process is configured: derived from the
@@ -643,6 +1556,35 @@ func (r *DurableRelay) SetSteeringSupported(supported *bool) {
 	r.steeringSupported = supported
 }
 
+// EffectiveSteeringSupported is the steering capability combining ACP
+// support with hook-based delivery.
+func (r *DurableRelay) EffectiveSteeringSupported() *bool {
+	if r.steeringSupported == nil {
+		return nil
+	}
+	var supported bool
+	switch r.steeringDeliveryMode {
+	case SteeringDeliveryModeHookPostToolBatch:
+		supported = true
+	case SteeringDeliveryModeHookTurnEnd:
+		supported = false
+	default:
+		supported = *r.steeringSupported
+	}
+	return &supported
+}
+
+func (r *DurableRelay) supportsClearContext() bool {
+	if r.verdictHarness == nil {
+		return false
+	}
+	switch *r.verdictHarness {
+	case core.HarnessKindCodex, core.HarnessKindClaude, core.HarnessKindKimi, core.HarnessKindAntigravity:
+		return true
+	}
+	return false
+}
+
 // SetAutomaticSteering allows the relay to steer queued prompts into the
 // running turn itself.
 func (r *DurableRelay) SetAutomaticSteering(enabled bool) {
@@ -650,11 +1592,11 @@ func (r *DurableRelay) SetAutomaticSteering(enabled bool) {
 }
 
 // SetSteeringDeliveryMode selects steering delivery for the configured
-// harness and staged profile. The safe Claude turn-end mode is selected
-// before worker admission opens; preparation upgrades it only after
-// verifying a usable hook marker.
-func (r *DurableRelay) SetSteeringDeliveryMode(harness core.HarnessKind, claudePostToolBatchHook bool) {
-	r.steeringDeliveryMode = steeringDeliveryModeForHarness(harness, claudePostToolBatchHook)
+// harness and staged profile. The safe turn-end mode is selected before
+// worker admission opens; preparation upgrades it only after verifying a
+// usable hook marker.
+func (r *DurableRelay) SetSteeringDeliveryMode(harness core.HarnessKind, boundaryHook bool) {
+	r.steeringDeliveryMode = steeringDeliveryModeForHarness(harness, boundaryHook)
 }
 
 // SetMailboxDeliveryMode sets when a Codex session's mailbox messages may
@@ -662,6 +1604,14 @@ func (r *DurableRelay) SetSteeringDeliveryMode(harness core.HarnessKind, claudeP
 // drain and the published operational state both read this one field.
 func (r *DurableRelay) SetMailboxDeliveryMode(mode core.MailboxDeliveryMode) {
 	r.mailboxDeliveryMode = &mode
+}
+
+func (r *DurableRelay) updateMailboxDeliveryMode(mode *core.MailboxDeliveryMode) {
+	r.mailboxDeliveryMode = mode
+}
+
+func (r *DurableRelay) inPlaceMoveHoldActive() bool {
+	return r.snapshot.InPlaceMoveHold != nil
 }
 
 // turnInProgress is the relay-owned turn boundary shared by command
@@ -681,7 +1631,92 @@ func (r *DurableRelay) turnInProgress() bool {
 // identical to RelayOperationalState.Facts, which is what the daemon reads;
 // worker_facts_match_the_published_state pins them together.
 func (r *DurableRelay) ActivityFacts() core.ActivityFacts {
-	panic("unported: mj-worker/src/relay.rs activity_facts")
+	backgroundCommands := r.backgroundCommands()
+	backgroundCount := len(backgroundCommands) + r.nativeAgentCount()
+	r.turnContext.SetCounts(backgroundCount, len(r.snapshot.QueuedPrompts))
+	var promptStartedAtMs *int64
+	if prompt := r.snapshot.ActivePrompt; prompt != nil {
+		started := prompt.StartedAtMs
+		promptStartedAtMs = &started
+	} else {
+		promptStartedAtMs = r.snapshot.ClearContextStartedAtMs()
+	}
+	var harnessTurnStartedAtMs *int64
+	if turn := r.snapshot.HarnessTurn; turn != nil {
+		started := turn.StartedAtMs
+		harnessTurnStartedAtMs = &started
+	}
+	var backgroundStartedAtMs *int64
+	noteStart := func(started int64) {
+		if backgroundStartedAtMs == nil || started < *backgroundStartedAtMs {
+			backgroundStartedAtMs = &started
+		}
+	}
+	for _, command := range backgroundCommands {
+		noteStart(command.StartedAtMs)
+	}
+	for _, shell := range r.snapshot.ActiveUserShells {
+		if shell.StartedAtMs != nil {
+			noteStart(*shell.StartedAtMs)
+		}
+	}
+	var backgroundWorkKnown *bool
+	if r.backgroundWorkKnown != nil {
+		known := *r.backgroundWorkKnown
+		backgroundWorkKnown = &known
+	}
+	acpReady := r.isAcpReady()
+	var lastACPActivityAtMs *int64
+	if at, ok := r.acpActivity.LastAtMs(); ok {
+		lastACPActivityAtMs = &at
+	}
+	// A settle only counts until the turn it promised has started: no turn
+	// open now, and none started since the settle.
+	var taskSettledAtMs *int64
+	if settled := r.taskSettledAtMs; settled != nil &&
+		r.snapshot.ActivePrompt == nil &&
+		r.snapshot.HarnessTurn == nil &&
+		(r.snapshot.ActivityTurnStartedAtMs == nil || *settled >= *r.snapshot.ActivityTurnStartedAtMs) {
+		at := *settled
+		taskSettledAtMs = &at
+	}
+	facts := core.ActivityFacts{
+		Execution:                  r.snapshot.Execution,
+		PromptStartedAtMs:          promptStartedAtMs,
+		HarnessTurnStartedAtMs:     harnessTurnStartedAtMs,
+		TurnStartedAtMs:            r.snapshot.ActivityTurnStartedAtMs,
+		QueuedCommands:             len(r.snapshot.QueuedPrompts),
+		ToolsInFlight:              r.foregroundTools.Snapshot(),
+		BackgroundStartedAtMs:      backgroundStartedAtMs,
+		BackgroundCommands:         backgroundCount,
+		AntigravityTaskStartedAtMs: core.BackgroundCommandOldestAntigravityTaskStart(backgroundCommands),
+		ActiveUserShells:           len(r.snapshot.ActiveUserShells),
+		ActiveAgentTerminals:       len(r.activeAgentTerminals),
+		GoalActive:                 r.snapshot.Goal.Active(),
+		GoalRunning:                r.snapshot.Goal.Running(),
+		GoalPendingResume:          r.snapshot.Goal.PendingResume != nil,
+		GoalDecision:               r.snapshot.Goal.Decision != nil,
+		GoalSynchronized:           r.snapshot.Goal.Synchronized(),
+		BackgroundWorkKnown:        backgroundWorkKnown,
+		AcpReady:                   &acpReady,
+		CheckpointOnly:             r.checkpointOnly,
+		CheckpointBarrier:          r.snapshot.CheckpointBarrier != nil,
+		CapacityRetryArmed:         r.snapshot.CapacityRetry != nil && !r.snapshot.CapacityRetry.Submitted,
+		LastAcpActivityAtMs:        lastACPActivityAtMs,
+		CurrentStepStartedAtMs:     r.stepClock.StartedAtMs(),
+		IdleSinceMs:                r.snapshot.IdleSinceMs,
+		TaskSettledAtMs:            taskSettledAtMs,
+	}
+	runningAgents := []string{}
+	for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgents)) {
+		if r.snapshot.NativeAgents[id].State == core.NativeAgentStateRunning {
+			runningAgents = append(runningAgents, id)
+		}
+	}
+	r.turnContext.SetBackgroundInventory(backgroundCommands, runningAgents)
+	facts.ExpectedContinuation, facts.InferredIdleSinceMs, facts.BackgroundNeeded =
+		r.repliedVerdict.inference(r.turnContext.Generation(), &facts)
+	return facts
 }
 
 // activityIsIdle is whether the session's idle clock should be running: the
@@ -750,13 +1785,44 @@ func (r *DurableRelay) setManagedSubagent(managed bool) error {
 			return err
 		}
 	}
+	if err := r.settleLocalQuota(); err != nil {
+		return err
+	}
 	return r.suppressChildAssessment()
 }
 
 // watchedWork is the latest finished turn's work processes while some may
 // still be alive, with the identities the worker's watcher recounts.
 func (r *DurableRelay) watchedWork() (core.WorkLiveness, []core.ProcessIdentity, bool) {
-	panic("unported: mj-worker/src/relay.rs watched_work")
+	liveness := r.snapshot.WorkLiveness
+	if liveness == nil || liveness.Alive == 0 {
+		return core.WorkLiveness{}, nil, false
+	}
+	completion := r.snapshot.TurnCompletion
+	if completion == nil || completion.CompletedOrdinal != liveness.CompletedOrdinal {
+		return core.WorkLiveness{}, nil, false
+	}
+	// A prompted turn's facts are in its handled command; an autonomous
+	// harness turn's are on its settlement.
+	var facts *core.WorkFacts
+	handled, ok := r.snapshot.HandledCommands[completion.CommandID]
+	if prompt, isPrompt := handled.Outcome.(core.RelayCommandOutcomePrompt); ok && isPrompt {
+		if prompt.WorkFacts == nil {
+			return core.WorkLiveness{}, nil, false
+		}
+		facts = prompt.WorkFacts
+	} else {
+		work := r.snapshot.HarnessTurnWork
+		if work == nil || work.CompletedOrdinal != liveness.CompletedOrdinal {
+			return core.WorkLiveness{}, nil, false
+		}
+		facts = &work.Facts
+	}
+	processes := facts.Processes.Known()
+	if processes == nil {
+		return core.WorkLiveness{}, nil, false
+	}
+	return *liveness, slices.Clone(processes.Identities), true
 }
 
 // recordWorkLiveness publishes a recount, unless the turn it counts is no
@@ -774,7 +1840,17 @@ func (r *DurableRelay) recordWorkLiveness(liveness core.WorkLiveness) (bool, err
 }
 
 func (r *DurableRelay) SetTurnVerdictHarness(harness core.HarnessKind) {
-	panic("unported: mj-worker/src/relay.rs set_turn_verdict_harness")
+	r.verdictHarness = &harness
+	if _, ok := r.turnContext.DecisionLog(); !ok {
+		log, err := core.DecisionLogOpen(filepath.Join(r.root, "jev-decisions"))
+		if err != nil {
+			slog.Warn("Jev diagnostic log unavailable", "error", err)
+		} else {
+			r.turnContext.SetDecisionLog(log)
+		}
+	}
+	r.turnContext.SetSessionID(r.snapshot.SessionID)
+	r.publishAssessmentDiagnostic()
 }
 
 func (r *DurableRelay) TurnContext() *transcript.TurnContext {
@@ -850,7 +1926,56 @@ func (r *DurableRelay) NativeSessionMayHaveHistory() bool {
 // NativeSessionHistory classifies native history using the durable evidence,
 // including after ACK pruning.
 func (r *DurableRelay) NativeSessionHistory() NativeSessionHistory {
-	panic("unported: mj-worker/src/relay.rs native_session_history")
+	dispatched := false
+	for _, dispatch := range r.snapshot.Dispatches {
+		if dispatch.PromptMayHaveReachedAgent() {
+			dispatched = true
+			break
+		}
+	}
+	if evidence := r.snapshot.NativeUseEvidence; evidence != nil {
+		// Before the restored worker opens its first harness session,
+		// native_session_id is still nil while the seed's archived evidence
+		// is already present. Honor RestoredNativeSessionUnused so an unused
+		// restored session can still take LoadBeforeReplace.
+		if r.snapshot.NativeSessionID == nil {
+			if evidence.Version == 1 && evidence.Usage == core.NativeSessionUseUnused &&
+				r.snapshot.RestoredNativeSessionUnused && !dispatched {
+				return NativeSessionHistoryLoadBeforeReplace
+			}
+			return NativeSessionHistoryMayHaveHistory
+		}
+		if evidence.Version != 1 ||
+			r.snapshot.NativeSessionID == nil || evidence.NativeSessionID != *r.snapshot.NativeSessionID ||
+			evidence.Usage != core.NativeSessionUseUnused ||
+			dispatched {
+			return NativeSessionHistoryMayHaveHistory
+		}
+		switch {
+		case evidence.OpenedOrdinal != nil:
+			return NativeSessionHistoryCreatedHereUnused
+		case r.snapshot.RestoredNativeSessionUnused:
+			return NativeSessionHistoryLoadBeforeReplace
+		default:
+			return NativeSessionHistoryMayHaveHistory
+		}
+	}
+	if r.snapshot.NativeSessionUsed || dispatched {
+		return NativeSessionHistoryMayHaveHistory
+	}
+	opened := r.snapshot.NativeSessionOpenedOrdinal
+	switch {
+	// History below the recovery floor was archived. A thread opened above
+	// it could never have contributed to that history.
+	case opened != nil && *opened > r.snapshot.RecoveryFloorOrdinal:
+		return NativeSessionHistoryCreatedHereUnused
+	// The checkpoint hint only reflects visible user prompts. The harness
+	// can still have history from a mailbox wake.
+	case opened == nil && r.snapshot.RestoredNativeSessionUnused:
+		return NativeSessionHistoryLoadBeforeReplace
+	default:
+		return NativeSessionHistoryMayHaveHistory
+	}
 }
 
 // RestoredNativeSessionUnused is whether the checkpoint this relay was
@@ -887,11 +2012,178 @@ func (r *DurableRelay) JournalGeneration() uint64 {
 // holds its cut, one that can wait is held until the barrier ends and the
 // current frontier is returned (see relay_checkpoint_hold.go).
 func (r *DurableRelay) RecordObservation(observation core.RelayObservation) (uint64, error) {
-	panic("unported: mj-worker/src/relay.rs record_observation")
+	observation, err := r.holdObservation(observation)
+	if err != nil {
+		return 0, err
+	}
+	if observation == nil {
+		return r.snapshot.LatestOrdinal, nil
+	}
+	if native, ok := observation.(core.RelayObservationNativeAgent); ok {
+		if update, ok := native.Event.(core.NativeAgentEventUpdate); ok {
+			sessionID := update.SessionID
+			r.consumeClaudeStopAcknowledgement(&sessionID, &update.Update)
+		}
+	}
+	var acpReady, sessionSetup *bool
+	ready, notReady := true, false
+	switch observation.(type) {
+	case core.RelayObservationSessionConfigured:
+		acpReady, sessionSetup = &ready, &notReady
+	case core.RelayObservationAgentInitialized:
+		acpReady, sessionSetup = &notReady, &ready
+	case core.RelayObservationSessionRestarted, core.RelayObservationClosing, core.RelayObservationClosed:
+		acpReady, sessionSetup = &notReady, &notReady
+		// A restart or a close ends the harness process that owned whatever
+		// it had left running, so nothing it reported is still alive.
+		r.forgetHarnessProcesses()
+	case core.RelayObservationSessionOpened:
+		sessionSetup = &notReady
+	}
+	ordinal, err := r.appendRelayEvent(nil, observation)
+	if err != nil {
+		return 0, err
+	}
+	if acpReady != nil {
+		r.setAcpReady(*acpReady)
+	}
+	if sessionSetup != nil {
+		r.sessionSetup = *sessionSetup
+	}
+	return ordinal, nil
 }
 
 func (r *DurableRelay) RecordSessionUpdate(update acpschema.SessionUpdate) (uint64, error) {
-	panic("unported: mj-worker/src/relay.rs record_session_update")
+	// An ACP file edit arrives as the whole file before and the whole file
+	// after. Store the patch between them instead: nothing downstream
+	// reconstructs a file from those copies, and the patch is proportional
+	// to the edit rather than to the file. See core diff.go.
+	switch update.Kind {
+	case acpschema.SessionUpdateKindToolCall:
+		if update.ToolCall != nil {
+			call := *update.ToolCall
+			call.Content = slices.Clone(call.Content)
+			core.CompactToolCallContent(call.Content)
+			update.ToolCall = &call
+		}
+	case acpschema.SessionUpdateKindToolCallUpdate:
+		if update.ToolCallUpdate != nil && update.ToolCallUpdate.Content != nil {
+			call := *update.ToolCallUpdate
+			call.Content = slices.Clone(call.Content)
+			core.CompactToolCallContent(call.Content)
+			update.ToolCallUpdate = &call
+		}
+	}
+	// A notification that changes no agent work waits for a ready checkpoint
+	// barrier to end; see relay_checkpoint_hold.go.
+	held, err := r.holdSessionUpdate(update)
+	if err != nil {
+		return 0, err
+	}
+	if held == nil {
+		return r.snapshot.LatestOrdinal, nil
+	}
+	update = *held
+	nativeBefore := r.snapshot.Goal.Running()
+	nativeAfter := r.snapshot.Goal
+	if _, err := nativeAfter.Apply(&update); err != nil {
+		return 0, err
+	}
+	resumeRunning := false
+	if update.Kind == acpschema.SessionUpdateKindSessionInfoUpdate && update.SessionInfoUpdate != nil &&
+		update.SessionInfoUpdate.Meta != nil {
+		if value, ok := update.SessionInfoUpdate.Meta.Get("execution"); ok {
+			encoded, err := jsonvalue.Marshal(value)
+			if err != nil {
+				return 0, err
+			}
+			var execution core.GoalExecution
+			if err := json.Unmarshal(encoded, &execution); err != nil {
+				return 0, err
+			}
+			resumeRunning = execution.Status == "running" &&
+				nativeAfter.Execution != nil && reflect.DeepEqual(*nativeAfter.Execution, execution)
+		}
+	}
+	resumesGoal := func(pending PendingNativeResume) bool {
+		return pending.goal == nil ||
+			(nativeAfter.Snapshot != nil && nativeAfter.Snapshot.SameGoal(pending.goal))
+	}
+	resumedNative := resumeRunning && slices.ContainsFunc(r.pendingNativeResumes, resumesGoal)
+	codex := r.harnessTurns == HarnessTurnPolicyCodexAdapter
+	if (codex && !nativeBefore && nativeAfter.Running()) || (resumedNative && r.snapshot.HarnessTurn == nil) {
+		if _, err := r.appendRelayEvent(nil, core.RelayObservationHarnessTurnStarted{StartedAtMs: core.EpochMillis()}); err != nil {
+			return 0, err
+		}
+	}
+	// Arrival after the marker does not associate an idle update with this
+	// resume. Only running proof or an explicit goal change settles it.
+	var goalReport any
+	goalReported := false
+	if update.Kind == acpschema.SessionUpdateKindSessionInfoUpdate && update.SessionInfoUpdate != nil &&
+		update.SessionInfoUpdate.Meta != nil {
+		goalReport, goalReported = core.GoalMeta(update.SessionInfoUpdate.Meta)
+	}
+	explicitlyCleared := goalReported && goalReport == nil
+	kept := r.pendingNativeResumes[:0]
+	for _, pending := range r.pendingNativeResumes {
+		settled := explicitlyCleared ||
+			(goalReported && pending.goal != nil &&
+				(nativeAfter.Snapshot == nil ||
+					!nativeAfter.Snapshot.SameGoal(pending.goal) ||
+					(pending.goal.Status != nativeAfter.Snapshot.Status && !nativeAfter.Snapshot.Active())))
+		if !(settled || (resumedNative && r.snapshot.HarnessTurn != nil && resumesGoal(pending))) {
+			kept = append(kept, pending)
+		}
+	}
+	clear(r.pendingNativeResumes[len(kept):])
+	r.pendingNativeResumes = kept
+	claude := r.harnessTurns == HarnessTurnPolicyClaudeAdapter
+	// A stop we requested is acknowledged with a plain chunk and nothing
+	// else: no model cycle runs, so no result would ever settle a turn
+	// opened for it. Consume the expectation and keep the line.
+	var owner *string
+	if r.snapshot.NativeSessionID != nil {
+		id := *r.snapshot.NativeSessionID
+		owner = &id
+	}
+	ack := claude && r.consumeClaudeStopAcknowledgement(owner, &update)
+	// The adapter publishes notices as agent text at times no model cycle
+	// runs. Such text is a notice row of its own, so it neither opens a turn
+	// that nothing would end nor joins the previous reply.
+	if claude && !ack {
+		if message, ok := r.noticeOutsideAnyTurn(&update); ok {
+			return r.RecordObservation(core.RelayObservationNotice{Message: message})
+		}
+	}
+	if claude && !ack && r.opensHarnessTurn(&update) {
+		if err := r.openHarnessTurnIfAllowed(); err != nil {
+			return 0, err
+		}
+	}
+	started := core.EpochMillis()
+	if step := r.stepClock.StartedAtMs(); step != nil {
+		started = *step
+	}
+	r.foregroundTools.ObserveWithStart(&update, started)
+	if r.backgroundWork == BackgroundWorkPolicyKimiTasks {
+		r.trackAgentTerminalToolCall(&update)
+		r.trackKimiBackgroundAgent(&update)
+	}
+	ordinal, err := r.RecordObservation(core.RelayObservationSessionUpdate{Update: update})
+	if err != nil {
+		return 0, err
+	}
+	// A Claude turn settles on its SDK result instead, in ClaudeTurnResult:
+	// the adapter's origin marker is left out when a cycle produced no
+	// assistant usage.
+	if codex && nativeBefore && !nativeAfter.Running() && r.snapshot.HarnessTurn != nil {
+		origin := "codex"
+		if err := r.settleHarnessTurn(&origin, "end_turn"); err != nil {
+			return 0, err
+		}
+	}
+	return ordinal, nil
 }
 
 // claudeResultSettlesTurn is whether a Claude cycle result ends the open
@@ -912,7 +2204,27 @@ func (r *DurableRelay) claudeResultSettlesTurn() bool {
 // as for a prompt that is finishing. Each arm names the condition its
 // settling site tests.
 func (r *DurableRelay) EventSettlesAutonomousTurn(event core.RuntimeEvent) bool {
-	panic("unported: mj-worker/src/relay.rs event_settles_autonomous_turn")
+	if r.snapshot.ActivePrompt != nil || r.snapshot.AutonomousHarnessTurn() == nil {
+		return false
+	}
+	switch event := event.(type) {
+	case core.RuntimeEventClaudeTurnResult:
+		return r.claudeResultSettlesTurn()
+	case core.RuntimeEventAirTaskChanged:
+		return r.airUpdateSettlesTurn(event.SessionID, event.Update)
+	case core.RuntimeEventSessionUpdate:
+		if r.harnessTurns != HarnessTurnPolicyCodexAdapter || !r.snapshot.Goal.Running() {
+			return false
+		}
+		var update acpschema.SessionUpdate
+		if json.Unmarshal(event.Update, &update) != nil {
+			return false
+		}
+		after := r.snapshot.Goal
+		_, err := after.Apply(&update)
+		return err == nil && !after.Running()
+	}
+	return false
 }
 
 // OfferSettleFacts hands the facts observed for the event about to be
@@ -961,7 +2273,7 @@ func (r *DurableRelay) announcedHarnessTurn() bool {
 // HarnessTurnStopGrace. The snapshot owns the stop: a journal event records
 // it, so it is the same on every path and after a restart.
 func (r *DurableRelay) UnansweredHarnessTurnStop() (uint64, bool) {
-	if r.harnessTurns != HarnessTurnPolicyClaudeAdapter {
+	if r.harnessTurns != HarnessTurnPolicyClaudeAdapter && r.harnessTurns != HarnessTurnPolicyAntigravity {
 		return 0, false
 	}
 	turn := r.snapshot.AutonomousHarnessTurn()
@@ -982,7 +2294,7 @@ func (r *DurableRelay) EndUnansweredHarnessTurnStop(firstOrdinal uint64) (bool, 
 	if ordinal, ok := r.UnansweredHarnessTurnStop(); !ok || ordinal != firstOrdinal {
 		return false, nil
 	}
-	slog.Warn("Claude Code did not answer a stop of the turn it started on its own; ending the turn",
+	slog.Warn("The harness did not answer a stop of its autonomous turn; ending the turn",
 		"session_id", r.snapshot.SessionID, "first_ordinal", firstOrdinal)
 	origin := "stop_unanswered"
 	if err := r.settleHarnessTurn(&origin, "cancelled"); err != nil {
@@ -1011,7 +2323,53 @@ func (r *DurableRelay) configurationRequestInFlight() bool {
 }
 
 func (r *DurableRelay) settleHarnessTurn(origin *string, stopReason string) error {
-	panic("unported: mj-worker/src/relay.rs settle_harness_turn")
+	var settledOrdinal *uint64
+	if turn := r.snapshot.HarnessTurn; turn != nil {
+		first := turn.FirstOrdinal
+		settledOrdinal = &first
+	}
+	workFacts := r.pendingSettleFacts
+	r.pendingSettleFacts = nil
+	var autonomous *core.SettledHarnessTurn
+	if turn := r.snapshot.AutonomousHarnessTurn(); turn != nil && r.snapshot.ActivePrompt == nil {
+		// claude-agent-acp 0.99.0 / Claude Code 2.1.308 (2026-11-06) forwards
+		// SDK results, including error-shaped interrupted cycles. Its
+		// interrupt has no yield deadline: a result can arrive after
+		// stop_unanswered. The snapshot's recorded stop owns the cancellation
+		// reason.
+		reason := stopReason
+		if stop := r.snapshot.CancellingHarnessTurn; stop != nil && stop.FirstOrdinal == turn.FirstOrdinal {
+			reason = "cancelled"
+		}
+		autonomous = &core.SettledHarnessTurn{
+			StartOrdinal: turn.FirstOrdinal,
+			StopReason:   reason,
+			WorkFacts:    workFacts,
+		}
+	}
+	if _, err := r.appendRelayEvent(nil, core.RelayObservationHarnessTurnSettled{
+		Autonomous: autonomous,
+		Origin:     origin,
+		// The projection cannot see active_prompt, so the event has to carry
+		// whether a prompt of ours is still running.
+		PromptInFlight: r.snapshot.ActivePrompt != nil,
+	}); err != nil {
+		return err
+	}
+	// Settlement and detachment share the relay owner lock. Keep task IDs as
+	// tombstones so late terminal updates cannot claim a successor. Late
+	// output may open an unannounced turn after its raw result; a fresh Stop
+	// still ends that turn through the same grace fallback.
+	for _, entry := range r.airTasks {
+		if entry.state.Kind != AirTaskStateKindTurn {
+			continue
+		}
+		ordinal := entry.state.TurnOrdinal
+		if (ordinal == nil) == (settledOrdinal == nil) && (ordinal == nil || *ordinal == *settledOrdinal) {
+			entry.state.TurnOrdinal = nil
+		}
+	}
+	return r.finishTurnActivity()
 }
 
 // finishTurnActivity forgets provisional tool statuses at a boundary the
@@ -1108,16 +2466,102 @@ func (r *DurableRelay) digestAt(ordinal uint64) (string, bool, error) {
 // seedLegacyOpenRequest seeds once at the legacy persisted-format boundary,
 // never during publication.
 func seedLegacyOpenRequest(snapshot *core.RelaySnapshot) {
-	panic("unported: mj-worker/src/relay.rs seed_legacy_open_request")
+	assessment := snapshot.Assessment
+	if assessment == nil || assessment.QuestionDismissed() {
+		return
+	}
+	question := assessment.InferredQuestion()
+	if question == nil && core.ClassifyPromptCompletion(assessment.Completion.StopReason) == core.PromptCompletionInputRequired {
+		question = &core.InferredQuestion{
+			TurnID:           assessment.TurnID,
+			CompletedOrdinal: assessment.CompletedOrdinal,
+		}
+	}
+	if question == nil {
+		return
+	}
+	snapshot.PersonInputThrough = 0
+	if accepted := snapshot.LatestPromptAcceptedOrdinal; accepted != nil && *accepted > question.CompletedOrdinal {
+		snapshot.PersonInputThrough = *accepted
+	}
+	message := assessment.QuestionMessage
+	if message == nil {
+		message = snapshot.CompletedReplyMessage
+	}
+	if message != nil {
+		copied := *message
+		message = &copied
+	}
+	snapshot.Request = &core.OpenRequest{Question: *question, QuestionMessage: message}
 }
 
 func seedLegacyNotificationStack(snapshot *core.RelaySnapshot) {
-	panic("unported: mj-worker/src/relay.rs seed_legacy_notification_stack")
+	var entries []core.NotificationStackEntry
+	if request := snapshot.OpenRequest(); request != nil {
+		var completedAtMs int64
+		if assessment := snapshot.Assessment; assessment != nil && assessment.CompletedOrdinal == request.Question.CompletedOrdinal {
+			completedAtMs = assessment.CompletedAtMs
+		}
+		var message core.EntryMessage = core.EntryMessageNone{}
+		if request.QuestionMessage != nil {
+			message = core.EntryMessageFound{Value: *request.QuestionMessage}
+		}
+		entries = append(entries, core.NotificationStackEntry{
+			CompletedAtMs:    completedAtMs,
+			CompletedOrdinal: request.Question.CompletedOrdinal,
+			Kind:             core.NotificationKindNeedsInput,
+			Message:          message,
+		})
+	}
+	if assessment := snapshot.Assessment; assessment != nil &&
+		assessment.Current() &&
+		assessment.Attention != nil && *assessment.Attention == core.AssessmentAttentionImportant &&
+		assessment.CompletedOrdinal > snapshot.PersonInputThrough &&
+		(snapshot.TurnCompletion == nil ||
+			(snapshot.TurnCompletion.CompletedOrdinal == assessment.CompletedOrdinal &&
+				snapshot.TurnCompletion.CommandID == assessment.TurnID)) &&
+		!slices.ContainsFunc(entries, func(entry core.NotificationStackEntry) bool {
+			return entry.CompletedOrdinal == assessment.CompletedOrdinal
+		}) {
+		var message core.EntryMessage = core.EntryMessageNone{}
+		if snapshot.CompletedReplyMessage != nil {
+			message = core.EntryMessageFound{Value: *snapshot.CompletedReplyMessage}
+		}
+		entries = append(entries, core.NotificationStackEntry{
+			CompletedAtMs:    assessment.CompletedAtMs,
+			CompletedOrdinal: assessment.CompletedOrdinal,
+			Kind:             core.NotificationKindImportant,
+			Message:          message,
+		})
+		slices.SortStableFunc(entries, func(a, b core.NotificationStackEntry) int {
+			return cmp.Compare(a.CompletedOrdinal, b.CompletedOrdinal)
+		})
+	}
+	if len(entries) > 0 {
+		snapshot.NotificationStack = core.NotificationStack{
+			Revision: snapshot.LatestOrdinal,
+			Entries:  entries,
+		}
+	}
 }
 
 // seedMissingNotificationTime: older stack snapshots omitted the time. The
 // matching assessment retains the original completion event's time even
 // when its journal was collected.
 func seedMissingNotificationTime(snapshot *core.RelaySnapshot) {
-	panic("unported: mj-worker/src/relay.rs seed_missing_notification_time")
+	assessment := snapshot.Assessment
+	if assessment == nil {
+		return
+	}
+	index := slices.IndexFunc(snapshot.NotificationStack.Entries, func(entry core.NotificationStackEntry) bool {
+		return entry.CompletedAtMs == 0 && entry.CompletedOrdinal == assessment.CompletedOrdinal
+	})
+	if index < 0 {
+		return
+	}
+	// The stack's entries may be shared with an earlier snapshot copy, so
+	// they are copied before the edit (Rust's Arc::make_mut).
+	entries := slices.Clone(snapshot.NotificationStack.Entries)
+	entries[index].CompletedAtMs = assessment.CompletedAtMs
+	snapshot.NotificationStack.Entries = entries
 }

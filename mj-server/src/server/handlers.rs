@@ -1447,7 +1447,6 @@ pub fn validate_new_preflight(
     };
     let action = ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: false,
         remember_container_size: false,

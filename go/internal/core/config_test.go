@@ -258,7 +258,7 @@ func configTestZaiProfile(t *testing.T, home string, environment map[string]stri
 // an API key. It loses every variable Codex would take a credential or an
 // address from; a profile that uses an API key keeps them.
 // Hard-won: c4e2838d: a leaked API key broke ChatGPT Codex turns
-func TestOnlyACodexProfileThatUsesAnAPIKeyKeepsTheOpenaiKeyVariables(t *testing.T) {
+func TestCodexLaunchProtectsChatgptLoginsAndAllowsKeysForFreshProfiles(t *testing.T) {
 	environment := func() map[string]string {
 		return map[string]string{
 			"OPENAI_API_KEY":     "sk-svcacct-test",
@@ -295,16 +295,16 @@ func TestOnlyACodexProfileThatUsesAnAPIKeyKeepsTheOpenaiKeyVariables(t *testing.
 	}
 	onlyRustLog(launched)
 
-	// A profile with no login yet has no key of its own either.
-	fresh := NewHarnessProfile(HarnessKindCodex, "/does/not/exist")
-	if login, ok := fresh.CodexLogin(); !ok || login != CodexLoginChatGpt {
-		t.Fatal("a fresh profile counts as a ChatGPT login")
+	// A profile without a login file can receive keys from the target.
+	fresh := NewHarnessProfile(HarnessKindCodex, t.TempDir())
+	if _, ok := fresh.CodexLogin(); ok {
+		t.Fatal("a fresh profile has no Codex login")
 	}
 	launched = environment()
-	if got := fresh.ExcludeHarnessEnvironment(launched); !slices.Equal(got, everyName) {
+	if got := fresh.ExcludeHarnessEnvironment(launched); len(got) != 0 {
 		t.Fatalf("excluded %v", got)
 	}
-	onlyRustLog(launched)
+	untouched(launched)
 
 	// `codex login --with-api-key` stores the key and says so.
 	apiKeyHome := t.TempDir()
@@ -799,6 +799,21 @@ func TestAMissingSecretIsNamedInOneLineWhereItsProfileIsUsed(t *testing.T) {
 	configTestLacks(t, message, "\n")
 }
 
+// Hard-won: ee847f7: a save removed every top-level setting the user wrote
+// out at its default, taking an explicit `[daemon] runtime = "host"` with it;
+// retired keys nested in such a table were only removed by that accident.
+func TestASaveKeepsSettingsWrittenAtTheirDefaultAndRemovesRetiredKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	kept := fmt.Sprintf("version = %d\ntheme = \"auto\"\n\n[daemon]\nruntime = \"host\"\n\n[phone]\nenabled = false\n", ConfigVersion)
+	configTestWrite(t, path, kept+"\n[subagents]\nmax_concurrent = 6\nenabled = true\n\n[sessionwiki]\nenabled = true\n")
+	configTestSave(t, configTestLoad(t, path), path)
+	// The written default stays beside the removed key; a table that held
+	// only a retired key goes with it.
+	if got, want := configTestReadFile(t, path), kept+"\n[subagents]\nmax_concurrent = 6\n"; got != want {
+		t.Fatalf("saved %q, want %q", got, want)
+	}
+}
+
 func TestObsoleteStartupSettingsAreIgnoredAndRemovedWhenSaving(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	expected := configTestSampleConfig()
@@ -1050,6 +1065,59 @@ func TestUnconstrainedEnforcementSplitsAcpModesFromLaunchControls(t *testing.T) 
 }
 
 func TestConfiguredApprovalsPreserveOtherProfilesAndSelectGuardians(t *testing.T) {
+	for _, kind := range HarnessKindAll {
+		stored := DefaultConfig()
+		profile := NewHarnessProfile(kind, filepath.Join("/profiles", kind.ID()))
+		profile.MjolnirGuardian = false
+		stored.Profiles["p"] = profile
+		config := configTestFromTOML(t, configTestTOML(t, stored))
+		if err := config.Validate(); err != nil {
+			t.Fatalf("all harnesses can disable Mjolnir review: %v", err)
+		}
+		disabled := config.Profiles["p"].ApprovalChoices()
+		enabled := disabled
+		enabled.MjolnirGuardian = true
+		if !kind.MjolnirGuardianReviews(ExecutionPolicyConfiguredApprovals, enabled) {
+			t.Fatalf("%v: enabled guardian does not review", kind)
+		}
+		if kind.MjolnirGuardianReviews(ExecutionPolicyConfiguredApprovals, disabled) {
+			t.Fatalf("%v: disabled guardian reviews", kind)
+		}
+		if kind.MjolnirGuardianReviews(ExecutionPolicyUnconstrained, enabled) {
+			t.Fatalf("%v: guardian reviews an unconstrained target", kind)
+		}
+	}
+
+	config := DefaultConfig()
+	if config.Guardian != DefaultGuardianConfig() {
+		t.Fatalf("guardian %+v", config.Guardian)
+	}
+	configTestLacks(t, configTestTOML(t, config), "[guardian]")
+
+	config.Guardian = GuardianConfig{Enabled: false, LocalClassifier: false, UseGPU: false}
+	loaded := configTestFromTOML(t, configTestTOML(t, config))
+	if loaded.Guardian != config.Guardian {
+		t.Fatalf("round trip [guardian]: %+v", loaded.Guardian)
+	}
+
+	profileOn := NewHarnessProfile(HarnessKindKimi, "/profiles/kimi")
+	profileOff := profileOn
+	profileOff.MjolnirGuardian = false
+	globalOn := DefaultConfig()
+	if !globalOn.ProfileApprovalChoices(profileOn).MjolnirGuardian {
+		t.Fatal("global and profile on")
+	}
+	if globalOn.ProfileApprovalChoices(profileOff).MjolnirGuardian {
+		t.Fatal("profile off")
+	}
+	globalOn.Guardian.Enabled = false
+	if globalOn.ProfileApprovalChoices(profileOn).MjolnirGuardian {
+		t.Fatal("global off")
+	}
+	if globalOn.ProfileApprovalChoices(profileOff).MjolnirGuardian {
+		t.Fatal("both off")
+	}
+
 	codex := configTestEnforcement(t, HarnessKindCodex, ExecutionPolicyConfiguredApprovals)
 	mode, ok := codex.ACPMode()
 	configTestAssertOptional(t, mode, ok, configTestPtr("agent"))
@@ -1214,31 +1282,62 @@ func TestBundleRequiresExistingPrimaryRepository(t *testing.T) {
 	configTestContains(t, configTestValidateError(t, config), "does not exist")
 }
 
-func TestBundleRejectsNonGithubSources(t *testing.T) {
+func TestBundleConfigRoundTripRemovesHTTPUserinfoAndKeepsSSHUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
 	config := configTestSampleConfig()
 	configTestSetBundle(&config, func(bundle *ProjectBundle) {
-		bundle.Repositories[0].Github = configTestPtr("https://example.com/owner/repo")
+		repository := &bundle.Repositories[0]
+		repository.Github = configTestPtr("https://gitlab.example/team/hel.git?token=route#checkout")
+		ssh := *repository
+		ssh.ID = "ssh"
+		ssh.Destination = "ssh"
+		ssh.Github = configTestPtr("ssh://build@gitlab.example/team/hel.git")
+		bundle.Repositories = append(bundle.Repositories, ssh)
 	})
-	configTestContains(t, configTestValidateError(t, config), "not a supported GitHub source")
+	configTestSave(t, config, path)
+
+	// Loading keeps the old source usable, and an ordinary save must also
+	// remove the credentials from the actual file when preserving comments.
+	body := strings.ReplaceAll(configTestReadFile(t, path), "https://gitlab.example", "https://user:password@gitlab.example")
+	configTestWrite(t, path, "# keep this comment\n"+body)
+	loaded := configTestLoad(t, path)
+	if !reflect.DeepEqual(loaded.Bundles, config.Bundles) {
+		t.Fatalf("loaded bundles %+v", loaded.Bundles)
+	}
+	configTestSave(t, loaded, path)
+	saved := configTestReadFile(t, path)
+	if !strings.HasPrefix(saved, "# keep this comment") {
+		t.Fatal(saved)
+	}
+	configTestLacks(t, saved, "user:password")
+	if reloaded := configTestLoad(t, path); !reflect.DeepEqual(reloaded.Bundles, config.Bundles) {
+		t.Fatalf("reloaded bundles %+v", reloaded.Bundles)
+	}
 }
 
-// A rejected `github` value fails the whole configuration, so every value
-// that loaded before the shared GitHub parser must keep loading, including
-// ones the parser does not call GitHub (the last three).
-func TestBundleKeepsLoadingGithubValuesAcceptedBeforeTheSharedParser(t *testing.T) {
+// Hard-won: fd9e9238c: an older accepted repository value blocked config load after upgrade.
+func TestBundleKeepsLoadingLegacyRepositoryValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	configTestSave(t, configTestSampleConfig(), path)
+	previousConfig := configTestReadFile(t, path)
+
 	for _, source := range []string{
-		"BrokkAi/hel",
-		"https://github.com/BrokkAi/hel.git",
-		"ssh://git@github.com/BrokkAi/hel.git",
-		"git@gitlab.example:BrokkAi/hel.git",
+		"./repo",
+		"~/repo",
+		"owner@host/repo",
+		"file:mirror/repo",
+		"git@github.com:owner/repo",
 		"BrokkAi/hel+fork",
-		"https://github.com/BrokkAi/hel?ref=main",
 	} {
-		config := configTestSampleConfig()
-		configTestSetBundle(&config, func(bundle *ProjectBundle) { bundle.Repositories[0].Github = configTestPtr(source) })
-		if err := config.Validate(); err != nil {
+		configTestWrite(t, path, strings.ReplaceAll(previousConfig, "BrokkAi/hel", source))
+		config, err := ConfigLoadFrom(path)
+		if err != nil {
 			t.Fatalf("%s: %v", source, err)
 		}
+		if github := config.Bundles["hel"].Repositories[0].Github; github == nil || *github != source {
+			t.Fatalf("%s: github %v", source, github)
+		}
+		configTestSave(t, config, path)
 	}
 }
 
@@ -1573,6 +1672,42 @@ func TestUpdateToSerializesDisjointProcessEdits(t *testing.T) {
 	}
 }
 
+func TestCancellableConfigEditCanLeaveAContendedLockWithoutSaving(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	guard, err := configLockAcquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	_, _, err = ConfigUpdateToCancellable(path, func() bool {
+		attempts++
+		return attempts > 1
+	}, func(*Config) (struct{}, error) {
+		panic("an edit cancelled while waiting must not start")
+	})
+	if err == nil || !strings.Contains(err.Error(), "file lock wait cancelled") {
+		t.Fatalf("error %v", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the cancelled edit saved")
+	}
+	if err := guard.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled := false
+	_, _, err = ConfigUpdateToCancellable(path, func() bool { return cancelled }, func(*Config) (struct{}, error) {
+		cancelled = true
+		return struct{}{}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "configuration edit cancelled") {
+		t.Fatalf("error %v", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the cancelled edit saved")
+	}
+}
+
 func TestUpdateToFailureLeavesThePreviousFileUnchanged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	configTestSave(t, configTestSampleConfig(), path)
@@ -1860,7 +1995,7 @@ func TestALegacySubagentsEnabledKeyStillLoadsAndIsDroppedOnSave(t *testing.T) {
 	configTestWrite(t, path, fmt.Sprintf("version = %d\n[subagents]\nenabled = true\n", ConfigVersion))
 
 	config := configTestLoad(t, path)
-	if config.Subagents.MaxConcurrent != 6 {
+	if config.Subagents.MaxConcurrent != 8 {
 		t.Fatal(config.Subagents.MaxConcurrent)
 	}
 
@@ -1868,7 +2003,7 @@ func TestALegacySubagentsEnabledKeyStillLoadsAndIsDroppedOnSave(t *testing.T) {
 	saved := configTestReadFile(t, path)
 	configTestLacks(t, saved, "enabled")
 	configTestLacks(t, saved, "[subagents]")
-	if configTestLoad(t, path).Subagents.MaxConcurrent != 6 {
+	if configTestLoad(t, path).Subagents.MaxConcurrent != 8 {
 		t.Fatal("max concurrent")
 	}
 
@@ -1890,7 +2025,7 @@ func TestVersionEightEnablesParentOnlySubagentsByDefault(t *testing.T) {
 
 	config := configTestLoad(t, path)
 
-	if config.Version != ConfigVersion || config.Subagents.MaxConcurrent != 6 {
+	if config.Version != ConfigVersion || config.Subagents.MaxConcurrent != 8 {
 		t.Fatalf("version %d max concurrent %d", config.Version, config.Subagents.MaxConcurrent)
 	}
 }
@@ -2355,7 +2490,12 @@ func TestAConfigWithoutAVersionNamesTheLineToAdd(t *testing.T) {
 
 	// Any other parse error keeps the parser's words after the file's path.
 	configTestWrite(t, path, fmt.Sprintf("version = %d\n[profiles.codex\n", ConfigVersion))
-	message := configTestLoadError(t, path)
+	_, err := ConfigLoadFrom(path)
+	var loadError *ConfigLoadErrorToml
+	if !errors.As(err, &loadError) || loadError.Location == nil || *loadError.Location != [2]int{2, 16} {
+		t.Fatalf("load error %#v", err)
+	}
+	message := err.Error()
 	if !strings.HasPrefix(message, fmt.Sprintf("parse Mjolnir config %s: ", path)) {
 		t.Fatal(message)
 	}
@@ -2733,7 +2873,7 @@ func TestLegacyProfileSubagentsLoadWithoutMigrationAndDisappearOnSave(t *testing
 	configTestWrite(t, path, fmt.Sprintf("version = %d\n[profiles.legacy]\nkind = \"codex\"\nhome = %s\nsubagents = { mode = \"single_model\", model = \"old\", effort = \"adaptive\" }\n",
 		ConfigVersion, debugString(root)))
 	config := configTestLoad(t, path)
-	if config.Subagents.IsConfiguredFor(false) {
+	if config.Subagents.IsConfigured() {
 		t.Fatal("legacy choices are not migrated")
 	}
 	configTestSave(t, config, path)
@@ -2759,103 +2899,102 @@ func TestLegacyProfileSubagentsLoadWithoutMigrationAndDisappearOnSave(t *testing
 }
 
 func TestSubtleSubagentsAreOptionalButNeverConfiguredAlone(t *testing.T) {
-	choice := func(model string) *SubagentChoice { return &SubagentChoice{Model: model} }
+	choice := func(model string) SubagentChoice { return SubagentChoice{Model: model} }
 	config := DefaultConfig()
-	config.Subagents.Straightforward = choice("plain")
+	config.Subagents.Straightforward = []SubagentChoice{choice("plain")}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !config.Subagents.IsConfiguredFor(false) {
+	if !config.Subagents.IsConfigured() {
 		t.Fatal("straightforward alone is configured")
 	}
 	policy := SubagentPolicy{Mode: SubagentPolicyMjolnir}
-	if config.Subagents.OffersSubtleFor(policy, false) {
+	if config.Subagents.OffersSubtle(policy) {
 		t.Fatal("no subtle choice")
 	}
 	// A session override can add the subtle type for one session.
-	withSubtle := SubagentPolicy{Mode: SubagentPolicyMjolnir, Subtle: choice("smart")}
-	if !config.Subagents.OffersSubtleFor(withSubtle, false) {
+	smart := choice("smart")
+	withSubtle := SubagentPolicy{Mode: SubagentPolicyMjolnir, Subtle: &smart}
+	if !config.Subagents.OffersSubtle(withSubtle) {
 		t.Fatal("the session's subtle choice")
 	}
-	config.Subagents.Subtle = choice("smart")
+	config.Subagents.Subtle = []SubagentChoice{choice("smart")}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !config.Subagents.OffersSubtleFor(policy, false) {
+	if !config.Subagents.OffersSubtle(policy) {
 		t.Fatal("the global subtle choice")
 	}
 
 	config.Subagents.Straightforward = nil
-	if config.Subagents.IsConfiguredFor(false) {
+	if config.Subagents.IsConfigured() {
 		t.Fatal("subtle alone is not configured")
 	}
 	configTestContains(t, configTestValidateError(t, config), "[subagents.subtle] requires [subagents.straightforward]")
 }
 
-func TestYoloSubagentChoicesAreIgnoredWhileSharedButKeptForLater(t *testing.T) {
-	choice := func(model string) *SubagentChoice { return &SubagentChoice{Model: model} }
-	model := func(config Config, yolo bool) string {
-		t.Helper()
-		chosen := config.Subagents.ChoiceFor(SubagentTaskTypeStraightforward, yolo)
-		if chosen == nil {
-			t.Fatal("no choice")
-		}
-		return chosen.Model
-	}
-	config := DefaultConfig()
-	config.Subagents.Straightforward = choice("shared")
-	config.Subagents.Yolo.Straightforward = choice("yolo")
-	config.Subagents.Yolo.Subtle = choice("yolo-smart")
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	// Checked: the YOLO values do nothing, including their subtle rule.
-	if model(config, true) != "shared" {
-		t.Fatal("shared choices")
-	}
-	config.Subagents.Yolo.Straightforward = nil
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if model(config, true) != "shared" {
-		t.Fatal("shared choices")
-	}
+func TestSubagentConfigAcceptsSingularAndArrayAndDropsLegacyYolo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	configTestWrite(t, path, `
+version = 23
 
-	// Unchecked: the retained YOLO values become active and are validated.
-	config.Subagents.UseSameOnAllTargets = false
-	config.Subagents.Yolo.Straightforward = choice("yolo")
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
+[subagents]
+use_same_on_all_targets = false
+max_concurrent = 8
+
+[subagents.straightforward]
+model = "gpt-5.4-mini"
+effort = "high"
+
+[[subagents.primary]]
+model = "claude-opus-4-6"
+effort = "high"
+
+[[subagents.primary]]
+model = "gpt-5.4"
+effort = "xhigh"
+
+[subagents.yolo.straightforward]
+model = "kimi-k2.5"
+`)
+	loaded := configTestLoad(t, path)
+	if loaded.Subagents.MaxConcurrent != 8 {
+		t.Fatalf("max concurrent %d", loaded.Subagents.MaxConcurrent)
 	}
-	if model(config, true) != "yolo" || model(config, false) != "shared" {
-		t.Fatal("split choices")
+	if len(loaded.Subagents.Straightforward) != 1 || loaded.Subagents.Straightforward[0].Model != "gpt-5.4-mini" {
+		t.Fatalf("straightforward %+v", loaded.Subagents.Straightforward)
 	}
-	config.Subagents.Yolo.Straightforward = nil
-	configTestContains(t, configTestValidateError(t, config), "[subagents.yolo.subtle] requires [subagents.yolo.straightforward]")
+	if len(loaded.Subagents.Primary) != 2 {
+		t.Fatalf("primary %+v", loaded.Subagents.Primary)
+	}
+	if !loaded.Subagents.PrimaryConfigured() || !loaded.Subagents.IsConfigured() {
+		t.Fatal("configured")
+	}
+	configTestSave(t, loaded, path)
+	saved := configTestReadFile(t, path)
+	configTestLacks(t, saved, "yolo")
+	configTestLacks(t, saved, "use_same_on_all_targets")
+	configTestContains(t, saved, "version = 24")
 }
 
-func TestInactiveYoloChoicesSurviveASaveAndReload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
+func TestSubagentConfigRejectsSameProviderInOneCategory(t *testing.T) {
 	config := DefaultConfig()
-	config.Subagents.Yolo.Straightforward = &SubagentChoice{Model: "yolo", Effort: configTestPtr("high")}
-	configTestSave(t, config, path)
-	saved := configTestReadFile(t, path)
-	configTestContains(t, saved, "[subagents.yolo.straightforward]")
-	configTestLacks(t, saved, "use_same_on_all_targets")
-	loaded := configTestLoad(t, path)
-	if !loaded.Subagents.UseSameOnAllTargets || loaded.Subagents.Yolo.Straightforward == nil ||
-		loaded.Subagents.Yolo.Straightforward.Model != "yolo" {
-		t.Fatalf("subagents %+v", loaded.Subagents)
+	config.Subagents.Primary = []SubagentChoice{
+		{Model: "claude-opus-4-6", Effort: configTestPtr("high")},
+		{Model: "claude-sonnet-4-6", Effort: configTestPtr("high")},
 	}
+	err := configTestValidateError(t, config)
+	configTestContains(t, err, "[subagents.primary] may configure at most one model per provider")
+	configTestContains(t, err, "Anthropic")
 }
 
 func TestOracleConfigurationIsIndependentAndRejectsAdaptiveEffort(t *testing.T) {
 	config := DefaultConfig()
-	config.Subagents.Oracle = &SubagentChoice{Model: "advisor", Effort: configTestPtr("high")}
+	config.Subagents.Oracle = []SubagentChoice{{Model: "advisor", Effort: configTestPtr("high")}}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !config.Subagents.OracleConfiguredFor(false) {
+	if !config.Subagents.OracleConfigured() {
 		t.Fatal("the oracle is configured")
 	}
 	encoded, err := serdeJSON(config)
@@ -2866,17 +3005,17 @@ func TestOracleConfigurationIsIndependentAndRejectsAdaptiveEffort(t *testing.T) 
 	if err := unmarshalJSONGeneric(encoded, &value); err != nil {
 		t.Fatal(err)
 	}
-	if value["subagents"].(map[string]any)["oracle"].(map[string]any)["model"] != "advisor" {
+	if value["subagents"].(map[string]any)["oracle"].([]any)[0].(map[string]any)["model"] != "advisor" {
 		t.Fatal(string(encoded))
 	}
 	var decoded Config
 	if err := decoded.UnmarshalJSON(encoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Subagents.Oracle == nil || !decoded.Subagents.Oracle.equal(*config.Subagents.Oracle) {
+	if len(decoded.Subagents.Oracle) != 1 || !decoded.Subagents.Oracle[0].equal(config.Subagents.Oracle[0]) {
 		t.Fatal("the oracle survives JSON")
 	}
-	config.Subagents.Oracle.Effort = configTestPtr("adaptive")
+	config.Subagents.Oracle[0].Effort = configTestPtr("adaptive")
 	configTestContains(t, configTestValidateError(t, config), "[subagents.oracle]")
 }
 

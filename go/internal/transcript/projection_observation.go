@@ -25,10 +25,14 @@ import (
 // identity.
 const externalEventsItemPrefix = "system:mailbox:delivered:"
 
-// QueuedCommandContent is the queue presentation shared by ordinary replay
-// and current-state recovery: ACP content blocks in their JSON form.
-func QueuedCommandContent(command core.RelayCommand) ([]json.RawMessage, error) {
-	if _, ok := command.(core.RelayCommandMailboxWake); ok {
+// QueuedCommandContent is the queue presentation shared by ordinary replay,
+// current-state recovery and archive restore: ACP content blocks in their
+// JSON form. A mailbox wake keeps no payload here: its messages are rows of
+// their own, the rendered prompt can exceed a transcript turn's budgets, and
+// the worker's queue holds it. The command ID decides, because a restored or
+// replayed wake is a plain prompt under its wake ID.
+func QueuedCommandContent(commandID string, command core.RelayCommand) ([]json.RawMessage, error) {
+	if core.CarriesMailboxWake(commandID) {
 		return []json.RawMessage{}, nil
 	}
 	if config, ok := command.(core.RelayCommandSetConfig); ok {
@@ -507,16 +511,15 @@ func projectCommandQueued(
 		if continued, ok := observation.Command.(core.RelayCommandContinueAuthorizedWork); ok {
 			pushSystem(mutation, event, fmt.Sprintf("Continuing requested work automatically · %d of 3", continued.Attempt))
 		}
-		wake, mailboxWake := observation.Command.(core.RelayCommandMailboxWake)
-		if mailboxWake {
+		if wake, ok := observation.Command.(core.RelayCommandMailboxWake); ok {
 			deliveredMessages(index, event, wake.Events, mutation)
 			deliveredExternalEvents(index, event, wake.Events, mutation)
 		}
-		content, err := QueuedCommandContent(observation.Command)
+		content, err := QueuedCommandContent(commandID, observation.Command)
 		if err != nil {
 			return err
 		}
-		if current.SessionTitle == nil && !mailboxWake {
+		if current.SessionTitle == nil && !core.CarriesMailboxWake(commandID) {
 			title, ok := current.ResolvedTitle()
 			if !ok {
 				title, ok = core.ProvisionalSessionTitle(core.MaterializedContentText(content))
@@ -544,7 +547,7 @@ func projectCommandQueued(
 	// A configuration change waits in the same queue as prompts and is
 	// displayed as the composer text that produced it.
 	case core.RelayCommandSetConfig:
-		content, err := QueuedCommandContent(command)
+		content, err := QueuedCommandContent(commandID, command)
 		if err != nil {
 			return err
 		}
@@ -937,7 +940,7 @@ func projectTerminalOutput(
 		Signal:     observation.Signal,
 	}
 	rawOwner := uniquelyMatchingRawTool(index, &record)
-	referrers := index.terminalReferrers(terminalID)
+	referrers := index.TerminalReferrers(terminalID)
 	attached := false
 	for _, existing := range referrers {
 		if rawOwner != nil && rawOwner.StableID != existing.StableID {
@@ -983,7 +986,7 @@ func projectTerminalOutput(
 		stableID := terminalItemID(terminalID)
 		if existing := index.get(stableID); existing != nil {
 			item := cloneTranscriptItem(existing)
-			item.Body = core.TranscriptBodyTerminalOutput{Record: record}
+			item.Body = core.TranscriptBodyTerminalOutputOf(record)
 			item.LastChangedAtMs = max(item.LastChangedAtMs, event.RecordedAtMs)
 			upsert(mutation, item)
 		} else {
@@ -992,7 +995,7 @@ func projectTerminalOutput(
 				Position:        event.Ordinal,
 				CreatedAtMs:     event.RecordedAtMs,
 				LastChangedAtMs: event.RecordedAtMs,
-				Body:            core.TranscriptBodyTerminalOutput{Record: record},
+				Body:            core.TranscriptBodyTerminalOutputOf(record),
 			})
 		}
 	}

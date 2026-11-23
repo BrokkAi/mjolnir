@@ -109,7 +109,8 @@ pub struct ClaudeTranscript {
     pub cwd: PathBuf,
     /// Files reliably reported as edited by the native harness.
     pub edited_paths: Vec<PathBuf>,
-    pub events: Vec<SequencedEvent>,
+    pub(crate) items: Vec<std::sync::Arc<mj_core::transcript::TranscriptItem>>,
+    pub(crate) last_activity_at_ms: Option<i64>,
 }
 
 pub type CodexTranscript = ClaudeTranscript;

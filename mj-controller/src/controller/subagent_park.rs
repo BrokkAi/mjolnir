@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 
+use mj_core::relay::WorkerHarnessStartupFailureKind;
 use mj_core::state::SessionState;
 
 use super::worker_binary::{
@@ -25,6 +26,7 @@ use super::worker_binary::{
 };
 use super::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
 use super::{Controller, IdleWorkspaceLease};
+use crate::database::SubagentUnparkFailure;
 use crate::session_manager::SessionManagerControl;
 use crate::targets::{self, CommandExecutor};
 
@@ -428,8 +430,8 @@ impl Controller {
 
     /// Accept a durable wake, launch the worker, and observe native readiness.
     /// Preparation and readiness hold no daemon admission. Once the wake is
-    /// accepted, a proved dead worker returns to Parked with its failure;
-    /// uncertain liveness leaves the active record and boot intent for recovery.
+    /// accepted, a proved dead worker settles with its failure; uncertain
+    /// liveness leaves the active record and boot intent for recovery.
     /// It never stops a worker that may have resumed accepted work.
     pub async fn unpark_subagent_worker(
         &self,
@@ -577,9 +579,38 @@ impl Controller {
                 .await
             }.await;
             if let Err(error) = observed {
-                // A failed connection alone does not prove death. The same
-                // lifecycle owner probes and settles before recovery can act.
+                // Probe liveness first: after the worker releases its root
+                // lock its exit record is final. A failed connection alone
+                // cannot authorize a retry.
                 let liveness = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root).context("check whether the failed unpark worker exited")?;
+                // The working-directory failure is written before the relay
+                // opens. If the marker is already present while the worker is
+                // still exiting, it is safe to settle without waiting for death.
+                let command = super::worker_binary::worker_exit_record_command(&backend, &worker_root);
+                let exited = executor.execute(&command)
+                    .and_then(|output| mj_core::targets::checked_command_output(&command, output))
+                    .and_then(|output| super::worker_binary::read_worker_exit_record(&output.stdout));
+                match exited {
+                    Ok(Some(exit)) => {
+                        if let Some(failure) = exit.harness_startup_failure
+                            && failure.kind == Some(WorkerHarnessStartupFailureKind::WorkingDirectoryUnavailable)
+                        {
+                            crate::database::fail_subagent_unpark(
+                                session_id,
+                                owner.operation_id(),
+                                SubagentUnparkFailure::WorkingDirectoryUnavailable(&failure.message),
+                            )?;
+                            return Err(anyhow::Error::new(failure)
+                                .context(mj_core::subagent::FAILED_CHILD_CLOSE_GUIDANCE));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(probe_error) => tracing::warn!(
+                        session_id,
+                        error = format!("{probe_error:#}"),
+                        "could not read the failed wake's worker exit record"
+                    ),
+                }
                 if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                     let detail = format!("{error:#}");
                     let evidence = staged_login
@@ -591,8 +622,10 @@ impl Controller {
                     crate::database::fail_subagent_unpark(
                         session_id,
                         owner.operation_id(),
-                        &detail,
-                        evidence.as_ref(),
+                        SubagentUnparkFailure::Retryable {
+                            detail: &detail,
+                            evidence: evidence.as_ref(),
+                        },
                     )?;
                     anyhow::bail!("{detail}");
                 }
@@ -728,7 +761,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-                supervisor: false,
+                orchestrator: false,
             },
         )
         .unwrap();
@@ -949,8 +982,10 @@ mod tests {
                     crate::database::fail_subagent_unpark(
                         LATCH_RELAY_SESSION,
                         "stale-owner",
-                        detail,
-                        Some(&evidence)
+                        SubagentUnparkFailure::Retryable {
+                            detail,
+                            evidence: Some(&evidence),
+                        }
                     )
                     .is_err()
                 );
@@ -961,8 +996,10 @@ mod tests {
                 crate::database::fail_subagent_unpark(
                     LATCH_RELAY_SESSION,
                     owner.operation_id(),
-                    detail,
-                    Some(&evidence),
+                    SubagentUnparkFailure::Retryable {
+                        detail,
+                        evidence: Some(&evidence),
+                    },
                 )
                 .unwrap();
                 let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
@@ -1625,7 +1662,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-                supervisor: false,
+                orchestrator: false,
             },
         )
         .unwrap();

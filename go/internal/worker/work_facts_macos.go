@@ -12,9 +12,11 @@ package worker
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -23,7 +25,54 @@ import (
 // parseElapsedSecs reads `[[dd-]hh:]mm:ss` as `ps -o etime` prints it;
 // false when it is malformed or overflows.
 func parseElapsedSecs(text string) (int64, bool) {
-	panic("unported: mj-worker/src/work_facts/macos.rs parse_elapsed_secs")
+	days, clock := int64(0), text
+	if before, after, ok := strings.Cut(text, "-"); ok {
+		parsed, err := strconv.ParseInt(before, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		days, clock = parsed, after
+	}
+	seconds := int64(0)
+	for _, part := range strings.Split(clock, ":") {
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		var ok bool
+		if seconds, ok = macosCheckedMul(seconds, 60); !ok {
+			return 0, false
+		}
+		if seconds, ok = macosCheckedAdd(seconds, value); !ok {
+			return 0, false
+		}
+	}
+	total, ok := macosCheckedMul(days, 86_400)
+	if !ok {
+		return 0, false
+	}
+	return macosCheckedAdd(total, seconds)
+}
+
+// macosCheckedMul is Rust's i64::checked_mul.
+func macosCheckedMul(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	product := a * b
+	if product/b != a || (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
+		return 0, false
+	}
+	return product, true
+}
+
+// macosCheckedAdd is Rust's i64::checked_add.
+func macosCheckedAdd(a, b int64) (int64, bool) {
+	sum := a + b
+	if (b > 0 && sum < a) || (b < 0 && sum > a) {
+		return 0, false
+	}
+	return sum, true
 }
 
 // ownPsCommand is the command line ps shows for itself when run with args.
@@ -43,7 +92,7 @@ func ps(args []string) (string, error) {
 	if !output.Status.Success() {
 		return "", fmt.Errorf("ps failed with %s", workFactsExitStatus(output.Status))
 	}
-	return captureLossy(output.Stdout), nil
+	return fromUTF8Lossy(output.Stdout), nil
 }
 
 // listing is the ps arguments of the scan's process listing.

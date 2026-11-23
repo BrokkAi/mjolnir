@@ -1288,3 +1288,98 @@ func TestRestoreRewritesKimiWorkspaceAndStateForTargetWorkspace(t *testing.T) {
 		t.Fatalf("sessionDir = %v", dir)
 	}
 }
+
+// Hard-won: #1622: Kimi ACP sessions run without workspaces.json and failed checkpoint export
+func TestKimiCheckpointExportAndRestoreSucceedWithoutWorkspacesRegistry(t *testing.T) {
+	temp := t.TempDir()
+	spec, archivePath := checkpointFixture(t, temp)
+	kimiNative := "session_" + checkpointTestNative
+	spec.Session.HarnessKind = core.HarnessKindKimi
+	spec.Session.ProfileID = "kimi-1"
+	spec.Session.NativeSessionID = kimiNative
+	spec.HarnessHome = filepath.Join(temp, "kimi-home")
+	sourceWorkspace := "wd_source_1234567890ab"
+	sessionDir := filepath.Join(spec.HarnessHome, "sessions", sourceWorkspace, kimiNative)
+	checkpointMkdirAll(t, filepath.Join(sessionDir, "agents/main"))
+	checkpointWriteFile(t, filepath.Join(sessionDir, "state.json"), []byte(`{"workDir":"/source/app","cwd":"/source/app"}`))
+	checkpointWriteFile(t, filepath.Join(sessionDir, "agents/main/wire.jsonl"), []byte("{}\n"))
+	indexLine := checkpointMust(json.Marshal(struct {
+		SessionID  string `json:"sessionId"`
+		WorkDir    string `json:"workDir"`
+		SessionDir string `json:"sessionDir"`
+	}{kimiNative, "/source/app", sessionDir}))(t)
+	checkpointWriteFile(t, filepath.Join(spec.HarnessHome, "session_index.jsonl"), append(indexLine, '\n'))
+
+	checkpointMust(ExportCheckpoint(&spec))(t)
+
+	targetWorkspaceRoot := filepath.Join(temp, "restored-workspace")
+	targetCwd := filepath.Join(targetWorkspaceRoot, "app")
+	checkpointMkdirAll(t, targetCwd)
+	restoredHome := filepath.Join(temp, "restored-kimi-home")
+	checkpointNoError(t, RestoreCheckpoint(&CheckpointRestoreSpec{
+		ArchivePath:         archivePath,
+		WorkspaceRoot:       targetWorkspaceRoot,
+		RelayRoot:           filepath.Join(temp, "restored-relay"),
+		HarnessHome:         restoredHome,
+		RestoreRepositories: false,
+		RestoreNative:       true,
+		QueuePolicy:         QueueRestorePolicyRestore,
+	}, SystemGit{}))
+
+	if checkpointExists(filepath.Join(restoredHome, "workspaces.json")) {
+		t.Fatal("a workspace registry was restored")
+	}
+	expectedStateRelative := checkpointMust(restoredNativeRelativePath(
+		core.HarnessKindKimi,
+		fmt.Sprintf("sessions/%s/session_%s/state.json", sourceWorkspace, checkpointTestNative),
+		&targetCwd,
+	))(t)
+	restoredState := checkpointReadFile(t, filepath.Join(restoredHome, expectedStateRelative))
+	if workDir := checkpointJSONString(t, restoredState, "workDir"); workDir != targetCwd {
+		t.Fatalf("workDir = %v", workDir)
+	}
+	if cwd := checkpointJSONString(t, restoredState, "cwd"); cwd != targetCwd {
+		t.Fatalf("cwd = %v", cwd)
+	}
+	restoredIndex := checkpointReadFile(t, filepath.Join(restoredHome, "session_index.jsonl"))
+	if workDir := checkpointJSONString(t, restoredIndex, "workDir"); workDir != targetCwd {
+		t.Fatalf("index workDir = %v", workDir)
+	}
+	stateParent, _ := checkpointParent(expectedStateRelative)
+	if dir := checkpointJSONString(t, restoredIndex, "sessionDir"); dir != core.Join(restoredHome, stateParent) {
+		t.Fatalf("index sessionDir = %v", dir)
+	}
+
+	// Also succeed when session_index.jsonl is absent.
+	if err := os.Remove(filepath.Join(spec.HarnessHome, "session_index.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	archiveWithoutIndex := filepath.Join(temp, "worker/no-index.hel.zip")
+	spec.OutputPath = archiveWithoutIndex
+	checkpointMust(ExportCheckpoint(&spec))(t)
+
+	restoredHomeNoIndex := filepath.Join(temp, "restored-kimi-home-no-index")
+	checkpointNoError(t, RestoreCheckpoint(&CheckpointRestoreSpec{
+		ArchivePath:         archiveWithoutIndex,
+		WorkspaceRoot:       targetWorkspaceRoot,
+		RelayRoot:           filepath.Join(temp, "restored-relay-no-index"),
+		HarnessHome:         restoredHomeNoIndex,
+		RestoreRepositories: false,
+		RestoreNative:       true,
+		QueuePolicy:         QueueRestorePolicyRestore,
+	}, SystemGit{}))
+
+	if checkpointExists(filepath.Join(restoredHomeNoIndex, "workspaces.json")) {
+		t.Fatal("a workspace registry was restored")
+	}
+	if checkpointExists(filepath.Join(restoredHomeNoIndex, "session_index.jsonl")) {
+		t.Fatal("a session index was restored")
+	}
+	restoredState = checkpointReadFile(t, filepath.Join(restoredHomeNoIndex, expectedStateRelative))
+	if workDir := checkpointJSONString(t, restoredState, "workDir"); workDir != targetCwd {
+		t.Fatalf("workDir = %v", workDir)
+	}
+	if cwd := checkpointJSONString(t, restoredState, "cwd"); cwd != targetCwd {
+		t.Fatalf("cwd = %v", cwd)
+	}
+}

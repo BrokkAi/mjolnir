@@ -352,21 +352,6 @@ impl RuntimeState {
                         default_targets: controller.config.default_targets.clone(),
                         container_sizes: controller.state.container_sizes.clone(),
                         last_oracle_choices: controller.state.last_oracle_choices.clone(),
-                        last_supervisor_choices: controller.state.last_supervisor_choices.clone(),
-                        supervisors_available: controller
-                            .config
-                            .targets
-                            .iter()
-                            .map(|(id, target)| {
-                                (
-                                    id.clone(),
-                                    controller.config.supervisors_available_for_target(
-                                        None,
-                                        target.execution_policy(),
-                                    ),
-                                )
-                            })
-                            .collect(),
                         mount_history: controller.state.mount_history.clone(),
                         last_subagent_policies: controller.state.last_subagent_policies.clone(),
                         lifecycles,
@@ -1317,6 +1302,7 @@ mod tests {
         let mut history = RuntimeHistory::default();
         let mut runtime = RuntimeProjection::default();
         for id in ["active", "unchanged"] {
+            runtime.environment_owners.insert(id.into(), id.into());
             runtime
                 .records
                 .insert(id.into(), record(id, SessionState::Running));
@@ -1385,6 +1371,7 @@ mod tests {
 
         let id = "session";
         let state = super::super::tests::test_runtime_state_holding(mj_core::state::State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.to_owned(), record(id, SessionState::Running))].into(),
             ..Default::default()
         });
@@ -1408,6 +1395,7 @@ mod tests {
             window_start_seq: 0,
             reset: false,
             entries: vec![Arc::new(BrowserTranscriptEntry {
+                tool_detail_trimmed: false,
                 command_id: None,
                 stable_id: None,
                 id: seq,
@@ -1508,6 +1496,7 @@ mod tests {
         record.target_template_id = "local".into();
         let config = super::super::tests::runtime_test_config();
         let mut records = State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.into(), record)].into(),
             ..Default::default()
         };

@@ -167,7 +167,6 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
             resource_allocation: None,
             subagents: None,
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
         },
         source_profile_id: "p1".to_owned(),
@@ -276,6 +275,10 @@ fn in_place_protocol_gate_and_deferred_notice_contract() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoint() {
     let name = crate::controller::test_support::test_name(
         module_path!(),
@@ -954,7 +957,7 @@ fn parent_move_reports_only_workers_in_its_environment() {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: true,
-                    supervisor: owner == id,
+                    orchestrator: owner == id,
                     resume_with_parent: false,
                 }
                 .into(),

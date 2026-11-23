@@ -282,7 +282,6 @@ fn sample_state() -> State {
     let session = SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -340,7 +339,6 @@ fn sample_state() -> State {
     };
     State {
         last_oracle_choices: Default::default(),
-        last_supervisor_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         version: STATE_VERSION,
@@ -689,7 +687,7 @@ fn ledger_ownership_controls_checkout_project_and_review_across_logical_ancestry
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         },
     );
     let mut owned = checkout_session("owned");
@@ -799,7 +797,7 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         },
     );
     let native = crate::native_agent::view_id(&parent.id, "a0c7080aee7ead7c5:generation:2");
@@ -837,7 +835,7 @@ fn only_a_sub_agent_without_a_live_worker_is_stopped() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         },
     );
 
@@ -1033,7 +1031,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
                 created_at: child.created_at.clone(),
                 noticed_turn: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
                 reported_finish: None,
             },
         );
@@ -1845,7 +1843,7 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         },
     );
     for working_directory in [

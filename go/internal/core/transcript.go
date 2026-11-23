@@ -84,7 +84,8 @@ type TerminalRecord interface {
 func (r TerminalOutputRecord) GetTerminalID() string    { return r.TerminalID }
 func (r CanonicalTerminalOutput) GetTerminalID() string { return r.TerminalID }
 
-func newTerminalOutputs[R TerminalRecord]() *TerminalOutputs[R] {
+// NewTerminalOutputs is an empty join (Rust's TerminalOutputs::default).
+func NewTerminalOutputs[R TerminalRecord]() *TerminalOutputs[R] {
 	return &TerminalOutputs[R]{
 		standalone: map[string]R{},
 		tools:      map[string]terminalOutputsTool[R]{},
@@ -92,7 +93,9 @@ func newTerminalOutputs[R TerminalRecord]() *TerminalOutputs[R] {
 	}
 }
 
-func (o *TerminalOutputs[R]) tool(id string, embedded []R, refs []string) {
+// Tool records the embedded records and terminal references of the tool
+// item id.
+func (o *TerminalOutputs[R]) Tool(id string, embedded []R, refs []string) {
 	o.tools[id] = terminalOutputsTool[R]{embedded: embedded, refs: refs}
 	for _, ref := range refs {
 		o.referenced[ref] = struct{}{}
@@ -100,6 +103,12 @@ func (o *TerminalOutputs[R]) tool(id string, embedded []R, refs []string) {
 	for _, record := range embedded {
 		o.referenced[record.GetTerminalID()] = struct{}{}
 	}
+}
+
+// Standalone records a close-time record, which overrides the embedded
+// streaming record of the same terminal.
+func (o *TerminalOutputs[R]) Standalone(record R) {
+	o.standalone[record.GetTerminalID()] = record
 }
 
 // ForTool is the output shown under the tool item stableID.
@@ -181,13 +190,13 @@ func (o *TerminalOutputs[R]) ShownUnderTool(terminalID string) bool {
 
 // TerminalOutputsOf joins the terminal output of materialized items.
 func TerminalOutputsOf(items []TranscriptItem) *TerminalOutputs[TerminalOutputRecord] {
-	outputs := newTerminalOutputs[TerminalOutputRecord]()
+	outputs := NewTerminalOutputs[TerminalOutputRecord]()
 	for i := range items {
 		switch body := items[i].Body.(type) {
 		case TranscriptBodyTool:
-			outputs.tool(items[i].StableID, body.TerminalOutputs, body.TerminalRefs)
+			outputs.Tool(items[i].StableID, body.TerminalOutputs, body.TerminalRefs)
 		case TranscriptBodyTerminalOutput:
-			outputs.standalone[body.Record.TerminalID] = body.Record
+			outputs.Standalone(body.Record)
 		}
 	}
 	return outputs
@@ -195,13 +204,13 @@ func TerminalOutputsOf(items []TranscriptItem) *TerminalOutputs[TerminalOutputRe
 
 // TerminalOutputsOfCanonical joins the terminal output of archived items.
 func TerminalOutputsOfCanonical(items []CanonicalTranscriptItem) *TerminalOutputs[CanonicalTerminalOutput] {
-	outputs := newTerminalOutputs[CanonicalTerminalOutput]()
+	outputs := NewTerminalOutputs[CanonicalTerminalOutput]()
 	for i := range items {
 		switch body := items[i].Body.(type) {
 		case CanonicalTranscriptBodyTool:
-			outputs.tool(items[i].StableID, body.TerminalOutputs, body.TerminalRefs)
+			outputs.Tool(items[i].StableID, body.TerminalOutputs, body.TerminalRefs)
 		case CanonicalTranscriptBodyTerminalOutput:
-			outputs.standalone[body.Record.TerminalID] = body.Record
+			outputs.Standalone(body.Record)
 		}
 	}
 	return outputs
@@ -219,14 +228,45 @@ const (
 // ToolCallPresentation is bounded presentation metadata derived from an ACP
 // tool call.
 type ToolCallPresentation struct {
-	Summary    string                `json:"summary"`
-	Source     PackedText            `json:"source"`
+	Summary string `json:"summary"`
+	// Source: existing canonical transcript readers require the field even
+	// when empty.
+	Source     PackedText            `json:"source" serde:"default"`
 	SourceKind ToolSummarySourceKind `json:"source_kind"`
 	ToolKind   acp.ToolKind          `json:"tool_kind"`
 	// SummaryVersion is the version of the parser rules that produced
 	// Summary. A missing value identifies presentation metadata written
 	// before parser versioning.
 	SummaryVersion uint8 `json:"summary_version" serde:"default"`
+	// What a trimmed tool row still says about its call.
+	OutputLineCount *uint64           `json:"output_line_count,omitempty"`
+	FirstErrorLine  *string           `json:"first_error_line,omitempty"`
+	OutputIsError   *bool             `json:"output_is_error,omitempty"`
+	EditSnippets    []ToolEditSnippet `json:"edit_snippets,omitempty"`
+	DetailTrimmed   bool              `json:"detail_trimmed,omitempty"`
+}
+
+// DefaultToolCallPresentation is Rust's ToolCallPresentation::default: an
+// empty title-sourced presentation of an "other" tool.
+func DefaultToolCallPresentation() ToolCallPresentation {
+	return ToolCallPresentation{SourceKind: ToolSummarySourceKindTitle, ToolKind: acp.ToolKindOther}
+}
+
+// ToolEditKind is which file edit a tool row's snippet shows.
+type ToolEditKind string
+
+const (
+	ToolEditKindEdit         ToolEditKind = "edit"
+	ToolEditKindWrite        ToolEditKind = "write"
+	ToolEditKindMultiEdit    ToolEditKind = "multi_edit"
+	ToolEditKindNotebookEdit ToolEditKind = "notebook_edit"
+)
+
+// ToolEditSnippet is a bounded excerpt of one file edit.
+type ToolEditSnippet struct {
+	Path    string       `json:"path"`
+	Kind    ToolEditKind `json:"kind"`
+	Snippet string       `json:"snippet"`
 }
 
 func (p *ToolCallPresentation) UnmarshalJSON(data []byte) error {
@@ -249,6 +289,10 @@ type toolCallMetadata struct {
 	terminalIDs []string
 	fallback    bool
 	rawResult   *toolCallRawResult
+	// What TranscriptBodyIsLegacyCompactedTool reads.
+	hasRawInput     bool
+	hasRawOutput    bool
+	hasDroppedPatch bool
 }
 
 // toolCallRawResult is the exit code, output length and output digest of a
@@ -309,8 +353,19 @@ func OpaqueToolCallFromValue(value json.RawMessage) OpaqueToolCall {
 		var stable schema.ToolCall
 		if err := json.Unmarshal(value, &stable); err == nil {
 			metadata.fallback = IsFallbackTerminalToolCall(&stable)
+			for i := range stable.Content {
+				content := &stable.Content[i]
+				if content.Kind != schema.ToolCallContentKindDiff || content.Diff == nil {
+					continue
+				}
+				if patch := StoredPatch(content.Diff); patch != nil && patch.Text == "" && patch.Truncated {
+					metadata.hasDroppedPatch = true
+				}
+			}
 		}
 	}
+	_, metadata.hasRawInput = transcriptGet(parsed, "rawInput")
+	_, metadata.hasRawOutput = transcriptGet(parsed, "rawOutput")
 	metadata.rawResult = toolCallRawResultOf(parsed)
 	return OpaqueToolCall{json: NewPackedText(text), metadata: metadata}
 }
@@ -515,6 +570,163 @@ type TranscriptBodyTool struct {
 // output is never dropped.
 type TranscriptBodyTerminalOutput struct {
 	Record TerminalOutputRecord `json:"record"`
+	// What a trimmed row still says about its output.
+	OutputLineCount *uint64 `json:"output_line_count,omitempty"`
+	FirstErrorLine  *string `json:"first_error_line,omitempty"`
+	DetailTrimmed   bool    `json:"detail_trimmed,omitempty"`
+}
+
+// TranscriptBodyTerminalOutputOf is Rust's TranscriptBody::terminal_output:
+// a standalone record with nothing trimmed.
+func TranscriptBodyTerminalOutputOf(record TerminalOutputRecord) TranscriptBodyTerminalOutput {
+	return TranscriptBodyTerminalOutput{Record: record}
+}
+
+// TranscriptBodyDetailTrimmed is Rust's TranscriptBody::detail_trimmed:
+// whether retention recorded that this row's detail was trimmed.
+func TranscriptBodyDetailTrimmed(body TranscriptBody) bool {
+	switch typed := body.(type) {
+	case TranscriptBodyTool:
+		return typed.Presentation != nil && typed.Presentation.DetailTrimmed
+	case TranscriptBodyTerminalOutput:
+		return typed.DetailTrimmed
+	}
+	return false
+}
+
+// TranscriptBodyIsLegacyCompactedTool is Rust's
+// TranscriptBody::is_legacy_compacted_tool: it recognizes rows compacted
+// before retention recorded an explicit marker.
+func TranscriptBodyIsLegacyCompactedTool(body TranscriptBody) bool {
+	tool, ok := body.(TranscriptBodyTool)
+	if !ok {
+		return false
+	}
+	presentation := tool.Presentation
+	if presentation != nil && presentation.DetailTrimmed {
+		return false
+	}
+	metadata := tool.Call.metadata
+	if metadata == nil {
+		metadata = &toolCallMetadata{}
+	}
+	if presentation != nil {
+		switch presentation.SourceKind {
+		case ToolSummarySourceKindRawInput:
+			if !metadata.hasRawInput {
+				return true
+			}
+		case ToolSummarySourceKindRawOutput:
+			if !metadata.hasRawOutput {
+				return true
+			}
+		}
+	}
+	return metadata.hasDroppedPatch
+}
+
+// TranscriptBodyHasTrimmedDetail is Rust's
+// TranscriptBody::has_trimmed_detail.
+func TranscriptBodyHasTrimmedDetail(body TranscriptBody) bool {
+	return TranscriptBodyDetailTrimmed(body) || TranscriptBodyIsLegacyCompactedTool(body)
+}
+
+// TranscriptBodyRole is Rust's TranscriptBody::role.
+func TranscriptBodyRole(body TranscriptBody) TranscriptRole {
+	switch body.(type) {
+	case TranscriptBodyUser:
+		return TranscriptRoleUser
+	case TranscriptBodyAgent:
+		return TranscriptRoleAgent
+	case TranscriptBodyMessage:
+		return TranscriptRoleMessage
+	case TranscriptBodyThought:
+		return TranscriptRoleThought
+	case TranscriptBodyTool:
+		return TranscriptRoleTool
+	case TranscriptBodyTerminalOutput:
+		return TranscriptRoleTerminal
+	case TranscriptBodyPlan:
+		return TranscriptRolePlan
+	case TranscriptBodyPlanProposal:
+		return TranscriptRolePlanProposal
+	case TranscriptBodySystem:
+		return TranscriptRoleSystem
+	}
+	return ""
+}
+
+// ToolCallDetailResult is the full stored detail of one tool row, or why it
+// is unavailable. Tagged by "status".
+type ToolCallDetailResult interface {
+	json.Marshaler
+	isToolCallDetailResult()
+}
+
+// ToolCallDetailResultFull is the row's untrimmed body.
+type ToolCallDetailResultFull struct {
+	Body TranscriptBody `json:"body"`
+}
+
+// ToolCallDetailResultUnavailable says why the full detail cannot be shown.
+// Summary, when present, is the body the row still has.
+type ToolCallDetailResultUnavailable struct {
+	Summary TranscriptBody `json:"summary,omitempty"`
+	Reason  string         `json:"reason"`
+}
+
+func (ToolCallDetailResultFull) isToolCallDetailResult()        {}
+func (ToolCallDetailResultUnavailable) isToolCallDetailResult() {}
+
+func (r ToolCallDetailResultFull) MarshalJSON() ([]byte, error) {
+	type plain ToolCallDetailResultFull
+	return transcriptMarshalTagged("status", "full", plain(r))
+}
+
+func (r ToolCallDetailResultUnavailable) MarshalJSON() ([]byte, error) {
+	type plain ToolCallDetailResultUnavailable
+	return transcriptMarshalTagged("status", "unavailable", plain(r))
+}
+
+// DecodeToolCallDetailResult reads a ToolCallDetailResult, tagged by
+// "status".
+func DecodeToolCallDetailResult(data []byte) (ToolCallDetailResult, error) {
+	tag, err := transcriptTag(data, "status", "ToolCallDetailResult")
+	if err != nil {
+		return nil, err
+	}
+	switch tag {
+	case "full":
+		var v struct {
+			Body json.RawMessage `json:"body"`
+		}
+		if err := transcriptStrictDecode(data, &v, false, "status"); err != nil {
+			return nil, err
+		}
+		body, err := DecodeTranscriptBody(v.Body)
+		if err != nil {
+			return nil, err
+		}
+		return ToolCallDetailResultFull{Body: body}, nil
+	case "unavailable":
+		var v struct {
+			Summary json.RawMessage `json:"summary" serde:"default"`
+			Reason  string          `json:"reason"`
+		}
+		if err := transcriptStrictDecode(data, &v, false, "status"); err != nil {
+			return nil, err
+		}
+		result := ToolCallDetailResultUnavailable{Reason: v.Reason}
+		if len(v.Summary) > 0 && string(v.Summary) != "null" {
+			summary, err := DecodeTranscriptBody(v.Summary)
+			if err != nil {
+				return nil, err
+			}
+			result.Summary = summary
+		}
+		return result, nil
+	}
+	return nil, transcriptUnknownVariant(tag, "full", "unavailable")
 }
 
 type TranscriptBodyPlan struct {
@@ -767,6 +979,25 @@ func (r *TerminalOutputRecord) UnmarshalJSON(data []byte) error {
 	return transcriptStrictDecode(data, (*plain)(r), false)
 }
 
+// TerminalOutputRecordFromCanonical is Rust's
+// From<&CanonicalTerminalOutput> for TerminalOutputRecord.
+func TerminalOutputRecordFromCanonical(record *CanonicalTerminalOutput) TerminalOutputRecord {
+	converted := TerminalOutputRecord{
+		TerminalID: record.TerminalID,
+		Output:     NewPackedText(record.Output),
+		Truncated:  record.Truncated,
+	}
+	if record.ExitCode != nil {
+		code := *record.ExitCode
+		converted.ExitCode = &code
+	}
+	if record.Signal != nil {
+		signal := *record.Signal
+		converted.Signal = &signal
+	}
+	return converted
+}
+
 // RawResultDigest is computed once before comparing one terminal event with
 // the tool window.
 func (r *TerminalOutputRecord) RawResultDigest() [32]byte {
@@ -990,8 +1221,12 @@ type ChatEntry struct {
 	Revision        uint64        `json:"revision"`
 	MessageID       *string       `json:"message_id"`
 	IncomingMessage *MailboxEvent `json:"incoming_message,omitempty"`
-	ToolCallID      *string       `json:"tool_call_id"`
-	ToolStatus      *ToolStatus   `json:"tool_status"`
+	// StableID and ToolDetailTrimmed: the stored item a row shows, and
+	// whether its detail was trimmed.
+	StableID          *string     `json:"stable_id,omitempty"`
+	ToolDetailTrimmed bool        `json:"tool_detail_trimmed,omitempty"`
+	ToolCallID        *string     `json:"tool_call_id"`
+	ToolStatus        *ToolStatus `json:"tool_status"`
 	// ToolSummary is the compact label used by Rich and browser projections.
 	// Text remains the original provider title for Raw mode.
 	ToolSummary *string `json:"tool_summary,omitempty"`
@@ -1363,28 +1598,7 @@ func (r TranscriptRole) StorageKind() string {
 }
 
 func TranscriptItemRole(body TranscriptBody) string {
-	var role TranscriptRole
-	switch body.(type) {
-	case TranscriptBodyUser:
-		role = TranscriptRoleUser
-	case TranscriptBodyAgent:
-		role = TranscriptRoleAgent
-	case TranscriptBodyMessage:
-		role = TranscriptRoleMessage
-	case TranscriptBodyThought:
-		role = TranscriptRoleThought
-	case TranscriptBodyTool:
-		role = TranscriptRoleTool
-	case TranscriptBodyTerminalOutput:
-		role = TranscriptRoleTerminal
-	case TranscriptBodyPlan:
-		role = TranscriptRolePlan
-	case TranscriptBodyPlanProposal:
-		role = TranscriptRolePlanProposal
-	case TranscriptBodySystem:
-		role = TranscriptRoleSystem
-	}
-	return role.AsStr()
+	return TranscriptBodyRole(body).AsStr()
 }
 
 func MessageItemID(eventKey string) string { return "message:" + eventKey }

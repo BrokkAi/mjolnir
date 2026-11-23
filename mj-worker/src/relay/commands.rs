@@ -642,6 +642,23 @@ impl DurableRelay {
                 None,
             )));
         }
+        // A wake is known by its ID wherever its type is gone: restored from a
+        // checkpoint or replayed, it is a plain prompt under its wake ID. So a
+        // wake needs that ID, and that ID names only a wake or such a prompt.
+        let wake_id = mj_core::continuation::carries_mailbox_wake(command_id);
+        let misnamed = match &command {
+            RelayCommand::MailboxWake { .. } => !wake_id,
+            RelayCommand::Prompt { .. } => false,
+            _ => wake_id,
+        };
+        if misnamed {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidRequest,
+                "a mailbox-wake command ID names only a mailbox wake or the prompt it was saved as",
+                false,
+                None,
+            )));
+        }
         let command = if let RelayCommand::Prompt { prompt } = &command {
             if let Some((maintenance, args)) = mj_core::acp::context_command(prompt) {
                 if prompt.len() != 1

@@ -561,6 +561,9 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
     }));
+    state
+        .environment_owners
+        .insert(record.id.clone(), record.id.clone());
     state.sessions.insert(record.id.clone(), record);
     state.mount_history.insert(
         "local".into(),
@@ -616,6 +619,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 65);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -688,6 +692,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 53);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -787,6 +792,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 46);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -2205,6 +2211,7 @@ fn materialized_session_round_trip_preserves_typed_projection() {
                 source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
                 tool_kind: agent_client_protocol::v1::schema::ToolKind::Execute,
                 summary_version: 0,
+                ..Default::default()
             }));
         }
     }
@@ -5331,6 +5338,7 @@ fn review_state_migration_moves_the_open_review_and_findings_into_lists() {
 
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_pre145_review_columns(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "DELETE FROM schema_migrations WHERE version >= 145;
@@ -6659,7 +6667,7 @@ pub(super) fn test_subagent(parent_id: &str, child_id: &str) -> SubagentRecord {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     }
 }
 
@@ -6759,6 +6767,7 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         let mut without_child = with_child.clone();
         without_child.sessions.remove(&child.id);
         without_child.subagents.remove(&child.id);
+        without_child.environment_owners.remove(&child.id);
         without_child
             .mount_history
             .insert("host".into(), vec![directory.path().join("without-child")]);
@@ -7133,6 +7142,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
     schema::restore_review_state_schema(&raw, 43);
+    schema::restore_pre153_transcript_layout(&raw);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -7749,7 +7759,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
             let (parked_id, body) = if standalone {
                 (
                     "terminal:late-terminal".to_owned(),
-                    TranscriptBody::TerminalOutput { record },
+                    TranscriptBody::terminal_output(record),
                 )
             } else {
                 (
@@ -8151,6 +8161,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
     schema::restore_review_state_schema(&raw, 52);
+    schema::restore_pre153_transcript_layout(&raw);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema
@@ -8263,69 +8274,52 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
 }
 
 #[test]
-fn supervisors_preference_survives_reopen_and_profile_rename() {
+fn schema_orchestrator_policy_survives_reopen_and_profile_rename() {
     use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("supervisors.sqlite3");
-    let mut record = session("sup-parent", "project");
+    let path = directory.path().join("orchestrators.sqlite3");
+    let mut record = session("parent", "project");
+    record.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: true,
+        straightforward: None,
+        subtle: None,
+    });
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert!(
+        state.sessions[&record.id]
+            .subagents
+            .as_ref()
+            .unwrap()
+            .orchestrators_enabled()
+    );
+    assert!(state.last_subagent_policies[&record.last_profile].orchestrators_enabled());
+
+    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
+    let renamed = load_state_from(&path).unwrap();
+    assert!(renamed.last_subagent_policies["renamed"].orchestrators_enabled());
+    assert!(
+        !renamed
+            .last_subagent_policies
+            .contains_key(&record.last_profile)
+    );
+
+    let mut record = renamed.sessions[&record.id].clone();
     record.subagents = Some(SubagentPolicy::Mjolnir {
         orchestrators: false,
         straightforward: None,
         subtle: None,
     });
-    record.supervisors = true;
-    save_new_session_to(&path, &record, None, true, false).unwrap();
-    let conn = open(&path).unwrap();
-    let schema = schema::read_schema_state(&conn).unwrap();
-    assert_eq!(schema.revision, SCHEMA_VERSION);
-    assert_eq!(
-        schema.minimum_compatible,
-        Some(schema::MINIMUM_COMPATIBLE_VERSION)
-    );
-    let state = load_state_from(&path).unwrap();
-    assert!(state.sessions[&record.id].supervisors);
-    let assert_policy = |state: &State, enabled| {
-        for policy in [
-            state.sessions[&record.id].subagents.as_ref().unwrap(),
-            &state.last_subagent_policies[&record.last_profile],
-        ] {
-            assert!(matches!(
-                policy,
-                SubagentPolicy::Mjolnir { orchestrators, .. } if *orchestrators == enabled
-            ));
-        }
-    };
-    assert_policy(&state, true);
-    assert_eq!(
-        state.last_supervisor_choices.get(&record.last_profile),
-        Some(&true)
-    );
-    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
-    let renamed = load_state_from(&path).unwrap();
-    assert_eq!(renamed.last_supervisor_choices.get("renamed"), Some(&true));
-    assert!(
-        !renamed
-            .last_supervisor_choices
-            .contains_key(&record.last_profile)
-    );
-    let mut record = renamed.sessions[&record.id].clone();
-    record.supervisors = false;
     save_new_session_to(&path, &record, None, true, false).unwrap();
     let disabled = load_state_from(&path).unwrap();
-    assert!(matches!(
-        disabled.sessions[&record.id].subagents,
-        Some(SubagentPolicy::Mjolnir {
-            orchestrators: false,
-            ..
-        })
-    ));
-    assert!(matches!(
-        disabled.last_subagent_policies[&record.last_profile],
-        SubagentPolicy::Mjolnir {
-            orchestrators: false,
-            ..
-        }
-    ));
+    assert!(
+        !disabled.sessions[&record.id]
+            .subagents
+            .as_ref()
+            .unwrap()
+            .orchestrators_enabled()
+    );
+    assert!(!disabled.last_subagent_policies["renamed"].orchestrators_enabled());
 }
 
 #[test]
@@ -8807,6 +8801,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
         ).unwrap();
     }
     schema::drop_environment_schema(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN no_github_credentials;
@@ -8879,7 +8874,7 @@ fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() 
             latest_content_event_ordinal: None,
             created_at_ms: 1,
             last_changed_at_ms: 1,
-            body: TranscriptBody::TerminalOutput { record },
+            body: TranscriptBody::terminal_output(record),
         });
         full.transcript = if output_first {
             vec![parked, owner.clone()]
@@ -9458,4 +9453,209 @@ fn closing_one_of_two_open_reviews_finishes_only_that_review() {
         )
         .unwrap();
     assert_eq!(other_handback, None, "A's report did not reach review-c");
+}
+
+#[test]
+fn interrupted_spill_leaves_inline_body_and_retry_commits_durable_detail() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "session-1";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+    let mut projection = MaterializedSession::empty(session_id);
+    projection.applied_event_ordinal = 10;
+    projection.applied_event_digest = event_digest(10);
+    let item = tool_item(4, "source.rs", "old\n", "new\n");
+    projection.transcript = vec![Arc::clone(&item)];
+    save_materialized_session_to(&path, &projection).unwrap();
+    let connection = open(&path).unwrap();
+    connection.execute_batch(
+        "CREATE TRIGGER stop_spill BEFORE UPDATE OF detail_offset ON materialized_transcript_items
+         WHEN NEW.detail_offset IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'interrupted after append'); END;"
+    ).unwrap();
+
+    let failure = spill_and_trim_settled_tools_through_from(&path, session_id, 10).unwrap_err();
+    assert!(format!("{failure:#}").contains("interrupted after append"));
+    let detail_path = directory.path().join("tool-details/session-1.mjtd");
+    let orphan_len = std::fs::metadata(&detail_path).unwrap().len();
+    assert!(orphan_len > 0);
+    assert_eq!(
+        read_stored_tool_detail_from(&path, session_id, &item).unwrap(),
+        None
+    );
+    assert_eq!(
+        load_materialized_session_from(&path, session_id)
+            .unwrap()
+            .unwrap()
+            .transcript
+            .as_slice(),
+        std::slice::from_ref(&item)
+    );
+
+    connection.execute_batch("DROP TRIGGER stop_spill").unwrap();
+    assert_eq!(
+        spill_and_trim_settled_tools_through_from(&path, session_id, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        read_stored_tool_detail_from(&path, session_id, &item).unwrap(),
+        Some(item.body.clone())
+    );
+    let offset: u64 = connection.query_row(
+        "SELECT detail_offset FROM materialized_transcript_items WHERE session_id = ?1 AND stable_id = ?2",
+        params![session_id, item.stable_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(offset, orphan_len);
+
+    let compact = load_materialized_session_from(&path, session_id)
+        .unwrap()
+        .unwrap();
+    save_materialized_session_to(&path, &compact).unwrap();
+    assert_eq!(
+        read_stored_tool_detail_from(&path, session_id, &item).unwrap(),
+        Some(item.body.clone())
+    );
+    connection
+        .execute_batch(
+            "CREATE TRIGGER stop_delete BEFORE DELETE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'interrupted delete'); END;",
+        )
+        .unwrap();
+    assert!(delete_session_from(&path, session_id).is_err());
+    assert!(detail_path.is_file());
+    connection
+        .execute_batch("DROP TRIGGER stop_delete")
+        .unwrap();
+    delete_session_from(&path, session_id).unwrap();
+    assert!(!detail_path.exists());
+}
+
+#[test]
+fn unsettled_fallback_terminal_defers_spilling_settled_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "session-fallback-defer";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+    let mut projection = MaterializedSession::empty(session_id);
+    projection.applied_event_ordinal = 10;
+    projection.applied_event_digest = event_digest(10);
+
+    let fallback = Arc::new(TranscriptItem {
+        stable_id: "tool:hel-terminal:term-1".into(),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_000,
+        last_changed_at_ms: 1_000,
+        body: TranscriptBody::Tool {
+            call: serde_json::to_value(mj_core::acp::fallback_terminal_tool_call(
+                "term-1",
+                "cargo test".into(),
+            ))
+            .unwrap()
+            .into(),
+            terminal_outputs: Vec::new(),
+            terminal_refs: vec!["term-1".into()],
+            presentation: None,
+        },
+    });
+    let provider_tool = tool_item(4, "source.rs", "old\n", "new\n");
+    projection.transcript = vec![Arc::clone(&fallback), Arc::clone(&provider_tool)];
+    save_materialized_session_to(&path, &projection).unwrap();
+
+    // While the fallback terminal tool is unsettled, settled tools stay inline so
+    // raw-result matching can claim the fallback when the terminal closes.
+    assert!(
+        spill_and_trim_settled_tools_through_from(&path, session_id, 10)
+            .unwrap()
+            .is_empty()
+    );
+    let loaded = load_materialized_session_from(&path, session_id)
+        .unwrap()
+        .unwrap();
+    assert!(!loaded.transcript[1].body.detail_trimmed());
+
+    // Once the fallback terminal is consumed and removed, the settled tool spills cleanly.
+    projection.transcript = vec![Arc::clone(&provider_tool)];
+    save_materialized_session_to(&path, &projection).unwrap();
+    let spilled = spill_and_trim_settled_tools_through_from(&path, session_id, 10).unwrap();
+    assert_eq!(spilled.len(), 1);
+    assert_eq!(spilled[0].0, provider_tool.stable_id);
+    assert!(spilled[0].1.detail_trimmed());
+}
+
+#[test]
+fn load_tool_call_detail_joins_spilled_referenced_standalone_terminal() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "session-referenced-terminal-detail";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+
+    let mut projection = MaterializedSession::empty(session_id);
+    projection.applied_event_ordinal = 10;
+    projection.applied_event_digest = event_digest(10);
+
+    let full_terminal_output = format!("authoritative stdout\n{}", "line\n".repeat(4_000));
+    let tool = Arc::new(TranscriptItem {
+        stable_id: "tool:cmd-1".into(),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_000,
+        last_changed_at_ms: 1_000,
+        body: TranscriptBody::Tool {
+            call: serde_json::json!({
+                "toolCallId": "cmd-1",
+                "title": "Run command",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": { "command": "cargo test", "padding": "x".repeat(8_000) }
+            })
+            .into(),
+            terminal_outputs: vec![mj_core::transcript::TerminalOutputRecord {
+                terminal_id: "term-1".into(),
+                output: "stale embedded output\n".into(),
+                truncated: false,
+                exit_code: None,
+                signal: None,
+            }],
+            terminal_refs: vec!["term-1".into()],
+            presentation: None,
+        },
+    });
+    let standalone = Arc::new(TranscriptItem {
+        stable_id: "terminal:term-1".into(),
+        position: 3,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_001,
+        last_changed_at_ms: 1_001,
+        body: TranscriptBody::terminal_output(mj_core::transcript::TerminalOutputRecord {
+            terminal_id: "term-1".into(),
+            output: full_terminal_output.clone().into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        }),
+    });
+    projection.transcript = vec![tool, standalone];
+    save_materialized_session_to(&path, &projection).unwrap();
+
+    let spilled = spill_and_trim_settled_tools_through_from(&path, session_id, 10).unwrap();
+    assert_eq!(spilled.len(), 2);
+
+    let detail = load_tool_call_detail_from(&path, session_id, "tool:cmd-1")
+        .unwrap()
+        .unwrap();
+    let mj_core::transcript::ToolCallDetailResult::Full {
+        body: TranscriptBody::Tool {
+            terminal_outputs, ..
+        },
+    } = detail
+    else {
+        panic!("expected hydrated tool detail with joined terminal output, got {detail:?}");
+    };
+    assert_eq!(terminal_outputs.len(), 1);
+    assert_eq!(terminal_outputs[0].terminal_id, "term-1");
+    assert_eq!(terminal_outputs[0].output.text(), full_terminal_output);
+    assert_eq!(terminal_outputs[0].exit_code, Some(0));
 }

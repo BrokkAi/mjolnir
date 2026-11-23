@@ -7,9 +7,15 @@
 package worker
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
+	"testing"
 
+	"github.com/BrokkAi/acp-go/jsonvalue"
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -22,7 +28,61 @@ const session = "018f9dd2-a3b4-7c8d-9000-123456789abc"
 // uncertain). background replaces the leftover-process distribution
 // [needed, unneeded, unclear] when a test needs a particular quiet judgment.
 func glideAnswer(expected string, background *[3]float64) core.Probabilities {
-	panic("unported: mj-worker/src/relay.rs test_support::glide_answer")
+	encoded, err := jsonvalue.Marshal(testSamples())
+	if err != nil {
+		panic(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var samples []map[string]any
+	if err := decoder.Decode(&samples); err != nil {
+		panic(err)
+	}
+	index := slices.IndexFunc(samples, func(sample map[string]any) bool { return sample["expected"] == expected })
+	if index < 0 {
+		panic(fmt.Sprintf("no recorded GLiDE answer for %s", expected))
+	}
+	answer := samples[index]
+	if background != nil {
+		answers := answer["answers"].(map[string]any)
+		axis, _ := answers["background"].(map[string]any)
+		if axis == nil {
+			axis = map[string]any{}
+			answers["background"] = axis
+		}
+		axis["probabilities"] = map[string]any{
+			"needed":   background[0],
+			"unneeded": background[1],
+			"unclear":  background[2],
+		}
+	}
+	rewritten, err := jsonvalue.Marshal(answer)
+	if err != nil {
+		panic(err)
+	}
+	value, err := jsonvalue.Parse(rewritten)
+	if err != nil {
+		panic(err)
+	}
+	probabilities, err := core.ProbabilitiesParse(value)
+	if err != nil {
+		panic(err)
+	}
+	return probabilities
+}
+
+// relayTempDir is t.TempDir for the root of a relay that is given a verdict
+// harness. Such a relay writes Jev diagnostics from the decision log's own
+// goroutine (Rust's writer thread), so the cleanup first drains that writer:
+// the directory is removed only after the writes queued during the test have
+// landed.
+func relayTempDir(t *testing.T) string {
+	root := t.TempDir()
+	t.Cleanup(func() {
+		// The read is ordered after every queued write; its answer is unused.
+		_, _ = core.JevRead(filepath.Join(root, "jev-decisions"), session, nil)
+	})
+	return root
 }
 
 func relayRequest(requestID string, request core.RelayRequest) core.RelayRequestEnvelope {

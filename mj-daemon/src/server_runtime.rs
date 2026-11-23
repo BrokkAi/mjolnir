@@ -79,7 +79,7 @@ use actions::*;
 mod project_sources;
 pub(crate) use project_sources::ProjectSourceKey;
 use project_sources::*;
-mod snapshot;
+pub(crate) mod snapshot;
 pub(crate) use crate::server::phone_prompt_blocks;
 use snapshot::*;
 

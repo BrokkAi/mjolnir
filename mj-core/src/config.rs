@@ -724,7 +724,7 @@ impl ReviewConfig {
 }
 
 fn default_subagent_limit() -> usize {
-    6
+    8
 }
 
 fn is_default_subagent_limit(value: &usize) -> bool {
@@ -737,7 +737,7 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "SubagentConfigInput")]
 pub struct SubagentConfig {
-    /// Choices for top-level primary auto-launch and supervisor sub-agents.
+    /// Choices for top-level primary auto-launch and orchestrators.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary: Vec<SubagentChoice>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -891,7 +891,7 @@ impl Default for SubagentConfig {
 }
 
 impl SubagentConfig {
-    /// Choices configured for top-level primary auto-launch and supervisors.
+    /// Choices configured for top-level primary auto-launch and orchestrators.
     pub fn primary_choices(&self) -> &[SubagentChoice] {
         &self.primary
     }
@@ -909,7 +909,7 @@ impl SubagentConfig {
             crate::subagent::SubagentTaskType::Straightforward => &self.straightforward,
             crate::subagent::SubagentTaskType::Subtle => &self.subtle,
             crate::subagent::SubagentTaskType::Oracle => &self.oracle,
-            crate::subagent::SubagentTaskType::Supervisor => &self.primary,
+            crate::subagent::SubagentTaskType::Orchestrator => &self.primary,
         }
     }
 
@@ -1113,56 +1113,9 @@ impl Config {
         ))
     }
 
-    /// Whether a target with `execution_policy` can run depth-1 supervisors.
-    ///
-    /// True iff `subagents.max_concurrent >= 2`, `subagents.straightforward` is
-    /// configured, and at least one enabled profile matching a configured
-    /// `subagents.primary` choice supports delegation tools and is allowed to
-    /// run under `execution_policy`. When `offered_models` contains discovered
-    /// models for a profile, matching uses those models; otherwise it falls
-    /// back to provider matching so availability works before discovery.
-    pub fn supervisors_available_for_target(
-        &self,
-        offered_models: Option<&BTreeMap<String, Vec<String>>>,
-        execution_policy: ExecutionPolicy,
-    ) -> bool {
-        if self.subagents.max_concurrent < 2
-            || !self.subagents.is_configured()
-            || !self.subagents.primary_configured()
-        {
-            return false;
-        }
-        self.enabled_profiles().any(|(profile_id, profile)| {
-            if !profile.kind.supports_delegation_tools() {
-                return false;
-            }
-            if execution_policy != ExecutionPolicy::Unconstrained
-                && profile.kind.guardian() != GuardianReviewer::Harness
-            {
-                return false;
-            }
-            let discovered = offered_models
-                .and_then(|map| map.get(profile_id))
-                .filter(|models| !models.is_empty());
-            self.subagents.primary.iter().any(|choice| {
-                let model = choice.model.trim();
-                if model.is_empty() {
-                    return false;
-                }
-                if let Some(models) = discovered {
-                    let normalized = crate::model_catalog::normalize_model(model);
-                    models.iter().any(|offered| {
-                        crate::model_catalog::normalize_model(offered) == normalized
-                            || model_matches_scope(offered, model)
-                    })
-                } else {
-                    match crate::model_catalog::model_provider(model) {
-                        Some(choice_provider) => choice_provider == profile.quota_provider(),
-                        None => true,
-                    }
-                }
-            })
-        })
+    /// Whether the orchestrator pool is configured.
+    pub fn orchestrators_configured(&self) -> bool {
+        !self.subagents.primary.is_empty()
     }
 
     /// The models this configuration selects on profile `id`, whose efforts

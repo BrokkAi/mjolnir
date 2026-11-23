@@ -653,6 +653,12 @@ pub enum CanonicalTranscriptBody {
     /// Terminal output no tool call refers to.
     TerminalOutput {
         record: CanonicalTerminalOutput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_line_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_error_line: Option<String>,
+        #[serde(default, skip_serializing_if = "crate::transcript::is_false")]
+        detail_trimmed: bool,
     },
     Plan {
         /// Complete current ACP `Plan` value.
@@ -1061,7 +1067,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
                     );
                 }
             }
-            CanonicalTranscriptBody::TerminalOutput { record } => {
+            CanonicalTranscriptBody::TerminalOutput { record, .. } => {
                 validate_canonical_terminal_output(record, &item.stable_id)?;
             }
             CanonicalTranscriptBody::Plan { plan } => {

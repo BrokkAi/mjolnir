@@ -237,6 +237,48 @@ func NormalizeModel(model string) string {
 	return strings.TrimSuffix(model, ":0")
 }
 
+// ModelProvider maps a model name or identity to its owning QuotaProvider,
+// if it belongs to a known model family.
+func ModelProvider(model string) QuotaProvider {
+	normalized := NormalizeModel(strings.TrimSpace(model))
+	base, _, _ := strings.Cut(normalized, "[")
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return nil
+	}
+	startsWithToken := func(prefix string) bool {
+		rest, ok := strings.CutPrefix(base, prefix)
+		return ok && (rest == "" || strings.ContainsRune("-_./", rune(rest[0])))
+	}
+	hasPrefix := func(prefixes ...string) bool {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(base, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case hasPrefix("claude", "opus", "sonnet", "haiku", "fable", "mythos"):
+		return QuotaProviderAnthropic{}
+	case hasPrefix("gpt") || startsWithToken("o1") || startsWithToken("o3") || startsWithToken("o4"):
+		return QuotaProviderOpenAI{}
+	case hasPrefix("gemini", "argon", "g1-"):
+		return QuotaProviderGoogle{}
+	case hasPrefix("grok"):
+		return QuotaProviderXAI{}
+	case hasPrefix("kimi") || startsWithToken("k2") || startsWithToken("k3"):
+		return QuotaProviderMoonshot{}
+	case hasPrefix("deepseek"):
+		return QuotaProviderDeepSeek{}
+	case hasPrefix("glm"):
+		return QuotaProviderZai{}
+	case hasPrefix("muse"):
+		return QuotaProviderMeta{}
+	}
+	return nil
+}
+
 // modelCatalogCutFirstPrefix removes the first of prefixes that value starts
 // with.
 func modelCatalogCutFirstPrefix(value string, prefixes ...string) string {

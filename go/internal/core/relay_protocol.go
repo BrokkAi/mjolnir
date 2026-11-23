@@ -343,6 +343,8 @@ func ReviewerRequestActionName(request ReviewerRequest) string {
 		return "reviewer_record_overridden"
 	case ReviewerRequestSetReviewBase:
 		return "reviewer_set_review_base"
+	case ReviewerRequestResolveRepositories:
+		return "reviewer_resolve_repositories"
 	}
 	panic(fmt.Sprintf("unknown reviewer request %T", request))
 }
@@ -351,16 +353,32 @@ func RelayRequestMethodName(request RelayRequest) string {
 	switch request := request.(type) {
 	case RelayRequestHello:
 		return "hello"
+	case RelayRequestAntigravityStop:
+		return "antigravity_stop"
 	case RelayRequestAttach:
 		return "attach"
 	case RelayRequestAcknowledge:
 		return "acknowledge"
 	case RelayRequestSubmit:
 		return "submit"
+	case RelayRequestHoldInPlaceMoveDispatch:
+		return "hold_in_place_move_dispatch"
+	case RelayRequestDiscardHeldMoveCommands:
+		return "discard_held_move_commands"
+	case RelayRequestSubmitFront:
+		return "submit_front"
+	case RelayRequestReleaseInPlaceMoveDispatch:
+		return "release_in_place_move_dispatch"
+	case RelayRequestRestartHarnessInPlace:
+		return "restart_harness_in_place"
 	case RelayRequestReadPendingElicitation:
 		return "read_pending_elicitation"
 	case RelayRequestReadQueuedCommand:
 		return "read_queued_command"
+	case RelayRequestReadCheckpointMailbox:
+		return "read_checkpoint_mailbox"
+	case RelayRequestReadCheckpointNativeUse:
+		return "read_checkpoint_native_use"
 	case RelayRequestBeginLiveBaseline:
 		return "begin_live_baseline"
 	case RelayRequestReadLiveBaselinePage:
@@ -447,6 +465,10 @@ func RelayRequestMethodName(request RelayRequest) string {
 		return "history_requests"
 	case RelayRequestCompleteHistoryRequest:
 		return "complete_history_request"
+	case RelayRequestGuardianRequests:
+		return "guardian_requests"
+	case RelayRequestCompleteGuardianRequest:
+		return "complete_guardian_request"
 	case RelayRequestCompleteSubagentRequest:
 		return "complete_subagent_request"
 	case RelayRequestReviewer:
@@ -462,6 +484,8 @@ func RelayRequestMethodName(request RelayRequest) string {
 // project-memory replacement in protocol 31.
 func RelayRequestMinimumProtocol(request RelayRequest) uint32 {
 	switch request := request.(type) {
+	case RelayRequestAntigravityStop:
+		return RelayAntigravityStopHookProtocol
 	case RelayRequestAwsCredentialsState, RelayRequestInstallAwsCredentials:
 		return RelayAwsCredentialsProtocol
 	case RelayRequestRemoveAwsCredentials, RelayRequestAwsCredentialsScope:
@@ -476,6 +500,8 @@ func RelayRequestMinimumProtocol(request RelayRequest) uint32 {
 		return 21
 	case RelayRequestHistoryQuery, RelayRequestHistoryRequests, RelayRequestCompleteHistoryRequest:
 		return 16
+	case RelayRequestGuardianRequests, RelayRequestCompleteGuardianRequest:
+		return RelayGuardianReviewProtocol
 	case RelayRequestAttachmentPresent, RelayRequestInstallAttachment, RelayRequestReadAttachment:
 		return 8
 	case RelayRequestStopBackgroundTask:
@@ -505,6 +531,13 @@ func RelayRequestMinimumProtocol(request RelayRequest) uint32 {
 	case RelayRequestReadPendingElicitation, RelayRequestReadQueuedCommand, RelayRequestCommandRetentionStatus,
 		RelayRequestUpdateCommandRetention:
 		return RelayCommandRetentionProtocol
+	case RelayRequestReadCheckpointMailbox:
+		return RelayCheckpointMailboxProtocol
+	case RelayRequestReadCheckpointNativeUse:
+		return RelayNativeUseEvidenceProtocol
+	case RelayRequestHoldInPlaceMoveDispatch, RelayRequestDiscardHeldMoveCommands, RelayRequestSubmitFront,
+		RelayRequestReleaseInPlaceMoveDispatch, RelayRequestRestartHarnessInPlace:
+		return RelayInPlaceMoveProtocol
 	case RelayRequestSubmit:
 		return RelayCommandMinimumProtocol(request.Command)
 	case RelayRequestReviewer:
@@ -518,6 +551,8 @@ func RelayRequestMinimumProtocol(request RelayRequest) uint32 {
 			}
 		case ReviewerRequestRecordOverridden, ReviewerRequestSetReviewBase:
 			return RelayReviewBaseProtocol
+		case ReviewerRequestResolveRepositories:
+			return RelayConcurrentReviewProtocol
 		case ReviewerRequestRecordReviewed:
 			return RelayPushReviewProtocol
 		}
@@ -927,6 +962,9 @@ func InvalidRelayRequestResponse(requestID string, protocolVersion uint32, messa
 		Body:            RelayError(RelayErrorCodeInvalidRequest, message, false, nil),
 	}
 }
+
+// RustDebugString renders text as Rust's {:?} does for a str.
+func RustDebugString(text string) string { return rustDebugString(text) }
 
 // rustDebugString renders text as Rust's {:?} does for a str.
 func rustDebugString(text string) string {
@@ -1357,6 +1395,22 @@ func (v RelayRequestHello) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("method", "params", "hello", plain(v))
 }
 
+// RelayRequestAntigravityStop reports an Antigravity native Stop hook firing
+// to the owning worker. Protocol 84.
+type RelayRequestAntigravityStop struct {
+	ConversationID    *string `json:"conversation_id,omitempty"`
+	FullyIdle         *bool   `json:"fully_idle,omitempty"`
+	TerminationReason *string `json:"termination_reason,omitempty"`
+}
+
+func (RelayRequestAntigravityStop) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestAntigravityStop.
+func (v RelayRequestAntigravityStop) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestAntigravityStop
+	return relayAdjacentJSON("method", "params", "antigravity_stop", plain(v))
+}
+
 type RelayRequestAttach struct {
 	AfterOrdinal uint64 `json:"after_ordinal"`
 	AfterDigest  string `json:"after_digest"`
@@ -1419,6 +1473,112 @@ func (v *RelayRequestSubmit) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// RelayRequestHoldInPlaceMoveDispatch atomically holds queue dispatch for a
+// same-target in-place Move, bound to ExpectedStoreID, and returns the
+// pending command IDs captured when the hold was taken. Idempotent by
+// OperationID. Protocol 81.
+type RelayRequestHoldInPlaceMoveDispatch struct {
+	OperationID     string `json:"operation_id"`
+	ExpectedStoreID string `json:"expected_store_id"`
+}
+
+func (RelayRequestHoldInPlaceMoveDispatch) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestHoldInPlaceMoveDispatch.
+func (v RelayRequestHoldInPlaceMoveDispatch) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestHoldInPlaceMoveDispatch
+	return relayAdjacentJSON("method", "params", "hold_in_place_move_dispatch", plain(v))
+}
+
+// RelayRequestDiscardHeldMoveCommands idempotently discards held pending
+// commands for an active in-place Move hold matching OperationID and
+// ExpectedStoreID. Protocol 81.
+type RelayRequestDiscardHeldMoveCommands struct {
+	OperationID     string   `json:"operation_id"`
+	ExpectedStoreID string   `json:"expected_store_id"`
+	CommandIDs      []string `json:"command_ids"`
+}
+
+func (RelayRequestDiscardHeldMoveCommands) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestDiscardHeldMoveCommands.
+func (v RelayRequestDiscardHeldMoveCommands) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestDiscardHeldMoveCommands
+	v.CommandIDs = relayNonNil(v.CommandIDs)
+	return relayAdjacentJSON("method", "params", "discard_held_move_commands", plain(v))
+}
+
+// RelayRequestSubmitFront submits a continuation command to the head
+// (index 0) of the pending queue while OperationID holds dispatch on
+// ExpectedStoreID. Protocol 81.
+type RelayRequestSubmitFront struct {
+	OperationID     string       `json:"operation_id"`
+	ExpectedStoreID string       `json:"expected_store_id"`
+	CommandID       string       `json:"command_id"`
+	Command         RelayCommand `json:"command"`
+}
+
+func (RelayRequestSubmitFront) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestSubmitFront.
+func (v RelayRequestSubmitFront) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestSubmitFront
+	return relayAdjacentJSON("method", "params", "submit_front", plain(v))
+}
+
+// UnmarshalJSON decodes the interface-typed fields through their variant tables.
+func (v *RelayRequestSubmitFront) UnmarshalJSON(data []byte) error {
+	type plain RelayRequestSubmitFront
+	aux := struct {
+		*plain
+		Command json.RawMessage `json:"command"`
+	}{plain: (*plain)(v)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(aux.Command) > 0 && string(aux.Command) != "null" {
+		decoded, err := UnmarshalRelayCommandJSON(aux.Command)
+		if err != nil {
+			return err
+		}
+		v.Command = decoded
+	}
+	return nil
+}
+
+// RelayRequestReleaseInPlaceMoveDispatch idempotently releases an in-place
+// Move dispatch hold for OperationID on ExpectedStoreID and resumes queue
+// promotion. Protocol 81.
+type RelayRequestReleaseInPlaceMoveDispatch struct {
+	OperationID     string `json:"operation_id"`
+	ExpectedStoreID string `json:"expected_store_id"`
+}
+
+func (RelayRequestReleaseInPlaceMoveDispatch) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestReleaseInPlaceMoveDispatch.
+func (v RelayRequestReleaseInPlaceMoveDispatch) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestReleaseInPlaceMoveDispatch
+	return relayAdjacentJSON("method", "params", "release_in_place_move_dispatch", plain(v))
+}
+
+// RelayRequestRestartHarnessInPlace restarts only the harness bridge process
+// under a new launch configuration without stopping the worker daemon or its
+// non-harness processes. Protocol 81.
+type RelayRequestRestartHarnessInPlace struct {
+	OperationID     string             `json:"operation_id"`
+	ExpectedStoreID string             `json:"expected_store_id"`
+	LaunchConfig    WorkerLaunchConfig `json:"launch_config"`
+}
+
+func (RelayRequestRestartHarnessInPlace) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestRestartHarnessInPlace.
+func (v RelayRequestRestartHarnessInPlace) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestRestartHarnessInPlace
+	return relayAdjacentJSON("method", "params", "restart_harness_in_place", plain(v))
+}
+
 type RelayRequestCommandRetentionStatus struct{}
 
 func (RelayRequestCommandRetentionStatus) isRelayRequest() {}
@@ -1471,6 +1631,40 @@ func (v RelayRequestReadQueuedCommand) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("method", "params", "read_queued_command", plain(v))
 }
 
+// RelayRequestReadCheckpointMailbox asks for the mail the relay holds at the
+// cut of a ready checkpoint barrier. Refused unless that barrier is ready at
+// exactly Cut and nothing has been journaled since, so the answer describes
+// the archived cut. Protocol 75.
+type RelayRequestReadCheckpointMailbox struct {
+	BarrierCommandID string      `json:"barrier_command_id"`
+	Cut              RelayCursor `json:"cut"`
+}
+
+func (RelayRequestReadCheckpointMailbox) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestReadCheckpointMailbox.
+func (v RelayRequestReadCheckpointMailbox) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestReadCheckpointMailbox
+	return relayAdjacentJSON("method", "params", "read_checkpoint_mailbox", plain(v))
+}
+
+// RelayRequestReadCheckpointNativeUse asks for the worker-owned
+// native-session-use evidence at the cut of a ready checkpoint barrier.
+// Refused unless that barrier is ready at exactly Cut and nothing has been
+// journaled since. Protocol 80.
+type RelayRequestReadCheckpointNativeUse struct {
+	BarrierCommandID string      `json:"barrier_command_id"`
+	Cut              RelayCursor `json:"cut"`
+}
+
+func (RelayRequestReadCheckpointNativeUse) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestReadCheckpointNativeUse.
+func (v RelayRequestReadCheckpointNativeUse) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestReadCheckpointNativeUse
+	return relayAdjacentJSON("method", "params", "read_checkpoint_native_use", plain(v))
+}
+
 type RelayRequestReadPendingElicitation struct {
 	ElicitationID string `json:"elicitation_id"`
 }
@@ -1511,7 +1705,9 @@ func (v RelayRequestStatus) MarshalJSON() ([]byte, error) {
 
 // Atomically lease pending mailbox events to a harness tool hook.
 type RelayRequestDrainMailbox struct {
-	HookEvent string `json:"hook_event"`
+	HookEvent       string  `json:"hook_event"`
+	ConversationID  *string `json:"conversation_id,omitempty"`
+	InitialNumSteps *int64  `json:"initial_num_steps,omitempty"`
 }
 
 func (RelayRequestDrainMailbox) isRelayRequest() {}
@@ -2053,6 +2249,31 @@ func (v RelayRequestCompleteHistoryRequest) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("method", "params", "complete_history_request", plain(v))
 }
 
+// RelayRequestGuardianRequests asks for the guardian reviews queued on this
+// connection. Protocol 82.
+type RelayRequestGuardianRequests struct{}
+
+func (RelayRequestGuardianRequests) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestGuardianRequests.
+func (v RelayRequestGuardianRequests) MarshalJSON() ([]byte, error) {
+	return relayAdjacentJSON("method", "params", "guardian_requests", nil)
+}
+
+// RelayRequestCompleteGuardianRequest answers one guardian review.
+// Protocol 82.
+type RelayRequestCompleteGuardianRequest struct {
+	Result GuardianReviewResult `json:"result"`
+}
+
+func (RelayRequestCompleteGuardianRequest) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestCompleteGuardianRequest.
+func (v RelayRequestCompleteGuardianRequest) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestCompleteGuardianRequest
+	return relayAdjacentJSON("method", "params", "complete_guardian_request", plain(v))
+}
+
 // Acknowledge a completed MCP request and cache its bounded answer for
 // subsequent tool calls and restart recovery.
 type RelayRequestCompleteSubagentRequest struct {
@@ -2105,15 +2326,25 @@ func (v *RelayRequestReviewer) UnmarshalJSON(data []byte) error {
 // relayRequestVariants decodes each RelayRequest variant by its wire name.
 var relayRequestVariants = map[string]func(json.RawMessage) (RelayRequest, error){
 	"hello":                           relayRequiredVariant[RelayRequestHello, RelayRequest](),
+	"antigravity_stop":                relayRequiredVariant[RelayRequestAntigravityStop, RelayRequest](),
 	"attach":                          relayRequiredVariant[RelayRequestAttach, RelayRequest](),
 	"acknowledge":                     relayRequiredVariant[RelayRequestAcknowledge, RelayRequest](),
 	"submit":                          relayRequiredVariant[RelayRequestSubmit, RelayRequest](),
+	"hold_in_place_move_dispatch":     relayRequiredVariant[RelayRequestHoldInPlaceMoveDispatch, RelayRequest](),
+	"discard_held_move_commands":      relayRequiredVariant[RelayRequestDiscardHeldMoveCommands, RelayRequest](),
+	"submit_front":                    relayRequiredVariant[RelayRequestSubmitFront, RelayRequest](),
+	"release_in_place_move_dispatch":  relayRequiredVariant[RelayRequestReleaseInPlaceMoveDispatch, RelayRequest](),
+	"restart_harness_in_place":        relayRequiredVariant[RelayRequestRestartHarnessInPlace, RelayRequest](),
+	"read_checkpoint_native_use":      relayRequiredVariant[RelayRequestReadCheckpointNativeUse, RelayRequest](),
+	"guardian_requests":               relayRequiredVariant[RelayRequestGuardianRequests, RelayRequest](),
+	"complete_guardian_request":       relayRequiredVariant[RelayRequestCompleteGuardianRequest, RelayRequest](),
 	"command_retention_status":        relayRequiredVariant[RelayRequestCommandRetentionStatus, RelayRequest](),
 	"begin_live_baseline":             relayRequiredVariant[RelayRequestBeginLiveBaseline, RelayRequest](),
 	"read_live_baseline_page":         relayRequiredVariant[RelayRequestReadLiveBaselinePage, RelayRequest](),
 	"abort_live_baseline":             relayRequiredVariant[RelayRequestAbortLiveBaseline, RelayRequest](),
 	"read_queued_command":             relayRequiredVariant[RelayRequestReadQueuedCommand, RelayRequest](),
 	"read_pending_elicitation":        relayRequiredVariant[RelayRequestReadPendingElicitation, RelayRequest](),
+	"read_checkpoint_mailbox":         relayRequiredVariant[RelayRequestReadCheckpointMailbox, RelayRequest](),
 	"update_command_retention":        relayRequiredVariant[RelayRequestUpdateCommandRetention, RelayRequest](),
 	"status":                          relayRequiredVariant[RelayRequestStatus, RelayRequest](),
 	"drain_mailbox":                   relayRequiredVariant[RelayRequestDrainMailbox, RelayRequest](),
@@ -2192,6 +2423,18 @@ func (v ReviewerRequestCaptureDelta) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("action", "params", "capture_delta", plain(v))
 }
 
+// UnmarshalJSON applies serde's `#[serde(default)]` to a missing scope, which
+// older turn captures leave out.
+func (v *ReviewerRequestCaptureDelta) UnmarshalJSON(data []byte) error {
+	type plain ReviewerRequestCaptureDelta
+	decoded := plain{Scope: CaptureScopePushableCommits}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*v = ReviewerRequestCaptureDelta(decoded)
+	return nil
+}
+
 // Record Trees, the current_tree ids of a reviewed capture, as the new
 // review baselines, pinning each so a later git gc cannot collect it.
 type ReviewerRequestRecordReviewed struct {
@@ -2237,12 +2480,30 @@ func (v ReviewerRequestSetReviewBase) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("action", "params", "set_review_base", plain(v))
 }
 
+// ReviewerRequestResolveRepositories names the repository root each of
+// Paths selects, as a scoped capture resolves them (a relative path is read
+// against the working directory), and changes nothing: no ref is written and
+// no capture is taken.
+type ReviewerRequestResolveRepositories struct {
+	Paths []string `json:"paths"`
+}
+
+func (ReviewerRequestResolveRepositories) isReviewerRequest() {}
+
+// MarshalJSON writes the serde-tagged form of ReviewerRequestResolveRepositories.
+func (v ReviewerRequestResolveRepositories) MarshalJSON() ([]byte, error) {
+	type plain ReviewerRequestResolveRepositories
+	v.Paths = relayNonNil(v.Paths)
+	return relayAdjacentJSON("action", "params", "resolve_repositories", plain(v))
+}
+
 // reviewerRequestVariants decodes each ReviewerRequest variant by its wire name.
 var reviewerRequestVariants = map[string]func(json.RawMessage) (ReviewerRequest, error){
-	"capture_delta":     relayVariant[ReviewerRequestCaptureDelta, ReviewerRequest](false),
-	"record_reviewed":   relayVariant[ReviewerRequestRecordReviewed, ReviewerRequest](false),
-	"record_overridden": relayVariant[ReviewerRequestRecordOverridden, ReviewerRequest](false),
-	"set_review_base":   relayVariant[ReviewerRequestSetReviewBase, ReviewerRequest](false),
+	"capture_delta":        relayVariant[ReviewerRequestCaptureDelta, ReviewerRequest](false),
+	"record_reviewed":      relayVariant[ReviewerRequestRecordReviewed, ReviewerRequest](false),
+	"record_overridden":    relayVariant[ReviewerRequestRecordOverridden, ReviewerRequest](false),
+	"set_review_base":      relayVariant[ReviewerRequestSetReviewBase, ReviewerRequest](false),
+	"resolve_repositories": relayVariant[ReviewerRequestResolveRepositories, ReviewerRequest](false),
 }
 
 // UnmarshalReviewerRequestJSON decodes the serde-tagged form of ReviewerRequest.
@@ -2334,6 +2595,17 @@ type RelayResponsePayload interface {
 	isRelayResponsePayload()
 }
 
+// RelayResponsePayloadAntigravityStopObserved acknowledges an
+// AntigravityStop report.
+type RelayResponsePayloadAntigravityStopObserved struct{}
+
+func (RelayResponsePayloadAntigravityStopObserved) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadAntigravityStopObserved.
+func (v RelayResponsePayloadAntigravityStopObserved) MarshalJSON() ([]byte, error) {
+	return relayAdjacentJSON("type", "data", "antigravity_stop_observed", nil)
+}
+
 type RelayResponsePayloadCommandRetentionUpdated struct{}
 
 func (RelayResponsePayloadCommandRetentionUpdated) isRelayResponsePayload() {}
@@ -2407,12 +2679,14 @@ func (v RelayResponsePayloadAttached) MarshalJSON() ([]byte, error) {
 }
 
 // The answer to RelayRequestWaitForChange: the worker's latest event
-// ordinal and state digest now, and whether this connection's sub-agent
-// queue has changes to poll. Equal values mean the wait ran out.
+// ordinal and state digest now, and whether the sub-agent or guardian queue
+// has changes to poll. An unchanged frontier with no queue changes means the
+// wait ran out.
 type RelayResponsePayloadChangeObserved struct {
 	LatestOrdinal        uint64 `json:"latest_ordinal"`
 	StateDigest          string `json:"state_digest"`
 	SubagentQueueChanged bool   `json:"subagent_queue_changed"`
+	GuardianQueueChanged bool   `json:"guardian_queue_changed,omitempty"`
 }
 
 func (RelayResponsePayloadChangeObserved) isRelayResponsePayload() {}
@@ -2463,6 +2737,48 @@ func (RelayResponsePayloadAccepted) isRelayResponsePayload() {}
 func (v RelayResponsePayloadAccepted) MarshalJSON() ([]byte, error) {
 	type plain RelayResponsePayloadAccepted
 	return relayAdjacentJSON("type", "data", "accepted", plain(v))
+}
+
+// RelayResponsePayloadInPlaceMoveDispatchHeld answers
+// HoldInPlaceMoveDispatch with the pending commands the hold captured.
+type RelayResponsePayloadInPlaceMoveDispatchHeld struct {
+	CapturedPendingCommandIDs []string `json:"captured_pending_command_ids"`
+}
+
+func (RelayResponsePayloadInPlaceMoveDispatchHeld) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadInPlaceMoveDispatchHeld.
+func (v RelayResponsePayloadInPlaceMoveDispatchHeld) MarshalJSON() ([]byte, error) {
+	type plain RelayResponsePayloadInPlaceMoveDispatchHeld
+	v.CapturedPendingCommandIDs = relayNonNil(v.CapturedPendingCommandIDs)
+	return relayAdjacentJSON("type", "data", "in_place_move_dispatch_held", plain(v))
+}
+
+type RelayResponsePayloadHeldMoveCommandsDiscarded struct{}
+
+func (RelayResponsePayloadHeldMoveCommandsDiscarded) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadHeldMoveCommandsDiscarded.
+func (v RelayResponsePayloadHeldMoveCommandsDiscarded) MarshalJSON() ([]byte, error) {
+	return relayAdjacentJSON("type", "data", "held_move_commands_discarded", nil)
+}
+
+type RelayResponsePayloadInPlaceMoveDispatchReleased struct{}
+
+func (RelayResponsePayloadInPlaceMoveDispatchReleased) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadInPlaceMoveDispatchReleased.
+func (v RelayResponsePayloadInPlaceMoveDispatchReleased) MarshalJSON() ([]byte, error) {
+	return relayAdjacentJSON("type", "data", "in_place_move_dispatch_released", nil)
+}
+
+type RelayResponsePayloadHarnessRestartedInPlace struct{}
+
+func (RelayResponsePayloadHarnessRestartedInPlace) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadHarnessRestartedInPlace.
+func (v RelayResponsePayloadHarnessRestartedInPlace) MarshalJSON() ([]byte, error) {
+	return relayAdjacentJSON("type", "data", "harness_restarted_in_place", nil)
 }
 
 type RelayResponsePayloadStatus struct {
@@ -2552,6 +2868,34 @@ func (v *RelayResponsePayloadQueuedCommand) UnmarshalJSON(data []byte) error {
 		v.Command = decoded
 	}
 	return nil
+}
+
+// RelayResponsePayloadCheckpointMailbox is the mail at a ready checkpoint
+// cut (protocol 75).
+type RelayResponsePayloadCheckpointMailbox struct {
+	Mailbox CanonicalMailbox `json:"mailbox"`
+}
+
+func (RelayResponsePayloadCheckpointMailbox) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadCheckpointMailbox.
+func (v RelayResponsePayloadCheckpointMailbox) MarshalJSON() ([]byte, error) {
+	type plain RelayResponsePayloadCheckpointMailbox
+	return relayAdjacentJSON("type", "data", "checkpoint_mailbox", plain(v))
+}
+
+// RelayResponsePayloadCheckpointNativeUse is the native-session-use evidence
+// at a ready checkpoint cut (protocol 80); nil when the worker has none.
+type RelayResponsePayloadCheckpointNativeUse struct {
+	NativeUseEvidence *NativeSessionUseEvidence `json:"native_use_evidence"`
+}
+
+func (RelayResponsePayloadCheckpointNativeUse) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadCheckpointNativeUse.
+func (v RelayResponsePayloadCheckpointNativeUse) MarshalJSON() ([]byte, error) {
+	type plain RelayResponsePayloadCheckpointNativeUse
+	return relayAdjacentJSON("type", "data", "checkpoint_native_use", plain(v))
 }
 
 type RelayResponsePayloadPendingElicitation struct {
@@ -2916,6 +3260,19 @@ func (v RelayResponsePayloadHistoryRequests) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("type", "data", "history_requests", plain(v))
 }
 
+type RelayResponsePayloadGuardianRequests struct {
+	Requests []GuardianReviewRequest `json:"requests"`
+}
+
+func (RelayResponsePayloadGuardianRequests) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadGuardianRequests.
+func (v RelayResponsePayloadGuardianRequests) MarshalJSON() ([]byte, error) {
+	type plain RelayResponsePayloadGuardianRequests
+	v.Requests = relayNonNil(v.Requests)
+	return relayAdjacentJSON("type", "data", "guardian_requests", plain(v))
+}
+
 type RelayResponsePayloadHistoryResult struct {
 	Result HistoryResult `json:"result"`
 }
@@ -2935,6 +3292,15 @@ func (RelayResponsePayloadHistoryRequestCompleted) isRelayResponsePayload() {}
 // MarshalJSON writes the serde-tagged form of RelayResponsePayloadHistoryRequestCompleted.
 func (v RelayResponsePayloadHistoryRequestCompleted) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("type", "data", "history_request_completed", nil)
+}
+
+type RelayResponsePayloadGuardianRequestCompleted struct{}
+
+func (RelayResponsePayloadGuardianRequestCompleted) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadGuardianRequestCompleted.
+func (v RelayResponsePayloadGuardianRequestCompleted) MarshalJSON() ([]byte, error) {
+	return relayAdjacentJSON("type", "data", "guardian_request_completed", nil)
 }
 
 // What every workspace repository changed since the stored baselines.
@@ -2978,8 +3344,24 @@ func (v RelayResponsePayloadReviewBaseSet) MarshalJSON() ([]byte, error) {
 	return relayAdjacentJSON("type", "data", "review_base_set", plain(v))
 }
 
+// RelayResponsePayloadReviewRepositories is the repository roots
+// ResolveRepositories selected, in request order with duplicates removed.
+type RelayResponsePayloadReviewRepositories struct {
+	Roots []string `json:"roots"`
+}
+
+func (RelayResponsePayloadReviewRepositories) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadReviewRepositories.
+func (v RelayResponsePayloadReviewRepositories) MarshalJSON() ([]byte, error) {
+	type plain RelayResponsePayloadReviewRepositories
+	v.Roots = relayNonNil(v.Roots)
+	return relayAdjacentJSON("type", "data", "review_repositories", plain(v))
+}
+
 // relayResponsePayloadVariants decodes each RelayResponsePayload variant by its wire name.
 var relayResponsePayloadVariants = map[string]func(json.RawMessage) (RelayResponsePayload, error){
+	"antigravity_stop_observed": relayVariant[RelayResponsePayloadAntigravityStopObserved, RelayResponsePayload](false),
 	"command_retention_updated": relayVariant[RelayResponsePayloadCommandRetentionUpdated, RelayResponsePayload](false),
 	"command_retention_state":   relayVariant[RelayResponsePayloadCommandRetentionState, RelayResponsePayload](false),
 	"idle_reservation":          relayVariant[RelayResponsePayloadIdleReservation, RelayResponsePayload](false),
@@ -2994,12 +3376,21 @@ var relayResponsePayloadVariants = map[string]func(json.RawMessage) (RelayRespon
 		err := json.Unmarshal(body, &v.State)
 		return v, err
 	},
+	"in_place_move_dispatch_held":              relayVariant[RelayResponsePayloadInPlaceMoveDispatchHeld, RelayResponsePayload](false),
+	"held_move_commands_discarded":             relayVariant[RelayResponsePayloadHeldMoveCommandsDiscarded, RelayResponsePayload](false),
+	"in_place_move_dispatch_released":          relayVariant[RelayResponsePayloadInPlaceMoveDispatchReleased, RelayResponsePayload](false),
+	"harness_restarted_in_place":               relayVariant[RelayResponsePayloadHarnessRestartedInPlace, RelayResponsePayload](false),
+	"checkpoint_native_use":                    relayVariant[RelayResponsePayloadCheckpointNativeUse, RelayResponsePayload](false),
+	"guardian_requests":                        relayVariant[RelayResponsePayloadGuardianRequests, RelayResponsePayload](false),
+	"guardian_request_completed":               relayVariant[RelayResponsePayloadGuardianRequestCompleted, RelayResponsePayload](false),
+	"review_repositories":                      relayVariant[RelayResponsePayloadReviewRepositories, RelayResponsePayload](false),
 	"live_baseline_waiting":                    relayVariant[RelayResponsePayloadLiveBaselineWaiting, RelayResponsePayload](false),
 	"live_baseline_started":                    relayVariant[RelayResponsePayloadLiveBaselineStarted, RelayResponsePayload](false),
 	"live_baseline_page":                       relayVariant[RelayResponsePayloadLiveBaselinePage, RelayResponsePayload](false),
 	"live_baseline_aborted":                    relayVariant[RelayResponsePayloadLiveBaselineAborted, RelayResponsePayload](false),
 	"queued_command":                           relayVariant[RelayResponsePayloadQueuedCommand, RelayResponsePayload](false),
 	"pending_elicitation":                      relayVariant[RelayResponsePayloadPendingElicitation, RelayResponsePayload](false),
+	"checkpoint_mailbox":                       relayVariant[RelayResponsePayloadCheckpointMailbox, RelayResponsePayload](false),
 	"mailbox_drained":                          relayVariant[RelayResponsePayloadMailboxDrained, RelayResponsePayload](false),
 	"mailbox_acknowledged":                     relayVariant[RelayResponsePayloadMailboxAcknowledged, RelayResponsePayload](false),
 	"attachment_present":                       relayVariant[RelayResponsePayloadAttachmentPresent, RelayResponsePayload](false),
@@ -3067,9 +3458,25 @@ func (v RelayErrorDetailDesynchronized) MarshalJSON() ([]byte, error) {
 	return relayInternalJSON("kind", "desynchronized", plain(v))
 }
 
+// RelayErrorDetailStoreMismatch: an in-place Move request named a relay
+// store other than the one the worker holds.
+type RelayErrorDetailStoreMismatch struct {
+	ExpectedStoreID string  `json:"expected_store_id"`
+	ActualStoreID   *string `json:"actual_store_id"`
+}
+
+func (RelayErrorDetailStoreMismatch) isRelayErrorDetail() {}
+
+// MarshalJSON writes the serde-tagged form of RelayErrorDetailStoreMismatch.
+func (v RelayErrorDetailStoreMismatch) MarshalJSON() ([]byte, error) {
+	type plain RelayErrorDetailStoreMismatch
+	return relayInternalJSON("kind", "store_mismatch", plain(v))
+}
+
 // relayErrorDetailVariants decodes each RelayErrorDetail variant by its wire name.
 var relayErrorDetailVariants = map[string]func(json.RawMessage) (RelayErrorDetail, error){
 	"desynchronized": relayInternalVariant[RelayErrorDetailDesynchronized, RelayErrorDetail]("kind", false),
+	"store_mismatch": relayInternalVariant[RelayErrorDetailStoreMismatch, RelayErrorDetail]("kind", false),
 }
 
 // UnmarshalRelayErrorDetailJSON decodes the serde-tagged form of RelayErrorDetail.

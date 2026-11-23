@@ -9,7 +9,7 @@ use mj_checkpoint::checkpoint::{CheckpointRestoreSpec, restore_checkpoint};
 use mj_core::config::{Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate};
 use mj_core::state::{SessionState, State};
 
-use mj_core::relay::WorkerEvent;
+use mj_core::transcript::TranscriptBody;
 
 use super::tests::initialize_repository;
 use super::*;
@@ -243,9 +243,9 @@ fn native_checkpoint_restore_relocates_muse_without_changing_identity() {
         transcript.edited_paths,
         [PathBuf::from("native-marker.txt")]
     );
-    assert!(transcript.events.iter().any(|event| matches!(
-        event.event,
-        WorkerEvent::PromptAccepted { ref text, .. } if text.contains("import")
+    assert!(transcript.items.iter().any(|item| matches!(
+        &item.body,
+        TranscriptBody::User { content } if content[0]["text"].as_str().unwrap().contains("import")
     )));
 }
 

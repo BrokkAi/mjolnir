@@ -91,6 +91,9 @@ pub(crate) fn render_transcript(
             Style::default().fg(theme::palette().secondary),
         );
     }
+    if chat.render_mode == TranscriptRenderMode::Raw {
+        chat.queue_visible_raw_tool_details(top, visible_rows);
+    }
 }
 
 pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
@@ -905,15 +908,43 @@ pub(super) fn entry_logical_lines(
             );
             lines.extend(raw_lines(&error, visual.body_style));
         }
+        lines.extend(tool_patch_lines(entry, visual.body_style));
         return lines;
     }
     let source = entry_body_source(entry, mode, expanded_tool);
-    match mode {
+    let mut lines = match mode {
         TranscriptRenderMode::Rich => {
             markdown_lines(&source, visual.body_style, visual.header_style, width)
         }
         TranscriptRenderMode::Raw => raw_lines(&source, visual.body_style),
+    };
+    if expanded_tool || mode == TranscriptRenderMode::Raw {
+        lines.extend(tool_patch_lines(entry, visual.body_style));
     }
+    lines
+}
+
+fn tool_patch_lines(entry: &ChatEntry, style: Style) -> Vec<LogicalLine> {
+    if entry.tool_detail_trimmed || entry.tool_diffstats.is_empty() {
+        return Vec::new();
+    }
+    let Some(TranscriptBody::Tool { call, .. }) = entry.source.0.as_deref().map(|item| &item.body)
+    else {
+        return Vec::new();
+    };
+    let Ok(call) = call.decode() else {
+        return Vec::new();
+    };
+    call.content
+        .iter()
+        .filter_map(|part| match part {
+            // Live projection already stored the patch. Legacy copies can
+            // supply their counts through the existing background diff job.
+            ToolCallContent::Diff(diff) => mj_core::diff::stored_patch(diff),
+            _ => None,
+        })
+        .flat_map(|patch| raw_lines(&sanitize_terminal_text(&patch.text), style))
+        .collect()
 }
 
 /// The tool output, diff stats, and locations an entry's details show.

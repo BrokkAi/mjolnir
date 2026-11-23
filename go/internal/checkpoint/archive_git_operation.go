@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -161,15 +161,7 @@ func (o *collectedOperation) carryObjects(runner GitCommandRunner, repository st
 	}
 	// A clone need not have an identity configured, and a fixed one keeps
 	// the wrapper the same for the same operation.
-	identity := [][2]string{
-		{"GIT_AUTHOR_NAME", "Mjolnir"},
-		{"GIT_AUTHOR_EMAIL", "mjolnir@localhost"},
-		{"GIT_AUTHOR_DATE", "@0 +0000"},
-		{"GIT_COMMITTER_NAME", "Mjolnir"},
-		{"GIT_COMMITTER_EMAIL", "mjolnir@localhost"},
-		{"GIT_COMMITTER_DATE", "@0 +0000"},
-	}
-	wrapperOutput, err := gitSuccess(runner, repository, &GitCommand{Arguments: arguments, Env: identity},
+	wrapperOutput, err := gitSuccess(runner, repository, &GitCommand{Arguments: arguments, Env: syntheticGitCommitIdentity()},
 		"record the Git operation's commits")
 	if err != nil {
 		return err
@@ -648,76 +640,23 @@ func todoCommits(contents []byte) []string {
 	return commits
 }
 
-// verifyObjects fails unless every object the operation names is in the
-// restored clone. The bundle was imported just before, so a missing object
-// means the archive cannot give the operation back.
-func verifyObjects(runner GitCommandRunner, repository string, operation *core.SavedGitOperation) error {
-	if len(operation.Objects) == 0 {
-		return nil
-	}
-	var input strings.Builder
-	for _, object := range operation.Objects {
-		input.WriteString(object)
-		input.WriteByte('\n')
-	}
-	output, err := gitBytes(runner, repository, []string{"cat-file", "--batch-check=%(objectname)"},
-		[]byte(input.String()), "verify the Git operation's objects")
-	if err != nil {
-		return err
-	}
-	text, err := gitDecodeUTF8(output)
-	if err != nil {
-		return fmt.Errorf("decode git cat-file --batch-check: %w", err)
-	}
-	answers := gitLines(text)
-	if len(answers) != len(operation.Objects) {
-		return fmt.Errorf("git cat-file answered %d of %d Git operation objects", len(answers), len(operation.Objects))
-	}
-	for index, object := range operation.Objects {
-		if !archiveEqualFoldASCII(answers[index], object) {
-			return fmt.Errorf("restore Git operation: object %s is missing from the restored clone", object)
-		}
-	}
-	return nil
-}
-
-// operationRestore writes the operation back into a clone whose commits,
-// index and working tree are otherwise restored: the unmerged index entries,
-// the files of the unmerged paths, and the state files. (Rust:
-// operation::restore.)
+// operationRestore preserves the working files of unmerged paths from a
+// legacy archive as ordinary unstaged edits, drops the saved in-progress Git
+// operation state (without recreating index conflict stages or
+// `.git/MERGE_HEAD` / `rebase-merge` / etc.), and returns a resume notice
+// describing what was dropped and which conflicted working files were
+// preserved. (Rust: operation::restore.)
 func operationRestore(
-	runner GitCommandRunner,
 	repository string,
 	operation *core.SavedGitOperation,
 	payloads *GitOperationPayloads,
-) error {
+) (string, error) {
 	paths := uniquePaths(operation.Unmerged)
-	if len(paths) > 0 {
-		// A mode-0 record removes every stage of its path, which is how Git
-		// asks for a path's stage-0 entry to give way to its conflict stages.
-		var records []byte
-		started := map[string]struct{}{}
-		for _, entry := range operation.Unmerged {
-			if key := gitComponentKey(entry.Path); !mapsContains(started, key) {
-				started[key] = struct{}{}
-				records = fmt.Appendf(records, "0 %s\t", strings.Repeat("0", len(entry.Object)))
-				records = append(records, entry.Path...)
-				records = append(records, 0)
-			}
-			records = fmt.Appendf(records, "%s %s %d\t", entry.Mode, entry.Object, entry.Stage)
-			records = append(records, entry.Path...)
-			records = append(records, 0)
-		}
-		if _, err := gitBytes(runner, repository, []string{"update-index", "-z", "--index-info"}, records,
-			"restore the unmerged index entries"); err != nil {
-			return err
-		}
-	}
-
 	unmerged := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		unmerged[gitComponentKey(path)] = struct{}{}
 	}
+	preserved := map[string]struct{}{}
 	archive := tar.NewReader(bytes.NewReader(payloads.ConflictedWorktreeTar))
 	for {
 		header, err := archive.Next()
@@ -725,27 +664,39 @@ func operationRestore(
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read conflicted-file tar entry: %w", err)
+			return "", fmt.Errorf("read conflicted-file tar entry: %w", err)
 		}
 		if !mapsContains(unmerged, gitComponentKey(header.Name)) {
-			return fmt.Errorf("conflicted-file tar holds '%s', which is not unmerged", header.Name)
+			return "", fmt.Errorf("conflicted-file tar holds '%s', which is not unmerged", header.Name)
 		}
+		preserved[header.Name] = struct{}{}
 	}
 	if err := restoreWorktreeTar(repository, payloads.ConflictedWorktreeTar, worktreeTarConflicted); err != nil {
-		return err
+		return "", err
 	}
 	for _, path := range operation.MissingWorktreePaths {
 		if !mapsContains(unmerged, gitComponentKey(path)) {
-			return fmt.Errorf("missing working-tree path '%s' is not unmerged", path)
+			return "", fmt.Errorf("missing working-tree path '%s' is not unmerged", path)
 		}
 		if err := ensureNoSymlinkAncestors(repository, path); err != nil {
-			return err
+			return "", err
 		}
 		if err := removeWorktreeFile(gitJoin(repository, path)); err != nil {
-			return err
+			return "", err
 		}
+		preserved[path] = struct{}{}
 	}
-	return restoreState(runner, repository, payloads.StateTar)
+	kind, err := detectOperationKind(payloads.StateTar)
+	if err != nil {
+		return "", err
+	}
+	if len(preserved) == 0 {
+		return fmt.Sprintf("Dropped saved in-progress %s state from this legacy archive.", kind), nil
+	}
+	list := slices.Sorted(maps.Keys(preserved))
+	return fmt.Sprintf(
+		"Dropped saved in-progress %s state from this legacy archive; preserved conflicted working files as unstaged edits: %s",
+		kind, strings.Join(list, ", ")), nil
 }
 
 func mapsContains(set map[string]struct{}, key string) bool {
@@ -753,17 +704,12 @@ func mapsContains(set map[string]struct{}, key string) bool {
 	return found
 }
 
-func restoreState(runner GitCommandRunner, repository string, data []byte) error {
+// detectOperationKind names the operation a legacy state tar recorded.
+func detectOperationKind(data []byte) (string, error) {
 	if err := validateOperationStateTar(data); err != nil {
-		return err
+		return "", err
 	}
-	type archivedState struct {
-		path      string
-		directory bool
-		mode      int64
-		contents  []byte
-	}
-	var entries []archivedState
+	names := map[string]struct{}{}
 	archive := tar.NewReader(bytes.NewReader(data))
 	for {
 		header, err := archive.Next()
@@ -771,80 +717,25 @@ func restoreState(runner GitCommandRunner, repository string, data []byte) error
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read Git operation state tar entry: %w", err)
+			return "", fmt.Errorf("read Git operation state tar entry: %w", err)
 		}
-		contents, err := io.ReadAll(archive)
-		if err != nil {
-			return fmt.Errorf("read Git operation state %s: %w", header.Name, err)
-		}
-		entries = append(entries, archivedState{
-			path:      header.Name,
-			directory: header.Typeflag == tar.TypeDir,
-			mode:      header.Mode,
-			contents:  contents,
-		})
-	}
-	var names []string
-	for _, entry := range entries {
-		if name, ok := topLevelStateName(entry.path); ok {
-			names = append(names, name)
+		if name, ok := topLevelStateName(header.Name); ok {
+			names[name] = struct{}{}
 		}
 	}
-	slices.Sort(names)
-	located, err := gitPaths(runner, repository, slices.Compact(names))
-	if err != nil {
-		return err
+	switch {
+	case mapsContains(names, "MERGE_HEAD"):
+		return "merge", nil
+	case mapsContains(names, "rebase-merge") || mapsContains(names, "rebase-apply"):
+		return "rebase", nil
+	case mapsContains(names, "CHERRY_PICK_HEAD"):
+		return "cherry-pick", nil
+	case mapsContains(names, "REVERT_HEAD"):
+		return "revert", nil
+	case mapsContains(names, "BISECT_LOG") || mapsContains(names, "BISECT_START"):
+		return "bisect", nil
 	}
-	locations := make(map[string]string, len(located))
-	for _, location := range located {
-		locations[location[0]] = location[1]
-	}
-	for _, entry := range entries {
-		name, ok := topLevelStateName(entry.path)
-		if !ok {
-			return errors.New("Git operation state entry has no name")
-		}
-		destination := locations[name]
-		for _, component := range archivePathComponents(entry.path)[1:] {
-			destination = gitJoin(destination, component.text)
-		}
-		if entry.directory {
-			if err := os.MkdirAll(destination, 0o777); err != nil {
-				return fmt.Errorf("create %s: %w", destination, err)
-			}
-			continue
-		}
-		parent := filepath.Dir(destination)
-		if err := os.MkdirAll(parent, 0o777); err != nil {
-			return fmt.Errorf("create %s: %w", parent, err)
-		}
-		file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
-		if errors.Is(err, fs.ErrExist) && name == rerereCache {
-			// A recorded resolution the clone already has is as good as the
-			// archived one, and the cache is shared by the repository's
-			// worktrees.
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("write Git operation state %s: %w", destination, err)
-		}
-		_, err = file.Write(entry.contents)
-		if err == nil {
-			err = file.Sync()
-		}
-		if closed := file.Close(); err == nil {
-			err = closed
-		}
-		if err != nil {
-			return fmt.Errorf("write Git operation state %s: %w", destination, err)
-		}
-		if runtime.GOOS != "windows" {
-			if err := os.Chmod(destination, fs.FileMode(entry.mode&0o777)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return "Git operation", nil
 }
 
 // topLevelStateName is the state entry an archived path belongs to: its

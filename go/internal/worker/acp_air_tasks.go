@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	acp "github.com/BrokkAi/acp-go"
@@ -146,7 +147,73 @@ func (n *RawSessionNotification) UnmarshalJSON(data []byte) error {
 // when it is, the change is nil if there is nothing to apply. The error is
 // what made an AIR update malformed.
 func airTaskUpdate(update any) (change core.AirTaskUpdate, handled bool, err error) {
-	panic("unported: mj-worker/src/acp/air_tasks.rs air_task_update")
+	kindValue, _ := jsonGetString(update, "sessionUpdate")
+	if kindValue == nil {
+		return nil, false, nil
+	}
+	kind := *kindValue
+	if !strings.HasPrefix(kind, "async_task_") {
+		return nil, false, nil
+	}
+	taskID := func() (string, error) {
+		id, _ := jsonGetString(update, "asyncTaskId")
+		if id == nil || strings.TrimSpace(*id) == "" {
+			return "", fmt.Errorf("%s requires a non-empty asyncTaskId", kind)
+		}
+		return *id, nil
+	}
+	if taskType, _ := jsonGetString(update, "taskType"); kind == "async_task_spawned" && taskType != nil && *taskType == "turn" {
+		id, err := taskID()
+		if err != nil {
+			return nil, true, err
+		}
+		return core.AirTaskUpdateTurnSpawned{TaskID: id, Replayed: false}, true, nil
+	}
+	id, err := taskID()
+	if err != nil {
+		return nil, true, err
+	}
+	description, _ := jsonGetString(update, "description")
+	if description != nil && strings.TrimSpace(*description) == "" {
+		description = nil
+	}
+	if description == nil {
+		description, _ = jsonGetString(update, "name")
+	}
+	var canStop *bool
+	if object, ok := update.(jsonvalue.Object); ok {
+		if value, ok := object.Get("canStop"); ok {
+			if flag, ok := value.(bool); ok {
+				canStop = &flag
+			}
+		}
+	}
+	switch kind {
+	case "async_task_spawned":
+		if description == nil {
+			return nil, true, errors.New("async_task_spawned requires name or description")
+		}
+		if canStop == nil {
+			return nil, true, errors.New("async_task_spawned requires canStop")
+		}
+		return core.AirTaskUpdateSpawned{TaskID: id, Description: *description, CanStop: *canStop}, true, nil
+	case "async_task_progress":
+		return core.AirTaskUpdateChanged{TaskID: id, Description: description, CanStop: canStop}, true, nil
+	case "async_task_state_update":
+		state, _ := jsonGetString(update, "state")
+		switch {
+		case state != nil && (*state == "running" || *state == "paused"):
+			return core.AirTaskUpdateChanged{TaskID: id, Description: description, CanStop: canStop}, true, nil
+		case state != nil && (*state == "completed" || *state == "failed" || *state == "stopped"):
+			return core.AirTaskUpdateFinished{TaskID: id, Settled: *state != "stopped", Failed: *state == "failed"}, true, nil
+		}
+		stateDebug := "None"
+		if state != nil {
+			stateDebug = "Some(" + sessionConfigDebugString(*state) + ")"
+		}
+		return nil, true, fmt.Errorf("unknown AIR async task state %s", stateDebug)
+	}
+	return nil, true, fmt.Errorf("unknown AIR async task update %s", sessionConfigDebugString(kind))
 }
 
 // airAsyncTaskStopMethod is AirAsyncTaskStopRequest's JSON-RPC method; its
@@ -195,7 +262,50 @@ const backgroundTaskStopTimeout = 5 * time.Second
 
 // stopBackgroundTask stops target; the error is the refusal the relay shows.
 func stopBackgroundTask(ctx context.Context, connection *acp.Connection, sessionID schema.SessionId, terminals *TerminalRegistry, target core.BackgroundTaskStopTarget) error {
-	panic("unported: mj-worker/src/acp/air_tasks.rs stop_background_task")
+	switch target := target.(type) {
+	case core.BackgroundTaskStopTargetNativeAgent:
+		request := NativeAgentCancelRequest{SessionID: sessionID, SubagentSessionID: target.SessionID}
+		answered, drop := acpStartCall[NativeAgentCancelResponse](ctx, connection, nativeAgentCancelMethod, request)
+		defer drop()
+		timer := time.NewTimer(backgroundTaskStopTimeout)
+		defer timer.Stop()
+		select {
+		case response := <-answered:
+			switch {
+			case response.err != nil:
+				return errors.New("cancel native agent: " + response.err.Error())
+			case response.value.Cancelled:
+				return nil
+			}
+			return errors.New("native agent is no longer running")
+		case <-timer.C:
+			return errors.New("timed out cancelling native agent")
+		}
+	case core.BackgroundTaskStopTargetHostedTerminal:
+		if terminals.Kill(target.TerminalID) {
+			return nil
+		}
+		return errors.New("background task is no longer running")
+	case core.BackgroundTaskStopTargetAirAsyncTask:
+		request := AirAsyncTaskStopRequest{SessionID: schema.SessionId(target.SessionID), AsyncTaskID: target.TaskID}
+		answered, drop := acpStartCall[AirAsyncTaskStopResponse](ctx, connection, airAsyncTaskStopMethod, request)
+		defer drop()
+		timer := time.NewTimer(backgroundTaskStopTimeout)
+		defer timer.Stop()
+		select {
+		case response := <-answered:
+			switch {
+			case response.err != nil:
+				return errors.New("stop AIR background task: " + response.err.Error())
+			case response.value.Stopped:
+				return nil
+			}
+			return errors.New("background task is no longer stoppable")
+		case <-timer.C:
+			return errors.New("timed out stopping AIR background task")
+		}
+	}
+	panic(fmt.Sprintf("unknown background task stop target %T", target))
 }
 
 // resolveBackgroundTaskStop stops target and answers resolved, a oneshot

@@ -6,10 +6,9 @@ package client
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"strings"
+	"log/slog"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -116,15 +115,25 @@ type ReviewerActionSetReviewBase struct {
 	Commit string  `json:"commit"`
 }
 
-func (ReviewerActionCaptureDelta) isReviewerAction()     {}
-func (ReviewerActionRecordReviewed) isReviewerAction()   {}
-func (ReviewerActionRecordOverridden) isReviewerAction() {}
-func (ReviewerActionSetReviewBase) isReviewerAction()    {}
+// ReviewerActionResolveRepositories names the repository roots Paths select,
+// changing nothing.
+type ReviewerActionResolveRepositories struct {
+	Paths []string `json:"paths"`
+}
+
+func (ReviewerActionCaptureDelta) isReviewerAction()        {}
+func (ReviewerActionRecordReviewed) isReviewerAction()      {}
+func (ReviewerActionRecordOverridden) isReviewerAction()    {}
+func (ReviewerActionSetReviewBase) isReviewerAction()       {}
+func (ReviewerActionResolveRepositories) isReviewerAction() {}
 
 func (ReviewerActionCaptureDelta) OperationName() string     { return "reviewer_capture_delta" }
 func (ReviewerActionRecordReviewed) OperationName() string   { return "reviewer_record_reviewed" }
 func (ReviewerActionRecordOverridden) OperationName() string { return "reviewer_record_overridden" }
 func (ReviewerActionSetReviewBase) OperationName() string    { return "reviewer_set_review_base" }
+func (ReviewerActionResolveRepositories) OperationName() string {
+	return "reviewer_resolve_repositories"
+}
 
 func (v ReviewerActionCaptureDelta) MarshalJSON() ([]byte, error) {
 	type plain ReviewerActionCaptureDelta
@@ -146,6 +155,11 @@ func (v ReviewerActionSetReviewBase) MarshalJSON() ([]byte, error) {
 	return sessionExternalStruct("set_review_base", plain(v))
 }
 
+func (v ReviewerActionResolveRepositories) MarshalJSON() ([]byte, error) {
+	type plain ReviewerActionResolveRepositories
+	return sessionExternalStruct("resolve_repositories", plain(v))
+}
+
 // UnmarshalReviewerActionJSON decodes serde's externally tagged form.
 func UnmarshalReviewerActionJSON(data []byte) (ReviewerAction, error) {
 	name, body, err := daemonSplitExternal(data)
@@ -161,8 +175,10 @@ func UnmarshalReviewerActionJSON(data []byte) (ReviewerAction, error) {
 		return sessionExternalVariant[ReviewerActionRecordOverridden, ReviewerAction](body)
 	case "set_review_base":
 		return sessionExternalVariant[ReviewerActionSetReviewBase, ReviewerAction](body)
+	case "resolve_repositories":
+		return sessionExternalVariant[ReviewerActionResolveRepositories, ReviewerAction](body)
 	}
-	return nil, daemonUnknownVariant(name, []string{"capture_delta", "record_reviewed", "record_overridden", "set_review_base"})
+	return nil, daemonUnknownVariant(name, []string{"capture_delta", "record_reviewed", "record_overridden", "set_review_base", "resolve_repositories"})
 }
 
 // ReviewerOutcome is a reviewer operation's result. Externally tagged in
@@ -184,9 +200,14 @@ type ReviewerOutcomeReviewBaseSet struct {
 	Changed bool   `json:"changed"`
 }
 
+type ReviewerOutcomeRepositories struct {
+	Roots []string `json:"roots"`
+}
+
 func (ReviewerOutcomeDelta) isReviewerOutcome()            {}
 func (ReviewerOutcomeBaselineAdvanced) isReviewerOutcome() {}
 func (ReviewerOutcomeReviewBaseSet) isReviewerOutcome()    {}
+func (ReviewerOutcomeRepositories) isReviewerOutcome()     {}
 
 func (v ReviewerOutcomeDelta) MarshalJSON() ([]byte, error) {
 	type plain ReviewerOutcomeDelta
@@ -202,6 +223,11 @@ func (v ReviewerOutcomeReviewBaseSet) MarshalJSON() ([]byte, error) {
 	return sessionExternalStruct("review_base_set", plain(v))
 }
 
+func (v ReviewerOutcomeRepositories) MarshalJSON() ([]byte, error) {
+	type plain ReviewerOutcomeRepositories
+	return sessionExternalStruct("repositories", plain(v))
+}
+
 // UnmarshalReviewerOutcomeJSON decodes serde's externally tagged form.
 func UnmarshalReviewerOutcomeJSON(data []byte) (ReviewerOutcome, error) {
 	name, body, err := daemonSplitExternal(data)
@@ -215,8 +241,10 @@ func UnmarshalReviewerOutcomeJSON(data []byte) (ReviewerOutcome, error) {
 		return ReviewerOutcomeBaselineAdvanced{}, nil
 	case "review_base_set":
 		return sessionExternalVariant[ReviewerOutcomeReviewBaseSet, ReviewerOutcome](body)
+	case "repositories":
+		return sessionExternalVariant[ReviewerOutcomeRepositories, ReviewerOutcome](body)
 	}
-	return nil, daemonUnknownVariant(name, []string{"delta", "baseline_advanced", "review_base_set"})
+	return nil, daemonUnknownVariant(name, []string{"delta", "baseline_advanced", "review_base_set", "repositories"})
 }
 
 // sessionExternalStruct writes an externally tagged struct variant;
@@ -303,6 +331,9 @@ func (p PendingRelaySync) Wait(ctx context.Context) error {
 // methods are the optional interfaces TranscriptHistoryBackend and
 // GithubTokenBackend; a backend without them gets Rust's defaults.
 type SessionHandleBackend interface {
+	// ToolCallDetail reloads a stored tool row's full detail; nil when the
+	// session has no such row.
+	ToolCallDetail(ctx context.Context, stableID string) (core.ToolCallDetailResult, error)
 	// SearchPrompts is one page of prompts matching query, resuming from
 	// after.
 	SearchPrompts(
@@ -354,6 +385,10 @@ type SessionHandle struct {
 
 func NewSessionHandle(backend SessionHandleBackend) SessionHandle {
 	return SessionHandle{backend: backend}
+}
+
+func (h SessionHandle) ToolCallDetail(ctx context.Context, stableID string) (core.ToolCallDetailResult, error) {
+	return h.backend.ToolCallDetail(ctx, stableID)
 }
 
 func (h SessionHandle) TranscriptHistory(ctx context.Context, before *core.TranscriptCursor) (core.TranscriptHistoryPage, error) {
@@ -422,13 +457,88 @@ func (h SessionHandle) SetConfigWithID(ctx context.Context, commandID, key, valu
 }
 
 func (h SessionHandle) applyConfigurationCommand(ctx context.Context, commandID string, command core.RelayCommand) (uint64, error) {
-	panic("unported: mj-client/src/session.rs SessionHandle::apply_configuration_command")
+	ordinal, err := h.Submit(ctx, commandID, command)
+	if err != nil {
+		return 0, err
+	}
+	wait, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	timedOut := func(err error) error {
+		return sessionTimedOut(ctx, wait, "configuration command did not complete within 60 seconds", err)
+	}
+	for {
+		rejection, done, err := h.backend.ConfigResult(wait, commandID)
+		if err != nil {
+			return 0, timedOut(err)
+		}
+		if done {
+			if rejection != nil {
+				return 0, errors.New(*rejection)
+			}
+			if err := h.SyncNow(wait); err != nil {
+				return 0, timedOut(err)
+			}
+			return ordinal, nil
+		}
+		if h.IsStopped() {
+			return 0, errors.New("session stopped while applying configuration")
+		}
+		if viewError := h.View().Error; viewError != nil {
+			return 0, fmt.Errorf("configuration connection failed: %s", viewError.Detail())
+		}
+		if err := daemonSleep(wait, 50*time.Millisecond); err != nil {
+			return 0, timedOut(err)
+		}
+	}
+}
+
+// sessionTimedOut is Rust's `tokio::time::timeout(..).context(message)`: a
+// failure after the wait's own deadline passed is that deadline, reported
+// with message; a cancelled parent and any other failure pass through.
+func sessionTimedOut(parent, wait context.Context, message string, err error) error {
+	if parent.Err() == nil && errors.Is(wait.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %w", message, wait.Err())
+	}
+	return err
 }
 
 // ApplyPlanControl applies a plan control. A follow-up prompt must wait for
 // the mode change, not just admission.
 func (h SessionHandle) ApplyPlanControl(ctx context.Context, commandID string, control core.PlanControl) error {
-	panic("unported: mj-client/src/session.rs SessionHandle::apply_plan_control")
+	switch control := control.(type) {
+	case core.PlanControlRestoreExecutionMode:
+		_, err := h.applyConfigurationCommand(ctx, commandID, core.RelayCommandRestoreExecutionMode{})
+		return err
+	case core.PlanControlSetConfig:
+		_, err := h.SetConfigWithID(ctx, commandID, control.Key, control.Value)
+		return err
+	case core.PlanControlSetSessionMode:
+		if _, err := h.Submit(ctx, commandID, core.RelayCommandSetSessionMode{ModeID: control.ModeID}); err != nil {
+			return err
+		}
+		wait, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		timedOut := func(err error) error {
+			return sessionTimedOut(ctx, wait, "session mode change did not complete within 60 seconds", err)
+		}
+		for {
+			if err := h.SyncNow(wait); err != nil {
+				return timedOut(err)
+			}
+			if snapshot := h.View().Snapshot; snapshot != nil {
+				if modes := snapshot.Operational.Get().Modes; modes != nil && string(modes.CurrentModeID) == control.ModeID {
+					return nil
+				}
+			}
+			if h.IsStopped() {
+				return errors.New("session stopped while changing mode")
+			}
+			if err := daemonSleep(wait, 50*time.Millisecond); err != nil {
+				return timedOut(err)
+			}
+		}
+	}
+	panic(fmt.Sprintf("unknown PlanControl %T", control))
 }
 
 func (h SessionHandle) EnqueueSubmit(ctx context.Context, commandID string, command core.RelayCommand) (PendingRelaySubmit, error) {
@@ -562,24 +672,28 @@ func (c SessionControl) Session(ctx context.Context, sessionID string) (SessionH
 // WaitForSession waits up to timeout for the session's actor to be
 // available.
 func (c SessionControl) WaitForSession(ctx context.Context, sessionID string, timeout time.Duration) (SessionHandle, error) {
-	panic("unported: mj-client/src/session.rs SessionControl::wait_for_session")
+	wait, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		handle, err := c.Session(wait, sessionID)
+		if err == nil {
+			return handle, nil
+		}
+		// tracing's trace level, below slog's Debug.
+		slog.Log(wait, slog.LevelDebug-4, "waiting for session actor", "session_id", sessionID, "error", err.Error())
+		if err := daemonSleep(wait, 25*time.Millisecond); err != nil {
+			return SessionHandle{}, sessionTimedOut(ctx, wait,
+				fmt.Sprintf("session %s did not become available within %d seconds", sessionID, int64(timeout/time.Second)), err)
+		}
+	}
 }
 
 // GoString is Rust's Debug.
 func (c SessionControl) GoString() string { return "SessionControl(..)" }
 
 // NewCommandID is a fresh command id: prefix, a dash, and 32 random hex
-// digits.
-func NewCommandID(prefix string) (string, error) {
-	if strings.TrimSpace(prefix) == "" {
-		return "", errors.New("command ID prefix is required")
-	}
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate command ID: %w", err)
-	}
-	return prefix + "-" + core.LowerHex(random), nil
-}
+// digits. Rust re-exports mj_core::relay::new_command_id here.
+func NewCommandID(prefix string) (string, error) { return core.NewCommandID(prefix) }
 
 // ReplacementSessionTestFixture is a stopped session and a manager that
 // resolves its live replacement.
@@ -610,6 +724,10 @@ type replacementTestSession struct {
 	viewClosed bool
 }
 
+func (s *replacementTestSession) ToolCallDetail(ctx context.Context, stableID string) (core.ToolCallDetailResult, error) {
+	return nil, nil
+}
+
 func (s *replacementTestSession) SearchPrompts(
 	ctx context.Context,
 	bundleID string,
@@ -618,7 +736,23 @@ func (s *replacementTestSession) SearchPrompts(
 	after *core.HistoryCursor,
 	limit int,
 ) (core.PromptHistoryPage, error) {
-	panic("unported: mj-client/src/session.rs ReplacementTestSession::search_prompts")
+	if s.history != nil {
+		response := make(chan historyTestResponse, 1)
+		err := s.history.Send(historyTestRequest{bundleID: bundleID, scope: scope, query: query, response: response})
+		if err != nil {
+			return core.PromptHistoryPage{}, errors.New("history backend closed")
+		}
+		select {
+		case answer, ok := <-response:
+			if !ok {
+				return core.PromptHistoryPage{}, errors.New("history response dropped")
+			}
+			return answer.page, answer.err
+		case <-ctx.Done():
+			return core.PromptHistoryPage{}, ctx.Err()
+		}
+	}
+	return core.PromptHistoryPage{Entries: []core.PromptHistoryEntry{}}, nil
 }
 
 func (s *replacementTestSession) SessionPrompts(ctx context.Context) ([]core.PromptHistoryEntry, error) {
@@ -653,7 +787,18 @@ func (s *replacementTestSession) HasChanged() (bool, error) {
 }
 
 func (s *replacementTestSession) Changed(ctx context.Context) (ManagedSessionView, error) {
-	panic("unported: mj-client/src/session.rs ReplacementTestSession::changed")
+	if s.viewClosed {
+		return ManagedSessionView{}, errors.New("session manager stopped")
+	}
+	select {
+	case <-s.seen:
+	case <-ctx.Done():
+		return ManagedSessionView{}, ctx.Err()
+	}
+	// Observing the change marks the current value seen, as tokio's
+	// changed() does.
+	s.seen = s.view.Changed()
+	return s.View(), nil
 }
 
 func (s *replacementTestSession) EnqueueSubmit(ctx context.Context, commandID string, command core.RelayCommand) (PendingRelaySubmit, error) {
@@ -706,7 +851,34 @@ func (c replacementTestControl) Session(ctx context.Context, sessionID string) (
 // replacement_session_test_fixture; renamed because the type holds the
 // name).
 func NewReplacementSessionTestFixture(sessionID string, acceptedOrdinal uint64) ReplacementSessionTestFixture {
-	panic("unported: mj-client/src/session.rs replacement_session_test_fixture")
+	// The stopped session's view has lost its sender: it never changes, and
+	// waiting for a change fails.
+	stoppedView := core.NewWatch(ManagedSessionView{})
+	stopped := NewSessionHandle(&replacementTestSession{
+		sessionID:       sessionID,
+		stopped:         true,
+		acceptedOrdinal: acceptedOrdinal,
+		view:            stoppedView,
+		seen:            stoppedView.Changed(),
+		viewClosed:      true,
+	})
+
+	view := core.NewWatch(ManagedSessionView{})
+	submitted := core.NewUnbounded[core.RelayCommand]()
+	replacement := NewSessionHandle(&replacementTestSession{
+		sessionID:       sessionID,
+		acceptedOrdinal: acceptedOrdinal,
+		submitted:       submitted,
+		view:            view,
+		seen:            view.Changed(),
+	})
+	control := NewSessionControl(replacementTestControl{sessionID: sessionID, replacement: replacement})
+	return ReplacementSessionTestFixture{
+		Stopped:         stopped,
+		Control:         control,
+		Submitted:       submitted,
+		ReplacementView: view,
+	}
 }
 
 // historyTestRequest is one prompt search a test answers (test-only in

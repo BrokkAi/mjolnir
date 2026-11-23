@@ -75,6 +75,27 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
             .unwrap();
             path
         }
+        HarnessKind::Antigravity => {
+            // One component per join: the adapter's key uses the platform
+            // separator, so a joined "a/b" would differ from it on Windows.
+            let path = home
+                .join("antigravity-cli")
+                .join("brain")
+                .join("90c30a64-54f7-4261-90f1-e75b1c14311c");
+            let transcript = path
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl");
+            fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            fs::write(
+                transcript,
+                [
+                    json!({"type":"USER_INPUT","step_index":1,"status":"DONE","cwd":cwd,"content":"<USER_REQUEST>remember native indexing</USER_REQUEST>"}),
+                    json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"hello back"}),
+                ].map(|record| record.to_string()).join("\n"),
+            ).unwrap();
+            path
+        }
         _ => unreachable!("fixture only covers the extracted native adapters"),
     }
 }
@@ -176,6 +197,7 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
         HarnessKind::Grok,
         HarnessKind::Muse,
         HarnessKind::Dsh,
+        HarnessKind::Antigravity,
     ] {
         let tool = harness_tools::tool_name(kind);
         let mut config = Config::default();
@@ -235,7 +257,7 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
         }
         for hit in &hits {
             let path = Path::new(&hit.row.path);
-            if kind != HarnessKind::Dsh {
+            if crate::import::native_sessions_enumerable(kind) {
                 // Muse stores its ID above session.jsonl; import must still
                 // resolve the indexed path through its harness-specific reader.
                 let native_session_id = if kind == HarnessKind::Muse {

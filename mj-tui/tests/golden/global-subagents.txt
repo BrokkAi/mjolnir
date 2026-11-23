@@ -7,8 +7,8 @@
 │hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
 │› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │   Primary and supervisor          0 entries  ›                                               │                     │
+│  │ No messages yet  │ Maximum concurrent children       8                                                          │                     │
+│  │                  │   Primary and orchestrator        0 entries  ›                                               │                     │
 │                     │   Straightforward                 0 entries  ›                                               │                     │
 │                     │   Subtle                          0 entries  ›                                               │                     │
 │                     │   Oracle                          0 entries  ›                                               │                     │
@@ -217,8 +217,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
 │› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │   Primary and supervisor          0 entries  ›                                               │                     │
+│  │ No messages yet  │ Maximum concurrent children       8                                                          │                     │
+│  │                  │   Primary and orchestrator        0 entries  ›                                               │                     │
 │                     │   Straightforward                 0 entries  ›                                               │                     │
 │                     │   Subtle                          1 entry  ›                                                 │                     │
 │                     │   Oracle                          1 entry  ›                                                 │                     │
@@ -259,8 +259,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ───────────────  │ Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir   │                     │
 │› ■ ACP pretty name  │ sub-agents.                                                                                  │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │ Maximum concurrent children       6                                                          │                     │
-│  │                  │   Primary and supervisor          0 entries  ›                                               │                     │
+│  │ No messages yet  │ Maximum concurrent children       8                                                          │                     │
+│  │                  │   Primary and orchestrator        0 entries  ›                                               │                     │
 │                     │   Straightforward                 0 entries  ›                                               │                     │
 │                     │   Subtle                          1 entry  ›                                                 │                     │
 │                     │   Oracle                          1 entry  ›                                                 │                     │

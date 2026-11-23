@@ -328,10 +328,6 @@ impl DashboardState {
                 .subagents
                 .oracle_available()
                 .then_some(wizard.subagents.oracle),
-            supervisors: wizard
-                .subagents
-                .supervisors_available()
-                .then_some(wizard.subagents.supervisors),
             oracle_choice: wizard.subagents.oracle_choice.clone(),
             review: None,
             create_managed_worktree: Some(
@@ -492,17 +488,8 @@ impl DashboardState {
         let chooser = checkout.owner().unwrap_or(source);
         let policy = chooser.subagents.clone().unwrap_or_default();
         let mut delegation = subagents::SubagentDraft::new(policy.clone())
-            .with_oracle(chooser.oracle, chooser.oracle_choice.as_deref().cloned())
-            .with_supervisors(chooser.supervisors);
-        delegation.refresh_create(
-            &profile_id,
-            &target_template_id,
-            &self.config,
-            &self.profile_capabilities,
-            Some(&policy),
-            chooser.oracle,
-            chooser.supervisors,
-        );
+            .with_oracle(chooser.oracle, chooser.oracle_choice.as_deref().cloned());
+        delegation.refresh_create(&profile_id, &self.config, Some(&policy), chooser.oracle);
         // The launch starts at once, so a choice the refresh could not keep is
         // reported, like the profile and workspace above. Native shown as None
         // for a harness without sub-agents of its own is not a change.
@@ -529,9 +516,6 @@ impl DashboardState {
             remember_container_size: false,
             subagents: Some(delegation.selected()),
             oracle: delegation.oracle_available().then_some(delegation.oracle),
-            supervisors: delegation
-                .supervisors_available()
-                .then_some(delegation.supervisors),
             oracle_choice: delegation.oracle_choice.clone(),
             review: chooser.review.as_deref().cloned(),
             // Like the wizard, ask for a worktree only where one can exist,

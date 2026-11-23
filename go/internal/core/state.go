@@ -501,10 +501,15 @@ func (o *MaterializedTurnOutcome) UnmarshalJSON(data []byte) error {
 // IsResubmittedBy reports whether this command carries out the request
 // again, including provider retries and any generation of worker restart
 // continuation.
-func (o *MaterializedTurnOutcome) IsResubmittedBy(commandID string) bool {
+func (o *MaterializedTurnOutcome) IsResubmittedBy(commandID string, subagent bool) bool {
 	carried := CarriedCommand(commandID)
 	if retried, ok := RetriedTurn(carried); ok && retried == o.CompletedOrdinal {
 		return true
+	}
+	if subagent {
+		if retried, ok := GeneratedPromptQuotaRetry.RetryOrdinal(carried); ok && retried == o.CompletedOrdinal {
+			return true
+		}
 	}
 	return carried != commandID && carried == CarriedCommand(o.CommandID)
 }
@@ -1014,20 +1019,22 @@ func ProjectionWindowOf(session *MaterializedSession) ProjectionWindow {
 	return window
 }
 
-// ResolvedTitle is the session's title, using the same precedence as
-// MaterializedSession.ResolvedTitle but taking the provisional title from
-// the window rather than from a transcript head that a polled projection
-// does not carry.
-func (s *ManagedSessionSnapshot) ResolvedTitle() (string, bool) {
-	if s.Materialized.SessionTitle != nil {
-		if title, ok := NormalizeSessionTitle(*s.Materialized.SessionTitle); ok {
+// ResolvedTitle is the resolved session title when earlier messages are
+// outside the tail.
+func (w *ProjectionWindow) ResolvedTitle(materialized *MaterializedSession) (string, bool) {
+	if materialized.SessionTitle != nil {
+		if title, ok := NormalizeSessionTitle(*materialized.SessionTitle); ok {
 			return title, true
 		}
 	}
-	if s.Window.ProvisionalTitle != nil {
-		return *s.Window.ProvisionalTitle, true
+	if w.ProvisionalTitle != nil {
+		return *w.ProvisionalTitle, true
 	}
-	return queuedPromptsTitle(s.Materialized.QueuedPrompts)
+	return queuedPromptsTitle(materialized.QueuedPrompts)
+}
+
+func (s *ManagedSessionSnapshot) ResolvedTitle() (string, bool) {
+	return s.Window.ResolvedTitle(&s.Materialized)
 }
 
 // LatestCompletedTurnOrdinal is the position of the turn this session most
@@ -1993,6 +2000,21 @@ func (k ManagedCheckoutKind) isWorktree() bool {
 	return k == ManagedCheckoutKindWorktree || k == ""
 }
 
+// UsesOriginDeltaSuspend reports whether this checkout suspends through an
+// origin-delta snapshot.
+func (w *ManagedWorktree) UsesOriginDeltaSuspend() bool {
+	if w.Kind != ManagedCheckoutKindClone && !w.Kind.isWorktree() {
+		return false
+	}
+	switch w.Target.(type) {
+	case ManagedWorktreeTargetLocal:
+		return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+	case ManagedWorktreeTargetSsh:
+		return true
+	}
+	return false
+}
+
 func (w *ManagedWorktree) validate(sessionID string, projectDirectory *string) error {
 	for _, entry := range []struct{ label, path string }{
 		{"source project directory", w.SourceProjectDirectory},
@@ -2204,17 +2226,15 @@ func (m *CheckpointMetadata) validate() error {
 }
 
 // SessionBuildCache is the mbx build cache a container session was
-// provisioned with. The directory is a host path mounted read-write at the
-// same absolute path inside the container. Older containers retain their
-// private binaries until recreated; the worker's bin/mbx contents identify
-// that legacy scheme.
+// provisioned with. A shared cache mounts the host directory read-write at
+// the same path inside the container. Nitro keeps its cache directory on the
+// guest root disk.
 type SessionBuildCache struct {
-	// Host is the container host this cache was resolved on. A session moved
-	// to a different host cannot reuse it, so the decision is made again there.
+	// Host is the cache owner, a container host or a Nitro session.
 	Host      string `json:"host"`
 	Directory string `json:"directory"`
-	// MaxSize is read compatibility for old records only. Launch never uses
-	// this value; budgets belong to the shared machine configuration.
+	// MaxSize is read compatibility for old records only. Shared caches use
+	// machine policy and Nitro guests use mbx's automatic budget.
 	MaxSize *string `json:"max_size,omitempty"`
 	// TargetRoot is a [target] root the host's mbx configuration relocates
 	// outside the cache directory, mounted read-write at the same path as well.
@@ -2527,7 +2547,7 @@ type SessionRecord struct {
 	// configured. Records written before the choice existed allow it.
 	Oracle bool `json:"oracle"`
 	// OracleChoice is this session's own oracle model (--subagent-oracle),
-	// overriding [subagents.oracle] or [subagents.yolo.oracle].
+	// overriding [subagents.oracle].
 	OracleChoice *SubagentChoice `json:"oracle_choice,omitempty"`
 	// Review is the turn review chosen for this session when it was created.
 	// Nil follows the global [review] section.
@@ -2849,13 +2869,16 @@ func ClampContainerSize(size HostContainerSize, limits *HostContainerSize) HostC
 	}
 }
 
-// DefaultContainerSize is the default selected for a new container target:
-// its remembered host size, or 4 CPUs / 8 GiB, clamped to the latest host
-// totals when available.
-func DefaultContainerSize(remembered, limits *HostContainerSize) HostContainerSize {
+// ResolveDefaultContainerSize selects the remembered host size, the
+// target's configured size, or the baseline of 4 CPUs / 8 GiB, clamped to
+// the latest host totals when available.
+func ResolveDefaultContainerSize(templateDefault, remembered, limits *HostContainerSize) HostContainerSize {
 	size := HostContainerSize{Cpus: BaselineContainerCpus, MemoryBytes: BaselineContainerMemoryBytes}
-	if remembered != nil {
+	switch {
+	case remembered != nil:
 		size = *remembered
+	case templateDefault != nil:
+		size = *templateDefault
 	}
 	return ClampContainerSize(size, limits)
 }
@@ -2866,7 +2889,7 @@ func defaultOracleEnabled() bool { return true }
 
 // OracleUnavailableNotice is what a session's creator is told when an
 // explicit request for the oracle could not be honored.
-const OracleUnavailableNotice = "Oracle is off for this session: no oracle model is configured; set [subagents.oracle], or [subagents.yolo.oracle] for a YOLO target, or pass --subagent-oracle."
+const OracleUnavailableNotice = "Oracle is off for this session: no oracle model is configured; set [subagents.oracle] or pass --subagent-oracle."
 
 // DestructionFailurePrefix and its siblings are how a failed lifecycle
 // operation's reason begins in SessionRecord.LastError.
@@ -2960,21 +2983,17 @@ func (r *SessionRecord) IsYoloTarget(config *Config) bool {
 	return err == nil && settings.IsYolo()
 }
 
-// EffectiveOracle is the oracle this session may consult: none when its
-// Oracle choice is off, else its own override or the global oracle for its
-// target mode.
-func (r *SessionRecord) EffectiveOracle(subagents *SubagentConfig, yolo bool) *SubagentChoice {
+// EffectiveOracle is the oracle choices this session may consult: empty when
+// its Oracle choice is off, else its own override or the global oracle
+// choices.
+func (r *SessionRecord) EffectiveOracle(subagents *SubagentConfig) []SubagentChoice {
 	if !r.Oracle {
 		return nil
 	}
-	choice := r.OracleChoice
-	if choice == nil {
-		choice = subagents.ChoiceFor(SubagentTaskTypeOracle, yolo)
+	if choice := r.OracleChoice; choice != nil && strings.TrimSpace(choice.Model) != "" {
+		return []SubagentChoice{*choice}
 	}
-	if choice == nil || strings.TrimSpace(choice.Model) == "" {
-		return nil
-	}
-	return choice
+	return subagents.Choices(SubagentTaskTypeOracle)
 }
 
 // IsCleanlyStopped: a completed close has no failure left to report. A
@@ -3060,8 +3079,9 @@ func (r *SessionRecord) ExecutionEnforcement(config *Config) (ExecutionEnforceme
 		return ExecutionEnforcement{}, false
 	}
 	choices := DefaultApprovalChoices()
+	choices.MjolnirGuardian = config.Guardian.Enabled
 	if profile, ok := config.Profiles[r.LastProfile]; ok {
-		choices = profile.ApprovalChoices()
+		choices = config.ProfileApprovalChoices(profile)
 	}
 	return r.HarnessKind.ResolveExecutionEnforcement(settings.ExecutionPolicy, choices)
 }
@@ -3107,7 +3127,7 @@ func (r *SessionRecord) ConfigurationIssue(config *Config) (string, bool) {
 	if len(issues) == 0 {
 		return "", false
 	}
-	return fmt.Sprintf("Session %s needs configuration repair: %s. Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+	return fmt.Sprintf("Session %s needs configuration repair: %s. Restore these entries in config.toml, then retry. Use Detect profiles and Detect runtimes in Settings to rediscover installed agents and runtimes.",
 		debugString(r.ID), strings.Join(issues, "; ")), true
 }
 
@@ -3567,6 +3587,9 @@ type StateState struct {
 	LastOracleChoices map[string]bool                    `json:"last_oracle_choices,omitempty"`
 	Version           uint32                             `json:"version"`
 	Sessions          SnapshotMap[string, SessionRecord] `json:"sessions"`
+	// EnvironmentOwners is the physical workspace owners, projected from
+	// the environment ledger.
+	EnvironmentOwners SnapshotMap[string, string] `json:"environment_owners"`
 	// Subagents are child sessions keyed by their session id. The
 	// relationship lives in controller state so every control surface sees
 	// the same session family.
@@ -3587,6 +3610,7 @@ func (s StateState) MarshalJSON() ([]byte, error) {
 		LastOracleChoices    map[string]bool                         `json:"last_oracle_choices,omitempty"`
 		Version              uint32                                  `json:"version"`
 		Sessions             *SnapshotMap[string, SessionRecord]     `json:"sessions,omitempty"`
+		EnvironmentOwners    *SnapshotMap[string, string]            `json:"environment_owners,omitempty"`
 		Subagents            *SnapshotMap[string, SubagentMetadata]  `json:"subagents,omitempty"`
 		MountHistory         *SnapshotMap[string, []string]          `json:"mount_history,omitempty"`
 		ContainerSizes       *SnapshotMap[string, HostContainerSize] `json:"container_sizes,omitempty"`
@@ -3602,6 +3626,9 @@ func (s StateState) MarshalJSON() ([]byte, error) {
 	}
 	if !s.Sessions.IsEmpty() {
 		out.Sessions = &s.Sessions
+	}
+	if !s.EnvironmentOwners.IsEmpty() {
+		out.EnvironmentOwners = &s.EnvironmentOwners
 	}
 	if !s.Subagents.IsEmpty() {
 		out.Subagents = &s.Subagents
@@ -3647,6 +3674,7 @@ func NewStateState() StateState {
 		LastSubagentPolicies: map[string]SubagentPolicy{},
 		LastOracleChoices:    map[string]bool{},
 		Sessions:             NewSnapshotMap[string, SessionRecord](),
+		EnvironmentOwners:    NewSnapshotMap[string, string](),
 		Subagents:            NewSnapshotMap[string, SubagentMetadata](),
 		MountHistory:         NewSnapshotMap[string, []string](),
 		ContainerSizes:       NewSnapshotMap[string, HostContainerSize](),
@@ -3657,13 +3685,20 @@ func NewStateState() StateState {
 // back to the legacy global choice and then the default when that profile
 // has no saved choice.
 func (s *StateState) LastSubagentPolicyFor(profileID string) SubagentPolicy {
-	if policy, ok := s.LastSubagentPolicies[profileID]; ok {
-		return policy
-	}
-	if policy, ok := s.LastSubagentPolicies[""]; ok {
+	if policy, ok := s.RememberedSubagentPolicyFor(profileID); ok {
 		return policy
 	}
 	return SubagentPolicy{Mode: SubagentPolicyNative}
+}
+
+// RememberedSubagentPolicyFor is the saved profile choice or the legacy
+// global choice.
+func (s *StateState) RememberedSubagentPolicyFor(profileID string) (SubagentPolicy, bool) {
+	if policy, ok := s.LastSubagentPolicies[profileID]; ok {
+		return policy, true
+	}
+	policy, ok := s.LastSubagentPolicies[""]
+	return policy, ok
 }
 
 // LastOracleChoiceFor is the remembered Oracle choice for a profile;
@@ -3675,28 +3710,26 @@ func (s *StateState) LastOracleChoiceFor(profileID string) bool {
 	return true
 }
 
-// reviewOwner is the session whose record holds the review choice that
-// governs sessionID. An ordinary sub-agent reviews under the choice of the
-// session that spawned it, followed up the chain to a top-level session, so
-// the parent's record stays the only copy and a later change to it applies
-// to its children. Every other session uses its own record.
-//
-// Fails with the id of a missing ancestor record, or with the session
-// itself when the parent chain loops (the string result, ok false).
+// reviewOwner: ordinary workers share the review choice of their
+// environment owner. Oracles and reviewers retain the choice on their own
+// record. Fails (ok false) with the session that has no environment owner
+// binding, or with the owner whose record is missing.
 func (s *StateState) reviewOwner(sessionID string) (owner *SessionRecord, failed string, ok bool) {
-	current := sessionID
-	// A chain longer than the relation table repeats a session.
-	for range s.Subagents.Len() + 1 {
-		child, isChild := s.Subagents.Get(current)
-		if !isChild || child.Kind != SubagentKindWorker {
-			return s.Sessions.GetShared(current), "", true
-		}
-		if !s.Sessions.ContainsKey(child.ParentSessionID) {
-			return nil, child.ParentSessionID, false
-		}
-		current = child.ParentSessionID
+	session := s.Sessions.GetShared(sessionID)
+	if session == nil {
+		return nil, "", true
 	}
-	return nil, sessionID, false
+	if relation := s.Subagents.GetShared(sessionID); relation != nil && relation.Kind != SubagentKindWorker {
+		return session, "", true
+	}
+	ownerID, bound := s.EnvironmentOwnerID(sessionID)
+	if !bound {
+		return nil, sessionID, false
+	}
+	if owner := s.Sessions.GetShared(ownerID); owner != nil {
+		return owner, "", true
+	}
+	return nil, ownerID, false
 }
 
 // EffectiveReview is the stored review choice that governs sessionID,
@@ -3718,8 +3751,8 @@ func (s *StateState) EffectiveReview(sessionID string) (review *SessionReview, f
 // EffectiveReviewConfig is the review configuration that governs sessionID:
 // the given global [review] under the stored choice, then Mjolnir's
 // automatic rules (see review settings automaticReviewOff), which are
-// evaluated here on every call and never stored. A parent chain that cannot
-// be followed reviews as Off. Launch (which offers the review tools), the
+// evaluated here on every call and never stored. Missing environment
+// ownership reviews as Off. Launch (which offers the review tools), the
 // review host, child review requests, delegation completion and the viewer
 // all read the effective review through this one rule.
 func (s *StateState) EffectiveReviewConfig(review *ReviewConfig, sessionID string) ReviewConfig {
@@ -3739,7 +3772,7 @@ func (s *StateState) EffectiveReviewConfig(review *ReviewConfig, sessionID strin
 // owns it.
 //
 // These variants are derived from the durable session record and the
-// State.Subagents relationship. They are not serialized. In particular, the
+// environment ledger. They are not serialized. In particular, the
 // creation-time create_managed_worktree choice is not evidence of current
 // checkout ownership.
 type Checkout interface {
@@ -3752,8 +3785,7 @@ type Checkout interface {
 	// location. The outer CheckoutBorrowed variant still controls cleanup: a
 	// child must never retire the managed checkout it borrows.
 	Effective() Checkout
-	// Owner is the record that owns a borrowed checkout, following nested
-	// borrowing to the session that holds the workspace. Nil for a checkout
+	// Owner is the record that owns a borrowed checkout. Nil for a checkout
 	// the session owns itself.
 	Owner() *SessionRecord
 	// ProjectDirectory is the concrete repository directory when the record
@@ -3810,12 +3842,7 @@ func (c CheckoutBorrowed) Effective() Checkout         { return c.Checkout.Effec
 func (CheckoutAttached) Owner() *SessionRecord         { return nil }
 func (CheckoutManagedWorktree) Owner() *SessionRecord  { return nil }
 func (CheckoutManagedWorkspace) Owner() *SessionRecord { return nil }
-func (c CheckoutBorrowed) Owner() *SessionRecord {
-	if owner := c.Checkout.Owner(); owner != nil {
-		return owner
-	}
-	return c.OwnerRecord
-}
+func (c CheckoutBorrowed) Owner() *SessionRecord       { return c.OwnerRecord }
 
 func (c CheckoutAttached) ProjectDirectory() (string, bool) { return c.Path, true }
 func (c CheckoutManagedWorktree) ProjectDirectory() (string, bool) {
@@ -3879,51 +3906,153 @@ func LiveSessionIDs(sessions *SnapshotMap[string, SessionRecord], subagents *Sna
 	}
 }
 
-// ActiveChildSessionIDs is the managed children that a parent suspend or
-// Move stop hook must end, including parked children and oracles.
-func (s *StateState) ActiveChildSessionIDs(parentSessionID string) []string {
-	ids := []string{}
-	for child := range s.Subagents.Values() {
-		if child.ParentSessionID != parentSessionID {
+// EnvironmentOwnerID is the ledger owner of sessionID's environment. The
+// owner ID may outlive the owner's session record.
+func (s *StateState) EnvironmentOwnerID(sessionID string) (string, bool) {
+	if IsViewID(sessionID) || !s.Sessions.ContainsKey(sessionID) {
+		return "", false
+	}
+	return s.EnvironmentOwners.Get(sessionID)
+}
+
+// OwnsEnvironment reports whether sessionID owns its environment. Missing
+// ownership is unknown (known false), including on older client
+// projections.
+func (s *StateState) OwnsEnvironment(sessionID string) (owns, known bool) {
+	owner, ok := s.EnvironmentOwnerID(sessionID)
+	if !ok {
+		return false, false
+	}
+	return owner == sessionID, true
+}
+
+// ownsEnvironmentKnown is `owns_environment(id) == Some(true)`.
+func (s *StateState) ownsEnvironmentKnown(sessionID string) bool {
+	owns, known := s.OwnsEnvironment(sessionID)
+	return known && owns
+}
+
+// BorrowedMembers is the sessions that work in ownerID's environment
+// without owning it.
+func (s *StateState) BorrowedMembers(ownerID string) []string {
+	members := []string{}
+	for id, owner := range s.EnvironmentOwners.All() {
+		if *owner != ownerID || id == ownerID {
 			continue
 		}
-		if session := s.Sessions.GetShared(child.ChildSessionID); session != nil && session.State.IsActive() {
-			ids = append(ids, child.ChildSessionID)
+		if _, bound := s.EnvironmentOwnerID(id); bound {
+			members = append(members, id)
+		}
+	}
+	return members
+}
+
+// ActiveBorrowers is the BorrowedMembers whose sessions are active.
+func (s *StateState) ActiveBorrowers(ownerID string) []string {
+	borrowers := []string{}
+	for _, id := range s.BorrowedMembers(ownerID) {
+		if s.Sessions.Index(id).State.IsActive() {
+			borrowers = append(borrowers, id)
+		}
+	}
+	return borrowers
+}
+
+// directSubagents is the children whose relation names parentID.
+func (s *StateState) directSubagents(parentID string) []string {
+	var ids []string
+	for id, relation := range s.Subagents.All() {
+		if relation.ParentSessionID == parentID {
+			ids = append(ids, id)
 		}
 	}
 	return ids
 }
 
-// SubagentsOccupyContainer reports whether a sub-agent of parentSessionID
-// still has a target. A child's worker, parked or live, runs in its
-// parent's container, so recreating that container would end it.
-func (s *StateState) SubagentsOccupyContainer(parentSessionID string) bool {
-	for child := range s.Subagents.Values() {
-		if child.ParentSessionID != parentSessionID {
-			continue
+// DirectOwnedChildIDs is parentID's direct children that own their
+// environment, sorted.
+func (s *StateState) DirectOwnedChildIDs(parentID string) []string {
+	owned := []string{}
+	for _, id := range s.directSubagents(parentID) {
+		if s.ownsEnvironmentKnown(id) {
+			owned = append(owned, id)
 		}
-		if session := s.Sessions.GetShared(child.ChildSessionID); session != nil && session.Target != nil {
+	}
+	slices.Sort(owned)
+	return owned
+}
+
+// CanSuspendOwnedChild reports whether id is a sub-agent owning its
+// environment with a parked or live worker.
+func (s *StateState) CanSuspendOwnedChild(id string) bool {
+	if !s.ownsEnvironmentKnown(id) || !s.Subagents.ContainsKey(id) {
+		return false
+	}
+	record := s.Sessions.GetShared(id)
+	return record != nil && (record.State == SessionStateParked || record.State.HasLiveWorker())
+}
+
+// SuspendableOwnedChildIDs is DirectOwnedChildIDs that
+// CanSuspendOwnedChild.
+func (s *StateState) SuspendableOwnedChildIDs(parentID string) []string {
+	ids := []string{}
+	for _, id := range s.DirectOwnedChildIDs(parentID) {
+		if s.CanSuspendOwnedChild(id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// DescendantSubagentIDs is every sub-agent descendant of rootID in BFS
+// order, guarded against cycles.
+func (s *StateState) DescendantSubagentIDs(rootID string) []string {
+	visited := map[string]struct{}{rootID: {}}
+	queue := []string{rootID}
+	descendants := []string{}
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+		direct := s.directSubagents(parentID)
+		slices.Sort(direct)
+		for _, childID := range direct {
+			if _, seen := visited[childID]; seen {
+				continue
+			}
+			visited[childID] = struct{}{}
+			descendants = append(descendants, childID)
+			queue = append(queue, childID)
+		}
+	}
+	return descendants
+}
+
+// ActiveChildSessionIDs is the managed descendants that a parent suspend or
+// Move stop hook must end, including parked children, depth-2 workers, and
+// oracles.
+func (s *StateState) ActiveChildSessionIDs(parentSessionID string) []string {
+	ids := []string{}
+	for _, childID := range s.DescendantSubagentIDs(parentSessionID) {
+		if session := s.Sessions.GetShared(childID); session != nil && session.State.IsActive() {
+			ids = append(ids, childID)
+		}
+	}
+	return ids
+}
+
+// SubagentsOccupyContainer reports whether any borrower still has a target,
+// including a parked worker.
+func (s *StateState) SubagentsOccupyContainer(ownerID string) bool {
+	for _, id := range s.BorrowedMembers(ownerID) {
+		if s.Sessions.Index(id).Target != nil {
 			return true
 		}
 	}
 	return false
 }
 
-// Checkout derives the checkout location and its owner for a session.
-//
-// Raw directory sessions with no managed-worktree descriptor are attached
-// even when they have no Git project snapshot (the supported non-Git
-// bare-target case). A descriptor takes precedence if both raw fields are
-// present, because it is the cleanup authority; the stored project path is
-// retained as the checkout directory, even if an invalid legacy record
-// disagrees with the descriptor's root. Record validation rejects that
-// mismatch. With neither field present, old bundle-backed records map to a
-// managed workspace whether their bundle came from config or a saved
-// project snapshot. A managed sub-agent is resolved through its durable
-// parent relation first, so its copied project_directory never changes
-// ownership. Nested children keep the chain of borrowed owners. An orphan
-// child whose parent record has already been removed falls back to its
-// stored checkout fields, preserving the older cleanup path.
+// Checkout derives checkout location and ownership from the session and its
+// ledger binding.
 func (s *StateState) Checkout(sessionID string) (Checkout, error) {
 	session := s.Sessions.GetShared(sessionID)
 	if session == nil {
@@ -3932,49 +4061,32 @@ func (s *StateState) Checkout(sessionID string) (Checkout, error) {
 	return s.CheckoutForRecord(sessionID, session)
 }
 
-// CheckoutForRecord derives checkout ownership for a projected record while
-// retaining the durable sub-agent relationship from this state snapshot.
+// CheckoutForRecord: for an owner, use the projected record (which may
+// describe a proposed placement). A borrower always takes its checkout from
+// the bound owner.
 func (s *StateState) CheckoutForRecord(sessionID string, session *SessionRecord) (Checkout, error) {
-	return s.checkoutForRecordInner(sessionID, session, map[string]struct{}{})
-}
-
-func (s *StateState) checkoutForRecordInner(sessionID string, session *SessionRecord, visited map[string]struct{}) (Checkout, error) {
-	if _, seen := visited[sessionID]; seen {
-		return nil, fmt.Errorf("sub-agent checkout ownership contains a cycle at %s", sessionID)
-	}
-	visited[sessionID] = struct{}{}
-	if relation := s.Subagents.GetShared(sessionID); relation != nil {
-		owner := s.Sessions.GetShared(relation.ParentSessionID)
-		if owner == nil {
-			return session.RecordCheckout(), nil
-		}
-		checkout, err := s.checkoutForRecordInner(owner.ID, owner, visited)
-		if err != nil {
-			return nil, err
-		}
-		return CheckoutBorrowed{OwnerRecord: owner, Checkout: checkout}, nil
-	}
-	return session.RecordCheckout(), nil
-}
-
-// WorkspaceOwner is the record whose workspace sessionID works in: the
-// session itself, or, for a sub-agent, the parent it borrows from. Facts
-// about how the workspace was created (its exact checkout, its history
-// cutoff) belong to that record, so a reader asks here instead of the
-// child's own fields, which a child leaves empty.
-func (s *StateState) WorkspaceOwner(sessionID string) (*SessionRecord, error) {
-	session := s.Sessions.GetShared(sessionID)
-	if session == nil {
-		return nil, fmt.Errorf("unknown session %s", sessionID)
-	}
-	checkout, err := s.Checkout(sessionID)
+	owner, err := s.WorkspaceOwner(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if owner := checkout.Owner(); owner != nil {
-		return owner, nil
+	if owner.ID == sessionID {
+		return session.RecordCheckout(), nil
 	}
-	return session, nil
+	return CheckoutBorrowed{OwnerRecord: owner, Checkout: owner.RecordCheckout()}, nil
+}
+
+// WorkspaceOwner is the record holding the physical checkout and workspace
+// history.
+func (s *StateState) WorkspaceOwner(sessionID string) (*SessionRecord, error) {
+	ownerID, ok := s.EnvironmentOwnerID(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("session %s has no environment owner binding", sessionID)
+	}
+	owner := s.Sessions.GetShared(ownerID)
+	if owner == nil {
+		return nil, fmt.Errorf("environment owner %s for session %s is unavailable", ownerID, sessionID)
+	}
+	return owner, nil
 }
 
 // SessionNoticeName is how a notice names a session: the title the session
@@ -3988,17 +4100,12 @@ func (s *StateState) SessionNoticeName(sessionID string) string {
 	return ShortID(sessionID)
 }
 
-// ProjectIdentitySession is the session whose project identity names a row.
-//
-// A sub-agent child runs inside its parent's workspace and owns no managed
-// worktree, so its own project_directory is the parent's worktree checkout,
-// whose directory is named after the parent session id. Reading the project
-// identity from the parent instead keeps a child under the same project
-// heading and target label as the session it belongs to.
+// ProjectIdentitySession uses the physical owner's project for display,
+// falling back to the row when the owner is outside this projection.
 func (s *StateState) ProjectIdentitySession(session *SessionRecord) *SessionRecord {
-	if record := s.Subagents.GetShared(session.ID); record != nil {
-		if parent := s.Sessions.GetShared(record.ParentSessionID); parent != nil {
-			return parent
+	if ownerID, ok := s.EnvironmentOwnerID(session.ID); ok && ownerID != session.ID {
+		if owner := s.Sessions.GetShared(ownerID); owner != nil {
+			return owner
 		}
 	}
 	return session
@@ -4087,13 +4194,43 @@ func (s *StateState) ValidateSubagent(childID string) error {
 	if !s.Sessions.ContainsKey(subagent.ParentSessionID) {
 		return fmt.Errorf("sub-agent %s has unknown parent %s", child, debugString(subagent.ParentSessionID))
 	}
-	if subagent.Kind != SubagentKindReviewer && s.Subagents.ContainsKey(subagent.ParentSessionID) {
-		return fmt.Errorf("sub-agent %s cannot belong to another sub-agent", child)
+	var parentSubagent *SubagentRecord
+	if parent := s.Subagents.GetShared(subagent.ParentSessionID); parent != nil {
+		parentSubagent = &SubagentRecord{
+			Kind:             parent.Kind,
+			ChildSessionID:   parent.ChildSessionID,
+			ParentSessionID:  parent.ParentSessionID,
+			TaskName:         parent.TaskName,
+			ProfileID:        parent.ProfileID,
+			Model:            parent.Model,
+			Effort:           parent.Effort,
+			WorkingDirectory: parent.WorkingDirectory,
+			RequestKey:       parent.RequestKey,
+			CreatedAt:        parent.CreatedAt,
+			NoticedTurn:      parent.NoticedTurn,
+			ReportedFinish:   parent.ReportedFinish,
+			HandbackTool:     parent.HandbackTool,
+			Orchestrator:     parent.Orchestrator,
+		}
 	}
-	// The shared checkout derivation validates the complete ownership chain
-	// and rejects cycles for nested reviewer relationships.
-	if _, err := s.Checkout(childID); err != nil {
+	if err := ValidateSubagentParent(parentSubagent, s.ownsEnvironmentKnown(subagent.ParentSessionID),
+		subagent.Kind, subagent.Orchestrator); err != nil {
 		return err
+	}
+	// Reviewer relations may nest. Validate the logical graph separately from
+	// the environment ledger, whose owners can outlive their rows.
+	ancestor := subagent.ParentSessionID
+	visited := map[string]struct{}{childID: {}}
+	for {
+		parent := s.Subagents.GetShared(ancestor)
+		if parent == nil {
+			break
+		}
+		if _, seen := visited[ancestor]; seen {
+			return fmt.Errorf("sub-agent relationship contains a cycle at %s", ancestor)
+		}
+		visited[ancestor] = struct{}{}
+		ancestor = parent.ParentSessionID
 	}
 	if strings.TrimSpace(subagent.TaskName) == "" || strings.TrimSpace(subagent.ProfileID) == "" ||
 		strings.TrimSpace(subagent.RequestKey) == "" {

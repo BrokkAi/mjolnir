@@ -6,9 +6,14 @@ package worker
 
 import (
 	"cmp"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"math"
 	"slices"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
 // TurnAssessmentIdentity names the turn an assessment judges: its turn id and
@@ -138,6 +143,53 @@ func (r *DurableRelay) classifiesTurns() bool {
 	return !r.snapshot.ManagedSubagent
 }
 
+// settleLocalQuota settles a typed quota stop without GLiDE: a top-level
+// session's explicit provider usage-limit code, or a managed child's quota
+// stop when its worker recovers child quota.
+func (r *DurableRelay) settleLocalQuota() error {
+	current := r.snapshot.Assessment
+	// Storing a settlement calls back here through the journal tail.
+	if current == nil || !current.Current() || current.Action != nil {
+		return nil
+	}
+	child := r.snapshot.ManagedSubagent
+	diagnostic := current.Completion.Diagnostic
+	var qualifies bool
+	if child {
+		continuation := &r.snapshot.Continuation
+		ownsQuotaFrontier := !continuation.QuotaSuppressed &&
+			continuation.UserCommandID != nil &&
+			continuation.CompletedCommandID != nil && *continuation.CompletedCommandID == current.TurnID
+		qualifies = r.recoversChildQuota &&
+			ownsQuotaFrontier &&
+			current.Status == core.StatusPending &&
+			((diagnostic != nil && diagnostic.IsUsageLimit()) ||
+				core.ClassifyPromptCompletion(current.Completion.StopReason) == core.PromptCompletionQuotaLimit)
+	} else {
+		qualifies = r.verdictHarness != nil &&
+			!r.jevDisabled &&
+			current.Verdict == nil &&
+			current.Glide == nil &&
+			(current.Status == core.StatusPending || current.Status == core.StatusFailed) &&
+			diagnostic != nil && diagnostic.IsTypedUsageLimitCode()
+	}
+	if !qualifies {
+		return nil
+	}
+	a := *current
+	action := core.AssessmentActionRecoverQuota
+	a.Action = &action
+	a.RetryAtMs = nil
+	if !child && r.automaticActionSuppressed() {
+		a.Status = core.StatusSuperseded
+		a.Reason = "automatic_action_suppressed"
+	} else {
+		a.Status = core.StatusDeferred
+		a.Reason = "quota_resolution_required"
+	}
+	return r.storeAssessment(a)
+}
+
 // suppressChildAssessment persists suppression so replaying controllers and
 // older assessment readers never wait for a child classification. Keep the
 // shared event format.
@@ -146,7 +198,8 @@ func (r *DurableRelay) suppressChildAssessment() error {
 		return nil
 	}
 	r.repliedVerdict = RepliedVerdictState{}
-	if r.snapshot.Assessment == nil || !r.snapshot.Assessment.Current() {
+	if r.snapshot.Assessment == nil || !r.snapshot.Assessment.Current() ||
+		(r.snapshot.Assessment.Action != nil && *r.snapshot.Assessment.Action == core.AssessmentActionRecoverQuota) {
 		return nil
 	}
 	assessment := *r.snapshot.Assessment
@@ -172,7 +225,109 @@ func (r *DurableRelay) publishAssessmentDiagnostic() {
 // The Unix worker is the only production caller; these assessment operations
 // stay compiled on Windows so their tests still build there.
 func (r *DurableRelay) preparePendingAssessment() error {
-	panic("unported: mj-worker/src/relay/verdict.rs prepare_pending_assessment")
+	if err := r.settleLocalQuota(); err != nil {
+		return err
+	}
+	if !r.classifiesTurns() {
+		return r.suppressChildAssessment()
+	}
+	if err := r.reclassifyAssessmentWithGeneratedAuthorization(); err != nil {
+		return err
+	}
+	if current := r.snapshot.Assessment; current != nil && current.Current() && current.Action != nil &&
+		(*current.Action == core.AssessmentActionWait || *current.Action == core.AssessmentActionUncertain) {
+		a := *current
+		facts := r.ActivityFacts()
+		if e := a.Evidence; e != nil &&
+			((a.Glide == nil && e.BackgroundCommands != facts.BackgroundCommands) ||
+				e.QueuedCommands != facts.QueuedCommands) {
+			a.ClassifyAgain(r.snapshot.LatestOrdinal + 1)
+			if err := r.storeAssessment(a); err != nil {
+				return err
+			}
+		}
+	}
+	if err := r.reaskBackgroundAfterRestart(); err != nil {
+		return err
+	}
+	if current := r.snapshot.Assessment; current != nil && current.Status == core.StatusFailed &&
+		current.NeedsClassification(core.EpochMillis()) {
+		// A failed request stays failed during backoff. Requeueing it is the
+		// durable transition that makes the next check pending again.
+		assessment := *current
+		assessment.Status = core.StatusPending
+		assessment.Reason = "awaiting_classification"
+		assessment.RetryAtMs = nil
+		if err := r.storeAssessment(assessment); err != nil {
+			return err
+		}
+	}
+	current := r.snapshot.Assessment
+	if current == nil || !current.NeedsClassification(core.EpochMillis()) || current.Evidence != nil {
+		return nil
+	}
+	a := *current
+	if r.verdictHarness == nil {
+		return nil
+	}
+	facts := r.ActivityFacts()
+	evidence := r.turnContext.Evidence(*r.verdictHarness, core.TurnPhaseReplied, &facts, core.EpochMillis())
+	completion := a.Completion
+	evidence.Completion = &completion
+	now := core.EpochMillis()
+	var background []core.BackgroundEvidence
+	for _, command := range r.backgroundCommands() {
+		if len(background) == core.InFlightTools {
+			break
+		}
+		background = append(background, core.BackgroundEvidence{
+			Command:     core.ToolTitle(command.Command),
+			ID:          command.ID,
+			StartedSAgo: uint64(max(verdictSaturatingSubI64(now, command.StartedAtMs), 0)) / 1000,
+		})
+	}
+	evidence.Background = background
+	evidence.Authorization = r.snapshot.AuthorizationContext()
+	a.Evidence = &evidence
+	return r.storeAssessment(a)
+}
+
+// verdictSaturatingSubI64 is Rust's i64::saturating_sub.
+func verdictSaturatingSubI64(a, b int64) int64 {
+	difference := a - b
+	if (b > 0 && difference > a) || (b < 0 && difference < a) {
+		if b > 0 {
+			return math.MinInt64
+		}
+		return math.MaxInt64
+	}
+	return difference
+}
+
+// verdictSaturatingAddI64 is Rust's i64::saturating_add.
+func verdictSaturatingAddI64(a, b int64) int64 {
+	sum := a + b
+	if (b > 0 && sum < a) || (b < 0 && sum > a) {
+		if b > 0 {
+			return math.MaxInt64
+		}
+		return math.MinInt64
+	}
+	return sum
+}
+
+// verdictGlideAnswers is serde_json::to_value of the typed probabilities: the
+// decoded JSON value the frozen GLiDE rules read.
+func verdictGlideAnswers(glide *core.Probabilities) (any, error) {
+	encoded, err := workerRuntimeMarshalJSON(glide)
+	if err != nil {
+		return nil, err
+	}
+	var answers any
+	if err := json.Unmarshal(encoded, &answers); err != nil {
+		return nil, err
+	}
+	return answers, nil
 }
 
 // requestBackgroundRefresh queues one more completed-turn check for the
@@ -180,7 +335,14 @@ func (r *DurableRelay) preparePendingAssessment() error {
 // completed actions keep their authority while the background judgment
 // refreshes.
 func (r *DurableRelay) requestBackgroundRefresh(a core.TurnAssessment) error {
-	panic("unported: mj-worker/src/relay/verdict.rs request_background_refresh")
+	if a.Action != nil && (*a.Action == core.AssessmentActionWait || *a.Action == core.AssessmentActionUncertain) {
+		a.ClassifyAgain(r.snapshot.LatestOrdinal + 1)
+	} else {
+		a.Revision = r.snapshot.LatestOrdinal + 1
+		a.Status = core.StatusPending
+		a.Evidence = nil
+	}
+	return r.storeAssessment(a)
 }
 
 // reaskBackgroundAfterRestart restores a stored GLiDE judgment only for the
@@ -189,7 +351,70 @@ func (r *DurableRelay) requestBackgroundRefresh(a core.TurnAssessment) error {
 // reasked after restart, and so is an unclear stored GLiDE judgment, once per
 // restart.
 func (r *DurableRelay) reaskBackgroundAfterRestart() error {
-	panic("unported: mj-worker/src/relay/verdict.rs reask_background_after_restart")
+	if r.verdictHarness == nil {
+		return nil
+	}
+	current := r.snapshot.Assessment
+	if current == nil || !current.Current() || current.Status != core.StatusAssessed {
+		return nil
+	}
+	turn := TurnAssessmentIdentity{TurnID: current.TurnID, CompletedOrdinal: current.CompletedOrdinal}
+	askedThisTurn := r.repliedVerdict.askedTurn != nil && *r.repliedVerdict.askedTurn == turn
+	recoversQuota := current.Action != nil && *current.Action == core.AssessmentActionRecoverQuota
+	if current.Glide == nil && (recoversQuota || askedThisTurn) {
+		return nil
+	}
+	a := *current
+	if a.Glide != nil {
+		inventory := r.backgroundCommands()
+		listedInventory := inventory[:min(len(inventory), core.InFlightTools)]
+		sameInventory := false
+		if e := a.Evidence; e != nil && e.BackgroundCommands == r.ActivityFacts().BackgroundCommands &&
+			len(e.Background) == len(listedInventory) {
+			sameInventory = true
+			for _, command := range listedInventory {
+				if !slices.ContainsFunc(e.Background, func(seen core.BackgroundEvidence) bool {
+					return seen.ID == command.ID && seen.Command == core.ToolTitle(command.Command)
+				}) {
+					sameInventory = false
+					break
+				}
+			}
+		}
+		if !sameInventory {
+			facts := r.ActivityFacts()
+			if _, stale := blocked(&facts); stale {
+				return nil
+			}
+			return r.requestBackgroundRefresh(a)
+		}
+		answers, err := verdictGlideAnswers(a.Glide)
+		if err != nil {
+			return err
+		}
+		listed := len(r.backgroundCommands()) > 0
+		needed := core.BackgroundNeeded(answers, listed)
+		// 9cb9d651: a worker asks once per restart about leftover processes.
+		// An unclear stored answer is not a judgment, so the first call after
+		// a restart asks again; once this process has asked, it does not.
+		if needed == nil && listed && !askedThisTurn {
+			facts := r.ActivityFacts()
+			if _, stale := blocked(&facts); !stale {
+				return r.requestBackgroundRefresh(a)
+			}
+		}
+		r.repliedVerdict.judgeBackground(r.turnContext.Generation(), needed)
+		r.repliedVerdict.askedTurn = &turn
+		return nil
+	}
+	facts := r.ActivityFacts()
+	if _, stale := blocked(&facts); len(r.backgroundCommands()) == 0 || stale || facts.BackgroundNeeded != nil {
+		return nil
+	}
+	slog.Info("asking Jev again about leftover processes after a worker restart",
+		"target", "mj_jev", "session", r.snapshot.SessionID, "revision", a.Revision, "phase", "replied")
+	a.ClassifyAgain(r.snapshot.LatestOrdinal + 1)
+	return r.storeAssessment(a)
 }
 
 // reclassifyAssessmentWithGeneratedAuthorization: an assessment classified by
@@ -198,7 +423,20 @@ func (r *DurableRelay) reaskBackgroundAfterRestart() error {
 // not the person's to rely on, so the turn is classified again on the
 // corrected history, the same way a seeded history does it.
 func (r *DurableRelay) reclassifyAssessmentWithGeneratedAuthorization() error {
-	panic("unported: mj-worker/src/relay/verdict.rs reclassify_assessment_with_generated_authorization")
+	current := r.snapshot.Assessment
+	if current == nil || !current.Current() ||
+		(current.Action != nil && (*current.Action == core.AssessmentActionRetryProvider ||
+			*current.Action == core.AssessmentActionRecoverQuota)) ||
+		current.Evidence == nil || current.Evidence.Authorization == nil ||
+		!current.Evidence.Authorization.HasGeneratedPrompts() {
+		return nil
+	}
+	a := *current
+	a.ClassifyAgain(r.snapshot.LatestOrdinal + 1)
+	a.Failures = 0
+	a.RetryAtMs = nil
+	a.Reason = "authorization_evidence_changed"
+	return r.storeAssessment(a)
 }
 
 func (r *DurableRelay) storeAssessment(assessment core.TurnAssessment) error {
@@ -207,7 +445,24 @@ func (r *DurableRelay) storeAssessment(assessment core.TurnAssessment) error {
 }
 
 func (r *DurableRelay) questionLocatorRequest(revision uint64) *core.Request {
-	panic("unported: mj-worker/src/relay/verdict.rs question_locator_request")
+	assessment := r.snapshot.Assessment
+	if assessment == nil {
+		return nil
+	}
+	requiresInput := (assessment.Glide != nil && assessment.Glide.Input.Probabilities.Required >= core.RequiredInput) ||
+		(assessment.Verdict != nil && assessment.Verdict.RequiresInput())
+	if assessment.Revision != revision || !assessment.Current() || assessment.Action == nil ||
+		*assessment.Action != core.AssessmentActionAwaitInput || !requiresInput {
+		return nil
+	}
+	if assessment.Evidence == nil || assessment.Evidence.Authorization == nil {
+		return nil
+	}
+	request := core.Build(assessment.Evidence.Authorization)
+	if len(request.MessageIDs) == 0 {
+		return nil
+	}
+	return &request
 }
 
 func (r *DurableRelay) questionLocatorCompletion(revision uint64) (uint64, bool) {
@@ -243,12 +498,113 @@ func (r *DurableRelay) glideRuntime() (core.ActivityFacts, int) {
 	return r.ActivityFacts(), r.nativeAgentCount()
 }
 
+func (r *DurableRelay) automaticActionSuppressed() bool {
+	return len(r.snapshot.AssessmentQuestions) > 0 ||
+		r.snapshot.Goal.BudgetLimited() ||
+		(r.snapshot.Goal.Snapshot != nil && r.snapshot.Goal.Snapshot.Status == "paused") ||
+		len(r.snapshot.QueuedPrompts) > 0
+}
+
 func (r *DurableRelay) applyGlideAssessment(ordinal uint64, glide core.Probabilities) (string, error) {
-	panic("unported: mj-worker/src/relay/verdict.rs apply_glide_assessment")
+	current := r.snapshot.Assessment
+	if current == nil || current.Revision != ordinal || !current.Current() {
+		return "stale_turn", nil
+	}
+	a := *current
+	answers, err := verdictGlideAnswers(&glide)
+	if err != nil {
+		panic(fmt.Sprintf("typed probabilities serialize: %v", err))
+	}
+	action := core.Action(answers)
+	// The quiet judgment is separate from the action: it only ever says
+	// whether the listed leftover processes still matter, and only when the
+	// request listed some.
+	listed := a.Evidence != nil && len(a.Evidence.Background) > 0
+	needed := core.BackgroundNeeded(answers, listed)
+	r.repliedVerdict.judgeBackground(r.turnContext.Generation(), needed)
+	if a.Glide != nil && a.Action != nil {
+		a.Glide = &glide
+		a.Status = core.StatusAssessed
+		a.RetryAtMs = nil
+		if err := r.storeAssessment(a); err != nil {
+			return "", err
+		}
+		return "background_judgment_refreshed", nil
+	}
+	a.Verdict = nil
+	a.Glide = &glide
+	a.Attention = glideAttention(a.Glide, action)
+	a.Action = &action
+	a.Status = core.StatusAssessed
+	a.RetryAtMs = nil
+	suppressed := r.automaticActionSuppressed()
+	var reason string
+	if suppressed {
+		a.Status = core.StatusSuperseded
+		reason = "automatic_action_suppressed"
+	} else {
+		switch action {
+		case core.AssessmentActionRetryProvider:
+			a.Status = core.StatusScheduled
+			reason = "server_retry_armed"
+		case core.AssessmentActionRecoverQuota:
+			a.Status = core.StatusDeferred
+			reason = "quota_resolution_required"
+		case core.AssessmentActionAwaitInput:
+			reason = "user_input_required"
+		case core.AssessmentActionFinished:
+			reason = "work_finished"
+		case core.AssessmentActionWait:
+			reason = "background_work_pending"
+		default:
+			// Continue is legacy: stored assessments may carry it, but
+			// nothing acts on it, so it reads as uncertain.
+			reason = "assessment_uncertain"
+		}
+	}
+	a.Reason = reason
+	if err := r.storeAssessment(a); err != nil {
+		return "", err
+	}
+	if !suppressed {
+		decision := core.DecisionKeepCurrent
+		switch action {
+		case core.AssessmentActionAwaitInput:
+			decision = core.DecisionAwaitingInput
+		case core.AssessmentActionFinished:
+			decision = core.DecisionInferIdle
+		case core.AssessmentActionWait:
+			decision = core.DecisionExpectContinuation
+		}
+		// Semantic completion survives; runtime inference only applies to
+		// current quiet facts, and never grants resource-replacement safety.
+		if _, err := r.applyRepliedDecision(r.turnContext.Generation(), decision, core.EpochMillis()); err != nil {
+			return "", err
+		}
+	}
+	return reason, nil
 }
 
 func (r *DurableRelay) failTurnAssessment(ordinal uint64, reason string) error {
-	panic("unported: mj-worker/src/relay/verdict.rs fail_turn_assessment")
+	current := r.snapshot.Assessment
+	if current == nil || current.Revision != ordinal || !current.Current() {
+		return nil
+	}
+	a := *current
+	if reason == "classifier_unavailable" {
+		a.Status = core.StatusAssessed
+	} else {
+		a.Status = core.StatusFailed
+	}
+	if a.Failures < math.MaxUint32 {
+		a.Failures++
+	}
+	backoff := min(int64(60_000)*(int64(1)<<min(max(a.Failures, 1)-1, 3)), 300_000)
+	retryAt := verdictSaturatingAddI64(core.EpochMillis(), backoff)
+	a.RetryAtMs = &retryAt
+	a.Reason = reason
+	r.repliedVerdict.lastGeneration = nil
+	return r.storeAssessment(a)
 }
 
 // PendingRepliedVerdict returns the completed-turn check to send now, once per
@@ -269,7 +625,8 @@ func (r *DurableRelay) PendingRepliedVerdict() (PendingRepliedVerdict, bool) {
 	r.repliedVerdict.lastGeneration = &generation
 	r.repliedVerdict.askedTurn = &TurnAssessmentIdentity{TurnID: a.TurnID, CompletedOrdinal: a.CompletedOrdinal}
 	turn := TurnAssessmentIdentity{TurnID: a.TurnID, CompletedOrdinal: a.CompletedOrdinal}
-	return PendingRepliedVerdict{Generation: a.Revision, Evidence: *a.Evidence, Turn: &turn}, true
+	// A private copy, as Rust's clone is: the caller may change it.
+	return PendingRepliedVerdict{Generation: a.Revision, Evidence: core.DeepClone(*a.Evidence), Turn: &turn}, true
 }
 
 func (r *DurableRelay) repliedVerdictIsCurrent(generation uint64) bool {
@@ -281,5 +638,94 @@ func (r *DurableRelay) repliedVerdictIsCurrent(generation uint64) bool {
 // state reads. Jev's verdict on the turn is its assessment record, or the
 // stop reason a classifier handoff ended it with.
 func (r *DurableRelay) applyRepliedDecision(generation uint64, decision core.Decision, sinceMs int64) (string, error) {
-	panic("unported: mj-worker/src/relay/verdict.rs apply_replied_decision")
+	facts := r.ActivityFacts()
+	if generation != r.turnContext.Generation() {
+		return "stale_generation", nil
+	}
+	if reason, stale := blocked(&facts); stale {
+		return reason, nil
+	}
+	if decision == core.DecisionKeepCurrent {
+		return "keep_current", nil
+	}
+	// Jev's verdict on the turn is its assessment record, or the stop reason
+	// a classifier handoff ended it with. This sets only the process-local
+	// inference that the activity state reads.
+	r.repliedVerdict.inferred = &repliedVerdictInference{generation: generation, decision: decision, sinceMs: sinceMs}
+	if err := r.persistActivityTransition(); err != nil {
+		return "", err
+	}
+	after := r.ActivityFacts()
+	slog.Info("Jev activity inference applied",
+		"target", "mj_jev", "session", r.snapshot.SessionID, "generation", generation,
+		"phase", "replied", "decision", decision,
+		"previous_activity", fmt.Sprintf("%+v", core.Classify(&facts)),
+		"activity", fmt.Sprintf("%+v", core.Classify(&after)))
+	return "applied", nil
+}
+
+// PreparedHandbackCheck is a sub-agent handback check ready to send: the
+// session and generation it is logged under and the evidence it judges.
+// Rust: `(String, u64, TurnEvidence)`.
+type PreparedHandbackCheck struct {
+	SessionID  string
+	Generation uint64
+	Evidence   core.TurnEvidence
+}
+
+// prepareHandbackCheck: the delivery events own assignment identity.
+// Reminders and provider retries do not replace it, so all their handbacks
+// consume the original assignment.
+func (r *DurableRelay) prepareHandbackCheck(report string) (*PreparedHandbackCheck, error) {
+	if core.DisabledByEnvironment() {
+		return nil, nil
+	}
+	if r.verdictHarness == nil {
+		return nil, nil
+	}
+	checks := &r.snapshot.HandbackChecks
+	if checks.AssignmentID == nil {
+		return nil, nil
+	}
+	assignmentID := *checks.AssignmentID
+	if slices.Contains(checks.Checked, assignmentID) {
+		return nil, nil
+	}
+	if checks.Context == nil {
+		return nil, nil
+	}
+	context := core.DeepClone(*checks.Context)
+	context.OpenAssistantID = nil
+	reportID := "handback-report"
+	context.Assistant(&reportID, r.snapshot.LatestOrdinal, report)
+	facts := r.ActivityFacts()
+	evidence := r.turnContext.Evidence(*r.verdictHarness, core.TurnPhaseReplied, &facts, core.EpochMillis())
+	// The report goes whole into the authorization history above; the tail
+	// field keeps the bound every classifier route enforces.
+	evidence.AssistantTextTail = transcript.Tail(report, core.AssistantTextBytes)
+	evidence.FinalToolCalls = nil
+	evidence.ToolsInFlight = []core.ToolEvidence{}
+	completion := core.CompletionEvidenceBounded("end_turn", nil)
+	evidence.Completion = &completion
+	// The whole history goes in; only GLiDE's own size refusal shrinks it,
+	// and the client refuses to shrink away the parent's instructions.
+	// Authorization is historical context. Only the turn owner supplies the
+	// current reply; an older question must not become this turn's answer.
+	evidence.Authorization = &context
+	evidence.TranscriptSummary = ""
+	// GLiDE judges the report against the parent's instructions. When they
+	// did not arrive whole (a non-text block), there is nothing to judge
+	// against: deliver unchecked and leave the check unspent.
+	if !evidence.Authorization.AuthorizationComplete {
+		return nil, nil
+	}
+	// Journal before HTTP: a crash or cancelled socket consumes the attempt.
+	if _, err := r.RecordObservation(core.RelayObservationHandbackCheckStarted{AssignmentID: assignmentID}); err != nil {
+		return nil, err
+	}
+	return &PreparedHandbackCheck{
+		SessionID:  r.snapshot.SessionID,
+		Generation: r.snapshot.LatestOrdinal,
+		Evidence:   evidence,
+	}, nil
 }

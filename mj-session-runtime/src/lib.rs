@@ -30,6 +30,7 @@ pub mod host_git_config;
 pub mod project_memory_merge;
 pub mod readiness;
 pub mod session_manager;
+pub mod tool_detail;
 pub mod wait_policy;
 pub mod worker_client;
 

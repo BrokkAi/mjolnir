@@ -545,7 +545,6 @@ fn validate_action_against(
             no_github_credentials: _,
             notifications_ignored: _,
             oracle: _,
-            supervisors: _,
             oracle_choice: _,
         } => {
             if let Some(review) = review {

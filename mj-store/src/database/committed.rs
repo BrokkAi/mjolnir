@@ -54,11 +54,6 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("subagent_sessions", "relation", "child_session_id"),
         ("subagent_preference", "preference", "profile_id"),
         ("oracle_preference", "oracle_preference", "profile_id"),
-        (
-            "supervisor_preference",
-            "supervisor_preference",
-            "profile_id",
-        ),
         ("operator_away", "operator_away", "singleton"),
         ("mount_history", "mount_history", "host"),
         ("project_locations", "mount_history", "host"),
@@ -515,23 +510,6 @@ pub(super) fn finish_operation(
                         state.last_oracle_choices.insert(key.clone(), enabled);
                     } else {
                         state.last_oracle_choices.remove(key);
-                    }
-                    changed = true;
-                }
-            }
-            "supervisor_preference" => {
-                let enabled: Option<bool> = transaction
-                    .query_row(
-                        "SELECT enabled FROM supervisor_preference WHERE profile_id=?1",
-                        [key],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if state.last_supervisor_choices.get(key).copied() != enabled {
-                    if let Some(enabled) = enabled {
-                        state.last_supervisor_choices.insert(key.clone(), enabled);
-                    } else {
-                        state.last_supervisor_choices.remove(key);
                     }
                     changed = true;
                 }

@@ -394,7 +394,7 @@ mj new --workspace eval --bundle product --target builder \
   Mjolnir is the default. If Mjolnir delegation is unconfigured or unavailable,
   the session uses `native` on harnesses with native delegation and `none` on
   DSH and Antigravity, with a notice on stderr. An explicit `--subagents mjolnir`
-  or `--supervisors enabled` requires Mjolnir delegation to be available.
+  or `--orchestrators` requires Mjolnir delegation to be available.
   A named DSH or Antigravity profile refuses an explicit `native` choice.
   Every profile accepts `none`, which turns off delegation.
   Mjolnir delegation supports Claude, Codex, DSH, OpenCode, and Antigravity

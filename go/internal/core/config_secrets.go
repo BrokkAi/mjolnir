@@ -39,6 +39,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/BurntSushi/toml"
 )
 
 // SecretsFile is the secrets file's name, beside config.toml.
@@ -591,7 +593,14 @@ func LoadSecrets(path string) (map[string]string, error) {
 	}
 	table, err := decodeTOMLDocument(string(contents))
 	if err != nil {
-		return nil, fmt.Errorf("parse secrets file %s: %w", path, err)
+		// The parser displays the source line, which can contain a secret.
+		// (Ported from the Rust source after this package's base.)
+		location := ""
+		var parseError toml.ParseError
+		if errors.As(err, &parseError) {
+			location = fmt.Sprintf(" at byte %d", parseError.Position.Start)
+		}
+		return nil, fmt.Errorf("invalid TOML in secrets file %s%s", path, location)
 	}
 	secrets := make(map[string]string, len(table))
 	for _, name := range sortedKeys(table) {

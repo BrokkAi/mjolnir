@@ -6,11 +6,20 @@
 package worker
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
+	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // workFactsStat is Rust's linux::Stat (renamed: locals named stat would
@@ -44,9 +53,26 @@ func parseStat(text string) (workFactsStat, bool) {
 	return workFactsStat{zombie: strings.HasPrefix(fields[0], "Z"), ppid: uint32(ppid), startTicks: start}, true
 }
 
-// ticksPerSecond is sysconf(_SC_CLK_TCK).
+// workFactsAtClockTick is AT_CLKTCK, the auxiliary vector entry the kernel passes
+// with the clock tick frequency.
+const workFactsAtClockTick = 17
+
+// ticksPerSecond is sysconf(_SC_CLK_TCK). glibc answers it from the
+// auxiliary vector's AT_CLKTCK, and with 100 when the kernel passed none;
+// Go has no sysconf, so this reads the same entry.
 func ticksPerSecond() (uint64, error) {
-	panic("unported: mj-worker/src/work_facts/linux.rs ticks_per_second")
+	ticks := int64(100)
+	if vector, err := unix.Auxv(); err == nil {
+		for _, entry := range vector {
+			if entry[0] == workFactsAtClockTick && entry[1] != 0 {
+				ticks = int64(entry[1])
+			}
+		}
+	}
+	if ticks <= 0 {
+		return 0, errors.New("could not read the clock tick frequency")
+	}
+	return uint64(ticks), nil
 }
 
 // uptimeMs is uptime in milliseconds. It is monotonic, unlike the boot time
@@ -72,15 +98,151 @@ func uptimeMs() (int64, error) {
 // the marker cannot be checked, which the scan reports instead of treating
 // the process as foreign.
 func sessionMarker(pid uint32, wanted []byte) WorkFactsMarker {
-	panic("unported: mj-worker/src/work_facts/linux.rs session_marker")
+	environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	switch {
+	case err == nil:
+		for _, entry := range bytes.Split(environ, []byte{0}) {
+			if bytes.Equal(entry, wanted) {
+				return WorkFactsMarkerPresent
+			}
+		}
+		return WorkFactsMarkerAbsent
+	case errors.Is(err, fs.ErrPermission):
+		info, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+		if err == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid == uint32(os.Geteuid()) {
+				return WorkFactsMarkerUnreadable
+			}
+		}
+		return WorkFactsMarkerAbsent
+	}
+	// The process exited, or has no environment to read.
+	return WorkFactsMarkerAbsent
 }
 
 // readTable is every process the scan may consider, and the reader for the
 // survivors.
 func readTable(sessionID string) (ProcessTable, error) {
-	panic("unported: mj-worker/src/work_facts/linux.rs read_table")
+	hz, err := ticksPerSecond()
+	if err != nil {
+		return ProcessTable{}, err
+	}
+	// One instant for every age: the process ages are measured against this
+	// uptime, and the harness's age against the wall clock read beside it.
+	uptime, err := uptimeMs()
+	if err != nil {
+		return ProcessTable{}, err
+	}
+	sampledMs := core.EpochMillis()
+	bootIDText, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ProcessTable{}, fmt.Errorf("read the boot identity: %w", err)
+	}
+	bootID := strings.TrimSpace(string(bootIDText))
+	wanted := []byte("MJ_SESSION_ID=" + sessionID)
+	listing, err := os.Open("/proc")
+	if err != nil {
+		return ProcessTable{}, fmt.Errorf("list processes: %w", err)
+	}
+	// An entry that cannot be read is skipped, as one that is not a process.
+	names, _ := listing.Readdirnames(-1)
+	_ = listing.Close()
+	var rows []ProcRow
+	for _, name := range names {
+		pid, err := strconv.ParseUint(name, 10, 32)
+		if err != nil {
+			continue
+		}
+		// A process may exit between the listing and the read.
+		text, err := workFactsReadText(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			continue
+		}
+		stat, ok := parseStat(text)
+		if !ok {
+			continue
+		}
+		startMs := int64(0)
+		if ticks := workFactsSaturatingMul(stat.startTicks, 1000) / hz; ticks <= math.MaxInt64 {
+			startMs = int64(ticks)
+		}
+		rows = append(rows, ProcRow{
+			Pid:    uint32(pid),
+			Ppid:   stat.ppid,
+			AgeMs:  max(workFactsSaturatingSub(uptime, startMs), 0),
+			Zombie: stat.zombie,
+			Marker: sessionMarker(uint32(pid), wanted),
+		})
+	}
+	// The start tick is read again for survivors only, so the identity
+	// matches the one PROCESS_BIRTH_SCRIPT prints for the same process.
+	reader := newProcessReader(func(row *ProcRow) Described { return describe(row.Pid, bootID) })
+	perTick := int64(100)
+	if hz <= math.MaxInt64 {
+		perTick = int64(hz)
+	}
+	return ProcessTable{
+		Rows:      rows,
+		Reader:    reader,
+		SampledMs: sampledMs,
+		// A start is a count of clock ticks, and /proc/uptime has its own
+		// hundredths of a second.
+		ResolutionMs: max(1000/perTick, 10),
+	}, nil
+}
+
+func workFactsSaturatingMul(a, b uint64) uint64 {
+	if a != 0 && b > math.MaxUint64/a {
+		return math.MaxUint64
+	}
+	return a * b
 }
 
 func describe(pid uint32, bootID string) Described {
-	panic("unported: mj-worker/src/work_facts/linux.rs describe")
+	command := ""
+	if arguments, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		var parts []string
+		for _, argument := range bytes.Split(arguments, []byte{0}) {
+			parts = append(parts, fromUTF8Lossy(argument))
+		}
+		command = strings.Join(parts, " ")
+	}
+	if strings.TrimSpace(command) == "" {
+		// A process without arguments, such as a kernel thread, has only
+		// its name.
+		command = ""
+		if text, err := workFactsReadText(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+			if _, after, ok := strings.Cut(text, "("); ok {
+				if close := strings.LastIndexByte(after, ')'); close >= 0 {
+					command = "[" + after[:close] + "]"
+				}
+			}
+		}
+	}
+	var exe *string
+	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		// A replaced executable reads back with this suffix.
+		target = strings.TrimSuffix(target, " (deleted)")
+		exe = &target
+	}
+	identity := ""
+	if text, err := workFactsReadText(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		if stat, ok := parseStat(text); ok {
+			identity = fmt.Sprintf("%s:%d", bootID, stat.startTicks)
+		}
+	}
+	return Described{Command: command, Exe: exe, Identity: identity}
+}
+
+// workFactsReadText is Rust's fs::read_to_string: the file's text, failing when
+// it is not UTF-8.
+func workFactsReadText(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if !utf8.Valid(data) {
+		return "", errors.New("stream did not contain valid UTF-8")
+	}
+	return string(data), nil
 }

@@ -671,6 +671,9 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
     let mut session = stopped_session();
     session.bundle_id = "missingpath".into();
     let mut state = State::default();
+    state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
@@ -759,6 +762,9 @@ fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() 
 fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selection() {
     let mut state = State::default();
     let session = stopped_session();
+    state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = dashboard_at_saved_projects(state);
 
@@ -1578,7 +1584,6 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
             subagents: None,
@@ -2010,7 +2015,6 @@ fn raw_localhost_uses_local_project_history() {
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
             subagents: None,
@@ -2448,7 +2452,6 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         conversion: None,
         selection: mj_core::state::MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -6271,7 +6274,7 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     }];
     let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
     let profile = config.profiles.keys().next().unwrap().clone();
-    draft.update_choices(&profile, "localhost", &config, &Default::default());
+    draft.update_choices(&profile, &config);
     assert!(draft.oracle_available());
     assert_eq!(
         draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
@@ -6282,7 +6285,7 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     let override_choice = config.subagents.oracle.pop();
     let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
         .with_oracle(true, override_choice);
-    override_draft.update_choices(&profile, "localhost", &config, &Default::default());
+    override_draft.update_choices(&profile, &config);
     assert!(override_draft.oracle_available());
     config.subagents.oracle = override_draft.oracle_choice.clone().into_iter().collect();
     let mut state = State::default();
@@ -6307,6 +6310,7 @@ fn golden_create_delegation_availability_and_submission() {
                 model: "model".into(),
                 effort: None,
             };
+            dashboard.config.subagents.primary = vec![choice.clone()];
             dashboard.config.subagents.straightforward = vec![choice.clone()];
             dashboard.config.subagents.subtle = vec![choice];
             dashboard.config.subagents.oracle = vec![SubagentChoice {
@@ -6350,6 +6354,27 @@ fn golden_create_delegation_availability_and_submission() {
             panic!("create");
         };
         assert_eq!(subagents, None);
+        if configured {
+            let Mode::New(wizard) = &mut dashboard.mode else {
+                unreachable!()
+            };
+            wizard.form.borrow_mut().focus(WizardControl::Orchestrators);
+            drawn(&mut dashboard, 140, 40);
+            dashboard.handle_key(key(KeyCode::Char(' ')));
+            dashboard.take_subagent_discovery();
+            let wizard = new_wizard(&dashboard);
+            let DashboardAction::CreateSession {
+                subagents: Some(policy),
+                ..
+            } = dashboard.create_session_action_without_closing(wizard)
+            else {
+                panic!("orchestrator opt-in must submit the delegation policy");
+            };
+            assert!(policy.orchestrators_enabled());
+            let screen = drawn(&mut dashboard, 140, 40).join("\n");
+            assert!(screen.contains("Orchestrators"));
+            output.push_str(&format!("=== orchestrators enabled ===\n{screen}\n"));
+        }
         // None is available even without configured Mjolnir models.
         let Mode::New(wizard) = &mut dashboard.mode else {
             unreachable!()
@@ -6496,11 +6521,11 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     use mj_core::subagent::SubagentPolicy;
     let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
     let mut config = config();
-    draft.update_choices("claude-1", "localhost", &config, &Default::default());
+    draft.update_choices("claude-1", &config);
     assert!(!draft.select_policy(1));
     assert!(draft.unavailable_reason().unwrap().contains("Settings"));
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
-    draft.update_choices("claude-1", "localhost", &config, &Default::default());
+    draft.update_choices("claude-1", &config);
     assert!(!draft.select_policy(1));
     assert!(
         draft
@@ -6510,7 +6535,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
-    draft.update_choices("claude-1", "localhost", &config, &Default::default());
+    draft.update_choices("claude-1", &config);
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);
     assert_eq!(draft.selected(), SubagentPolicy::None);
@@ -6778,7 +6803,7 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     let mut dashboard = dashboard_with_session(parent.clone());
     dashboard
@@ -6786,6 +6811,9 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     let mut state = dashboard.state.clone();
+    state
+        .environment_owners
+        .insert(child.id.clone(), relation.parent_session_id.clone());
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);
@@ -6869,9 +6897,12 @@ fn new_session_like_carries_the_container_owners_size() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     let mut state = dashboard.state.clone();
+    state
+        .environment_owners
+        .insert(child.id.clone(), relation.parent_session_id.clone());
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);

@@ -32,13 +32,26 @@ import (
 // Covers `No space left on device` (scp, ssh, coreutils, podman, docker and
 // Rust's `os error 28`) and `Disk quota exceeded` (EDQUOT): a quota stops
 // writes the same way a full filesystem does.
+//
+// The errno names count only as words of their own: `/work/enospc-repro` in
+// an unrelated error is a path, not a full disk.
 func ReportsNoSpace(text string) bool {
-	text = strings.ToLower(text)
-	return strings.Contains(text, "no space left on device") ||
-		strings.Contains(text, "enospc") ||
-		strings.Contains(text, "os error 28)") ||
-		strings.Contains(text, "disk quota exceeded") ||
-		strings.Contains(text, "edquot")
+	lower := asciiLowercase(text)
+	if strings.Contains(lower, "no space left on device") ||
+		strings.Contains(lower, "os error 28)") ||
+		strings.Contains(lower, "disk quota exceeded") {
+		return true
+	}
+	words := strings.FieldsFunc(lower, func(character rune) bool {
+		return !(character < 0x80 && (character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("_-./", character)))
+	})
+	for _, word := range words {
+		if word == "enospc" || word == "edquot" {
+			return true
+		}
+	}
+	return false
 }
 
 // NoSpacePath is the target path a no-space failure names, when it names
@@ -324,6 +337,9 @@ type FilesystemSpace struct {
 	// A write belongs to the filesystem of the longest of these that
 	// contains it.
 	Paths []string `json:"paths"`
+	// QuotaLimited: AvailableBytes is the probing user's or group's disk
+	// quota, which is smaller than the filesystem's free space.
+	QuotaLimited bool `json:"quota_limited,omitempty"`
 }
 
 // MarshalJSON writes Paths as [] when empty, as serde does.
@@ -560,6 +576,9 @@ func (v *TargetStorageView) FullFor(paths []string) *FilesystemView {
 // reserves 24.69 GB more for root)".
 func (v *TargetStorageView) Explanation(filesystem *FilesystemView) string {
 	text := fmt.Sprintf("%s has %s free on %s", v.Host, FormatBytes(filesystem.AvailableBytes), filesystem.Mount)
+	if filesystem.QuotaLimited {
+		text += " within its disk quota"
+	}
 	if filesystem.ReservedBytes >= WriteReserveBytes {
 		text += fmt.Sprintf(" (the filesystem reserves %s more for root)", FormatBytes(filesystem.ReservedBytes))
 	}
@@ -698,14 +717,21 @@ func ViewsFor(views []TargetStorageView, hosts []string) []*TargetStorageView {
 	return out
 }
 
-// StorageProbeScript is shell that prints the probing user's home, then
-// measures each path given as an argument at its nearest existing ancestor:
-// `storage=<avail-kib>\t<total-kib>\t<used-kib>\t<mount>\t<path>`. `df -Pk`
-// is POSIX, so it reads the same on Linux and macOS; its "Available" column
-// is what a non-root user can write. The ancestor walk ends whenever a step
-// fails or makes no progress, so a host without `dirname` cannot spin it.
+// StorageProbeScript is shell that prints the probing user's home and clock,
+// then measures each path given as an argument at its nearest existing
+// ancestor: `storage=<avail-kib>\t<total-kib>\t<used-kib>\t<mount>\t<path>`.
+// `df -Pk` is POSIX, so it reads the same on Linux and macOS; its "Available"
+// column is what a non-root user can write. The ancestor walk ends whenever
+// a step fails or makes no progress, so a host without `dirname` cannot spin
+// it.
+//
+// `df` does not see a user or group quota (statfs reports XFS and ext4
+// project quotas already), so where Linux quota-tools are installed each
+// filesystem's quota rows follow as `quota=<mount>\t<the nine columns>`.
+// Elsewhere `quota` is absent or rejects these options, and prints nothing.
 const StorageProbeScript = `
 printf 'home=%s\n' "$HOME"
+printf 'now=%s\n' "$(date +%s)"
 for hel_path in "$@"; do
     hel_probe=$hel_path
     while [ ! -e "$hel_probe" ]; do
@@ -713,7 +739,12 @@ for hel_path in "$@"; do
         [ "$hel_parent" != "$hel_probe" ] || break
         hel_probe=$hel_parent
     done
-    df -Pk -- "$hel_probe" 2>/dev/null | awk -v hel_path="$hel_path" 'NR == 2 { mount = $6; for (i = 7; i <= NF; i++) mount = mount " " $i; printf "storage=%s\t%s\t%s\t%s\t%s\n", $4, $2, $3, mount, hel_path }'
+    hel_row=$(df -Pk -- "$hel_probe" 2>/dev/null | awk -v hel_path="$hel_path" 'NR == 2 { mount = $6; for (i = 7; i <= NF; i++) mount = mount " " $i; printf "storage=%s\t%s\t%s\t%s\t%s\n", $4, $2, $3, mount, hel_path }')
+    [ -n "$hel_row" ] || continue
+    printf '%s\n' "$hel_row"
+    command -v quota >/dev/null 2>&1 || continue
+    hel_mount=$(printf '%s\n' "$hel_row" | cut -f4)
+    LC_ALL=C quota -ug -w -p -v --show-mntpoint --hide-device -f "$hel_mount" 2>/dev/null | awk -v hel_mount="$hel_mount" '$1 == hel_mount && NF == 9 { printf "quota=%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9 }'
 done
 `
 
@@ -766,10 +797,78 @@ func ParseStorageLines(output []byte) (home *string, filesystems []FilesystemSpa
 			Paths:          []string{NormalizeTargetPath(fields[4], home)},
 		})
 	}
+	var now *uint64
+	for _, line := range lines {
+		if value, ok := strings.CutPrefix(line, "now="); ok {
+			if parsed, ok := parseRustUnsigned(strings.TrimSpace(value)); ok {
+				now = &parsed
+			}
+			break
+		}
+	}
+	for _, line := range lines {
+		row, ok := strings.CutPrefix(line, "quota=")
+		if !ok {
+			continue
+		}
+		mount, room, ok := quotaRoomBytes(row, now)
+		if !ok {
+			continue
+		}
+		for index := range filesystems {
+			if filesystems[index].Mount == mount && room < filesystems[index].AvailableBytes {
+				filesystems[index].AvailableBytes = room
+				filesystems[index].QuotaLimited = true
+			}
+		}
+	}
 	if filesystems == nil {
 		filesystems = []FilesystemSpace{}
 	}
 	return home, filesystems
+}
+
+// quotaRoomBytes is what one `quota -w -p -v` row (mount, then blocks,
+// quota, limit and grace for space and for files; KiB, grace as epoch
+// seconds, 0 when none) still lets its user or group write, or false when it
+// sets no limit. A soft limit whose grace has run out stops writes like a
+// hard one; without the probe's clock an expired grace cannot be told apart,
+// so the hard limit decides.
+func quotaRoomBytes(row string, now *uint64) (string, uint64, bool) {
+	fields := strings.Split(row, "\t")
+	mount, rest := fields[0], fields[1:]
+	if len(rest) != 8 {
+		return "", 0, false
+	}
+	var numbers [8]uint64
+	for index, field := range rest {
+		// `quota` marks a usage over its soft limit with `*`.
+		value, ok := parseRustUnsigned(strings.TrimRight(field, "*"))
+		if !ok {
+			return "", 0, false
+		}
+		numbers[index] = value
+	}
+	blocks, soft, hard, grace := numbers[0], numbers[1], numbers[2], numbers[3]
+	files, fileSoft, fileHard, fileGrace := numbers[4], numbers[5], numbers[6], numbers[7]
+	expired := func(grace uint64) bool { return grace != 0 && now != nil && grace <= *now }
+	filesStopped := (fileHard != 0 && files >= fileHard) || (fileSoft != 0 && files > fileSoft && expired(fileGrace))
+	blocksStopped := soft != 0 && blocks > soft && expired(grace)
+	var roomKiB uint64
+	switch {
+	case filesStopped || blocksStopped:
+		roomKiB = 0
+	case hard != 0:
+		if hard > blocks {
+			roomKiB = hard - blocks
+		}
+	default:
+		return "", 0, false
+	}
+	if roomKiB > math.MaxUint64/1024 {
+		return mount, math.MaxUint64, true
+	}
+	return mount, roomKiB * 1024, true
 }
 
 // placeMeasuredPath adds one measurement, a filesystem holding one path,

@@ -412,7 +412,7 @@ mode after selecting Open settings: "Setup"
 │           │   Sessions                                                                                   │           │
 │           │   Guardian                        On · local classifier                                      │           │
 │           │   Code Review                     Off                                                        │  ─────────╯
-│           │   Sub-agents                      Up to 6 at once                                            │  ── ▁   ▄ ╮
+│           │   Sub-agents                      Up to 8 at once                                            │  ── ▁   ▄ ╮
 │           │   Quota checks                    Host                                                       │           │
 │           │   SessionWiki                     Keeps every session                                        │  ─────────╯
 │           │   Web Access                      On · 127.0.0.1:3765                                        │  ── ▁   ▄ ╮

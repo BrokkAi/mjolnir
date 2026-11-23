@@ -217,7 +217,7 @@ fn move_provisioning_uses_the_captured_manifest_without_a_session_checkpoint() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Preserve,
-                Some(&manifest),
+                RepositorySeed::Restore(Some(&manifest)),
             ),
         ))
         .unwrap_err();
@@ -499,7 +499,6 @@ fn stale_worker_fails_before_any_container_is_created() {
             "stale worker",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,
@@ -541,7 +540,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
-                None,
+                RepositorySeed::ConfiguredBundle,
             ),
         ))
         .unwrap_err();
@@ -590,7 +589,6 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "failed image",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,
@@ -631,7 +629,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
-                None,
+                RepositorySeed::ConfiguredBundle,
             ),
         ))
         .unwrap_err();
@@ -676,18 +674,18 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     }
 
     let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, child_id) = startup_cleanup_fixture(false);
     // The shape `register_subagent` produced before borrowing was
     // recorded: the parent's container with no owner, which no child can
     // verify.
+    let (mut controller, child_id) =
+        startup_cleanup_fixture_on(false, |_| mj_core::state::TargetLocator::SshDocker {
+            host: "builder".into(),
+            container_id: targets::resource_name(PROVISIONED_SESSION).unwrap(),
+            borrowed_from: None,
+        });
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
     record.state = SessionState::Provisioning;
     record.target_template_id = "docker".into();
-    record.target = Some(Box::new(mj_core::state::TargetLocator::SshDocker {
-        host: "builder".into(),
-        container_id: targets::resource_name(PROVISIONED_SESSION).unwrap(),
-        borrowed_from: None,
-    }));
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
@@ -965,6 +963,18 @@ fn failed_owned_child_startup_retires_its_environment_and_keeps_the_relation() {
 }
 
 fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
+    startup_cleanup_fixture_on(owns_environment, |id| TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join(id),
+    })
+}
+
+/// A parent and its failed child, each placed by `target`. A local bare
+/// worker root is a POSIX path a Windows controller cannot record, so a test
+/// that must run there places the sessions in a container.
+fn startup_cleanup_fixture_on(
+    owns_environment: bool,
+    target: impl Fn(&str) -> TargetLocator,
+) -> (Controller, String) {
     let mut config = ssh_docker_registration_config();
     config
         .targets
@@ -973,18 +983,14 @@ fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
     config.save().unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
     parent.project_directory = Some(mj_core::config::data_dir());
-    parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join(PROVISIONED_SESSION),
-    }));
+    parent.target = Some(Box::new(target(PROVISIONED_SESSION)));
     crate::database::save_session(&parent).unwrap();
     let child_id = "fedcba9876543210fedcba9876543210";
     let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture launch failed".into());
     child.project_directory = Some(mj_core::config::data_dir());
-    child.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join(child_id),
-    }));
+    child.target = Some(Box::new(target(child_id)));
     crate::database::register_subagent_with_startup(
         &child,
         &mj_core::subagent::SubagentRecord {
@@ -1004,7 +1010,7 @@ fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         },
         Vec::new(),
         None,
@@ -1066,7 +1072,6 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "missing Node",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,
@@ -1109,7 +1114,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
-                None,
+                RepositorySeed::ConfiguredBundle,
             ),
         ))
         .unwrap_err();
@@ -1141,7 +1146,6 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let mut session = SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
@@ -1341,7 +1345,6 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             "cancelled launch",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,

@@ -14,7 +14,8 @@ use crate::packed_text::PackedText;
 use std::sync::Arc;
 
 use agent_client_protocol::v1::schema::{
-    ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, ToolCallStatus, ToolKind,
+    ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, ToolCallContent,
+    ToolCallStatus, ToolKind,
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,11 @@ impl TerminalRecord for crate::archive::CanonicalTerminalOutput {
         &self.terminal_id
     }
 }
+impl<R: TerminalRecord> Default for TerminalOutputs<'_, R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl<'a, R: TerminalRecord> TerminalOutputs<'a, R> {
     fn new() -> Self {
         Self {
@@ -65,11 +71,14 @@ impl<'a, R: TerminalRecord> TerminalOutputs<'a, R> {
             referenced: Default::default(),
         }
     }
-    fn tool(&mut self, id: &'a str, embedded: &'a [R], refs: &'a [String]) {
+    pub fn tool(&mut self, id: &'a str, embedded: &'a [R], refs: &'a [String]) {
         self.tools.insert(id, (embedded, refs));
         self.referenced.extend(refs.iter().map(String::as_str));
         self.referenced
             .extend(embedded.iter().map(TerminalRecord::terminal_id));
+    }
+    pub fn standalone(&mut self, record: &'a R) {
+        self.standalone.insert(record.terminal_id(), record);
     }
     pub fn for_tool(&self, stable_id: &str) -> std::borrow::Cow<'a, [R]> {
         let Some((embedded, refs)) = self.tools.get(stable_id) else {
@@ -126,8 +135,8 @@ impl<'a> TerminalOutputs<'a> {
                     terminal_refs,
                     ..
                 } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
-                TranscriptBody::TerminalOutput { record } => {
-                    outputs.standalone.insert(&record.terminal_id, record);
+                TranscriptBody::TerminalOutput { record, .. } => {
+                    outputs.standalone(record);
                 }
                 _ => {}
             }
@@ -147,8 +156,8 @@ impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
                     terminal_refs,
                     ..
                 } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
-                crate::archive::CanonicalTranscriptBody::TerminalOutput { record } => {
-                    outputs.standalone.insert(&record.terminal_id, record);
+                crate::archive::CanonicalTranscriptBody::TerminalOutput { record, .. } => {
+                    outputs.standalone(record);
                 }
                 _ => {}
             }
@@ -158,18 +167,37 @@ impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
 }
 
 /// Where a tool's compact presentation source came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSummarySourceKind {
     RawInput,
     RawOutput,
+    #[default]
     Title,
 }
 
-/// Bounded presentation metadata derived from an ACP tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEditKind {
+    Edit,
+    Write,
+    MultiEdit,
+    NotebookEdit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolEditSnippet {
+    pub path: String,
+    pub kind: ToolEditKind,
+    pub snippet: String,
+}
+
+/// Bounded presentation metadata derived from an ACP tool call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallPresentation {
     pub summary: String,
+    // Existing canonical transcript readers require the field even when empty.
+    #[serde(default)]
     pub source: PackedText,
     pub source_kind: ToolSummarySourceKind,
     pub tool_kind: ToolKind,
@@ -177,6 +205,16 @@ pub struct ToolCallPresentation {
     /// identifies presentation metadata written before parser versioning.
     #[serde(default)]
     pub summary_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_line_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_error_line: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_is_error: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edit_snippets: Vec<ToolEditSnippet>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub detail_trimmed: bool,
 }
 
 /// An ACP call retained as JSON text. All cached interpretations are built
@@ -196,6 +234,9 @@ struct ToolCallMetadata {
     terminal_ids: Vec<String>,
     fallback: bool,
     raw_result: Option<(u32, usize, [u8; 32])>,
+    has_raw_input: bool,
+    has_raw_output: bool,
+    has_dropped_patch: bool,
 }
 
 impl Serialize for OpaqueToolCall {
@@ -255,6 +296,15 @@ impl From<serde_json::Value> for OpaqueToolCall {
                 .as_ref()
                 .is_some_and(crate::acp::is_fallback_terminal_tool_call),
             raw_result,
+            has_raw_input: value.get("rawInput").is_some(),
+            has_raw_output: value.get("rawOutput").is_some(),
+            has_dropped_patch: decoded.as_ref().is_some_and(|call| {
+                call.content.iter().any(|content| {
+                    matches!(content, ToolCallContent::Diff(diff)
+                        if crate::diff::stored_patch(diff)
+                            .is_some_and(|patch| patch.text.is_empty() && patch.truncated))
+                })
+            }),
         };
         Self {
             json: serde_json::to_string(&value)
@@ -374,6 +424,12 @@ pub enum TranscriptBody {
     /// never dropped.
     TerminalOutput {
         record: TerminalOutputRecord,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_line_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_error_line: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        detail_trimmed: bool,
     },
     Plan {
         /// Complete current ACP `Plan`, including entry priorities and all
@@ -394,6 +450,74 @@ pub enum TranscriptBody {
     System {
         text: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolCallDetailResult {
+    Full {
+        body: TranscriptBody,
+    },
+    Unavailable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<TranscriptBody>,
+        reason: String,
+    },
+}
+
+impl TranscriptBody {
+    pub fn role(&self) -> TranscriptRole {
+        match self {
+            Self::User { .. } => TranscriptRole::User,
+            Self::Agent { .. } => TranscriptRole::Agent,
+            Self::Message { .. } => TranscriptRole::Message,
+            Self::Thought { .. } => TranscriptRole::Thought,
+            Self::Tool { .. } => TranscriptRole::Tool,
+            Self::TerminalOutput { .. } => TranscriptRole::Terminal,
+            Self::Plan { .. } => TranscriptRole::Plan,
+            Self::PlanProposal { .. } => TranscriptRole::PlanProposal,
+            Self::System { .. } => TranscriptRole::System,
+        }
+    }
+
+    pub fn detail_trimmed(&self) -> bool {
+        match self {
+            Self::Tool { presentation, .. } => presentation
+                .as_ref()
+                .is_some_and(|value| value.detail_trimmed),
+            Self::TerminalOutput { detail_trimmed, .. } => *detail_trimmed,
+            _ => false,
+        }
+    }
+
+    /// Recognize rows compacted before retention recorded an explicit marker.
+    pub fn is_legacy_compacted_tool(&self) -> bool {
+        let Self::Tool {
+            call, presentation, ..
+        } = self
+        else {
+            return false;
+        };
+        !presentation.as_ref().is_some_and(|p| p.detail_trimmed)
+            && (presentation.as_ref().is_some_and(|p| match p.source_kind {
+                ToolSummarySourceKind::RawInput => !call.metadata.has_raw_input,
+                ToolSummarySourceKind::RawOutput => !call.metadata.has_raw_output,
+                ToolSummarySourceKind::Title => false,
+            }) || call.metadata.has_dropped_patch)
+    }
+
+    pub fn has_trimmed_detail(&self) -> bool {
+        self.detail_trimmed() || self.is_legacy_compacted_tool()
+    }
+
+    pub fn terminal_output(record: TerminalOutputRecord) -> Self {
+        Self::TerminalOutput {
+            record,
+            output_line_count: None,
+            first_error_line: None,
+            detail_trimmed: false,
+        }
+    }
 }
 
 /// Append one ACP `ContentChunk` value to a transcript item's chunk list,
@@ -500,6 +624,18 @@ pub struct TerminalOutputRecord {
     pub exit_code: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+}
+
+impl From<&crate::archive::CanonicalTerminalOutput> for TerminalOutputRecord {
+    fn from(record: &crate::archive::CanonicalTerminalOutput) -> Self {
+        Self {
+            terminal_id: record.terminal_id.clone(),
+            output: record.output.clone().into(),
+            truncated: record.truncated,
+            exit_code: record.exit_code,
+            signal: record.signal.clone(),
+        }
+    }
 }
 
 impl TerminalOutputRecord {
@@ -701,6 +837,10 @@ pub struct ChatEntry {
     pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incoming_message: Option<Box<crate::mailbox::MailboxEvent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tool_detail_trimmed: bool,
     pub tool_call_id: Option<String>,
     pub tool_status: Option<ToolStatus>,
     /// Compact label used by Rich and browser projections. `text` remains the
@@ -821,6 +961,8 @@ impl ChatEntry {
             revision: 0,
             message_id: None,
             incoming_message: None,
+            stable_id: None,
+            tool_detail_trimmed: false,
             tool_call_id: None,
             tool_status: None,
             tool_summary: None,
@@ -911,6 +1053,8 @@ impl ChatEntry {
             revision: 0,
             message_id: None,
             incoming_message: None,
+            stable_id: None,
+            tool_detail_trimmed: false,
             tool_call_id: None,
             tool_status: None,
             tool_summary: None,
@@ -945,6 +1089,8 @@ impl ChatEntry {
             revision: 0,
             message_id: None,
             incoming_message: None,
+            stable_id: None,
+            tool_detail_trimmed: false,
             tool_call_id,
             tool_status: Some(tool_status),
             tool_summary: None,
@@ -1098,18 +1244,7 @@ impl TranscriptRole {
 }
 
 pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
-    let role = match body {
-        TranscriptBody::User { .. } => TranscriptRole::User,
-        TranscriptBody::Agent { .. } => TranscriptRole::Agent,
-        TranscriptBody::Message { .. } => TranscriptRole::Message,
-        TranscriptBody::Thought { .. } => TranscriptRole::Thought,
-        TranscriptBody::Tool { .. } => TranscriptRole::Tool,
-        TranscriptBody::TerminalOutput { .. } => TranscriptRole::Terminal,
-        TranscriptBody::Plan { .. } => TranscriptRole::Plan,
-        TranscriptBody::PlanProposal { .. } => TranscriptRole::PlanProposal,
-        TranscriptBody::System { .. } => TranscriptRole::System,
-    };
-    role.as_str()
+    body.role().as_str()
 }
 
 pub fn message_item_id(event_key: &str) -> String {

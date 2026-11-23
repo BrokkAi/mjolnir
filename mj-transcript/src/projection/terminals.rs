@@ -124,7 +124,7 @@ pub(super) fn find_terminal_record(
     index
         .get(&terminal_item_id(terminal_id))
         .and_then(|item| match &item.body {
-            TranscriptBody::TerminalOutput { record } if record.terminal_id == terminal_id => {
+            TranscriptBody::TerminalOutput { record, .. } if record.terminal_id == terminal_id => {
                 Some(record.clone())
             }
             _ => None,
@@ -317,7 +317,7 @@ pub(super) fn uniquely_matching_raw_terminal(
 ) -> Option<String> {
     let mut matching = current.transcript.iter().filter_map(|item| {
         let record = match &item.body {
-            TranscriptBody::TerminalOutput { record } => record,
+            TranscriptBody::TerminalOutput { record, .. } => record,
             TranscriptBody::Tool {
                 terminal_outputs, ..
             } if fallback_tool_item(item).ok()? => terminal_outputs.first()?,
@@ -392,11 +392,5 @@ pub(super) fn canonical_terminal_output(record: &TerminalOutputRecord) -> Canoni
 pub(super) fn materialized_terminal_output(
     record: &CanonicalTerminalOutput,
 ) -> TerminalOutputRecord {
-    TerminalOutputRecord {
-        terminal_id: record.terminal_id.clone(),
-        output: record.output.clone().into(),
-        truncated: record.truncated,
-        exit_code: record.exit_code,
-        signal: record.signal.clone(),
-    }
+    record.into()
 }

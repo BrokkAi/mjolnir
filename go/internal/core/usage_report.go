@@ -194,8 +194,12 @@ type UsageAgentRole string
 
 const (
 	UsageAgentRolePrimary              UsageAgentRole = "primary"
-	UsageAgentRoleSubagent             UsageAgentRole = "subagent"
+	UsageAgentRoleOrchestrator         UsageAgentRole = "orchestrator"
+	UsageAgentRoleSubtle               UsageAgentRole = "subtle"
+	UsageAgentRoleStraightforward      UsageAgentRole = "straightforward"
+	UsageAgentRoleOracle               UsageAgentRole = "oracle"
 	UsageAgentRoleReviewer             UsageAgentRole = "reviewer"
+	UsageAgentRoleSubagent             UsageAgentRole = "subagent"
 	UsageAgentRoleUnclassifiedSubagent UsageAgentRole = "unclassified_subagent"
 )
 
@@ -203,10 +207,18 @@ func (r UsageAgentRole) Label() string {
 	switch r {
 	case UsageAgentRolePrimary:
 		return "Primary agents"
-	case UsageAgentRoleSubagent:
-		return "Subagents"
+	case UsageAgentRoleOrchestrator:
+		return "Orchestrators"
+	case UsageAgentRoleSubtle:
+		return "Subtle subagents"
+	case UsageAgentRoleStraightforward:
+		return "Straightforward subagents"
+	case UsageAgentRoleOracle:
+		return "Oracles"
 	case UsageAgentRoleReviewer:
 		return "Reviewers"
+	case UsageAgentRoleSubagent:
+		return "Other subagents"
 	}
 	return "Unclassified subagents"
 }
@@ -216,12 +228,20 @@ func (r UsageAgentRole) usageAgentRoleOrder() int {
 	switch r {
 	case UsageAgentRolePrimary:
 		return 0
-	case UsageAgentRoleSubagent:
+	case UsageAgentRoleOrchestrator:
 		return 1
-	case UsageAgentRoleReviewer:
+	case UsageAgentRoleSubtle:
 		return 2
+	case UsageAgentRoleStraightforward:
+		return 3
+	case UsageAgentRoleOracle:
+		return 4
+	case UsageAgentRoleReviewer:
+		return 5
+	case UsageAgentRoleSubagent:
+		return 6
 	}
-	return 3
+	return 7
 }
 
 type AgentUsageEstimate struct {

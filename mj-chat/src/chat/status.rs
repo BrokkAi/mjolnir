@@ -137,7 +137,10 @@ impl ChatState {
     /// it starts with a placeholder id that has to be corrected once the real
     /// id arrives.
     pub fn adopt_session_id(&mut self, session_id: &str) {
-        self.session_id = session_id.to_owned();
+        if self.session_id != session_id {
+            self.reset_tool_details();
+            self.session_id = session_id.to_owned();
+        }
         self.bind_composer_session(Some(session_id));
     }
 

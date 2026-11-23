@@ -9,8 +9,8 @@
 //! file does not already end in one, and no write when the checkout is not a
 //! Git repository.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -53,6 +53,67 @@ pub fn snapshot_keep_dir(checkout: &Path, session_id: Option<&str>) -> Result<Pa
         path.push(session_id);
     }
     Ok(path)
+}
+
+/// The source directory and path exclusions for a cross-target Move.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MoveKeep {
+    directory: PathBuf,
+    skipped: BTreeSet<PathBuf>,
+}
+
+impl MoveKeep {
+    pub fn new(directory: PathBuf, skip: &[PathBuf]) -> Result<Self> {
+        Ok(Self {
+            directory,
+            skipped: skip
+                .iter()
+                .map(|path| normalize_keep_path(path))
+                .collect::<Result<_>>()?,
+        })
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    pub fn skipped_paths(&self) -> &BTreeSet<PathBuf> {
+        &self.skipped
+    }
+
+    /// Match a path under the checkout-wide keep directory against the one
+    /// session directory the transport sends.
+    pub fn relative_path<'a>(&self, keep_root: &Path, path: &'a Path) -> Option<&'a Path> {
+        let prefix = self.directory.strip_prefix(keep_root).ok()?;
+        path.strip_prefix(prefix).ok()
+    }
+
+    pub fn carries(&self, keep_root: &Path, path: &Path) -> bool {
+        self.relative_path(keep_root, path)
+            .is_some_and(|relative| !self.skips(relative))
+    }
+
+    pub fn skips(&self, relative: &Path) -> bool {
+        self.skipped.iter().any(|skip| relative.starts_with(skip))
+    }
+}
+
+pub fn normalize_keep_path(path: &Path) -> Result<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("invalid relative path in keep stream: {}", path.display());
+            }
+        }
+    }
+    ensure!(
+        !out.as_os_str().is_empty(),
+        "empty relative path in keep stream"
+    );
+    Ok(out)
 }
 
 /// Create the session keep directory and export [`SESSION_KEEP_DIR_ENV`].
@@ -101,6 +162,31 @@ pub fn interpret_checkout_top_level(
         return Ok((cwd.to_path_buf(), false));
     }
     bail!("resolve checkout {}: {}", cwd.display(), stderr.trim())
+}
+
+/// Interpret `git -C <cwd> rev-parse --show-prefix --show-toplevel` as
+/// [`interpret_checkout_top_level`] does, except that a `cwd` which is itself
+/// the top level is returned as given. Git spells the top level with symlinks
+/// resolved (`/var` is `/private/var` on macOS) and absolute where a session
+/// records it relative to the target user's home, while a Move's preview and
+/// capture find the keep directory under the session's recorded checkout.
+pub fn interpret_checkout_top_level_as_given(
+    cwd: &Path,
+    status: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(PathBuf, bool)> {
+    if status != Some(0) {
+        return interpret_checkout_top_level(cwd, status, stdout, stderr);
+    }
+    let text = std::str::from_utf8(stdout).context("decode Git checkout top level")?;
+    let (prefix, top) = text
+        .split_once('\n')
+        .context("Git did not report the checkout prefix and top level")?;
+    if prefix.is_empty() {
+        return Ok((cwd.to_path_buf(), true));
+    }
+    interpret_checkout_top_level(cwd, status, top.as_bytes(), stderr)
 }
 
 fn checkout_top_level(cwd: &Path) -> Result<(PathBuf, bool)> {

@@ -9,6 +9,10 @@ package worker
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -43,7 +47,10 @@ func newKimiTaskMonitor(home kimiHome) *KimiTaskMonitor {
 // prompt started at startedAtMs; known is false when no such turn is
 // journalled.
 func (m *KimiTaskMonitor) turnSettledSince(startedAtMs int64) (settled, known bool) {
-	panic("unported: mj-worker/src/worker_runtime/unix/kimi.rs KimiTaskMonitor::turn_settled_since")
+	if m.follower == nil {
+		return false, false
+	}
+	return m.follower.TurnSettledSince(startedAtMs)
 }
 
 func (m *KimiTaskMonitor) detach() {
@@ -65,13 +72,95 @@ func (m *KimiTaskMonitor) attach(ctx context.Context, nativeSessionID string, re
 // refresh rescans the wire journal when it is due, or at once when force,
 // and publishes its tasks and native agents to the relay.
 func (m *KimiTaskMonitor) refresh(ctx context.Context, relay *RelayCell, force bool) error {
-	panic("unported: mj-worker/src/worker_runtime/unix/kimi.rs KimiTaskMonitor::refresh")
+	if m.nativeSessionID == nil || (!force && time.Now().Before(m.retryAt)) {
+		return nil
+	}
+	if m.home.err != nil {
+		return m.recordFailure(relay, fmt.Errorf("cannot locate Kimi home: %s", m.home.err))
+	}
+	home := m.home.path
+	nativeSessionID := *m.nativeSessionID
+	follower := m.follower
+	m.follower = nil
+	type scan struct {
+		follower *KimiWireFollower
+		snapshot KimiTaskSnapshot
+		err      error
+	}
+	scanned, joinErr := core.SpawnBlocking(func() scan {
+		sessionDir, err := ResolveSessionDir(home, nativeSessionID)
+		if err != nil {
+			return scan{err: err}
+		}
+		wirePath := filepath.Join(sessionDir, "agents/main/wire.jsonl")
+		if follower == nil || follower.WirePath() != wirePath {
+			if follower, err = KimiWireFollowerOpen(wirePath); err != nil {
+				return scan{err: err}
+			}
+		}
+		refreshed, err := follower.Refresh()
+		if err != nil {
+			return scan{err: err}
+		}
+		var snapshot KimiTaskSnapshot
+		switch refreshed := refreshed.(type) {
+		case KimiWireRefreshUpdated:
+			snapshot = refreshed.Value
+		default:
+			if snapshot, err = follower.Rescan(); err != nil {
+				return scan{err: err}
+			}
+		}
+		return scan{follower: follower, snapshot: snapshot}
+	}).Join(ctx)
+	switch {
+	case joinErr != nil:
+		return m.recordFailure(relay, fmt.Errorf("Kimi background task scan stopped: %s", joinErr))
+	case scanned.err != nil:
+		return m.recordFailure(relay, scanned.err)
+	}
+	m.follower = scanned.follower
+	m.consecutiveFailures = 0
+	m.retryAt = time.Now().Add(kimiTaskPollInterval)
+	m.lastWarning = nil
+	agents := make(map[string]KimiNativeAgentEntry, len(scanned.snapshot.NativeAgents))
+	for id, agent := range scanned.snapshot.NativeAgents {
+		agents[id] = KimiNativeAgentEntry{Task: agent.Task, State: agent.State}
+	}
+	guard := relay.Lock()
+	err := guard.KimiNativeAgentsChanged(agents)
+	guard.Unlock()
+	if err != nil {
+		return err
+	}
+	guard = relay.Lock()
+	defer guard.Unlock()
+	return guard.KimiBackgroundTasksChanged(scanned.snapshot.Tasks, scanned.snapshot.ProviderToolIDs, scanned.snapshot.ObservedTaskIDs)
 }
 
 // recordFailure backs off and reports, once per distinct message, that
 // background task tracking is unavailable.
 func (m *KimiTaskMonitor) recordFailure(relay *RelayCell, err error) error {
-	panic("unported: mj-worker/src/worker_runtime/unix/kimi.rs KimiTaskMonitor::record_failure")
+	m.follower = nil
+	if m.consecutiveFailures < math.MaxUint32 {
+		m.consecutiveFailures++
+	}
+	exponent := min(max(m.consecutiveFailures, 1)-1, 4)
+	delay := min(kimiTaskPollInterval*time.Duration(uint32(1)<<exponent), kimiTaskMaxRetryDelay)
+	m.retryAt = time.Now().Add(delay)
+	message := "Kimi background task tracking is unavailable; worker replacement is blocked: " + err.Error()
+	guard := relay.Lock()
+	defer guard.Unlock()
+	if err := guard.KimiBackgroundTasksUnavailable(); err != nil {
+		return err
+	}
+	if m.lastWarning == nil || *m.lastWarning != message {
+		if _, err := guard.RecordObservation(core.RelayObservationWarning{Message: message}); err != nil {
+			return err
+		}
+		m.lastWarning = &message
+	}
+	return nil
 }
 
 // awaitTurnEnd waits, briefly, for the journal record that closes the turn
@@ -108,5 +197,83 @@ func awaitTurnEnd(ctx context.Context, monitor *KimiTaskMonitor, relay *RelayCel
 // usage and its failure. monitor is nil when the harness is not Kimi; event
 // may be replaced.
 func prepareKimiRuntimeEvent(ctx context.Context, monitor *KimiTaskMonitor, relay *RelayCell, event *core.RuntimeEvent) error {
-	panic("unported: mj-worker/src/worker_runtime/unix/kimi.rs prepare_kimi_runtime_event")
+	if monitor == nil {
+		return nil
+	}
+	activePrompt := func() *core.ActiveRelayPrompt {
+		guard := relay.Lock()
+		defer guard.Unlock()
+		return guard.OperationalState().ActivePrompt
+	}
+	switch current := (*event).(type) {
+	case core.RuntimeEventSessionStarted:
+		return monitor.attach(ctx, current.NativeSessionID, relay)
+	case core.RuntimeEventSessionConfigured:
+		return monitor.refresh(ctx, relay, true)
+	case core.RuntimeEventWarning:
+		// The ACP runtime says this before it finishes a prompt that ended
+		// with no session updates. When Kimi journalled a failure for that
+		// turn, the failure is what happened, and it is what the person and
+		// the credential sync need to read (#1132).
+		if !strings.Contains(current.Message, core.PromptEmptyResponseMarker) {
+			return nil
+		}
+		prompt := activePrompt()
+		if prompt == nil {
+			return nil
+		}
+		started := prompt.StartedAtMs
+		if err := monitor.refresh(ctx, relay, true); err != nil {
+			return err
+		}
+		if err := awaitTurnEnd(ctx, monitor, relay, started, true); err != nil {
+			return err
+		}
+		if monitor.follower != nil {
+			if native := monitor.follower.TurnDiagnosticSince(started); native != nil {
+				current.Message = "prompt failed: " + native.Message
+				*event = current
+			}
+		}
+		return nil
+	case core.RuntimeEventPromptFinished:
+		var started *int64
+		if prompt := activePrompt(); prompt != nil && prompt.CommandID == current.RequestID {
+			started = &prompt.StartedAtMs
+		}
+		if err := monitor.refresh(ctx, relay, true); err != nil {
+			return err
+		}
+		// The last step's usage can still be in flight when the prompt
+		// response arrives; the turn end follows every record of the turn.
+		if started != nil {
+			unanswered := current.StopReason == core.PromptUnansweredStopReason
+			if err := awaitTurnEnd(ctx, monitor, relay, *started, unanswered); err != nil {
+				return err
+			}
+		}
+		// The ACP prompt response carries no usage, so the native records are
+		// the only report of what the turn spent (#1064).
+		if current.Usage == nil && started != nil && monitor.follower != nil {
+			if native := monitor.follower.TurnUsageSince(*started); native != nil {
+				current.Usage = native
+			}
+		}
+		if started != nil && monitor.follower != nil {
+			if native := monitor.follower.TurnDiagnosticSince(*started); native != nil {
+				if native.IsUsageLimit() {
+					current.StopReason = core.QuotaStopReason
+				} else {
+					current.StopReason = "error"
+				}
+				current.Diagnostic = native
+			}
+		}
+		*event = current
+		return nil
+	case core.RuntimeEventHarnessRestarting, core.RuntimeEventStopped:
+		monitor.detach()
+		return nil
+	}
+	return nil
 }

@@ -294,7 +294,11 @@ impl Controller {
         // The controller's durable queue/frontier may be newer than the copy.
         // Recover native files from the archive without replaying work already
         // completed since that archive was captured.
-        let canonical = current_parent_projection(session_id, Some(&archive.canonical_session))?;
+        let (canonical, lost_wakes) = current_parent_projection(
+            session_id,
+            Some(&archive.canonical_session),
+            spec.queue_policy,
+        )?;
         let seed =
             mj_checkpoint::checkpoint::relay_seed_for_restore(&canonical, true, spec.queue_policy)?;
         let local_seed = staging.path().join("current-relay-seed.json");
@@ -336,6 +340,7 @@ impl Controller {
         let _outcome: mj_checkpoint::checkpoint::ParentRecoveryOutcome =
             serde_json::from_slice(&output.stdout)
                 .context("read missing parent recovery result")?;
+        report_lost_wakes(executor, session_id, &lost_wakes);
         if self.state.sessions[session_id].native_session_id.is_none()
             && let Some(native_session_id) = archive.native_session_to_load(true)
         {
@@ -943,14 +948,66 @@ impl Controller {
     }
 }
 
+/// The parent's queue and frontier, from the daemon's projection when it has
+/// one, with the queued mailbox wakes it could not restore. The projection
+/// keeps no payload for a queued wake, and the worker that held it is gone:
+/// take it from the recovery copy when that holds it, and otherwise leave the
+/// wake out. The caller reports those once its restore has succeeded.
 fn current_parent_projection(
     session_id: &str,
     archived: Option<&CanonicalSessionSnapshot>,
-) -> Result<CanonicalSessionSnapshot> {
-    crate::database::load_materialized_session(session_id)?
-        .map(mj_transcript::projection::canonical_session_from_materialized_owned)
-        .transpose()?.or_else(|| archived.cloned())
-        .context("No durable parent relay state or recovery copy is available; files and children were kept. Supply a recovery copy and retry Resume.")
+    queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy,
+) -> Result<(CanonicalSessionSnapshot, Vec<String>)> {
+    let Some(materialized) = crate::database::load_materialized_session(session_id)? else {
+        let archived = archived.cloned().context("No durable parent relay state or recovery copy is available; files and children were kept. Supply a recovery copy and retry Resume.")?;
+        return Ok((archived, Vec::new()));
+    };
+    let mut canonical =
+        mj_transcript::projection::canonical_session_from_materialized_owned(materialized)?;
+    if !queue_policy.keeps_queue() {
+        return Ok((canonical, Vec::new()));
+    }
+    let mut lost = Vec::new();
+    canonical.queued_prompts.retain_mut(|queued| {
+        if !queued.content.is_empty()
+            || !mj_core::continuation::carries_mailbox_wake(&queued.command_id)
+        {
+            return true;
+        }
+        // A wake requeued by a worker restart after the copy was taken is its
+        // restart continuation, which carries the same prompt.
+        let wake = mj_core::continuation::carried_command(&queued.command_id);
+        let saved = archived.and_then(|archived| {
+            archived.queued_prompts.iter().find(|saved| {
+                !saved.content.is_empty()
+                    && mj_core::continuation::carried_command(&saved.command_id) == wake
+            })
+        });
+        if let Some(saved) = saved {
+            queued.content = saved.content.clone();
+            return true;
+        }
+        lost.push(queued.command_id.clone());
+        false
+    });
+    Ok((canonical, lost))
+}
+
+/// Tell the person which queued mailbox wakes a recovered parent left out.
+fn report_lost_wakes(executor: &impl CommandExecutor, session_id: &str, lost: &[String]) {
+    if lost.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        session_id,
+        lost = ?lost,
+        "queued mailbox wakes left with their worker; they are not in the recovered queue"
+    );
+    executor.notify_notice(&super::super::checkpoint::lost_wakes_notice(
+        lost.len(),
+        "recovered",
+        "only the stopped worker held their prompts",
+    ));
 }
 
 impl Controller {
@@ -968,16 +1025,14 @@ impl Controller {
             dead.status == 0 && String::from_utf8_lossy(&dead.stdout).trim() == "dead",
             "Parent runtime cannot be reconstructed while its worker may be live; everything was kept. Retry Resume."
         );
-        let canonical = current_parent_projection(session_id, None)?;
-        let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
-            &canonical,
-            true,
-            if discard_queue {
-                mj_checkpoint::checkpoint::QueueRestorePolicy::Discard
-            } else {
-                mj_checkpoint::checkpoint::QueueRestorePolicy::Restore
-            },
-        )?;
+        let queue_policy = if discard_queue {
+            mj_checkpoint::checkpoint::QueueRestorePolicy::Discard
+        } else {
+            mj_checkpoint::checkpoint::QueueRestorePolicy::Restore
+        };
+        let (canonical, lost_wakes) = current_parent_projection(session_id, None, queue_policy)?;
+        let seed =
+            mj_checkpoint::checkpoint::relay_seed_for_restore(&canonical, true, queue_policy)?;
         executor.begin_resumable_work()?;
         self.prepare_subagent_report_dir(session_id, &backend, executor)?;
         self.prepare_worker_files(
@@ -1013,11 +1068,7 @@ impl Controller {
             )),
             restore_repositories: false,
             restore_native: false,
-            queue_policy: if discard_queue {
-                mj_checkpoint::checkpoint::QueueRestorePolicy::Discard
-            } else {
-                mj_checkpoint::checkpoint::QueueRestorePolicy::Restore
-            },
+            queue_policy,
             primary_repository_root: None,
         };
         let staging = tempfile::tempdir()?;
@@ -1060,6 +1111,7 @@ impl Controller {
                 "rebuild missing parent relay from durable state",
             )?,
         )?;
+        report_lost_wakes(executor, session_id, &lost_wakes);
         executor.end_resumable_work("start reconstructed parent runtime")?;
         Box::pin(self.repair_existing_environment(
             session_id,

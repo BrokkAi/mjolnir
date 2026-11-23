@@ -1318,6 +1318,7 @@ pub(super) fn capture_legacy_raw_checkout_snapshot(
     consent.repositories.insert(
         repository_id.to_owned(),
         CaptureConsent {
+            move_keep: None,
             untracked: UntrackedConsent::Any,
             operations: OperationConsent::None,
         },
@@ -2228,6 +2229,27 @@ pub(super) enum ManagedCloneRestoreOutcome {
     /// Empty clone was seeded on the remote SSH target; the target worker
     /// must run `restore_repositories` during `restore_into_target`.
     SeededForRemoteRestore,
+}
+
+/// Move's keep stream arrives before the clone exists. Its sibling staging
+/// path belongs to the same checkout and is reclaimed with it on rollback.
+pub(super) fn managed_clone_move_keep_stage(worktree: &ManagedWorktree) -> PathBuf {
+    worktree.worktree_root.with_extension("move-keep")
+}
+
+pub(super) fn publish_managed_clone_move_keep(
+    worktree: &ManagedWorktree,
+    session_id: &str,
+) -> Result<()> {
+    let checkout = &worktree.worktree_root;
+    let keep = mj_checkpoint::checkpoint::session_keep_dir(checkout, session_id)?;
+    let relative = keep.strip_prefix(checkout)?;
+    let parent = relative.parent().context("keep directory has no parent")?;
+    let root = mj_core::confined_path::ConfinedDir::open_root(checkout)?
+        .context("restored clone is missing")?;
+    root.create_dir_all(parent)?;
+    std::fs::rename(managed_clone_move_keep_stage(worktree), &keep)
+        .with_context(|| format!("publish Move keep directory {}", keep.display()))
 }
 
 fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorktree) -> Result<()> {
@@ -3343,16 +3365,19 @@ fn remove_managed_worktree_checkout(
         .run(executor);
     };
     if worktree.kind == ManagedCheckoutKind::Clone {
-        if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
-            // Unlinking files requires write permission on their parent.
-            // A stopped clone can contain owner-read-only directories. Make
-            // those directories writable, without following symlinks or
-            // changing file modes, before removing the owned tree.
-            const REMOVE_CLONE: &str = r#"
+        // Unlinking files requires write permission on their parent.
+        // A stopped clone can contain owner-read-only directories. Make
+        // those directories writable, without following symlinks or
+        // changing file modes, before removing the owned tree.
+        const REMOVE_CLONE: &str = r#"
 owner=$(id -u) || exit
 find -P "$1" -type d -user "$owner" ! -perm -0200 -exec chmod -- u+w {} + &&
     exec rm -rf -- "$1"
 "#;
+        let remove_clone_dir = |directory: &Path| -> Result<bool> {
+            if !path_exists_on_managed_target(executor, &worktree.target, directory)? {
+                return Ok(false);
+            }
             execute_checked(
                 executor,
                 managed_target_command(
@@ -3363,11 +3388,17 @@ find -P "$1" -type d -user "$owner" ! -perm -0200 -exec chmod -- u+w {} + &&
                         "-c",
                         REMOVE_CLONE,
                         "mj-remove-clone",
-                        &worktree.worktree_root.to_string_lossy(),
+                        &directory.to_string_lossy(),
                     ],
                 )
                 .purpose("remove managed clone after its worker stopped"),
             )?;
+            Ok(true)
+        };
+        if matches!(worktree.target, ManagedWorktreeTarget::Local) {
+            remove_clone_dir(&managed_clone_move_keep_stage(worktree))?;
+        }
+        if remove_clone_dir(&worktree.worktree_root)? {
             release();
         }
         return Ok(true);

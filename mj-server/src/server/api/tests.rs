@@ -1,6 +1,6 @@
 use super::*;
 use mj_core::state::{SessionResourceAllocation, TurnOutcomeKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use axum::body::Body;
@@ -1251,6 +1251,16 @@ struct FakeSession {
 }
 
 impl SessionHandleBackend for FakeSession {
+    fn tool_call_detail(
+        &self,
+        _stable_id: String,
+    ) -> mj_client::session::BoxFuture<
+        '_,
+        anyhow::Result<Option<mj_core::transcript::ToolCallDetailResult>>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
     fn search_prompts(
         &self,
         _bundle_id: String,
@@ -1330,6 +1340,9 @@ struct CapturedSessionMessageRequest {
     created_at_ms: i64,
 }
 
+type FakeToolDetails =
+    BTreeMap<(String, Option<String>, String), mj_core::transcript::ToolCallDetailResult>;
+
 #[derive(Default)]
 struct FakeBackend {
     login_errors: std::collections::BTreeMap<String, String>,
@@ -1356,6 +1369,7 @@ struct FakeBackend {
     start_status: Option<StartStatus>,
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
+    tool_details: FakeToolDetails,
     transcript_limits: Mutex<Vec<usize>>,
     transcript_filters: Mutex<Vec<(Vec<mj_core::transcript::TranscriptRole>, bool)>>,
     history: Option<mj_core::storage::TranscriptHistoryPage>,
@@ -1411,6 +1425,33 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn tool_call_detail(
+        &self,
+        session_id: String,
+        stable_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::transcript::ToolCallDetailResult>>> {
+        Box::pin(async move {
+            Ok(self
+                .tool_details
+                .get(&(session_id, None, stable_id))
+                .cloned())
+        })
+    }
+
+    fn native_agent_tool_call_detail(
+        &self,
+        owner: String,
+        child: String,
+        stable_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::transcript::ToolCallDetailResult>>> {
+        Box::pin(async move {
+            Ok(self
+                .tool_details
+                .get(&(owner, Some(child), stable_id))
+                .cloned())
+        })
+    }
+
     fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
         Ok(self.login_errors.clone())
     }
@@ -1680,7 +1721,7 @@ impl SubagentBackend for FakeBackend {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             })
         })
     }
@@ -3172,7 +3213,6 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         request.action,
         ControllerAction::New {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
@@ -6437,7 +6477,6 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
         failure_notice: None,
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
@@ -6490,6 +6529,12 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                 if prior_use == "sub-agent" {
                     let mut parent = record.clone();
                     parent.id = "parent".into();
+                    state
+                        .environment_owners
+                        .insert(parent.id.clone(), parent.id.clone());
+                    state
+                        .environment_owners
+                        .insert("session-1".into(), parent.id.clone());
                     state.sessions.insert(parent.id.clone(), parent);
                     state.subagents.insert(
                         "session-1".into(),
@@ -6507,7 +6552,7 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                             noticed_turn: None,
                             reported_finish: None,
                             handback_tool: false,
-                            supervisor: false,
+                            orchestrator: false,
                         },
                     );
                 }
@@ -8098,7 +8143,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-        supervisor: false,
+        orchestrator: false,
     };
     mj_store::database::save_subagent_session(&child, &relation).unwrap();
     let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
@@ -8673,4 +8718,117 @@ async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() 
         json_body(dropped).await["error"].as_str().unwrap(),
         "the controller is unavailable"
     );
+}
+
+#[tokio::test]
+async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unavailable() {
+    use mj_core::transcript::{ToolCallDetailResult, TranscriptBody};
+    use serde_json::json;
+
+    let body = TranscriptBody::Tool {
+        call: json!({
+            "toolCallId": "edit", "title": "Edit", "status": "failed",
+            "rawInput": {"path": "project.txt"},
+            "rawOutput": {"error": "write failed"},
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "tool output"}},
+                {"type": "diff", "path": "project.txt", "oldText": "old\n", "newText": "new\n"}
+            ]
+        })
+        .into(),
+        terminal_outputs: Vec::new(),
+        terminal_refs: Vec::new(),
+        presentation: None,
+    };
+    let full = ToolCallDetailResult::Full { body };
+    let unavailable = ToolCallDetailResult::Unavailable {
+        summary: None,
+        reason: "full tool detail is not stored locally".into(),
+    };
+    let mut tool_details = FakeToolDetails::new();
+    for child in [None, Some("child".to_owned())] {
+        for (id, result) in [
+            ("tool:edit", full.clone()),
+            ("tool:old", unavailable.clone()),
+        ] {
+            tool_details.insert(("session-1".into(), child.clone(), id.into()), result);
+        }
+    }
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(
+        Arc::new(FakeBackend {
+            tool_details,
+            ..Default::default()
+        }),
+        |_| {},
+    );
+    let cookie = login_cookie(&app).await;
+
+    for (route, cookie_only) in [
+        ("/api/v1/sessions/session-1/items", false),
+        (
+            "/api/v1/sessions/session-1/native-agents/child/items",
+            false,
+        ),
+        ("/api/sessions/session-1/items", true),
+    ] {
+        let edit = format!("{route}/tool%3Aedit/detail");
+        let request = |builder: axum::http::request::Builder| {
+            app.clone().oneshot(builder.body(Body::empty()).unwrap())
+        };
+        let response = request(Request::get(&edit)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
+        if cookie_only {
+            assert_eq!(
+                request(bearer(Request::get(&edit))).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let authenticated = |path: &str| {
+            if cookie_only {
+                Request::get(path).header(COOKIE, &cookie)
+            } else {
+                bearer(Request::get(path))
+            }
+        };
+        let response = request(authenticated(&edit)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        let full = json_body(response).await;
+        assert_eq!(full["status"], "full");
+        assert_eq!(full["stable_id"], "tool:edit");
+        assert_eq!(full["entry"]["tool_input"]["path"], "project.txt");
+        assert_eq!(full["entry"]["tool_error"], "write failed");
+        assert_eq!(full["entry"]["tool_content"], json!(["tool output"]));
+        assert!(full["diffs"][0]["text"].as_str().unwrap().contains("+new"));
+        assert_eq!(full["call"]["toolCallId"], "edit");
+        assert_eq!(full["body"]["kind"], "tool");
+
+        let response = request(authenticated(&format!("{route}/tool:old/detail")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        assert_eq!(
+            json_body(response).await,
+            json!({
+                "status": "unavailable", "stable_id": "tool:old", "summary": null,
+                "unavailable_reason": "full tool detail is not stored locally",
+            })
+        );
+        let response = request(authenticated(&format!("{route}/missing/detail")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+    }
+
+    for path in [
+        "/api/v1/sessions/missing/items/tool:edit/detail",
+        "/api/v1/sessions/session-1/native-agents/other-child/items/tool:edit/detail",
+        "/api/v1/sessions/session-2/native-agents/child/items/tool:edit/detail",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }

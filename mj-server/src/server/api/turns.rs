@@ -52,6 +52,7 @@ pub(super) async fn native_agent_history(
         .map(|item| {
             serde_json::json!({
                 "stable_id": item.stable_id,
+                "tool_detail_trimmed": item.body.detail_trimmed(),
                 "position": item.position,
                 "role": mj_core::transcript::transcript_item_role(&item.body),
                 "text": mj_transcript::transcript::transcript_item_text(item),
@@ -61,6 +62,113 @@ pub(super) async fn native_agent_history(
     Ok(Json(
         serde_json::json!({"generation": page.generation_ordinal, "items": items, "has_more": page.has_more}),
     ))
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(in crate::server) enum ToolCallDetailResponse {
+    Full {
+        stable_id: String,
+        entry: Box<mj_core::transcript::ChatEntry>,
+        body: Box<mj_core::transcript::TranscriptBody>,
+        call: Option<serde_json::Value>,
+        diffs: Vec<mj_core::diff::DiffPatch>,
+        terminal_outputs: Vec<mj_core::transcript::TerminalOutputRecord>,
+    },
+    Unavailable {
+        stable_id: String,
+        summary: Option<mj_core::transcript::TranscriptBody>,
+        unavailable_reason: String,
+    },
+}
+
+impl ToolCallDetailResponse {
+    async fn render(
+        stable_id: String,
+        detail: Option<mj_core::transcript::ToolCallDetailResult>,
+    ) -> Result<axum::response::Response, ApiFailure> {
+        use axum::response::IntoResponse;
+        use mj_core::transcript::{ToolCallDetailResult, TranscriptBody, TranscriptItem};
+
+        let detail = detail.ok_or_else(|| ApiFailure::not_found("unknown transcript item"))?;
+        match detail {
+            ToolCallDetailResult::Unavailable { summary, reason } => Ok(Json(Self::Unavailable {
+                stable_id,
+                summary,
+                unavailable_reason: reason,
+            })
+            .into_response()),
+            ToolCallDetailResult::Full { body } => {
+                Ok(mj_core::runtime::spawn_blocking(move || {
+                    let (call, diffs, terminal_outputs) = match &body {
+                        TranscriptBody::Tool {
+                            call,
+                            terminal_outputs,
+                            ..
+                        } => (
+                            Some(call.value()),
+                            mj_client::transcript::tool_detail_patches(call),
+                            terminal_outputs.clone(),
+                        ),
+                        TranscriptBody::TerminalOutput { record, .. } => {
+                            (None, Vec::new(), vec![record.clone()])
+                        }
+                        _ => (None, Vec::new(), Vec::new()),
+                    };
+                    let item = Arc::new(TranscriptItem {
+                        stable_id: stable_id.clone(),
+                        position: 0,
+                        latest_content_event_ordinal: None,
+                        created_at_ms: 0,
+                        last_changed_at_ms: 0,
+                        body,
+                    });
+                    let mut entry = mj_client::transcript::materialized_chat_entry(&item, 0);
+                    // The response carries the body separately from its rendered entry.
+                    entry.source = Default::default();
+                    entry.recorded_at_ms = None;
+                    entry.tool_ended_at_ms = None;
+                    Json(Self::Full {
+                        stable_id,
+                        entry: Box::new(entry),
+                        body: Box::new(
+                            Arc::into_inner(item)
+                                .expect("detail body has one owner")
+                                .body,
+                        ),
+                        call,
+                        diffs,
+                        terminal_outputs,
+                    })
+                    .into_response()
+                })
+                .await
+                .context("render tool call detail")?)
+            }
+        }
+    }
+}
+
+pub(in crate::server) async fn tool_call_detail(
+    State(state): State<ServerState>,
+    Path((session_id, stable_id)): Path<(String, String)>,
+) -> Result<axum::response::Response, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let detail = backend(&state)?
+        .tool_call_detail(session_id, stable_id.clone())
+        .await?;
+    ToolCallDetailResponse::render(stable_id, detail).await
+}
+
+pub(super) async fn native_agent_tool_call_detail(
+    State(state): State<ServerState>,
+    Path((owner, child, stable_id)): Path<(String, String, String)>,
+) -> Result<axum::response::Response, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &owner)?;
+    let detail = backend(&state)?
+        .native_agent_tool_call_detail(owner, child, stable_id.clone())
+        .await?;
+    ToolCallDetailResponse::render(stable_id, detail).await
 }
 
 pub(super) async fn prompt(
@@ -429,6 +537,7 @@ pub(super) async fn transcript(
             .iter()
             .map(|item| TranscriptItemView {
                 stable_id: item.stable_id.clone(),
+                tool_detail_trimmed: item.body.detail_trimmed(),
                 position: item.position,
                 seq: item.seq(),
                 role: mj_core::transcript::transcript_item_role(&item.body).to_owned(),

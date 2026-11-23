@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -223,7 +225,26 @@ func (r *TerminalRegistry) allocateID() string {
 // createWithID spawns and registers under terminalID, which the caller
 // registered with its relay owner before spawn.
 func (r *TerminalRegistry) createWithID(terminalID string, spawn TerminalSpawn, events chan<- core.RuntimeEvent) (string, error) {
-	panic("unported: mj-worker/src/terminal.rs TerminalRegistry::create_with_id")
+	line := ShellLine(spawn.Command, spawn.Args)
+	child, stdout, stderr, err := spawnTerminalShell(line, &spawn)
+	if err != nil {
+		return "", err
+	}
+	buffer := newSharedTerminalBuffer(spawn.OutputByteLimit)
+	exit := core.NewWatch[*TerminalExit](nil)
+	supervisor := core.Spawn(func() struct{} {
+		superviseTerminal(terminalID, child, stdout, stderr, buffer, exit, events)
+		return struct{}{}
+	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.terminals[terminalID] = &terminalEntry{
+		group:      terminalProcessGroup{pid: child.Process.Pid, exit: exit},
+		buffer:     buffer,
+		exit:       exit,
+		supervisor: supervisor,
+	}
+	return terminalID, nil
 }
 
 // Output is the output served for `terminal/output`; false for an unknown
@@ -308,7 +329,50 @@ func (r *TerminalRegistry) Release(terminalID string) (*core.JoinHandle[struct{}
 // costs one reap timeout rather than one per terminal. ctx bounds only the
 // delivery of the failure reports on events.
 func (r *TerminalRegistry) Shutdown(ctx context.Context, events chan<- core.RuntimeEvent) {
-	panic("unported: mj-worker/src/terminal.rs TerminalRegistry::shutdown")
+	r.mu.Lock()
+	entries := r.terminals
+	r.terminals = map[string]*terminalEntry{}
+	r.mu.Unlock()
+
+	type reaped struct {
+		terminalID string
+		err        error
+	}
+	unreaped := map[string]bool{}
+	results := make(chan reaped, len(entries))
+	for terminalID, entry := range entries {
+		entry.group.killIfLive()
+		unreaped[terminalID] = true
+		go func() {
+			_, err := entry.supervisor.Join(context.Background())
+			results <- reaped{terminalID: terminalID, err: err}
+		}()
+	}
+
+	deadline := time.NewTimer(terminalReapTimeout)
+	defer deadline.Stop()
+	var failures []string
+	// Collect first and report after: a report waits on the event channel,
+	// and that wait must not spend the reap deadline.
+collect:
+	for len(unreaped) > 0 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				failures = append(failures, fmt.Sprintf("client terminal %s supervisor failed: %v", result.terminalID, result.err))
+			}
+			delete(unreaped, result.terminalID)
+		case <-deadline.C:
+			break collect
+		}
+	}
+	for _, terminalID := range slices.Sorted(maps.Keys(unreaped)) {
+		failures = append(failures, fmt.Sprintf(
+			"client terminal %s did not finish within %s of being killed", terminalID, terminalReapTimeout))
+	}
+	for _, message := range failures {
+		terminalReportEventWithin(ctx, events, core.RuntimeEventWarning{Message: message})
+	}
 }
 
 // DisplayCommand is the concise command a client can show while this
@@ -368,7 +432,59 @@ func superviseTerminal(
 	exit *core.Watch[*TerminalExit],
 	events chan<- core.RuntimeEvent,
 ) {
-	panic("unported: mj-worker/src/terminal.rs supervise")
+	// Both pipes drain concurrently: a child that fills either one stops
+	// running until somebody reads it, and a blocked child never exits.
+	var drains sync.WaitGroup
+	var fromStdout, fromStderr error
+	drains.Add(2)
+	go func() {
+		defer drains.Done()
+		defer stdout.Close()
+		fromStdout = drainPipe(stdout, buffer)
+	}()
+	go func() {
+		defer drains.Done()
+		defer stderr.Close()
+		fromStderr = drainPipe(stderr, buffer)
+	}()
+	waitErr := child.Wait()
+	drains.Wait()
+
+	var status TerminalExit
+	failedReap := ""
+	if child.ProcessState != nil {
+		status = terminalExitFromStatus(child.ProcessState)
+	} else {
+		failedReap = fmt.Sprintf("reap client terminal %s: %v", terminalID, waitErr)
+	}
+	// Release the waiters before any report: a report waits on a full event
+	// channel, and the agent blocked in `terminal/wait_for_exit` is what
+	// keeps that channel draining.
+	published := status
+	exit.SendReplace(&published)
+
+	if failedReap != "" {
+		terminalReport(events, failedReap)
+	}
+	for _, failure := range []struct {
+		stream string
+		err    error
+	}{{"stdout", fromStdout}, {"stderr", fromStderr}} {
+		if failure.err != nil {
+			terminalReport(events, fmt.Sprintf("read client terminal %s %s: %v", terminalID, failure.stream, failure.err))
+		}
+	}
+
+	output, truncated := buffer.read()
+	// The single close report for this terminal: a kill or a release makes
+	// the child exit, so both arrive here rather than reporting separately.
+	terminalReportEvent(events, core.RuntimeEventTerminalClosed{
+		TerminalID: terminalID,
+		Output:     output,
+		Truncated:  truncated,
+		ExitCode:   status.ExitCode,
+		Signal:     status.Signal,
+	})
 }
 
 // drainPipe copies pipe into buffer until end of file.
@@ -393,8 +509,21 @@ func terminalReport(events chan<- core.RuntimeEvent, message string) {
 	terminalReportEvent(events, core.RuntimeEventWarning{Message: message})
 }
 
-// terminalReportEvent sends event to the relay coordinator. A coordinator
-// that already stopped is logged at debug level, not treated as a failure.
+// terminalReportEvent sends event to the relay coordinator, waiting for room
+// as Rust's bounded channel does. A Go channel cannot tell the sender that
+// its receiver went away, so a supervisor's report waits for the coordinator
+// for as long as the worker runs.
 func terminalReportEvent(events chan<- core.RuntimeEvent, event core.RuntimeEvent) {
-	panic("unported: mj-worker/src/terminal.rs report_event")
+	terminalReportEventWithin(context.Background(), events, event)
+}
+
+// terminalReportEventWithin sends event to the relay coordinator until ctx
+// ends. A coordinator that already stopped is logged at debug level, not
+// treated as a failure: terminal cleanup must stay cancellation-safe, and
+// the log keeps the first lost report diagnosable.
+func terminalReportEventWithin(ctx context.Context, events chan<- core.RuntimeEvent, event core.RuntimeEvent) {
+	if err := emitRuntimeEvent(ctx, events, event); err != nil {
+		slog.Debug("terminal event could not reach the relay coordinator",
+			"operation", "terminal_event", "error", err)
+	}
 }

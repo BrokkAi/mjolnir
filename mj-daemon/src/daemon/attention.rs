@@ -1326,7 +1326,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             },
         );
         let mut child = RelaySnapshot::new("child".into()).operational_state();
@@ -1422,7 +1422,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             },
         );
         for step in 0..144 {
@@ -2241,7 +2241,7 @@ mod tests {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: false,
-                    supervisor: false,
+                    orchestrator: false,
                 },
             );
         }

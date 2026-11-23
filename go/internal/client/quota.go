@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
+	"slices"
 	"strings"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
@@ -183,7 +186,10 @@ type PaidCredits struct {
 // NewPaidCreditsLimited is Rust's PaidCredits::limited: a finite balance,
 // with a negative one read as zero; nil for NaN or an infinity.
 func NewPaidCreditsLimited(balance float64) *PaidCredits {
-	panic("unported: mj-client/src/quota.rs PaidCredits::limited")
+	if math.IsNaN(balance) || math.IsInf(balance, 0) {
+		return nil
+	}
+	return &PaidCredits{Kind: PaidCreditsLimited, Balance: max(balance, 0)}
 }
 
 func (c PaidCredits) MarshalJSON() ([]byte, error) {
@@ -252,13 +258,30 @@ func RefusedLoginMessage(profileID string) string {
 // every pool for selection and quota recovery. Other harnesses are
 // unchanged.
 func (q *ProfileQuota) RetainAntigravityPools(pools []AntigravityQuotaPool) {
-	panic("unported: mj-client/src/quota.rs ProfileQuota::retain_antigravity_pools")
+	if q.Harness != core.HarnessKindAntigravity {
+		return
+	}
+	q.Windows = slices.DeleteFunc(q.Windows, func(window QuotaWindow) bool {
+		pool, ok := AntigravityPoolOfWindow(&window)
+		return ok && !slices.Contains(pools, pool)
+	})
 }
 
 // ForAntigravityPool is a display projection of one pool; the original
 // report retains all scopes for model selection and quota recovery.
 func (q *ProfileQuota) ForAntigravityPool(pool AntigravityQuotaPool) ProfileQuota {
-	panic("unported: mj-client/src/quota.rs ProfileQuota::for_antigravity_pool")
+	report := *q
+	report.Windows = nil
+	for _, window := range q.Windows {
+		if found, ok := AntigravityPoolOfWindow(&window); ok && found == pool {
+			window.ModelScope = nil
+			report.Windows = append(report.Windows, window)
+		}
+	}
+	if report.Windows == nil {
+		report.Windows = []QuotaWindow{}
+	}
+	return report
 }
 
 // WindowLabel is a window's name in text that lists a whole report: an
@@ -360,7 +383,17 @@ func (q *ProfileQuota) FiveHourWindow() *QuotaWindow {
 // FableWeeklyWindow is Claude's model-specific Fable weekly allowance, when
 // the provider reports the canonical seven-day scoped window.
 func (q *ProfileQuota) FableWeeklyWindow() *QuotaWindow {
-	panic("unported: mj-client/src/quota.rs ProfileQuota::fable_weekly_window")
+	if q.Harness != core.HarnessKindClaude {
+		return nil
+	}
+	for i := range q.Windows {
+		window := &q.Windows[i]
+		if window.ModelScope != nil && *window.ModelScope == "fable" &&
+			window.DurationSeconds != nil && *window.DurationSeconds == 7*24*60*60 {
+			return window
+		}
+	}
+	return nil
 }
 
 // SummaryWindow is the window that best represents this profile at a
@@ -369,7 +402,18 @@ func (q *ProfileQuota) FableWeeklyWindow() *QuotaWindow {
 // monthly pool still have a usable rolling limit and must not read as
 // unavailable.
 func (q *ProfileQuota) SummaryWindow() *QuotaWindow {
-	panic("unported: mj-client/src/quota.rs ProfileQuota::summary_window")
+	if window := q.WeeklyWindow(); window != nil {
+		return window
+	}
+	if window := q.FiveHourWindow(); window != nil {
+		return window
+	}
+	for i := range q.Windows {
+		if q.Windows[i].ModelScope == nil {
+			return &q.Windows[i]
+		}
+	}
+	return nil
 }
 
 // IsUsagePriced is whether the report says the profile is usage-priced: an
@@ -415,7 +459,44 @@ func (q *ProfileQuota) FiveHourProjectsExhaustion() bool {
 }
 
 func (q *ProfileQuota) Compact() string {
-	panic("unported: mj-client/src/quota.rs ProfileQuota::compact")
+	if q.Error != nil {
+		return quotaErrorLabel(*q.Error)
+	}
+	seenResets := map[string]bool{}
+	hasLongWindow := slices.ContainsFunc(q.Windows, func(window QuotaWindow) bool {
+		return !isShortQuotaWindow(window.Label)
+	})
+	var parts []string
+	for i := range q.Windows {
+		window := &q.Windows[i]
+		if isShortQuotaWindow(window.Label) && hasLongWindow &&
+			!projectsExhaustionBeforeReset(window, q.RefreshedAtEpochSeconds) {
+			continue
+		}
+		var usage string
+		switch {
+		case window.RemainingPercent != nil:
+			usage = fmt.Sprintf("%d%% left", *window.RemainingPercent)
+		case window.Used != nil && window.Limit != nil:
+			usage = fmt.Sprintf("%d/%d", *window.Used, *window.Limit)
+		default:
+			usage = "available"
+		}
+		label := q.WindowLabel(window)
+		if window.Resets != nil && !seenResets[*window.Resets] {
+			seenResets[*window.Resets] = true
+			parts = append(parts, fmt.Sprintf("%s %s, resets %s", label, usage, *window.Resets))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s %s", label, usage))
+		}
+	}
+	if q.Extra != nil {
+		parts = append(parts, *q.Extra)
+	}
+	if len(parts) == 0 {
+		return "no quota windows reported"
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (q *ProfileQuota) ErrorLabel() (string, bool) {
@@ -447,14 +528,28 @@ func HarnessBilling(harness core.HarnessKind) QuotaBilling {
 }
 
 func quotaErrorLabel(err string) string {
-	panic("unported: mj-client/src/quota.rs quota_error_label")
+	// This is the stable user-facing marker emitted by the Claude usage
+	// adapter. Keep the display contract independent of the controller
+	// package.
+	switch {
+	case strings.HasPrefix(err, "login refused;"):
+		return "login required"
+	case err == "login expired":
+		return err
+	case strings.HasPrefix(err, "rate limited"):
+		// The provider is throttling the usage endpoint, which is not the
+		// same as the quota being unknown for good.
+		return "rate limited"
+	default:
+		return "unavailable"
+	}
 }
 
 // isWeeklyQuotaWindow is the dashboard's long-window column. A harness
 // billed monthly rather than weekly belongs in the same column; the label
 // itself names the real period.
 func isWeeklyQuotaWindow(label string) bool {
-	switch strings.ToLower(label) {
+	switch asciiLowercase(label) {
 	case "week", "weekly", "7d", "month", "monthly":
 		return true
 	}
@@ -462,7 +557,7 @@ func isWeeklyQuotaWindow(label string) bool {
 }
 
 func isShortQuotaWindow(label string) bool {
-	switch strings.ToLower(label) {
+	switch asciiLowercase(label) {
 	case "5h", "5-hour", "5 hour":
 		return true
 	}
@@ -476,7 +571,27 @@ func ProjectsExhaustion(window *QuotaWindow, now uint64) bool {
 }
 
 func projectsExhaustionBeforeReset(window *QuotaWindow, now uint64) bool {
-	panic("unported: mj-client/src/quota.rs projects_exhaustion_before_reset")
+	const fiveHoursSeconds int64 = 5 * 60 * 60
+	if window.ResetsAtEpochSeconds == nil || now > math.MaxInt64 {
+		return false
+	}
+	remainingTime := *window.ResetsAtEpochSeconds - int64(now)
+	elapsed := fiveHoursSeconds - remainingTime
+	if remainingTime <= 0 || elapsed <= 0 || elapsed >= fiveHoursSeconds {
+		return false
+	}
+	if window.Used != nil && window.Limit != nil && *window.Limit > 0 {
+		limit := *window.Limit
+		used := min(max(*window.Used, 0), limit)
+		// Rust widens to i128; used <= limit and elapsed is below five hours,
+		// so the products are compared in big.Int to stay exact.
+		left := new(big.Int).Mul(big.NewInt(used), big.NewInt(fiveHoursSeconds))
+		right := new(big.Int).Mul(big.NewInt(limit), big.NewInt(elapsed))
+		return left.Cmp(right) > 0
+	}
+	// Rust subtracts in u8, which wraps for a reading above 100 percent.
+	return window.RemainingPercent != nil &&
+		int64(uint8(100)-*window.RemainingPercent)*fiveHoursSeconds > 100*elapsed
 }
 
 // ResetCountdownStyle is which existing TUI countdown convention applies to
@@ -543,20 +658,139 @@ func (q *ProfileQuota) BankedResetsForWindow(window *QuotaWindow) *uint64 {
 // browser equivalent is checked against the same examples in
 // testdata/quota/reset_display_cases.json.
 func FormatQuotaReset(now uint64, reset *int64, fallback *string, style ResetCountdownStyle, bankedResets *uint64) string {
-	panic("unported: mj-client/src/quota.rs format_quota_reset")
+	var display string
+	switch {
+	case reset != nil && style == ResetCountdownStyleFiveHour:
+		display = FiveHourQuotaResetCountdown(now, *reset)
+	case reset != nil:
+		display = QuotaResetCountdown(now, *reset)
+	case fallback != nil:
+		display = *fallback
+	}
+	if bankedResets != nil && *bankedResets > 0 {
+		if display != "" {
+			display += " "
+		}
+		display += fmt.Sprintf("[%d]", *bankedResets)
+	}
+	return display
 }
 
 func QuotaResetCountdown(now uint64, resetAtEpochSeconds int64) string {
-	panic("unported: mj-client/src/quota.rs quota_reset_countdown")
+	if resetAtEpochSeconds < 0 {
+		return "now"
+	}
+	remaining := usageSaturatingSub(uint64(resetAtEpochSeconds), now)
+	if remaining == 0 {
+		return "now"
+	}
+	const minute uint64 = 60
+	const hour = 60 * minute
+	const day = 24 * hour
+	switch {
+	case remaining >= day:
+		return fmt.Sprintf("%dd %dh", remaining/day, remaining%day/hour)
+	case remaining >= hour:
+		hours := remaining / hour
+		minutes := remaining % hour / minute
+		// Under ten hours the minutes decide whether to wait, so show them.
+		if hours < 10 && minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	case remaining >= minute:
+		return fmt.Sprintf("%dm", remaining/minute)
+	default:
+		return "<1m"
+	}
 }
 
 func FiveHourQuotaResetCountdown(now uint64, resetAtEpochSeconds int64) string {
-	panic("unported: mj-client/src/quota.rs five_hour_quota_reset_countdown")
+	if resetAtEpochSeconds < 0 {
+		return "now"
+	}
+	remaining := usageSaturatingSub(uint64(resetAtEpochSeconds), now)
+	switch {
+	case remaining == 0:
+		return "now"
+	case remaining < 60:
+		return "<1m"
+	case remaining < 60*60:
+		return fmt.Sprintf("%dm", remaining/60)
+	default:
+		return fmt.Sprintf("%dh %dm", remaining/(60*60), remaining%(60*60)/60)
+	}
 }
 
 // MergeResetWindows fills only missing reset data; fresh usage values always
 // win. An Antigravity pool is the same allowance whichever of its scopes a
 // reading carries, so a cached reading never returns beside a fresh one.
 func MergeResetWindows(windows *[]QuotaWindow, cached []QuotaWindow) bool {
-	panic("unported: mj-client/src/quota.rs merge_reset_windows")
+	restored := false
+	for i := range cached {
+		old := &cached[i]
+		oldPool, oldHasPool := AntigravityPoolOfWindow(old)
+		index := slices.IndexFunc(*windows, func(window QuotaWindow) bool {
+			if !isASCIIEqualFold(window.Label, old.Label) {
+				return false
+			}
+			if quotaOptionalEqual(window.ModelScope, old.ModelScope) {
+				return true
+			}
+			pool, ok := AntigravityPoolOfWindow(&window)
+			return oldHasPool && ok && pool == oldPool
+		})
+		if index >= 0 {
+			window := &(*windows)[index]
+			if window.ResetsAtEpochSeconds == nil && old.ResetsAtEpochSeconds != nil {
+				window.ResetsAtEpochSeconds = old.ResetsAtEpochSeconds
+				window.Resets = old.Resets
+				restored = true
+			}
+		} else {
+			*windows = append(*windows, *old)
+			restored = restored || old.ResetsAtEpochSeconds != nil
+		}
+	}
+	return restored
+}
+
+// isASCIIEqualFold is Rust's str::eq_ignore_ascii_case: only ASCII letters
+// fold.
+func isASCIIEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiLowercase is Rust's str::to_ascii_lowercase: only ASCII letters
+// change.
+func asciiLowercase(text string) string {
+	lowered := []byte(text)
+	for i, c := range lowered {
+		if 'A' <= c && c <= 'Z' {
+			lowered[i] = c + 'a' - 'A'
+		}
+	}
+	return string(lowered)
+}
+
+func quotaOptionalEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

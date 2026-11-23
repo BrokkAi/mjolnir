@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
+	"maps"
 	"os"
 	"runtime"
 	"slices"
@@ -23,16 +25,43 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
-// QueueRestorePolicy is whether the destination worker owns dispatch
-// immediately, drops the queue, or waits for its controller to admit the
-// archived commands after readiness.
+// QueueRestorePolicy is who dispatches the archived queue and the archived
+// worker's pending mail.
+//
+// Pending mail joins the same dispatch decision as the queue: a restored
+// worker given a waking event starts a turn on its own, so mail the
+// controller must hold back (behind a Move's ownership commit, or behind a
+// fresh native session's handoff) is admitted by the controller with the
+// queue. Mail already claimed by a queued prompt travels with that prompt.
+// (The mail half is Rust commit 39722ace5, after this file's base.)
 type QueueRestorePolicy string
 
 const (
+	// QueueRestorePolicyRestore: the destination worker owns its queue and
+	// pending mail at once.
 	QueueRestorePolicyRestore QueueRestorePolicy = "restore"
+	// QueueRestorePolicyDiscard: drop the queue and the mail its prompts
+	// claimed; the destination worker owns pending mail at once.
 	QueueRestorePolicyDiscard QueueRestorePolicy = "discard"
-	QueueRestorePolicyDefer   QueueRestorePolicy = "defer"
+	// QueueRestorePolicyDefer: the controller admits the queue and pending
+	// mail after readiness. The mail a queued prompt claimed is bound to its
+	// command ID now, so it is there before that prompt can start.
+	QueueRestorePolicyDefer QueueRestorePolicy = "defer"
+	// QueueRestorePolicyDiscardDeferringMail: drop the queue and the mail
+	// its prompts claimed; the controller admits pending mail after
+	// readiness.
+	QueueRestorePolicyDiscardDeferringMail QueueRestorePolicy = "discard_deferring_mail"
 )
+
+// DefersMail reports whether the controller, not the restored worker,
+// admits pending mail.
+func (p QueueRestorePolicy) DefersMail() bool {
+	return p == QueueRestorePolicyDefer || p == QueueRestorePolicyDiscardDeferringMail
+}
+
+func (p QueueRestorePolicy) keepsQueue() bool {
+	return p == QueueRestorePolicyRestore || p == QueueRestorePolicyDefer
+}
 
 // UnmarshalJSON accepts only the snake_case variant names, as serde does.
 func (p *QueueRestorePolicy) UnmarshalJSON(data []byte) error {
@@ -41,11 +70,11 @@ func (p *QueueRestorePolicy) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	switch policy := QueueRestorePolicy(text); policy {
-	case QueueRestorePolicyRestore, QueueRestorePolicyDiscard, QueueRestorePolicyDefer:
+	case QueueRestorePolicyRestore, QueueRestorePolicyDiscard, QueueRestorePolicyDefer, QueueRestorePolicyDiscardDeferringMail:
 		*p = policy
 		return nil
 	}
-	return fmt.Errorf("unknown variant `%s`, expected one of `restore`, `discard`, `defer`", text)
+	return fmt.Errorf("unknown variant `%s`, expected one of `restore`, `discard`, `defer`, `discard_deferring_mail`", text)
 }
 
 // RelaySeedForRestore is the relay metadata needed to continue a verified
@@ -67,7 +96,23 @@ func RelaySeedForRestore(canonical *core.CanonicalSessionSnapshot, nativeContinu
 	if queuePolicy == QueueRestorePolicyRestore {
 		seed.QueuedPrompts = append(seed.QueuedPrompts, canonical.QueuedPrompts...)
 	}
-	seed.NativeSessionUnused = nativeContinuity && !CurrentNativeSessionReceivedPrompt(canonical)
+	seed.NativeSessionUnused = nativeContinuity && CurrentNativeSessionIsUnused(canonical, nil)
+	if archived := canonical.Mailbox; archived != nil {
+		mailbox := core.CanonicalMailbox{DeliveredEventKeys: maps.Clone(archived.DeliveredEventKeys)}
+		if !queuePolicy.DefersMail() {
+			mailbox.PendingEvents = slices.Clone(archived.PendingEvents)
+		}
+		if queuePolicy.keepsQueue() {
+			mailbox.PromptContexts = maps.Clone(archived.PromptContexts)
+		}
+		if !mailbox.IsEmpty() {
+			seed.Mailbox = &mailbox
+		}
+	}
+	if nativeContinuity && canonical.NativeUseEvidence != nil {
+		evidence := *canonical.NativeUseEvidence
+		seed.NativeUseEvidence = &evidence
+	}
 	if err := seed.Validate(); err != nil {
 		return core.RestoredRelaySeed{}, err
 	}
@@ -146,99 +191,108 @@ func RestoreCheckpoint(spec *CheckpointRestoreSpec, git GitCommandRunner) error 
 }
 
 func RestoreCheckpointWithNativeState(spec *CheckpointRestoreSpec, git GitCommandRunner, nativeState NativeCheckpointState) error {
+	_, err := RestoreCheckpointWithNotices(spec, git, nativeState)
+	return err
+}
+
+// RestoreCheckpointWithNotices restores a checkpoint and returns the resume
+// notices its repositories reported.
+func RestoreCheckpointWithNotices(spec *CheckpointRestoreSpec, git GitCommandRunner, nativeState NativeCheckpointState) ([]string, error) {
 	if !checkpointIsDir(spec.WorkspaceRoot) {
-		return errors.New("restore workspace is missing")
+		return nil, errors.New("restore workspace is missing")
 	}
 	// A restore seeds a relay that has no durable state yet. Existing state
 	// means either a leaked worker still writing here or an unfinished
 	// teardown, and the seed would be ignored in favour of the stale
 	// snapshot, leaving a frontier no journal can support.
 	if checkpointExists(core.Join(spec.RelayRoot, core.RelayStateFile)) {
-		return fmt.Errorf("relay state already present in %s; a previous worker may still be running, refusing to restore over it", spec.RelayRoot)
+		return nil, fmt.Errorf("relay state already present in %s; a previous worker may still be running, refusing to restore over it", spec.RelayRoot)
 	}
 	archive, err := readArchiveForRestore(spec.ArchivePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	payloadReader, err := CheckpointPayloadReaderOpen(spec.ArchivePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer payloadReader.Close()
 	// Deserialize and validate the schema-2 canonical projection before any
 	// repository, relay, or native-session state can be mutated.
 	canonicalSession, err := archive.CanonicalSession()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The relay that opens next needs the frontier it continues from and the
 	// commands still queued, and nothing else. The transcript stays in the
 	// archive; the controller already holds it as the durable projection.
 	seed, err := RelaySeedForRestore(&canonicalSession, spec.RestoreNative, spec.QueuePolicy)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Without repository restoration a Move has already transported
 	// workspace files, but review refs still need their destination
 	// checkout names without changing its index.
-	if err := restoreRepositoriesFromArchive(&archive, spec.WorkspaceRoot, git, spec.RestoreRepositories); err != nil {
-		return err
+	notices, err := restoreRepositoriesFromArchive(spec.ArchivePath, &archive, spec.WorkspaceRoot,
+		spec.PrimaryRepositoryRoot, git, spec.RestoreRepositories)
+	if err != nil {
+		return nil, err
 	}
 
 	// Attachment data belongs to the relay, even when native harness history
 	// is deliberately not restored. Install before publishing the queue seed.
 	imageStore := core.AttachmentStoreWorker(spec.RelayRoot)
 	if err := restoreArchivedAttachments(&archive, &imageStore); err != nil {
-		return err
+		return nil, err
 	}
 	reportRoot := core.Join(spec.WorkspaceRoot, core.ReportRootDir)
 	if spec.ReportRoot != nil {
 		if reportRoot, err = ResolveTargetPath(*spec.ReportRoot); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := restoreSubagentReports(&archive, spec.WorkspaceRoot, reportRoot); err != nil {
-		return err
+		return nil, err
 	}
 	for _, queued := range seed.QueuedPrompts {
 		blocks := make([]acp.ContentBlock, 0, len(queued.Content))
 		for _, content := range queued.Content {
 			var block acp.ContentBlock
 			if err := json.Unmarshal(content, &block); err != nil {
-				return err
+				return nil, err
 			}
 			blocks = append(blocks, block)
 		}
 		references, err := core.References(blocks)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for i := range references {
 			if _, err := imageStore.Read(&references[i]); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if err := os.MkdirAll(spec.RelayRoot, 0o777); err != nil {
-		return err
+		return nil, err
 	}
 	if err := core.ClearNativeSessionIdentity(spec.RelayRoot); err != nil {
-		return err
+		return nil, err
 	}
 	seedBody, err := checkpointMarshal(seed)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := writePrivateFile(spec.RelayRoot, core.RestoredRelaySeedFile, seedBody, 0o600); err != nil {
-		return err
+		return nil, err
 	}
 
 	if spec.RestoreNative {
 		if _, err := restoreNativeArtifacts(&archive, payloadReader, spec, nativeState, false); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return notices, nil
 }
 
 // restoreArchivedAttachments installs the archive's attachment blobs in the
@@ -716,12 +770,37 @@ func RestoreRepositories(archivePath string, workspaceRoot string, git GitComman
 	if err != nil {
 		return err
 	}
-	return restoreRepositoriesFromArchive(&archive, workspaceRoot, git, true)
+	_, err = restoreRepositoriesFromArchive(archivePath, &archive, workspaceRoot, nil, git, true)
+	return err
 }
 
-func restoreRepositoriesFromArchive(archive *VerifiedArchive, workspaceRoot string, git GitCommandRunner, restoreContents bool) error {
+func restoreRepositoriesFromArchive(
+	archivePath string,
+	archive *VerifiedArchive,
+	workspaceRoot string,
+	primaryRepositoryRoot *string,
+	git GitCommandRunner,
+	restoreContents bool,
+) ([]string, error) {
+	allNotices := []string{}
 	for i := range archive.Manifest.Repositories {
 		repository := &archive.Manifest.Repositories[i]
+		id := repository.Metadata.ID
+		inRepository := func(err error) error {
+			return fmt.Errorf("restore repository %s: %w", checkpointDebugString(id), err)
+		}
+		if delta := repository.Metadata.OriginDelta; delta != nil {
+			if !restoreContents {
+				continue
+			}
+			notices, err := restoreOriginDeltaRepository(archivePath, archive, repository, delta, workspaceRoot,
+				primaryRepositoryRoot, git)
+			if err != nil {
+				return nil, err
+			}
+			allNotices = append(allNotices, notices...)
+			continue
+		}
 		// A plain project folder is the user's own directory on a bare local
 		// target. Its files were never captured, so a restore must never
 		// check out, rewrite or remove anything in it.
@@ -731,24 +810,111 @@ func restoreRepositoriesFromArchive(archive *VerifiedArchive, workspaceRoot stri
 		if !restoreContents && !savesMjolnirRefs(repository.Metadata.SavedRefs) {
 			continue
 		}
-		id := repository.Metadata.ID
-		inRepository := func(err error) error {
-			return fmt.Errorf("restore repository %s: %w", checkpointDebugString(id), err)
-		}
 		snapshot, err := archivedRepositorySnapshot(archive, repository)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		path, err := checkoutTopLevel(core.Join(workspaceRoot, repository.Metadata.RelativeDestination), &repository.Metadata)
 		if err != nil {
-			return inRepository(err)
+			return nil, inRepository(err)
 		}
 		session := archive.Manifest.Session.ID
-		if err := restoreGitSnapshotForSession(git, path, &snapshot, &session, restoreContents); err != nil {
-			return inRepository(err)
+		notices, err := restoreGitSnapshotForSession(git, path, &snapshot, &session, restoreContents)
+		if err != nil {
+			return nil, inRepository(err)
 		}
+		for _, notice := range notices {
+			slog.Info(notice, "repository_id", id)
+		}
+		allNotices = append(allNotices, notices...)
 	}
-	return nil
+	return allNotices, nil
+}
+
+// restoreOriginDeltaRepository restores one origin-delta repository from
+// its snapshot metadata and its pack, streamed out of the archive into a
+// temporary file that is removed afterwards.
+func restoreOriginDeltaRepository(
+	archivePath string,
+	archive *VerifiedArchive,
+	repository *core.RepositoryManifest,
+	delta *core.WorkspaceSnapshotMetadata,
+	workspaceRoot string,
+	primaryRepositoryRoot *string,
+	git GitCommandRunner,
+) ([]string, error) {
+	id := repository.Metadata.ID
+	snapshot := WorkspaceSnapshot{Metadata: *delta}
+	if packPath := repository.OriginDeltaPackPath; packPath != nil {
+		role := core.PayloadRole{Kind: core.PayloadRoleGitOriginDeltaPack, RepositoryID: id}
+		var descriptor *core.PayloadDescriptor
+		for index := range archive.Manifest.Payloads {
+			payload := &archive.Manifest.Payloads[index]
+			if payload.Path == *packPath && payload.Role == role {
+				descriptor = payload
+				break
+			}
+		}
+		if descriptor == nil {
+			return nil, errors.New("origin delta pack descriptor is missing")
+		}
+		temporary, err := os.CreateTemp("", ".tmp")
+		if err != nil {
+			return nil, fmt.Errorf("create temporary origin delta pack file: %w", err)
+		}
+		defer func() {
+			temporary.Close()
+			os.Remove(temporary.Name())
+		}()
+		reader, err := CheckpointPayloadReaderOpen(archivePath)
+		if err != nil {
+			return nil, err
+		}
+		err = reader.CopyPayload(descriptor, temporary)
+		reader.Close()
+		if err != nil {
+			return nil, fmt.Errorf("stream origin delta pack payload: %w", err)
+		}
+		if err := temporary.Sync(); err != nil {
+			return nil, fmt.Errorf("flush temporary origin delta pack file: %w", err)
+		}
+		pack := temporary.Name()
+		snapshot.Pack = &pack
+	}
+	inRepository := func(err error) error {
+		return fmt.Errorf("restore repository %s: %w", checkpointDebugString(id), err)
+	}
+	var path string
+	if primary := primaryRepositoryRoot; id == archive.Manifest.Bundle.PrimaryRepository && primary != nil {
+		subdirectory := repository.Metadata.CheckoutSubdirectory
+		if subdirectory != nil && checkpointPathEndsWith(*primary, *subdirectory) {
+			topLevel, err := checkoutTopLevel(*primary, &repository.Metadata)
+			if err != nil {
+				return nil, inRepository(err)
+			}
+			path = topLevel
+		} else {
+			path = *primary
+		}
+	} else {
+		topLevel, err := checkoutTopLevel(core.Join(workspaceRoot, repository.Metadata.RelativeDestination),
+			&repository.Metadata)
+		if err != nil {
+			return nil, inRepository(err)
+		}
+		path = topLevel
+	}
+	notices, err := RestoreWorkspaceSnapshot(git, snapshot, path)
+	if err != nil {
+		return nil, inRepository(err)
+	}
+	for _, notice := range notices {
+		slog.Info(notice, "repository_id", id)
+	}
+	if err := RepairWorkspaceSnapshot(git, snapshot, path); err != nil {
+		return nil, fmt.Errorf("repair repository %s: %w", checkpointDebugString(id), err)
+	}
+	return notices, nil
 }
 
 // savesMjolnirRefs is whether any saved ref is one of Mjolnir's private
@@ -789,6 +955,9 @@ func checkoutTopLevel(directory string, metadata *core.RepositoryMetadata) (stri
 
 func archivedRepositorySnapshot(archive *VerifiedArchive, repository *core.RepositoryManifest) (RepositorySnapshot, error) {
 	id := repository.Metadata.ID
+	if repository.Metadata.OriginDelta != nil {
+		return RepositorySnapshot{}, errors.New("origin delta requires managed clone provisioning")
+	}
 	payload := func(role core.PayloadRole) ([]byte, error) {
 		data, err := archive.PayloadByRole(&role)
 		if err != nil {
@@ -861,8 +1030,8 @@ func archivedRepositorySnapshot(archive *VerifiedArchive, repository *core.Repos
 // A resume that moves a session out of its workspace restores it into a
 // worktree of the user's own repository, where the archived branch is
 // usually already checked out somewhere else and `git checkout -B` would
-// refuse it. Returns the branch the checkpoint recorded (nil when detached).
-func RestoreSingleRepositoryOntoBranch(archivePath string, repositoryPath string, branch string, git GitCommandRunner) (*string, error) {
+// refuse it. Returns the resume notices of the restore.
+func RestoreSingleRepositoryOntoBranch(archivePath string, repositoryPath string, branch string, git GitCommandRunner) ([]string, error) {
 	if !checkpointIsDir(repositoryPath) {
 		return nil, errors.New("restore checkout is missing")
 	}
@@ -881,46 +1050,80 @@ func RestoreSingleRepositoryOntoBranch(archivePath string, repositoryPath string
 	if err != nil {
 		return nil, err
 	}
-	archivedBranch := snapshot.Metadata.Branch
 	snapshot.Metadata.Branch = &branch
 	// This explicit host restore uses a linked worktree whose local Git
 	// configuration is shared with the user's main checkout; keep managed
 	// network configuration out of that shared config.
 	snapshot.Metadata.RemoteWorkspace = false
 	session := archive.Manifest.Session.ID
-	if err := restoreGitSnapshotForSession(git, repositoryPath, &snapshot, &session, true); err != nil {
+	notices, err := restoreGitSnapshotForSession(git, repositoryPath, &snapshot, &session, true)
+	if err != nil {
 		return nil, fmt.Errorf("restore repository %s: %w", checkpointDebugString(repository.Metadata.ID), err)
 	}
-	return archivedBranch, nil
+	return notices, nil
 }
 
 // RestoreSingleRepositoryIntoCheckout restores a retired independent clone
 // on the branch saved in its archive.
-func RestoreSingleRepositoryIntoCheckout(archivePath string, repositoryPath string, git GitCommandRunner) error {
+func RestoreSingleRepositoryIntoCheckout(archivePath string, repositoryPath string, git GitCommandRunner) ([]string, error) {
 	if !checkpointIsDir(repositoryPath) {
-		return errors.New("restore checkout is missing")
+		return nil, errors.New("restore checkout is missing")
 	}
 	archive, err := readArchiveRepositories(archivePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(archive.Manifest.Repositories) != 1 {
-		return errors.New("an isolated checkout requires exactly one archived repository")
+		return nil, errors.New("an isolated checkout requires exactly one archived repository")
 	}
 	repository := &archive.Manifest.Repositories[0]
 	if repository.Metadata.PlainDirectory {
-		return errors.New("this session's project is a directory without a committed Git checkout, so it cannot be restored into one")
+		return nil, errors.New("this session's project is a directory without a committed Git checkout, so it cannot be restored into one")
 	}
 	snapshot, err := archivedRepositorySnapshot(&archive, repository)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	snapshot.Metadata.RemoteWorkspace = false
 	session := archive.Manifest.Session.ID
-	if err := restoreGitSnapshotForSession(git, repositoryPath, &snapshot, &session, true); err != nil {
-		return fmt.Errorf("restore independent checkout before moving it into a target: %w", err)
+	notices, err := restoreGitSnapshotForSession(git, repositoryPath, &snapshot, &session, true)
+	if err != nil {
+		return nil, fmt.Errorf("restore independent checkout before moving it into a target: %w", err)
 	}
-	return nil
+	return notices, nil
+}
+
+// RestoreSingleRepositoryIntoClone restores a legacy single-repository
+// archive into a fresh managed clone. It checks out the saved commit on the
+// saved branch name, or as a detached HEAD (with a resume notice) if that
+// branch name already exists pointing at a different commit.
+func RestoreSingleRepositoryIntoClone(archivePath string, repositoryPath string, git GitCommandRunner) ([]string, error) {
+	if !checkpointIsDir(repositoryPath) {
+		return nil, errors.New("restore checkout is missing")
+	}
+	archive, err := readArchiveRepositories(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(archive.Manifest.Repositories) != 1 {
+		return nil, errors.New("an isolated clone requires exactly one archived repository")
+	}
+	repository := &archive.Manifest.Repositories[0]
+	if repository.Metadata.PlainDirectory {
+		return nil, errors.New("this session's project is a directory without a committed Git checkout, so it cannot be restored into one")
+	}
+	snapshot, err := archivedRepositorySnapshot(&archive, repository)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Metadata.RemoteWorkspace = false
+	session := archive.Manifest.Session.ID
+	notices, err := restoreGitSnapshotForSessionWithOptions(git, repositoryPath, &snapshot, &session, true,
+		LegacyRestoreOptions{DetachOnBranchCollision: true})
+	if err != nil {
+		return nil, fmt.Errorf("restore legacy archive into fresh managed clone: %w", err)
+	}
+	return notices, nil
 }
 
 // restoredNativeRelativePath: native session files use harness-specific

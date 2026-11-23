@@ -7,11 +7,19 @@ use anyhow::{Context, Result, ensure};
 
 use super::{Controller, now};
 use mj_core::config::HarnessKind;
-use mj_core::state::{SessionRecord, SessionState, new_session_id};
-use mj_core::subagent::SubagentRecord;
+use mj_core::state::{SessionRecord, SessionState, State, new_session_id};
+use mj_core::subagent::{SubagentKind, SubagentPolicy, SubagentRecord};
+use mj_store::database::subagent_has_handed_back;
 
 pub use mj_session_types::RegisterSubagentRequest;
-use mj_store::database::subagent_has_handed_back;
+
+pub struct OrchestratorPlacement {
+    pub target_id: String,
+    pub bundle_id: String,
+    pub project: std::sync::Arc<mj_core::repository::ProjectBundleSnapshot>,
+    pub directory: Option<std::path::PathBuf>,
+    pub allocation: Option<mj_core::state::SessionResourceAllocation>,
+}
 
 /// Creates a report directory on a target and prints its absolute path.
 ///
@@ -264,7 +272,7 @@ impl Controller {
         &mut self,
         request: RegisterSubagentRequest,
     ) -> Result<SubagentRecord> {
-        self.register_subagent_inner(request, None)
+        self.register_subagent_inner(request, None, None)
     }
 
     /// Register managed launches before the committed relation becomes addressable.
@@ -273,12 +281,23 @@ impl Controller {
         request: RegisterSubagentRequest,
         manager: &crate::session_manager::SessionManagerControl,
     ) -> Result<SubagentRecord> {
-        self.register_subagent_inner(request, Some(manager))
+        self.register_subagent_inner(request, None, Some(manager))
+    }
+
+    pub fn register_orchestrator_with_manager(
+        &mut self,
+        request: RegisterSubagentRequest,
+        placement: OrchestratorPlacement,
+        manager: &crate::session_manager::SessionManagerControl,
+    ) -> Result<SubagentRecord> {
+        ensure!(request.orchestrator, "owning child must be an orchestrator");
+        self.register_subagent_inner(request, Some(placement), Some(manager))
     }
 
     fn register_subagent_inner(
         &mut self,
         request: RegisterSubagentRequest,
+        placement: Option<OrchestratorPlacement>,
         manager: Option<&crate::session_manager::SessionManagerControl>,
     ) -> Result<SubagentRecord> {
         let request_key = request.kind.request_key(&request.request_key);
@@ -326,20 +345,17 @@ impl Controller {
         let parent_subagent = crate::database::load_subagent(&parent.id)?;
         mj_core::subagent::validate_subagent_parent(
             parent_subagent.as_ref(),
+            self.state.owns_environment(&parent.id) == Some(true),
             request.kind,
-            request.supervisor,
+            request.orchestrator,
         )?;
-        if request.supervisor {
-            ensure!(
-                parent.supervisors,
-                "supervisors are not enabled for this session"
-            );
+        if request.orchestrator {
             ensure!(
                 parent
                     .subagents
                     .as_ref()
-                    .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
-                "supervisors require Mjolnir delegation"
+                    .is_some_and(SubagentPolicy::orchestrators_enabled),
+                "orchestrators are not enabled for this session"
             );
         }
         let profile = self
@@ -349,7 +365,7 @@ impl Controller {
                 format!("sub-agent profile {:?} is unavailable", request.profile_id)
             })?;
         profile.ensure_ready(&request.profile_id)?;
-        if profile.kind == HarnessKind::Muse {
+        if placement.is_none() && profile.kind == HarnessKind::Muse {
             let multiple_roots = !mj_core::state::applied_container_settings(&parent)
                 .additional_mounts
                 .is_empty()
@@ -367,21 +383,63 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        if !reviewer && !oracle {
-            self.ensure_subagent_slot_available_for(&parent.id, None, request.supervisor)?;
-        }
-
         let child_id = new_session_id()?;
-        let target = borrowed_locator(
-            parent.target.as_ref().expect("live target checked above"),
-            &parent.id,
-            &child_id,
-        )?;
+        let target = if placement.is_none() {
+            Some(Box::new(borrowed_locator(
+                parent.target.as_ref().expect("live target checked above"),
+                &parent.id,
+                &child_id,
+            )?))
+        } else {
+            None
+        };
         let created_at = now();
-        let session = SessionRecord {
+        let handback_tool = reviewer || child_gets_handback_tool(profile.kind);
+        let report_dir = request
+            .report_root
+            .as_deref()
+            .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
+        // The assignment and directory are per-task data; standing role policy
+        // is composed by the worker from the durable subagent record.
+        let assignment = if oracle {
+            format!(
+                "{}\n\n{}",
+                mj_core::subagent::READ_ONLY_TASK_SCOPE,
+                request.initial_prompt
+            )
+        } else {
+            request.initial_prompt
+        };
+        let initial_prompt = match &report_dir {
+            Some(report_dir) => format!(
+                "{}\n\n{}",
+                mj_core::subagent::report_directory_note(report_dir),
+                assignment
+            ),
+            None => assignment,
+        };
+        let relation = SubagentRecord {
+            resume_with_parent: false,
+            kind: request.kind,
+            reviewer_launch: request.reviewer_launch,
+            child_session_id: child_id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: request.task_name.clone(),
+            profile_id: request.profile_id.clone(),
+            model: request.model,
+            effort: request.effort,
+            working_directory: request.working_directory,
+            initial_prompt,
+            request_key: request.request_key,
+            created_at: created_at.clone(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool,
+            orchestrator: request.orchestrator,
+        };
+        let mut session = SessionRecord {
             oracle_choice: None,
             oracle: false,
-            supervisors: false,
             notifications_ignored: true,
             project: parent.project.clone(),
             target_runtime: Some(match &parent.target_runtime {
@@ -398,14 +456,18 @@ impl Controller {
             // A child shares its parent's container, so it shares the build
             // cache that container was created with.
             build_cache: parent.build_cache.clone(),
-            // Supervisors inherit their parent's Mjolnir delegation policy
+            // Orchestrators inherit their parent's Mjolnir delegation policy
             // (including straightforward/subtle overrides); other children
             // never receive ordinary delegation tools.
-            subagents: if request.supervisor {
-                parent.subagents.clone()
+            subagents: Some(if relation.orchestrator {
+                parent
+                    .subagents
+                    .as_ref()
+                    .expect("orchestrators require Mjolnir policy")
+                    .for_launch(profile.kind, Some(&relation))
             } else {
-                Some(mj_core::subagent::SubagentPolicy::None)
-            },
+                SubagentPolicy::None
+            }),
             create_managed_worktree: Some(false),
             archived: false,
             // A child runs inside its parent's container, so it works in the
@@ -437,7 +499,7 @@ impl Controller {
                 .additional_mounts
                 .to_vec(),
             state: SessionState::Provisioning,
-            target: Some(Box::new(target)),
+            target,
             native_session_id: None,
             acp_session_title: None,
             session_title_override: Some(request.task_name.clone()),
@@ -451,60 +513,58 @@ impl Controller {
             last_checkpoint_error: None,
             checkpoint: None,
         };
-        let handback_tool = reviewer || child_gets_handback_tool(profile.kind);
-        let report_dir = request
-            .report_root
-            .as_deref()
-            .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
-        // The assignment and directory are per-task data; standing role policy
-        // is composed by the worker from the durable subagent record.
-        let assignment = if oracle {
-            format!(
-                "{}\n\n{}",
-                mj_core::subagent::READ_ONLY_TASK_SCOPE,
-                request.initial_prompt
-            )
-        } else {
-            request.initial_prompt
-        };
-        let initial_prompt = match &report_dir {
-            Some(report_dir) => format!(
-                "{}\n\n{}",
-                mj_core::subagent::report_directory_note(report_dir),
-                assignment
-            ),
-            None => assignment,
-        };
-        let relation = SubagentRecord {
-            resume_with_parent: false,
-            kind: request.kind,
-            reviewer_launch: request.reviewer_launch,
-            child_session_id: child_id.clone(),
-            parent_session_id: parent.id,
-            task_name: request.task_name,
-            profile_id: request.profile_id,
-            model: request.model,
-            effort: request.effort,
-            working_directory: request.working_directory,
-            initial_prompt,
-            request_key: request.request_key,
-            created_at,
-            noticed_turn: None,
-            reported_finish: None,
-            handback_tool,
-            supervisor: request.supervisor,
-        };
+        let owns_environment = placement.is_some();
+        if let Some(placement) = placement {
+            let template = self.config.ensure_target_enabled(&placement.target_id)?;
+            ensure!(
+                profile.kind.supports_delegation_tools(),
+                "orchestrator profile must support delegation"
+            );
+            ensure!(
+                profile.kind != HarnessKind::Muse
+                    || placement.project.bundle.repositories.len() <= 1,
+                "Muse ACP supports one workspace root. Use a single-repository project"
+            );
+            super::validate_resource_allocation(template, placement.allocation.as_ref())?;
+            session.oracle = parent.oracle;
+            session.oracle_choice.clone_from(&parent.oracle_choice);
+            session.review.clone_from(&parent.review);
+            session.project = Some(placement.project);
+            session.bundle_id = placement.bundle_id;
+            session.target_template_id = placement.target_id;
+            session.target_runtime = Some(template.into());
+            session.project_directory = placement.directory;
+            session.resource_allocation = placement.allocation;
+            session.create_managed_worktree = session.project_directory.as_ref().map(|_| true);
+            session.container_workspace =
+                Some(mj_core::targets::new_container_workspace(&child_id)?);
+            session.additional_mounts.clear();
+            session.build_cache = None;
+            session.no_github_events = true;
+        }
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
         let registration = manager
             .map(|manager| manager.register_starting_blocking(&child_id))
             .transpose()?;
-        crate::database::register_subagent_with_startup(
+        let maximum = self.config.subagents.max_concurrent;
+        crate::database::register_subagent_with_startup_admitted(
             &session,
             &relation,
             startup,
             report_dir.as_deref(),
             Some(request.category.as_str()),
-            false,
+            owns_environment,
+            move |state, relation| {
+                if relation.kind == SubagentKind::Worker {
+                    ensure_subagent_slot_available(
+                        state,
+                        &relation.parent_session_id,
+                        None,
+                        maximum,
+                    )?;
+                }
+                Ok(())
+            },
         )?;
         if let Some(registration) = registration {
             registration.publish()?;
@@ -521,99 +581,61 @@ impl Controller {
         Ok(relation)
     }
 
-    /// Refuse to start another child process tree for `parent_session_id`
-    /// when it already has the maximum number of live children.
-    ///
-    /// `starting` is the child a `send_message` is about to start again from
-    /// parked; it is not counted against itself. A spawn passes `None`.
-    ///
-    /// Every child whose worker may be holding processes in the parent's
-    /// container counts, idle or not: those processes are what the cap
-    /// protects (#1161). A parked, stopped, failed or lost child holds none.
-    ///
-    /// Only ordinary workers count. A reviewer or the oracle holds processes
-    /// but never uses a delegation slot.
+    /// Count workers borrowing the owner's environment and each live
+    /// orchestrator owning a separate environment directly under that owner.
+    /// A parked worker holds no slot. Skip the child being restarted.
     pub fn ensure_subagent_slot_available(
         &self,
         parent_session_id: &str,
         starting: Option<&str>,
     ) -> Result<()> {
-        self.ensure_subagent_slot_available_for(parent_session_id, starting, false)
+        ensure_subagent_slot_available(
+            &self.state,
+            parent_session_id,
+            starting,
+            self.config.subagents.max_concurrent,
+        )
     }
+}
 
-    /// Container-wide worker slot check with anti-starvation supervisor sub-cap.
-    pub fn ensure_subagent_slot_available_for(
-        &self,
-        parent_session_id: &str,
-        starting: Option<&str>,
-        starting_supervisor: bool,
-    ) -> Result<()> {
-        let root_id = self
-            .state
-            .workspace_owner(parent_session_id)
-            .map(|session| session.id.as_str())
-            .unwrap_or(parent_session_id);
-        let mut seen = std::collections::BTreeSet::new();
-        let mut live = Vec::new();
-        let mut live_supervisors = 0usize;
-        for child_id in self.state.descendant_subagent_ids(root_id) {
-            if Some(child_id.as_str()) == starting || !seen.insert(child_id.clone()) {
-                continue;
-            }
-            let Some(meta) = self.state.subagents.get(&child_id) else {
-                continue;
-            };
-            if meta.kind != mj_core::subagent::SubagentKind::Worker {
-                continue;
-            }
-            let Some(session) = self.state.sessions.get(&child_id) else {
-                continue;
-            };
-            if session.state.has_live_worker() {
-                if meta.supervisor {
-                    live_supervisors += 1;
-                }
-                live.push(LiveSubagent {
-                    child_session_id: child_id,
-                    title: session.message_name(),
-                    state: live_subagent_state(session),
-                });
-            }
-        }
-        // Also check direct DB rows in case state hasn't caught up yet.
-        for child in crate::database::list_subagents(parent_session_id)? {
-            if child.kind != mj_core::subagent::SubagentKind::Worker
-                || Some(child.child_session_id.as_str()) == starting
-                || !seen.insert(child.child_session_id.clone())
-            {
-                continue;
-            }
-            let Some(session) = self.state.sessions.get(&child.child_session_id) else {
-                continue;
-            };
-            if session.state.has_live_worker() {
-                if child.supervisor {
-                    live_supervisors += 1;
-                }
-                live.push(LiveSubagent {
-                    child_session_id: child.child_session_id.clone(),
-                    title: session.message_name(),
-                    state: live_subagent_state(session),
-                });
-            }
-        }
-        let maximum = self.config.subagents.max_concurrent;
-        ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
-        if starting_supervisor {
-            let max_supervisors = maximum / 2;
-            ensure!(
-                maximum >= 2 && live_supervisors < max_supervisors,
-                "{}",
-                slot_refusal(&live, max_supervisors)
-            );
-        }
-        Ok(())
-    }
+fn ensure_subagent_slot_available(
+    state: &State,
+    parent_session_id: &str,
+    starting: Option<&str>,
+    maximum: usize,
+) -> Result<()> {
+    let owner_id = state
+        .environment_owner_id(parent_session_id)
+        .unwrap_or(parent_session_id);
+    let borrowed_workers = state.active_borrowers(owner_id).into_iter().filter(|id| {
+        state
+            .subagents
+            .get(id)
+            .is_some_and(|meta| meta.kind == SubagentKind::Worker)
+    });
+    let owned_orchestrators = state
+        .direct_owned_child_ids(owner_id)
+        .into_iter()
+        .filter(|id| {
+            state
+                .subagents
+                .get(id)
+                .is_some_and(|meta| meta.orchestrator)
+        });
+    let live: Vec<_> = borrowed_workers
+        .chain(owned_orchestrators)
+        .filter(|id| Some(id.as_str()) != starting)
+        .filter_map(|id| {
+            let session = state.sessions.get(&id)?;
+            session.state.has_live_worker().then(|| LiveSubagent {
+                child_session_id: id,
+                title: session.message_name(),
+                state: live_subagent_state(session),
+            })
+        })
+        .collect();
+    ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
+    Ok(())
 }
 
 /// Older daemons registered children before saving their initial input. A
@@ -757,10 +779,8 @@ fn sibling_path(path: &Path, parent_id: &str, child_id: &str) -> Result<PathBuf>
         path.ends_with(parent_id),
         "parent target path does not end in its session id"
     );
-    Ok(path
-        .parent()
-        .context("parent target path has no parent")?
-        .join(child_id))
+    let parent = path.parent().context("parent target path has no parent")?;
+    Ok(mj_core::target_path::join(parent, Path::new(child_id)))
 }
 
 fn borrowed_locator(
@@ -1221,7 +1241,7 @@ mod tests {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: true,
-                    supervisor: false,
+                    orchestrator: false,
                 },
             )
             .unwrap();
@@ -1283,13 +1303,13 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_cap_and_depth_two_slot_accounting() {
-        const MARKER: &str = "MJ_TEST_SUPERVISOR_SLOT_ACCOUNTING";
+    fn owning_orchestrator_uses_one_parent_slot_and_has_its_own_worker_slots() {
+        const MARKER: &str = "MJ_TEST_ORCHESTRATOR_SLOT_ACCOUNTING";
         if std::env::var_os(MARKER).is_none() {
             let directory = tempfile::tempdir().unwrap();
             super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
                 module_path!(),
-                "supervisor_cap_and_depth_two_slot_accounting",
+                "owning_orchestrator_uses_one_parent_slot_and_has_its_own_worker_slots",
             ))
             .env(MARKER, "1")
             .isolated_store(directory.path())
@@ -1297,19 +1317,18 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        let mut parent = super::super::test_support::checkpoint_test_session("primary-1");
-        parent.supervisors = true;
+        let parent = super::super::test_support::checkpoint_test_session("root");
         crate::database::save_session(&parent).unwrap();
 
-        let save_child = |id: &str, parent_id: &str, state: SessionState, supervisor: bool| {
+        let save_child = |id: &str, parent_id: &str, orchestrator: bool| {
             let mut child = super::super::test_support::checkpoint_test_session(id);
-            child.state = state;
+            child.state = SessionState::Running;
             child.session_title_override = Some(id.into());
-            crate::database::save_subagent_session(
+            crate::database::register_subagent_with_startup(
                 &child,
                 &SubagentRecord {
                     resume_with_parent: false,
-                    kind: mj_core::subagent::SubagentKind::Worker,
+                    kind: SubagentKind::Worker,
                     reviewer_launch: None,
                     child_session_id: id.into(),
                     parent_session_id: parent_id.into(),
@@ -1324,69 +1343,59 @@ mod tests {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: true,
-                    supervisor,
+                    orchestrator,
                 },
+                Vec::new(),
+                None,
+                None,
+                orchestrator,
             )
             .unwrap();
         };
-
-        // Two live supervisors fill the supervisor cap (4 / 2 = 2).
-        save_child("sup-1", "primary-1", SessionState::Running, true);
-        save_child("sup-2", "primary-1", SessionState::Running, true);
-        save_child("sup-3-parked", "primary-1", SessionState::Parked, true);
-        // A live depth-2 worker under sup-1 consumes one total slot (3 of 4).
-        save_child("d2-worker-1", "sup-1", SessionState::Running, false);
+        save_child("orchestrator", "root", true);
+        save_child("depth-two-a", "orchestrator", false);
+        save_child("depth-two-b", "orchestrator", false);
 
         let mut controller = Controller {
             config: mj_core::config::Config::default(),
             state: crate::database::load_state().unwrap(),
         };
-        controller.config.subagents.max_concurrent = 4;
-
-        // Spawning or unparking a 3rd live supervisor is refused (cap 4 / 2 = 2).
-        let err = controller
-            .ensure_subagent_slot_available_for("primary-1", None, true)
+        assert_eq!(controller.config.subagents.max_concurrent, 8);
+        assert_eq!(
+            controller.state.environment_owner_id("depth-two-a"),
+            Some("orchestrator")
+        );
+        controller.config.subagents.max_concurrent = 2;
+        controller
+            .ensure_subagent_slot_available("root", None)
+            .unwrap();
+        let refusal = controller
+            .ensure_subagent_slot_available("orchestrator", None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("maximum is 2"), "{err}");
+        assert!(refusal.contains("maximum is 2"), "{refusal}");
         assert!(
-            controller
-                .ensure_subagent_slot_available_for("primary-1", Some("sup-3-parked"), true)
-                .is_err()
+            refusal.contains("depth-two-a") && refusal.contains("depth-two-b"),
+            "{refusal}"
         );
 
-        // A 4th non-supervisor worker still fits (3 live < 4).
-        controller
-            .ensure_subagent_slot_available_for("sup-1", None, false)
-            .unwrap();
-
-        // Add a 4th live worker (depth-2 under sup-2) -> total live = 4 == max_concurrent.
-        save_child("d2-worker-2", "sup-2", SessionState::Running, false);
+        save_child("root-worker", "root", false);
         controller.state = crate::database::load_state().unwrap();
         assert!(
             controller
-                .ensure_subagent_slot_available_for("sup-1", None, false)
-                .is_err(),
-            "depth-1 + depth-2 live workers together are capped by max_concurrent"
+                .ensure_subagent_slot_available("root", None)
+                .is_err()
         );
-
-        // Parking sup-1 frees its slot, while its live depth-2 worker STILL consumes a slot
-        // (live count drops from 4 to 3: sup-2, d2-worker-1, d2-worker-2).
-        controller.state.sessions.get_mut("sup-1").unwrap().state = SessionState::Parked;
-        // Now 1 live supervisor < 2 and 3 total live < 4, so unparking sup-3 fits.
-        controller
-            .ensure_subagent_slot_available_for("primary-1", Some("sup-3-parked"), true)
-            .unwrap();
     }
 
     #[test]
-    fn register_subagent_enforces_supervisor_and_depth_two_rules() {
-        const MARKER: &str = "MJ_TEST_REGISTER_SUPERVISOR_DEPTH_RULES";
+    fn register_subagent_enforces_orchestrator_and_depth_two_rules() {
+        const MARKER: &str = "MJ_TEST_REGISTER_ORCHESTRATOR_DEPTH_RULES";
         if std::env::var_os(MARKER).is_none() {
             let directory = tempfile::tempdir().unwrap();
             super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
                 module_path!(),
-                "register_subagent_enforces_supervisor_and_depth_two_rules",
+                "register_subagent_enforces_orchestrator_and_depth_two_rules",
             ))
             .env(MARKER, "1")
             .isolated_store(directory.path())
@@ -1406,19 +1415,18 @@ mod tests {
             "localhost".into(),
             mj_core::config::TargetTemplate::LocalBare,
         );
-        let make_primary = |id: &str, supervisors: bool| {
+        let make_primary = |id: &str, orchestrators: bool| {
             let mut s = super::super::test_support::checkpoint_test_session(id);
             s.state = SessionState::Running;
             s.target_template_id = "localhost".into();
             s.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
-                orchestrators: false,
+                orchestrators,
                 straightforward: None,
                 subtle: None,
             });
-            s.supervisors = supervisors;
             s.project_directory = Some(workdir.path().to_path_buf());
             s.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-                worker_root: workdir.path().join(id),
+                worker_root: PathBuf::from(format!("/workers/{id}")),
             }));
             crate::database::save_session(&s).unwrap();
         };
@@ -1433,10 +1441,10 @@ mod tests {
         let make_req = |parent: &str,
                         task: &str,
                         kind: mj_core::subagent::SubagentKind,
-                        supervisor: bool| RegisterSubagentRequest {
+                        orchestrator: bool| RegisterSubagentRequest {
             no_github_credentials: false,
             kind,
-            supervisor,
+            orchestrator,
             reviewer_launch: None,
             parent_session_id: parent.into(),
             task_name: task.into(),
@@ -1448,14 +1456,14 @@ mod tests {
             initial_prompt: "do work".into(),
             request_key: format!("req-{parent}-{task}"),
             report_root: None,
-            category: if supervisor {
-                "supervisor".into()
+            category: if orchestrator {
+                "orchestrator".into()
             } else {
                 "straightforward".into()
             },
         };
 
-        // Top-level with supervisors = false refuses supervisor: true.
+        // Top-level with orchestrators = false refuses orchestrator: true.
         assert!(
             controller
                 .register_subagent(make_req(
@@ -1467,7 +1475,7 @@ mod tests {
                 .is_err()
         );
 
-        // Top-level with supervisors = true spawns depth-1 supervisor.
+        // Top-level with orchestrators = true spawns depth-1 orchestrator.
         let sup = controller
             .register_subagent(make_req(
                 "primary-enabled",
@@ -1475,10 +1483,118 @@ mod tests {
                 mj_core::subagent::SubagentKind::Worker,
                 true,
             ))
-            .expect("depth-1 supervisor should register");
-        assert!(sup.supervisor);
+            .expect("depth-1 orchestrator should register");
+        assert!(sup.orchestrator);
+        assert_eq!(
+            controller.state.owns_environment(&sup.child_session_id),
+            Some(false)
+        );
+        assert!(!controller.state.sessions[&sup.child_session_id].oracle);
+        assert!(
+            controller.state.sessions[&sup.child_session_id]
+                .oracle_choice
+                .is_none()
+        );
+        let placement = OrchestratorPlacement {
+            target_id: "localhost".into(),
+            bundle_id: "accepted-project".into(),
+            project: std::sync::Arc::new(mj_core::repository::ProjectBundleSnapshot {
+                bundle: mj_core::config::ProjectBundle {
+                    primary_repo: "test".into(),
+                    repositories: vec![mj_core::config::ProjectRepository {
+                        id: "test".into(),
+                        github: Some("https://example.com/test.git".into()),
+                        destination: "test".into(),
+                        ..Default::default()
+                    }],
+                },
+                identities: std::collections::BTreeMap::from([(
+                    "test".into(),
+                    mj_core::repository::RepositoryIdentity::from_remote(
+                        "https://example.com/test.git",
+                    )
+                    .unwrap(),
+                )]),
+                network_sources: Default::default(),
+                plain_directories: Default::default(),
+            }),
+            directory: Some(workdir.path().to_path_buf()),
+            allocation: None,
+        };
+        // The stale controller sees only the first child. Once the owner
+        // commits, the writer must refuse a second launch at the same cap.
+        let mut stale_controller = Controller {
+            config: controller.config.clone(),
+            state: controller.state.clone(),
+        };
+        stale_controller.config.subagents.max_concurrent = 2;
+        let owner = controller
+            .register_subagent_inner(
+                make_req("primary-enabled", "owning", SubagentKind::Worker, true),
+                Some(placement),
+                None,
+            )
+            .unwrap();
+        stale_controller
+            .ensure_subagent_slot_available("primary-enabled", None)
+            .unwrap();
+        let error = stale_controller
+            .register_subagent_inner(
+                make_req("primary-enabled", "over-cap", SubagentKind::Worker, true),
+                Some(OrchestratorPlacement {
+                    target_id: "localhost".into(),
+                    bundle_id: "accepted-project".into(),
+                    project: controller.state.sessions[&owner.child_session_id]
+                        .project
+                        .clone()
+                        .unwrap(),
+                    directory: Some(workdir.path().to_path_buf()),
+                    allocation: None,
+                }),
+                None,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("the maximum is 2"), "{error:#}");
+        let stored = crate::database::load_state().unwrap();
+        let owner_record = &stored.sessions[&owner.child_session_id];
+        assert_eq!(stored.owns_environment(&owner.child_session_id), Some(true));
+        assert!(owner_record.notifications_ignored && owner_record.no_github_events);
+        assert!(owner_record.subagents.as_ref().unwrap().uses_mjolnir());
+        assert!(
+            !owner_record
+                .subagents
+                .as_ref()
+                .unwrap()
+                .orchestrators_enabled()
+        );
+        assert_eq!(
+            owner_record.workspace_id,
+            stored.sessions["primary-enabled"].workspace_id
+        );
+        assert!(
+            owner_record.target.is_none(),
+            "create provisions the owner target"
+        );
+        assert!(
+            mj_core::subagent::validate_subagent_parent(
+                Some(&owner),
+                true,
+                SubagentKind::Oracle,
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            mj_core::subagent::validate_subagent_parent(
+                Some(&owner),
+                true,
+                SubagentKind::Worker,
+                true
+            )
+            .is_err()
+        );
 
-        // Depth-1 supervisor spawns depth-2 non-supervisor worker.
+        // Depth-1 orchestrator spawns depth-2 non-orchestrator worker.
         let d2 = controller
             .register_subagent(make_req(
                 &sup.child_session_id,
@@ -1486,15 +1602,15 @@ mod tests {
                 mj_core::subagent::SubagentKind::Worker,
                 false,
             ))
-            .expect("depth-2 worker under supervisor should register");
-        assert!(!d2.supervisor);
+            .expect("depth-2 worker under orchestrator should register");
+        assert!(!d2.orchestrator);
 
         let stored = crate::database::load_state().unwrap();
         assert!(stored.sessions[&sup.child_session_id].notifications_ignored);
         assert!(stored.sessions[&d2.child_session_id].notifications_ignored);
         assert!(!stored.sessions["primary-enabled"].notifications_ignored);
 
-        // Depth-1 supervisor refuses depth-2 supervisor.
+        // Depth-1 orchestrator refuses depth-2 orchestrator.
         assert!(
             controller
                 .register_subagent(make_req(
@@ -1506,7 +1622,7 @@ mod tests {
                 .is_err()
         );
 
-        // Depth-1 supervisor refuses depth-2 oracle.
+        // Depth-1 orchestrator refuses depth-2 oracle.
         assert!(
             controller
                 .register_subagent(make_req(

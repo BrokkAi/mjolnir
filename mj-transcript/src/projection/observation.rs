@@ -5,9 +5,13 @@ use super::*;
 /// an event key, so the two can never share an identity.
 const EXTERNAL_EVENTS_ITEM_PREFIX: &str = "system:mailbox:delivered:";
 
-/// Queue presentation shared by ordinary replay and current-state recovery.
-pub fn queued_command_content(command: &RelayCommand) -> Result<Vec<Value>> {
-    if matches!(command, RelayCommand::MailboxWake { .. }) {
+/// Queue presentation shared by ordinary replay, current-state recovery and
+/// archive restore. A mailbox wake keeps no payload here: its messages are
+/// rows of their own, the rendered prompt can exceed a transcript turn's
+/// budgets, and the worker's queue holds it. The command ID decides, because
+/// a restored or replayed wake is a plain prompt under its wake ID.
+pub fn queued_command_content(command_id: &str, command: &RelayCommand) -> Result<Vec<Value>> {
+    if mj_core::continuation::carries_mailbox_wake(command_id) {
         return Ok(Vec::new());
     }
     if let RelayCommand::SetConfig { key, value } = command {
@@ -243,13 +247,14 @@ pub(super) fn project_observation(
                         format!("Continuing requested work automatically · {attempt} of 3"),
                     );
                 }
-                let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
                 if let RelayCommand::MailboxWake { events } = command {
                     delivered_messages(index, event, events, mutation);
                     delivered_external_events(index, event, events, mutation);
                 }
-                let content = queued_command_content(command)?;
-                if current.session_title.is_none() && !mailbox_wake {
+                let content = queued_command_content(command_id, command)?;
+                if current.session_title.is_none()
+                    && !mj_core::continuation::carries_mailbox_wake(command_id)
+                {
                     let prompt_text = crate::transcript::materialized_content_text(&content);
                     if let Some(title) = current
                         .resolved_title()
@@ -280,7 +285,7 @@ pub(super) fn project_observation(
                         key: key.clone(),
                         value: value.clone(),
                     },
-                    content: queued_command_content(command)?,
+                    content: queued_command_content(command_id, command)?,
                     queued_at_ms: *created_at_ms,
                     accepted_ordinal: Some(event.ordinal),
                 });
@@ -820,7 +825,7 @@ pub(super) fn project_observation(
                 match index.get(&stable_id) {
                     Some(existing) => {
                         let mut item = TranscriptItem::clone(existing);
-                        item.body = TranscriptBody::TerminalOutput { record };
+                        item.body = TranscriptBody::terminal_output(record);
                         item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
                         upsert(mutation, item);
                     }
@@ -832,7 +837,7 @@ pub(super) fn project_observation(
                             latest_content_event_ordinal: None,
                             created_at_ms: event.recorded_at_ms,
                             last_changed_at_ms: event.recorded_at_ms,
-                            body: TranscriptBody::TerminalOutput { record },
+                            body: TranscriptBody::terminal_output(record),
                         },
                     ),
                 }

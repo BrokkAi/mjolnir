@@ -412,6 +412,7 @@ fn run_relay_coordinator(
                     // restarting this harness and reports why.
                     verdict_tasks.shutdown().await;
                     return Err(anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                        kind: None,
                         message: cause,
                     }));
                 }
@@ -954,6 +955,7 @@ fn record_runtime_event_with_startup(
         {
             let (cause, diagnostics) = message.split_once('\n').unwrap_or((message, ""));
             let failure = anyhow::Error::new(mj_core::relay::WorkerHarnessStartupFailure {
+                kind: None,
                 message: cause.to_owned(),
             });
             Some(if diagnostics.is_empty() {

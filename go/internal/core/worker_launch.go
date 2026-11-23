@@ -67,7 +67,7 @@ func InstalledHarnessHome(launchPath string) (home string, ok bool, err error) {
 }
 
 // HarnessRuntimePolicy is where a worker's ACP adapter and harness executable
-// come from. Locate turns a policy into a launch.
+// come from. harnessinstall.Locate turns a policy into a launch.
 type HarnessRuntimePolicy int
 
 const (
@@ -166,6 +166,14 @@ func defaultSubtleSubagents() bool { return true }
 
 func isDefaultSubtleSubagents(value bool) bool { return value }
 
+// SessionNitroMbxEnv is the launch directive that makes the Nitro engine's
+// mbx settings authoritative.
+const SessionNitroMbxEnv = "MJ_SESSION_NITRO_MBX"
+
+const MbxRemoteEnvPrefix = "MBX_REMOTE_"
+
+var MbxRemoteEnvironment = [3]string{"MBX_REMOTE_URL", "MBX_REMOTE_NAMESPACE", "MBX_REMOTE_MODE"}
+
 // SessionGitConfigIncludePath is an internal launch directive: include this
 // absolute Git config file in the worker-owned session global config, then
 // remove the key before harness use.
@@ -175,6 +183,11 @@ const SessionGitConfigIncludePath = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH"
 // old launch.json readers remain compatible while a new worker can
 // distinguish a managed child whose historical handback tool is disabled.
 const SessionManagedSubagentEnv = "MJ_SESSION_MANAGED_SUBAGENT"
+
+// SessionRawLaunchRecordEnv is a controller-authored environment marker:
+// record a raw Git launch baseline (`mj/sessions/<session-id>/launch`)
+// before starting the harness if absent.
+const SessionRawLaunchRecordEnv = "MJ_SESSION_RAW_LAUNCH_RECORD"
 
 // SessionMessageMCPEnv is a controller-authored environment marker: the
 // controller staged the message-only `mj-agents` registration for this
@@ -187,6 +200,12 @@ const SessionMessageMCPEnv = "MJ_SESSION_MESSAGE_MCP"
 // container-only project tool installation. The worker consumes this
 // directive before starting a harness.
 const SessionProjectToolsRoots = "MJ_SESSION_PROJECT_TOOLS_ROOTS"
+
+// SessionKeepDirEnv is the absolute path of this session's scratch
+// directory, `<checkout>/.mj/keep/<session-id>/`. Move copies that
+// directory; suspend does not save it. The worker sets it after creating the
+// directory.
+const SessionKeepDirEnv = "MJ_KEEP_DIR"
 
 // WorkerRunMode is whether this worker executes the harness or only
 // preserves recovered state.
@@ -253,6 +272,13 @@ type WorkerLaunchConfig struct {
 	// SubagentKind is the explicit child identity; older launch files deliver
 	// handbacks unchecked.
 	SubagentKind *SubagentKind
+	// Orchestrator is whether this child is a depth-1 orchestrator. On the
+	// wire "supervisor", written only when true.
+	Orchestrator bool
+	// OrchestratorsEnabled is whether this top-level session may spawn
+	// depth-1 orchestrators. On the wire "supervisors_enabled", written only
+	// when true.
+	OrchestratorsEnabled bool
 	// AgentMailboxesEnabled is a legacy wire flag retained for older workers.
 	// New workers ignore it. Mailbox delivery and hooks are always present in
 	// protocol-41 workers. Defaults to true.
@@ -353,6 +379,8 @@ type workerLaunchConfigWireOut struct {
 	Subagents             SubagentPolicy             `json:"subagents"`
 	HandbackTool          bool                       `json:"handback_tool"`
 	SubagentKind          *SubagentKind              `json:"subagent_kind,omitempty"`
+	Orchestrator          bool                       `json:"supervisor,omitempty"`
+	OrchestratorsEnabled  bool                       `json:"supervisors_enabled,omitempty"`
 	AgentMailboxesEnabled bool                       `json:"agent_mailboxes_enabled"`
 	SubtleSubagents       *bool                      `json:"subtle_subagents,omitempty"`
 	Oracle                bool                       `json:"oracle,omitempty"`
@@ -388,6 +416,8 @@ func (c WorkerLaunchConfig) MarshalJSON() ([]byte, error) {
 		Subagents:             c.Subagents,
 		HandbackTool:          c.HandbackTool,
 		SubagentKind:          c.SubagentKind,
+		Orchestrator:          c.Orchestrator,
+		OrchestratorsEnabled:  c.OrchestratorsEnabled,
 		AgentMailboxesEnabled: c.AgentMailboxesEnabled,
 		Oracle:                c.Oracle,
 		InitialModel:          c.InitialModel,
@@ -439,6 +469,8 @@ type workerLaunchConfigWireIn struct {
 	SubagentTools         json.RawMessage            `json:"subagent_tools"`
 	HandbackTool          bool                       `json:"handback_tool"`
 	SubagentKind          *SubagentKind              `json:"subagent_kind"`
+	Orchestrator          bool                       `json:"supervisor"`
+	OrchestratorsEnabled  bool                       `json:"supervisors_enabled"`
 	AgentMailboxesEnabled *bool                      `json:"agent_mailboxes_enabled"`
 	SubtleSubagents       *bool                      `json:"subtle_subagents"`
 	Oracle                bool                       `json:"oracle"`
@@ -526,6 +558,8 @@ func (c *WorkerLaunchConfig) UnmarshalJSON(data []byte) error {
 		Subagents:             subagents,
 		HandbackTool:          in.HandbackTool,
 		SubagentKind:          in.SubagentKind,
+		Orchestrator:          in.Orchestrator,
+		OrchestratorsEnabled:  in.OrchestratorsEnabled,
 		AgentMailboxesEnabled: defaultAgentMailboxesEnabled(),
 		SubtleSubagents:       defaultSubtleSubagents(),
 		Oracle:                in.Oracle,
@@ -839,7 +873,10 @@ func ReviewMcpDeliveryForHarness(harness HarnessKind) ReviewMcpDelivery {
 // ResolveSubagentMCPRole resolves the `mj-agents` server role from the
 // launch values that control whether its durable request queue exists in the
 // worker.
-func ResolveSubagentMCPRole(subagents *SubagentPolicy, managedSubagent, handbackTool, legacyAgentMailboxesEnabled, messageMCPGranted bool) (SubagentMcpRole, bool) {
+func ResolveSubagentMCPRole(subagents *SubagentPolicy, managedSubagent, orchestrator, handbackTool, legacyAgentMailboxesEnabled, messageMCPGranted bool) (SubagentMcpRole, bool) {
+	if managedSubagent && orchestrator {
+		return SubagentMcpRoleOrchestrator, true
+	}
 	if role, ok := subagents.ParentRole(); ok {
 		return role, true
 	}
@@ -856,10 +893,18 @@ func ResolveSubagentMCPRole(subagents *SubagentPolicy, managedSubagent, handback
 	return none, false
 }
 
+// ApprovalChoices are the profile's approval choices the controller resolved
+// into this launch.
+func (c *WorkerLaunchConfig) ApprovalChoices() ApprovalChoices {
+	return ApprovalChoices{
+		ClaudePermissionMode: c.ClaudePermissionMode,
+		MjolnirGuardian:      c.MjolnirGuardian,
+	}
+}
+
 // ReviewTools reports whether this session is offered the `mj-review` tools.
-// The controller writes `review_trigger` as push only for sessions that may
-// request review: top-level sessions and ordinary sub-agents, never reviewers
-// or the oracle. This is the one owner of that fact.
+// The controller enables `review_trigger` for workspace owners with push
+// review.
 func (c *WorkerLaunchConfig) ReviewTools() bool {
 	return OffersReviewTools(c.ReviewTrigger, c.Harness)
 }
@@ -869,16 +914,13 @@ func (c *WorkerLaunchConfig) ReviewTools() bool {
 // tools, and the push gate (or a notice that this harness cannot enforce one)
 // for a primary.
 func (c *WorkerLaunchConfig) PreparesReview() bool {
-	return c.ReviewTrigger == ReviewTriggerPush &&
-		c.ReviewerLaunch == nil &&
-		(c.ReviewTools() || (!c.IsManagedSubagent() && !c.HandbackTool))
+	return c.ReviewTrigger == ReviewTriggerPush && c.ReviewerLaunch == nil
 }
 
 // ReviewGate reports whether pushes from this session are held to review:
-// the pre-push hook, `MJ_REVIEW_GATE` and the session-start pin. Only
-// top-level sessions are gated; a sub-agent gets the tools without the gate.
+// the pre-push hook, `MJ_REVIEW_GATE` and the session-start pin.
 func (c *WorkerLaunchConfig) ReviewGate() bool {
-	return c.ReviewTools() && !c.IsManagedSubagent() && !c.HandbackTool && c.ReviewerLaunch == nil
+	return c.ReviewTools() && c.ReviewerLaunch == nil
 }
 
 // IsManagedSubagent: managed ownership is independent of the MCP role and
@@ -893,6 +935,7 @@ func (c *WorkerLaunchConfig) SubagentMCPRole() (SubagentMcpRole, bool) {
 	return ResolveSubagentMCPRole(
 		&c.Subagents,
 		c.IsManagedSubagent(),
+		c.Orchestrator,
 		c.HandbackTool,
 		c.AgentMailboxesEnabled,
 		c.Environment[SessionMessageMCPEnv] == "1" || c.ReviewGate(),
@@ -934,7 +977,7 @@ func WorkerLaunchConfigRead(path string) (WorkerLaunchConfig, error) {
 			delete(fields, "expected_runtime_identity")
 			delete(fields, "bifrost_binary")
 		}
-		cleaned, err := harnessMarshalJSON(value)
+		cleaned, err := relayMarshalJSON(value)
 		if err != nil {
 			return WorkerLaunchConfig{}, err
 		}
@@ -955,6 +998,20 @@ func WorkerLaunchConfigRead(path string) (WorkerLaunchConfig, error) {
 	// every `mj` in the session then read as a named instance. Workers
 	// launched then keep that config across upgrades, so drop it on load.
 	delete(launch.TargetEnvironment, InstanceEnv)
+	if _, ok := launch.TargetEnvironment[SessionNitroMbxEnv]; ok {
+		// Older launch files may contain remote options from the target or
+		// profile. The Nitro engine supplies them in the process env.
+		for name := range launch.TargetEnvironment {
+			if strings.HasPrefix(name, MbxRemoteEnvPrefix) {
+				delete(launch.TargetEnvironment, name)
+			}
+		}
+		for name := range launch.Environment {
+			if strings.HasPrefix(name, MbxRemoteEnvPrefix) {
+				delete(launch.Environment, name)
+			}
+		}
+	}
 	return launch, nil
 }
 

@@ -115,7 +115,7 @@ fn save_new_session_with_preferences_to(
     }
     let policy = session.subagents.clone().unwrap_or_default();
     if remember_subagent_policy && policy.updates_remembered_choice(session.harness_kind) {
-        save_subagent_preference(&tx, &session.last_profile, policy.clone())?;
+        save_subagent_preference(&tx, &session.last_profile, policy)?;
     }
     if remember_launch_choices {
         tx.execute(
@@ -123,65 +123,21 @@ fn save_new_session_with_preferences_to(
              ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
             params![session.last_profile, session.oracle],
         )?;
-        if policy.uses_mjolnir() {
-            save_supervisor_preference(&tx, &session.last_profile, session.supervisors)?;
-        }
     }
     tx.commit()?;
     Ok(())
 }
 
-// Milestone 3 removes the legacy preference and both halves of this bridge.
 fn save_subagent_preference(
     tx: &Transaction<'_>,
     profile: &str,
-    mut policy: mj_core::subagent::SubagentPolicy,
+    policy: mj_core::subagent::SubagentPolicy,
 ) -> Result<()> {
-    if let mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. } = &mut policy
-        && !*orchestrators
-    {
-        *orchestrators = tx
-            .query_row(
-                "SELECT enabled FROM supervisor_preference WHERE profile_id = ?1",
-                [profile],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-    }
     tx.execute(
         "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
          ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
         params![profile, serde_json::to_string(&policy)?],
     )?;
-    Ok(())
-}
-
-fn save_supervisor_preference(tx: &Transaction<'_>, profile: &str, enabled: bool) -> Result<()> {
-    tx.execute(
-        "INSERT INTO supervisor_preference(profile_id, enabled) VALUES(?1, ?2)
-         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
-        params![profile, enabled],
-    )?;
-    let json: Option<String> = tx
-        .query_row(
-            "SELECT policy FROM subagent_preference WHERE profile_id = ?1",
-            [profile],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(json) = json {
-        let mut policy = mj_core::subagent::parse_stored_policy(&json)?;
-        if let mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. } = &mut policy
-            && *orchestrators != enabled
-        {
-            *orchestrators = enabled;
-            tx.execute(
-                "UPDATE subagent_preference SET policy = ?2 WHERE profile_id = ?1",
-                params![profile, serde_json::to_string(&policy)?],
-            )?;
-        }
-    }
     Ok(())
 }
 
@@ -240,6 +196,28 @@ pub fn register_subagent_with_startup(
     category: Option<&str>,
     own_environment: bool,
 ) -> Result<()> {
+    register_subagent_with_startup_admitted(
+        session,
+        subagent,
+        startup,
+        report_dir,
+        category,
+        own_environment,
+        |_, _| Ok(()),
+    )
+}
+
+/// Run the controller's admission policy against the latest committed state
+/// in the same serialized write that registers the child.
+pub fn register_subagent_with_startup_admitted(
+    session: &SessionRecord,
+    subagent: &mj_core::subagent::SubagentRecord,
+    startup: Vec<super::startup::StartupDelivery>,
+    report_dir: Option<&str>,
+    category: Option<&str>,
+    own_environment: bool,
+    admit: impl FnOnce(&State, &mj_core::subagent::SubagentRecord) -> Result<()> + Send + 'static,
+) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
     let report_dir = report_dir.map(str::to_owned);
@@ -247,6 +225,9 @@ pub fn register_subagent_with_startup(
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let committed =
+            committed_state()?.context("sub-agent admission requires the database writer")?;
+        admit(&committed.state, &subagent)?;
         let parent_state = tx.query_row(
             "SELECT state FROM sessions WHERE session_id=?1",
             [&subagent.parent_session_id],
@@ -1596,16 +1577,6 @@ pub(super) fn rename_profile_references_at(
         "DELETE FROM oracle_preference WHERE profile_id = ?1",
         [old_id],
     )?;
-    tx.execute(
-        "INSERT INTO supervisor_preference(profile_id, enabled)
-         SELECT ?2, enabled FROM supervisor_preference WHERE profile_id = ?1
-         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
-        params![old_id, new_id],
-    )?;
-    tx.execute(
-        "DELETE FROM supervisor_preference WHERE profile_id = ?1",
-        [old_id],
-    )?;
     tx.commit()?;
     Ok(changed)
 }
@@ -2285,7 +2256,13 @@ pub fn delete_session(session_id: &str) -> Result<()> {
 
 pub(super) fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
     let connection = open(path)?;
+    mj_core::config::validate_id("session", session_id)?;
     connection.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
+    if let Err(error) =
+        tool_details::remove_session_tool_details(tool_details::data_dir_from(path), session_id)
+    {
+        tracing::warn!(session_id, error = %format!("{error:#}"), "session deleted but its tool detail file could not be removed");
+    }
     Ok(())
 }
 
@@ -2430,7 +2407,7 @@ mod ownership_tests {
         expected.state = SessionState::Disconnected;
         expected.native_session_id = None;
         expected.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: directory.path().join(&expected.id),
+            worker_root: PathBuf::from(format!("/workers/{}", expected.id)),
         }));
         save_session_to(&path, &expected).unwrap();
         let mut stopped = expected.clone();
@@ -2469,7 +2446,7 @@ mod ownership_tests {
         expected.native_session_id = None;
         expected.last_error = Some("previous diagnosis".into());
         expected.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: directory.path().join(&expected.id),
+            worker_root: PathBuf::from(format!("/workers/{}", expected.id)),
         }));
         save_session_to(&path, &expected).unwrap();
         let mut connection = open(&path).unwrap();

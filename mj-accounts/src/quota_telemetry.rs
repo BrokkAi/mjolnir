@@ -75,7 +75,7 @@ pub struct CategoryBurnStats {
 /// Measured category burn defaults from the 2026-11-21 live-store empirical
 /// analysis (180,417 turns / 50,192 children; `c4ecd0f90d14c80a4f0d25104e36eebe/report.md`),
 /// with conservative initial defaults for unmeasured categories (`oracle`,
-/// `supervisor`, `primary`). Replaced per category once `N >= 200` local
+/// `orchestrator`, `primary`). Replaced per category once `N >= 200` local
 /// completed sessions accumulate.
 pub fn default_category_burn_stats(category: &str) -> CategoryBurnStats {
     match category {
@@ -99,7 +99,7 @@ pub fn default_category_burn_stats(category: &str) -> CategoryBurnStats {
             runway_duration_hours: 15.0 / 60.0,
             local_sample_count: 0,
         },
-        "supervisor" | "primary" => CategoryBurnStats {
+        "supervisor" | "orchestrator" | "primary" => CategoryBurnStats {
             mean_api_usd: 5.00,
             runway_duration_hours: 180.0 / 60.0,
             local_sample_count: 0,

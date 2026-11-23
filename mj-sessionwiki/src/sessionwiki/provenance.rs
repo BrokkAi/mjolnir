@@ -1,8 +1,10 @@
 //! File evidence from stored ACP calls, shared by live and checkpoint indexing.
 use std::collections::BTreeSet;
 
-use agent_client_protocol::v1::schema::{ToolCall, ToolCallContent, ToolCallStatus, ToolKind};
+use agent_client_protocol::v1::schema::ToolCallContent;
 use anyhow::Result;
+use mj_core::transcript::{ToolCallPresentation, ToolEditKind};
+use serde_json::Value;
 use sessionwiki::adapters::Adapter;
 use sessionwiki::model::{EditEvent, EditKind};
 
@@ -15,26 +17,52 @@ pub(super) struct Evidence {
 }
 
 impl Evidence {
-    pub fn observe(&mut self, value: &serde_json::Value, created_at_ms: i64) {
-        let call = match serde_json::from_value::<ToolCall>(value.clone()) {
-            Ok(call) => call,
-            Err(error) => {
-                tracing::debug!(%error, "cannot extract file evidence from a stored tool call");
-                return;
-            }
-        };
-        if call.status != ToolCallStatus::Completed {
+    pub fn observe_tool(
+        &mut self,
+        call: &Value,
+        presentation: Option<&ToolCallPresentation>,
+        created_at_ms: i64,
+    ) {
+        if call.get("status").and_then(Value::as_str) != Some("completed") {
             return;
         }
         let ts = chrono::DateTime::from_timestamp_millis(created_at_ms);
-        for content in &call.content {
-            if let ToolCallContent::Diff(diff) = content {
-                let path = diff.path.to_string_lossy().replace('\\', "/");
-                if path.is_empty() {
-                    continue;
-                }
-                self.paths.insert(path.clone());
-                let patch = mj_core::diff::patch_of(diff);
+        if let Some(presentation) = presentation {
+            for edit in &presentation.edit_snippets {
+                self.paths.insert(edit.path.clone());
+                self.edits.push(EditEvent {
+                    path: edit.path.clone(),
+                    kind: match edit.kind {
+                        ToolEditKind::Edit => EditKind::Edit,
+                        ToolEditKind::Write => EditKind::Write,
+                        ToolEditKind::MultiEdit => EditKind::MultiEdit,
+                        ToolEditKind::NotebookEdit => EditKind::NotebookEdit,
+                    },
+                    snippet: edit.snippet.clone(),
+                    ts,
+                });
+            }
+        }
+        let use_raw_patches =
+            presentation.is_none_or(|p| p.edit_snippets.is_empty() && !p.detail_trimmed);
+        for content in call
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if content.get("type").and_then(Value::as_str) != Some("diff") {
+                continue;
+            }
+            let Some(path) = file_path(content) else {
+                continue;
+            };
+            self.paths.insert(path.clone());
+            if use_raw_patches
+                && let Ok(ToolCallContent::Diff(diff)) =
+                    serde_json::from_value::<ToolCallContent>(content.clone())
+            {
+                let patch = mj_core::diff::patch_of(&diff);
                 if !patch.text.is_empty() {
                     self.edits.push(EditEvent {
                         path,
@@ -50,16 +78,23 @@ impl Evidence {
             }
         }
         if matches!(
-            call.kind,
-            ToolKind::Edit | ToolKind::Delete | ToolKind::Move
+            call.get("kind").and_then(Value::as_str),
+            Some("edit" | "delete" | "move")
         ) {
-            self.paths
-                .extend(call.locations.iter().filter_map(|location| {
-                    let path = location.path.to_string_lossy().replace('\\', "/");
-                    (!path.is_empty()).then_some(path)
-                }));
+            self.paths.extend(
+                call.get("locations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(file_path),
+            );
         }
     }
+}
+
+fn file_path(value: &Value) -> Option<String> {
+    let path = value.get("path")?.as_str()?;
+    (!path.is_empty()).then(|| path.replace('\\', "/"))
 }
 
 /// Compatible data repair, not a schema migration. Scope it to this instance's
@@ -144,15 +179,17 @@ mod tests {
             ("edit", "completed", "src/edited.rs"),
             ("delete", "completed", "removed.rs"),
         ] {
-            evidence.observe(
+            evidence.observe_tool(
                 &json!({"toolCallId":path,"title":path,"kind":kind,"status":status,
                 "locations":[{"path":path}]}),
+                None,
                 1000,
             );
         }
-        evidence.observe(
+        evidence.observe_tool(
             &json!({"toolCallId":"diff","title":"patch","status":"completed",
             "content":[{"type":"diff","path":"new.rs","newText":"hello\n"}]}),
+            None,
             2000,
         );
         assert_eq!(
@@ -177,6 +214,9 @@ mod tests {
             tool: "mjolnir",
             path: "/checkpoints/session-1".into(),
             project: "/project".into(),
+            raw_cwd: None,
+            operational_edited_paths: Vec::new(),
+            compacted_prefix: false,
             title: "edit".into(),
             started: None,
             ended: None,

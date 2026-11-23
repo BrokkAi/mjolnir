@@ -87,7 +87,7 @@ fn not_picked_up_advice(action: &SubagentToolAction) -> &'static str {
         SubagentToolAction::ListAgents
         | SubagentToolAction::ListTargets
         | SubagentToolAction::ListProfiles => "It changes nothing, so call it again later.",
-        SubagentToolAction::Spawn { .. } => {
+        SubagentToolAction::Spawn { .. } | SubagentToolAction::SpawnOrchestrator { .. } => {
             "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Continue without this child or call list_agents later to see whether it started; close it if you no longer need it."
         }
         _ => {
@@ -219,22 +219,19 @@ fn model_facing(request_id: &str, result: &Value) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentTools {
     pub oracle: bool,
-    /// Legacy option accepted for older launch arguments; it has no effect.
-    pub agent_mailboxes_enabled: bool,
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
     /// no `task_type` and every child uses the straightforward choice.
     pub subtle_subagents: bool,
-    /// Whether a top-level parent's `spawn` offers `task_type = "supervisor"`.
-    pub supervisors_enabled: bool,
+    /// Whether a top-level parent can start standalone orchestrators.
+    pub orchestrators_enabled: bool,
 }
 
 impl Default for ParentTools {
     fn default() -> Self {
         Self {
             oracle: false,
-            agent_mailboxes_enabled: true,
             subtle_subagents: true,
-            supervisors_enabled: false,
+            orchestrators_enabled: false,
         }
     }
 }
@@ -247,15 +244,7 @@ struct ChildReportBudget {
 }
 
 impl ChildReportBudget {
-    fn from_socket(socket: &Path) -> Result<Option<Self>> {
-        let path = socket.with_file_name("launch.json");
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
-        };
-        let launch: Value =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    fn from_launch(launch: &Value) -> Result<Option<Self>> {
         let environment = &launch["environment"];
         let (Some(directory), Some(limit)) = (
             environment[mj_core::subagent::CHILD_REPORT_DIR_ENV].as_str(),
@@ -377,15 +366,16 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     mut options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
-    let report_budget = if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) {
-        ChildReportBudget::from_socket(&socket)?
-    } else {
-        None
+    let launch = read_launch_settings(&socket)?;
+    let report_budget = match &launch {
+        Some(launch) if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Orchestrator) => {
+            ChildReportBudget::from_launch(launch)?
+        }
+        _ => None,
     };
-    let launch = read_launch_settings(&socket);
     if let Some(launch) = &launch {
         options.oracle |= launch["oracle"] == true;
-        options.supervisors_enabled |= launch["supervisors_enabled"] == true;
+        options.orchestrators_enabled |= launch["supervisors_enabled"] == true;
     }
     let review_role = launch
         .as_ref()
@@ -402,49 +392,17 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         .context("read review child MCP output contract")?;
     let review_instructions =
         review_role.map(mj_core::session_instructions::review_child_output_contract);
-    let tools = match role {
-        SubagentMcpRole::Parent => tool_definitions_with_options(harness, options),
-        SubagentMcpRole::Supervisor => {
-            let mut sup_options = options;
-            sup_options.oracle = false;
-            sup_options.supervisors_enabled = false;
-            let mut tools = tool_definitions_with_options(harness, sup_options);
-            let mut handback = child_tool_definitions().remove(0);
-            if let Some(budget) = &report_budget {
-                let description = handback["description"].as_str().unwrap();
-                handback["description"] = json!(format!("{description} {}", budget.note()));
-            }
-            tools.push(handback);
-            tools
+    let mut tools = role_tool_definitions(role, options);
+    if let Some(handback) = tools.iter_mut().find(|tool| tool["name"] == "handback") {
+        if let Some(budget) = &report_budget {
+            let description = handback["description"].as_str().unwrap();
+            handback["description"] = json!(format!("{description} {}", budget.note()));
         }
-        SubagentMcpRole::MessageOnly => {
-            let mut tools = vec![send_message_tool(), fetch_tool()];
-            if options.oracle {
-                tools.push(ask_oracle_tool());
-            }
-            tools
+        if let Some(instructions) = review_instructions {
+            handback["description"] = json!(instructions);
+            handback["inputSchema"]["properties"]["message"]["description"] = json!(instructions);
         }
-        SubagentMcpRole::FetchOnly => {
-            let mut tools = vec![fetch_tool(), send_message_tool()];
-            if options.oracle {
-                tools.push(ask_oracle_tool());
-            }
-            tools
-        }
-        SubagentMcpRole::Child => {
-            let mut tools = child_tool_definitions();
-            if let Some(budget) = &report_budget {
-                let description = tools[0]["description"].as_str().unwrap();
-                tools[0]["description"] = json!(format!("{description} {}", budget.note()));
-            }
-            if let Some(instructions) = review_instructions {
-                tools[0]["description"] = json!(instructions);
-                tools[0]["inputSchema"]["properties"]["message"]["description"] =
-                    json!(instructions);
-            }
-            tools
-        }
-    };
+    }
     crate::mcp_stdio::serve(
         reader,
         writer,
@@ -453,7 +411,15 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
-                call_with_options(&socket, harness, role, params, progress, options)
+                call_with_budget_and_options(
+                    &socket,
+                    role,
+                    params,
+                    progress,
+                    |action| reply_timeout(action, harness),
+                    options,
+                    report_budget.as_ref(),
+                )
             },
         },
     )
@@ -477,9 +443,20 @@ struct SpawnArgs {
     /// Required when the subtle type is offered. Without it, the spawn tool
     /// has no task type and a call that omits one is straightforward.
     #[serde(default)]
-    task_type: Option<mj_core::subagent::SubagentTaskType>,
+    task_type: Option<mj_core::subagent::WorkerTaskType>,
     #[serde(default)]
     working_directory: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnOrchestratorArgs {
+    task_name: String,
+    instructions: String,
+    target: Option<String>,
+    repos: Option<Vec<String>>,
+    #[serde(default)]
+    no_github_credentials: bool,
 }
 
 #[derive(Deserialize)]
@@ -487,10 +464,9 @@ struct SpawnArgs {
 struct ListTargetsArgs {}
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChildArgs {
     child_session_id: String,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -533,6 +509,7 @@ fn call(
     )
 }
 
+#[cfg(test)]
 fn call_with_options(
     socket: &Path,
     harness: Option<HarnessKind>,
@@ -541,14 +518,24 @@ fn call_with_options(
     progress: &crate::mcp_stdio::Progress,
     options: ParentTools,
 ) -> Result<(Value, bool)> {
+    let launch = read_launch_settings(socket)?;
+    let report_budget = if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Orchestrator) {
+        launch
+            .as_ref()
+            .map(ChildReportBudget::from_launch)
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     call_with_budget_and_options(
         socket,
-        harness,
         role,
         params,
         progress,
         |action| reply_timeout(action, harness),
         options,
+        report_budget.as_ref(),
     )
 }
 
@@ -565,34 +552,29 @@ fn call_with_budget(
 ) -> Result<(Value, bool)> {
     call_with_budget_and_options(
         socket,
-        _harness,
         role,
         params,
         progress,
         budget,
         ParentTools::default(),
+        None,
     )
 }
 
 fn call_with_budget_and_options(
     socket: &Path,
-    _harness: Option<HarnessKind>,
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
     options: ParentTools,
+    report_budget: Option<&ChildReportBudget>,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
-    let legacy_alias = params.name == "send_input"
-        && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
-    if params.name == "ask_oracle" && !options.oracle {
-        bail!("unknown sub-agent tool {:?} for {role}", params.name);
-    }
-    if params.name == "list_targets" && !options.supervisors_enabled {
-        bail!("unknown sub-agent tool {:?} for {role}", params.name);
-    }
-    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
+    if !role
+        .tool_names(options.oracle, options.orchestrators_enabled)
+        .contains(&params.name.as_str())
+    {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     let action = match params.name.as_str() {
@@ -604,7 +586,7 @@ fn call_with_budget_and_options(
                 ls: args.ls,
             }
         }
-        "spawn" => {
+        "spawn_worker" => {
             if ["files", "context"]
                 .iter()
                 .any(|key| params.arguments.get(key).is_some())
@@ -642,30 +624,34 @@ fn call_with_budget_and_options(
             // daemon: the configuration may have gained one since launch.
             let task_type = match args.task_type {
                 Some(task_type) => task_type,
-                None if !options.subtle_subagents
-                    && !(role == SubagentMcpRole::Parent && options.supervisors_enabled) =>
-                {
-                    mj_core::subagent::SubagentTaskType::Straightforward
+                None if !options.subtle_subagents => {
+                    mj_core::subagent::WorkerTaskType::Straightforward
                 }
                 None => bail!("missing field `task_type`"),
             };
-            if task_type == mj_core::subagent::SubagentTaskType::Supervisor {
-                if role == SubagentMcpRole::Supervisor {
-                    bail!("supervisors cannot spawn nested supervisors (maximum depth is 2)");
-                }
-                if role != SubagentMcpRole::Parent || !options.supervisors_enabled {
-                    bail!("supervisors are not enabled for this session");
-                }
-            }
             SubagentToolAction::Spawn {
                 no_github_credentials: args.no_github_credentials,
                 task_name: args.task_name,
                 instructions: instructions.to_owned(),
-                task_type,
+                task_type: task_type.into(),
                 working_directory: args.working_directory,
                 // Legacy accepted requests keep these wire fields; new calls omit them.
                 context: None,
                 files: Vec::new(),
+            }
+        }
+        "spawn_orchestrator" => {
+            let args: SpawnOrchestratorArgs = serde_json::from_value(params.arguments)?;
+            let instructions = args.instructions.trim();
+            if instructions.is_empty() {
+                bail!("spawn_orchestrator instructions cannot be empty");
+            }
+            SubagentToolAction::SpawnOrchestrator {
+                task_name: args.task_name,
+                instructions: instructions.to_owned(),
+                target: args.target,
+                repos: args.repos,
+                no_github_credentials: args.no_github_credentials,
             }
         }
         "ask_oracle" => SubagentToolAction::AskOracle {
@@ -688,22 +674,14 @@ fn call_with_budget_and_options(
                 message: args.message,
             }
         }
-        "send_input" => {
-            let args: ChildArgs = serde_json::from_value(params.arguments)?;
-            let message = args.message.context("send_input requires message")?;
-            SubagentToolAction::SendInput {
-                child_session_id: args.child_session_id,
-                message,
-            }
-        }
         "close" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
             SubagentToolAction::CloseAgent {
                 child_session_id: args.child_session_id,
             }
         }
-        "handback" if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) => {
-            if let Some(budget) = ChildReportBudget::from_socket(socket)?
+        "handback" => {
+            if let Some(budget) = report_budget
                 && let Err(error) = budget.check()
             {
                 return Ok((json!({"error": format!("{error:#}")}), true));
@@ -843,7 +821,7 @@ const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem u
 
 /// The parent's `spawn` tool. With only the straightforward type configured
 /// there is no choice to make, so it has no `task_type`.
-fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
+fn spawn_tool(subtle_subagents: bool) -> Value {
     let (lead, selection) = if subtle_subagents {
         (
             SPAWN_TWO_TASK_TYPES,
@@ -859,29 +837,16 @@ fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
         "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
     });
     let mut required = vec!["task_name", "instructions"];
-    if subtle_subagents || supervisors_enabled {
-        let mut task_types = vec!["straightforward"];
-        let mut description = String::from(
-            "`straightforward` is for bounded work with a single clear path, such as locating and mapping code, running exact build, test, or gate commands, and small mechanical edits.",
-        );
-        if subtle_subagents {
-            task_types.push("subtle");
-            description.push_str(
-                " `subtle` gets a smarter, more expensive agent for multi-file implementation, multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, or work with a high risk of subtle bugs.",
-            );
-        }
-        if supervisors_enabled {
-            task_types.push("supervisor");
-            description.push_str(
-                " `supervisor` starts a depth-1 supervisor from the primary pool that can delegate its own workers.",
-            );
-        }
-        properties["task_type"] =
-            json!({"type":"string","enum":task_types,"description":description});
+    if subtle_subagents {
+        properties["task_type"] = json!({
+            "type":"string",
+            "enum":["straightforward","subtle"],
+            "description":"`straightforward` is for bounded work with a single clear path, such as locating and mapping code, running exact build, test, or gate commands, and small mechanical edits. `subtle` gets a smarter, more expensive agent for multi-file implementation, multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, or work with a high risk of subtle bugs."
+        });
         required.push("task_type");
     }
     tool(
-        "spawn",
+        "spawn_worker",
         &format!(
             "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
         ),
@@ -893,54 +858,64 @@ fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
     )
 }
 
+#[cfg(test)]
 fn tool_definitions_with_options(
     _harness: Option<HarnessKind>,
     options: ParentTools,
 ) -> Vec<Value> {
-    let child = json!({
-        "type":"object",
-        "properties":{
-            "child_session_id":{
-                "type":"string",
-                "description":"Full child session ID or a unique case-insensitive hexadecimal prefix of at least 8 characters."
-            }
-        },
-        "required":["child_session_id"],
-        "additionalProperties":false
-    });
-    let mut tools = vec![
-        spawn_tool(options.subtle_subagents, options.supervisors_enabled),
-        read_only(tool(
+    role_tool_definitions(SubagentMcpRole::Parent, options)
+}
+
+fn role_tool_definitions(role: SubagentMcpRole, options: ParentTools) -> Vec<Value> {
+    role.tool_names(options.oracle, options.orchestrators_enabled)
+        .into_iter()
+        .map(|name| match name {
+            "spawn_worker" => spawn_tool(options.subtle_subagents),
+            "spawn_orchestrator" => tool(
+                name,
+                "Start an orchestrator in its own environment. Use list_targets to choose an enabled target. Omit target to use your target. Omit repos to inherit your project's bundle, image and tooling. Supply repos to create or reuse a project bundle for those URLs. Bare targets require an existing directory, so choose a container target for URL-only repos. Use list_agents for startup status and the report directory, then fetch remote files before closing. Close checkpoints tracked commits, discards untracked files, and tears down the container and report directory.",
+                json!({"type":"object","properties":{
+                    "task_name":{"type":"string"},
+                    "instructions":{"type":"string"},
+                    "target":{"type":"string"},
+                    "repos":{"type":"array","items":{"type":"string"}},
+                    "no_github_credentials":{"type":"boolean"}
+                },"required":["task_name","instructions"],"additionalProperties":false}),
+            ),
+            "list_agents" => read_only(tool(
             "list_agents",
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
         )),
-        send_message_tool(),
-        tool(
-            "close",
-            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no worker left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
-            child,
-        ),
-        fetch_tool(),
-    ];
-    if options.oracle {
-        tools.push(ask_oracle_tool());
-    }
-    if options.supervisors_enabled {
-        tools.insert(2, read_only(tool(
-            "list_targets",
-            "List enabled execution targets, their default container sizes, and recent and hourly host capacity observations.",
-            json!({"type":"object","properties":{},"additionalProperties":false}),
-        )));
-    }
-    tools
+            "list_targets" => read_only(tool(
+                name,
+                "List enabled execution targets, their default container sizes, and recent and hourly host capacity observations.",
+                json!({"type":"object","properties":{},"additionalProperties":false}),
+            )),
+            "close" => tool(
+                name,
+                "Stop a child by its full ID or unique hexadecimal prefix of at least 8 characters, retaining its conversation. Closing a standalone orchestrator checkpoints tracked commits, discards untracked files, and tears down the container and report directory. A borrowed worker's report directory is kept. Closed children cannot receive messages. If cleanup is pending, use list_agents to confirm the child is stopped before replacing it.",
+                json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false}),
+            ),
+            "fetch" => fetch_tool(),
+            "send_message" => send_message_tool(),
+            "handback" => handback_tool(),
+            "ask_oracle" => ask_oracle_tool(),
+            _ => unreachable!("unknown capability {name}"),
+        })
+        .collect()
 }
 
 // Treat fields from older or newer launch files as optional.
-fn read_launch_settings(socket: &Path) -> Option<Value> {
-    std::fs::read(socket.with_file_name("launch.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+fn read_launch_settings(socket: &Path) -> Result<Option<Value>> {
+    let path = socket.with_file_name("launch.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .with_context(|| format!("parse {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 fn ask_oracle_tool() -> Value {
@@ -1187,20 +1162,20 @@ fn fetch_tool() -> Value {
     ))
 }
 
-/// Keep handback first so the report budget can annotate it at launch.
+#[cfg(test)]
 fn child_tool_definitions() -> Vec<Value> {
-    vec![
-        read_only(tool(
-            "handback",
-            &format!(
-                "Hand back once, as your last action. Repeats in one turn are refused. {}",
-                mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
-            ),
-            json!({"type":"object","properties":{"message":{"type":"string","description":format!("Your report, at most {} characters for workers or {} for oracles and reviewers; details go in files in your report directory.", mj_core::subagent::SubagentKind::Worker.max_handback_chars(), mj_core::subagent::SubagentKind::Oracle.max_handback_chars())}},"required":["message"],"additionalProperties":false}),
-        )),
-        fetch_tool(),
-        send_message_tool(),
-    ]
+    role_tool_definitions(SubagentMcpRole::Child, ParentTools::default())
+}
+
+fn handback_tool() -> Value {
+    read_only(tool(
+        "handback",
+        &format!(
+            "Hand back once, as your last action. Repeats in one turn are refused. {}",
+            mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
+        ),
+        json!({"type":"object","properties":{"message":{"type":"string","description":format!("Your report, at most {} characters for workers or {} for oracles and reviewers; details go in files in your report directory.", mj_core::subagent::SubagentKind::Worker.max_handback_chars(), mj_core::subagent::SubagentKind::Oracle.max_handback_chars())}},"required":["message"],"additionalProperties":false}),
+    ))
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -1219,24 +1194,34 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    const MAILBOXES_DISABLED: ParentTools = ParentTools {
+    fn test_call_with_options(
+        socket: &Path,
+        _harness: Option<HarnessKind>,
+        role: SubagentMcpRole,
+        params: Option<&Value>,
+        progress: &crate::mcp_stdio::Progress,
+        budget: impl Fn(&SubagentToolAction) -> Duration,
+        options: ParentTools,
+    ) -> Result<(Value, bool)> {
+        call_with_budget_and_options(socket, role, params, progress, budget, options, None)
+    }
+
+    const PARENT_WITHOUT_ORACLE: ParentTools = ParentTools {
         oracle: false,
-        agent_mailboxes_enabled: false,
         subtle_subagents: true,
-        supervisors_enabled: false,
+        orchestrators_enabled: false,
     };
 
     const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
         oracle: false,
-        agent_mailboxes_enabled: true,
         subtle_subagents: false,
-        supervisors_enabled: false,
+        orchestrators_enabled: false,
     };
 
     fn spawn_definition(options: ParentTools) -> Value {
         tool_definitions_with_options(None, options)
             .into_iter()
-            .find(|tool| tool["name"] == "spawn")
+            .find(|tool| tool["name"] == "spawn_worker")
             .unwrap()
     }
 
@@ -1256,7 +1241,7 @@ mod tests {
         assert!(description.contains(
             "multi-file implementation, multi-stage operational runs or troubleshooting"
         ));
-        assert!(!description.contains("`supervisor`"));
+        assert!(!description.contains("`orchestrator`"));
     }
 
     #[test]
@@ -1310,7 +1295,9 @@ mod tests {
             Path::new("unused.sock"),
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i"}})),
+            Some(
+                &json!({"name":"spawn_worker", "arguments":{"task_name":"t", "instructions":"i"}}),
+            ),
             &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
         )
         .unwrap_err();
@@ -1347,11 +1334,11 @@ mod tests {
                 .write_all(b"{\"result\":{\"child_session_id\":\"child\"}}\n")
                 .unwrap();
         });
-        let (value, is_error) = call_with_budget_and_options(
+        let (value, is_error) = test_call_with_options(
             &socket,
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i", "no_github_credentials":true}})),
+            Some(&json!({"name":"spawn_worker", "arguments":{"task_name":"t", "instructions":"i", "no_github_credentials":true}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
             |_| Duration::from_secs(5),
             STRAIGHTFORWARD_ONLY,
@@ -1508,7 +1495,7 @@ mod tests {
         assert!(
             refused("request_review", json!({"path":"/workspace"})).contains("now takes `paths`")
         );
-        assert!(refused("spawn", json!({})).contains("unknown review tool"));
+        assert!(refused("spawn_worker", json!({})).contains("unknown review tool"));
     }
 
     fn mcp_exchange(
@@ -1603,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn list_targets_schema_and_calls_require_a_supervisor_enabled_parent() {
+    fn list_targets_schema_and_calls_require_an_orchestrator_enabled_parent() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("control.sock");
         let launch = socket.with_file_name("launch.json");
@@ -1611,7 +1598,7 @@ mod tests {
             (SubagentMcpRole::Parent, true, true),
             (SubagentMcpRole::Parent, false, false),
             (SubagentMcpRole::Child, true, false),
-            (SubagentMcpRole::Supervisor, true, false),
+            (SubagentMcpRole::Orchestrator, true, false),
         ] {
             std::fs::write(&launch, json!({"supervisors_enabled": enabled}).to_string()).unwrap();
             let (_, tools) = mcp_exchange(|input, output| {
@@ -1626,7 +1613,66 @@ mod tests {
                     json!({"type":"object","properties":{},"additionalProperties":false})
                 );
             }
-            let error = call_with_budget_and_options(
+            let spawn = tools
+                .iter()
+                .find(|tool| tool["name"] == "spawn_orchestrator");
+            assert_eq!(spawn.is_some(), offered, "{role}");
+            for field in [
+                "task_type",
+                "working_directory",
+                "profile",
+                "model",
+                "effort",
+                "cpus",
+                "memory",
+            ] {
+                if let Some(spawn) = spawn {
+                    assert!(spawn["inputSchema"]["properties"].get(field).is_none());
+                    assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
+                }
+                let error = test_call_with_options(
+                    &socket,
+                    None,
+                    role,
+                    Some(&json!({"name": "spawn_orchestrator", "arguments": {
+                        "task_name": "t", "instructions": "i", (field): "unexpected"
+                    }})),
+                    &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                    |_| Duration::from_millis(1),
+                    ParentTools {
+                        orchestrators_enabled: enabled,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains(if offered {
+                    "unknown field"
+                } else {
+                    "unknown sub-agent tool"
+                }));
+            }
+            if matches!(
+                role,
+                SubagentMcpRole::Parent | SubagentMcpRole::Orchestrator
+            ) {
+                let error = test_call_with_options(
+                    &socket,
+                    None,
+                    role,
+                    Some(&json!({"name": "spawn_worker", "arguments": {
+                        "task_name": "t", "instructions": "i", "task_type": "orchestrator"
+                    }})),
+                    &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                    |_| Duration::from_millis(1),
+                    ParentTools {
+                        orchestrators_enabled: enabled,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("unknown variant `orchestrator`"));
+            }
+            let error = test_call_with_options(
                 &socket,
                 None,
                 role,
@@ -1634,7 +1680,7 @@ mod tests {
                 &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
                 |_| Duration::from_millis(1),
                 ParentTools {
-                    supervisors_enabled: enabled,
+                    orchestrators_enabled: enabled,
                     ..Default::default()
                 },
             )
@@ -1645,6 +1691,56 @@ mod tests {
                 "unknown sub-agent tool"
             }));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_orchestrator_dispatches_the_new_wire_action() {
+        use std::io::{BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                request.action,
+                SubagentToolAction::SpawnOrchestrator {
+                    task_name: "plan".into(),
+                    instructions: "coordinate".into(),
+                    target: Some("remote".into()),
+                    repos: Some(vec!["https://example.com/code.git".into()]),
+                    no_github_credentials: true,
+                }
+            );
+            reader
+                .into_inner()
+                .write_all(b"{\"result\":{\"child_session_id\":\"child\"}}\n")
+                .unwrap();
+        });
+        let (value, is_error) = test_call_with_options(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name":"spawn_orchestrator","arguments":{
+                "task_name":"plan", "instructions":"coordinate", "target":"remote",
+                "repos":["https://example.com/code.git"], "no_github_credentials":true
+            }})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+            |_| Duration::from_secs(5),
+            ParentTools {
+                orchestrators_enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert!(!is_error);
+        assert_eq!(value["child_session_id"], "child");
     }
 
     #[test]
@@ -1675,12 +1771,12 @@ mod tests {
                 assert!(!mj_core::subagent::REVIEW_MCP_TOOLS.contains(&name));
             }
             if role != SubagentMcpRole::Parent {
-                for name in ["spawn", "list_agents", "close"] {
+                for name in ["spawn_worker", "list_agents", "close"] {
                     assert!(tools.iter().all(|tool| tool["name"] != name));
                 }
             }
             for name in mj_core::subagent::REVIEW_MCP_TOOLS {
-                let error = call_with_budget_and_options(
+                let error = test_call_with_options(
                     Path::new("unused.sock"),
                     None,
                     role,
@@ -1912,8 +2008,8 @@ mod tests {
                         }
                         assert!(!description.contains("child_session_id"));
                     }
-                    SubagentMcpRole::Parent | SubagentMcpRole::Supervisor => {
-                        let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
+                    SubagentMcpRole::Parent | SubagentMcpRole::Orchestrator => {
+                        let spawn = tools.iter().find(|t| t["name"] == "spawn_worker").unwrap();
                         let props = &spawn["inputSchema"]["properties"];
                         assert!(props.get("files").is_none() && props.get("context").is_none());
                         let mut keys = props
@@ -2011,7 +2107,7 @@ mod tests {
                 Path::new("unused.sock"),
                 Some(HarnessKind::Codex),
                 role,
-                MAILBOXES_DISABLED,
+                PARENT_WITHOUT_ORACLE,
             )
             .unwrap();
             let output = output.lock().unwrap();
@@ -2039,7 +2135,10 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "send_message"));
         assert!(!tools.iter().any(|tool| tool["name"] == "send_input"));
         assert!(!tools.iter().any(|tool| tool["name"] == "interrupt"));
-        let spawn = tools.iter().find(|tool| tool["name"] == "spawn").unwrap();
+        let spawn = tools
+            .iter()
+            .find(|tool| tool["name"] == "spawn_worker")
+            .unwrap();
         assert_eq!(
             spawn["inputSchema"]["required"],
             json!(["task_name", "instructions", "task_type"])
@@ -2049,7 +2148,7 @@ mod tests {
             assert!(spawn["inputSchema"]["properties"].get(key).is_none());
             let mut args = json!({"task_name":"probe", "instructions":"report", "task_type":"straightforward"});
             args[key] = json!("override");
-            calls.push(json!({"name":"spawn", "arguments":args}));
+            calls.push(json!({"name":"spawn_worker", "arguments":args}));
         }
         for params in calls {
             let error = call(
@@ -2085,7 +2184,7 @@ mod tests {
         assert!(wait.contains("failure kind login_invalid"), "{wait}");
         assert!(wait.contains("`mj login`"), "{wait}");
         assert!(wait.contains("not about the task"), "{wait}");
-        let spawn = description("spawn");
+        let spawn = description("spawn_worker");
         assert!(spawn.contains("login the provider has refused"), "{spawn}");
     }
 
@@ -2117,7 +2216,7 @@ mod tests {
         assert!(send_message.contains("tens of seconds"), "{send_message}");
         let wait = description("list_agents");
         assert!(wait.contains("parked true"), "{wait}");
-        let spawn = description("spawn");
+        let spawn = description("spawn_worker");
         assert!(spawn.contains("live children"), "{spawn}");
         assert!(spawn.contains("finished children are parked"), "{spawn}");
         assert!(
@@ -2237,7 +2336,7 @@ mod tests {
             &socket,
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i", "task_type":"straightforward"}})),
+            Some(&json!({"name": "spawn_worker", "arguments": {"task_name": "t", "instructions": "i", "task_type":"straightforward"}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_secs(30),
         )
@@ -2398,21 +2497,23 @@ mod tests {
                 .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
                 .collect::<Vec<_>>()
         };
-        let mut expected = SubagentMcpRole::Parent.tool_names().to_vec();
-        expected.retain(|name| !matches!(*name, "ask_oracle" | "list_targets"));
+        let expected = SubagentMcpRole::Parent.tool_names(false, false);
         assert_eq!(names(tool_definitions(None)), expected);
         let oracle = tool_definitions_with_options(
             None,
             ParentTools {
                 oracle: true,
-                supervisors_enabled: true,
+                orchestrators_enabled: true,
                 ..Default::default()
             },
         );
-        assert_eq!(names(oracle), SubagentMcpRole::Parent.tool_names());
+        assert_eq!(
+            names(oracle),
+            SubagentMcpRole::Parent.tool_names(true, true)
+        );
         assert_eq!(
             names(child_tool_definitions()),
-            SubagentMcpRole::Child.tool_names()
+            SubagentMcpRole::Child.tool_names(false, false)
         );
     }
 
@@ -2420,7 +2521,10 @@ mod tests {
     fn optional_tools_are_read_from_the_launch_file_as_plain_json() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("control.sock");
-        assert!(read_launch_settings(&socket).is_none(), "no launch file");
+        assert!(
+            read_launch_settings(&socket).unwrap().is_none(),
+            "no launch file"
+        );
         let launch = directory.path().join("launch.json");
         for (body, expected) in [
             (json!({"session_id": "s"}), false),
@@ -2434,7 +2538,7 @@ mod tests {
         ] {
             std::fs::write(&launch, body.to_string()).unwrap();
             assert_eq!(
-                read_launch_settings(&socket).unwrap()["oracle"] == true,
+                read_launch_settings(&socket).unwrap().unwrap()["oracle"] == true,
                 expected,
                 "{body}"
             );
@@ -2476,6 +2580,7 @@ mod tests {
     fn oracle_is_listed_for_each_primary_role_only_when_enabled() {
         for role in [
             SubagentMcpRole::Parent,
+            SubagentMcpRole::Orchestrator,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::FetchOnly,
             SubagentMcpRole::Child,
@@ -2526,7 +2631,7 @@ mod tests {
             socket,
             None,
             SubagentMcpRole::Child,
-            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i", "task_type":"straightforward"}})),
+            Some(&json!({"name": "spawn_worker", "arguments": {"task_name": "t", "instructions": "i", "task_type":"straightforward"}})),
             &progress,
             |_| Duration::from_millis(50),
         )
@@ -2610,7 +2715,16 @@ mod tests {
     fn older_launch_files_without_both_report_settings_skip_the_budget() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("subagents.sock");
-        assert!(ChildReportBudget::from_socket(&socket).unwrap().is_none());
+        assert!(
+            read_launch_settings(&socket)
+                .unwrap()
+                .as_ref()
+                .map(ChildReportBudget::from_launch)
+                .transpose()
+                .unwrap()
+                .flatten()
+                .is_none()
+        );
         for environment in [
             json!({}),
             json!({
@@ -2625,7 +2739,16 @@ mod tests {
                 serde_json::to_vec(&json!({"environment":environment})).unwrap(),
             )
             .unwrap();
-            assert!(ChildReportBudget::from_socket(&socket).unwrap().is_none());
+            assert!(
+                read_launch_settings(&socket)
+                    .unwrap()
+                    .as_ref()
+                    .map(ChildReportBudget::from_launch)
+                    .transpose()
+                    .unwrap()
+                    .flatten()
+                    .is_none()
+            );
         }
     }
 
@@ -2722,58 +2845,20 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn send_message_accepts_the_unlisted_send_input_alias() {
-        use std::io::{BufReader, Read};
-        use std::os::unix::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (sent, received) = std::sync::mpsc::channel::<Value>();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let request_id = request["request_id"].clone();
-            sent.send(request).unwrap();
-            let reply = json!({"accepted":true,"result":{
-                "request_id":request_id,"completed_at_ms":1,"is_error":false,
-                "message":"{\"child_session_id\":\"child\",\"status\":\"queued\"}"
-            }});
-            let mut body = serde_json::to_vec(&reply).unwrap();
-            body.push(b'\n');
-            let mut stream = reader.into_inner();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
-            let _ = stream.read(&mut [0u8; 1]);
-        });
-        let (value, is_error) = call_with_budget_and_options(
-            &socket,
+    fn new_mcp_refuses_the_old_send_input_name() {
+        let error = call(
+            Path::new("unused.sock"),
             None,
             SubagentMcpRole::Parent,
             Some(&json!({
                 "name":"send_input",
                 "arguments":{"child_session_id":"child","message":"keep going"}
             })),
-            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-            |_| Duration::from_secs(5),
-            MAILBOXES_DISABLED,
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
         )
-        .unwrap();
-        assert!(!is_error, "{value}");
-        assert_eq!(value["status"], "queued");
-        let request = received.recv().unwrap();
-        assert_eq!(
-            request["action"],
-            json!({
-                "action":"send_input",
-                "params":{"child_session_id":"child","message":"keep going"}
-            })
-        );
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown sub-agent tool"));
     }
 
     #[test]
@@ -2797,7 +2882,7 @@ mod tests {
     fn spawn_takes_no_caller_chosen_key() {
         let spawn = tool_definitions(None)
             .into_iter()
-            .find(|tool| tool["name"] == "spawn")
+            .find(|tool| tool["name"] == "spawn_worker")
             .expect("spawn definition");
         assert!(
             spawn["inputSchema"]["properties"]
@@ -2816,7 +2901,7 @@ mod tests {
             Path::new("/nonexistent/subagents.sock"),
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name": "spawn", "arguments": {
+            Some(&json!({"name": "spawn_worker", "arguments": {
                 "task_name": "t", "instructions": "i", "task_type":"straightforward", "request_key": "k"
             }})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
@@ -2915,7 +3000,7 @@ mod tests {
         // responses would come back the other way round.
         let input = format!(
             "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn","arguments":{"task_name":"slow","instructions":"work","task_type":"straightforward"}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn_worker","arguments":{"task_name":"slow","instructions":"work","task_type":"straightforward"}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents"}}),
         );
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));

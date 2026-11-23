@@ -633,11 +633,8 @@ pub(in crate::controller) fn verify_installed_checkpoint_gate(
 
 /// Release the projection history the new checkpoint covers.
 ///
-/// The checkpoint archive holds the complete transcript up to its frontier, so
-/// the tool output stored below that frontier is a second copy of something
-/// already durable. Reclaiming it is housekeeping: a checkpoint that is
-/// verified and persisted stays good whether or not this succeeds, so a
-/// failure is logged rather than returned.
+/// Retention spills the original tool bodies before replacing them with inline
+/// summaries. A failed spill leaves the saved checkpoint usable.
 pub(in crate::controller) fn release_projection_behind_checkpoint(
     session_id: &str,
     current: &CheckpointMetadata,

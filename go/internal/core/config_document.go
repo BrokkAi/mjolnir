@@ -79,6 +79,29 @@ func editInPlace(existing, loaded, updated string) (string, bool) {
 			}
 		}
 	}
+	// Loading removes HTTP userinfo. Compare those bundles against their raw
+	// values so saving also removes the credentials from the file.
+	if rawBundles, ok := raw["bundles"].(map[string]any); ok {
+		if bundles, ok := before["bundles"].(map[string]any); ok {
+			for _, id := range sortedKeys(rawBundles) {
+				bundle, _ := rawBundles[id].(map[string]any)
+				repositories, _ := bundle["repositories"].([]any)
+				hasCredentials := false
+				for _, repository := range repositories {
+					table, _ := repository.(map[string]any)
+					if source, ok := table["github"].(string); ok {
+						if _, owned, err := ProjectSource(source, ShorthandAllowed); err == nil && owned {
+							hasCredentials = true
+							break
+						}
+					}
+				}
+				if hasCredentials {
+					bundles[id] = rawBundles[id]
+				}
+			}
+		}
+	}
 	// Compare review against the file so saving replaces the legacy boolean
 	// and writes the trigger even when its effective value has not changed.
 	if review, ok := raw["review"]; ok {
@@ -109,7 +132,10 @@ func editInPlace(existing, loaded, updated string) (string, bool) {
 		return "", false
 	}
 	nextPosition := math.MaxInt / 2
-	documentApply(document.root, documentTables{raw: raw, before: before, after: after}, source.root, true, &nextPosition)
+	documentApply(document.root, documentTables{raw: raw, before: before, after: after}, source.root, &nextPosition)
+	for _, path := range retiredKeys {
+		removeRetired(document.root, path, after)
+	}
 	// The version is not a setting and is equal in both serializations, so it
 	// is written here: the file now holds what this build writes.
 	if updatedVersion, ok := after["version"]; ok {
@@ -135,20 +161,41 @@ func editInPlace(existing, loaded, updated string) (string, bool) {
 	if version <= legacyDefaultImageLastVersion {
 		dropLegacyDefaultImages(document, LegacyDefaultContainerImage)
 	}
-	// These keys are accepted only for legacy reads and must not survive the
-	// comment-preserving path merely because they are absent from both
-	// projections.
-	if subagents := tomlEditAsTableLike(document.root.get("subagents")); subagents != nil {
-		subagents.remove("enabled")
+	return document.String(), true
+}
+
+// removeRetired removes the retired key at path under table, "*" matching
+// every key at its level. A table that held nothing but retired keys is
+// removed with them, unless this build writes it (written is what it writes
+// there).
+func removeRetired(table tomlEditTableLike, path []string, written map[string]any) {
+	if len(path) == 0 {
+		return
 	}
-	if profiles := tomlEditAsTableLike(document.root.get("profiles")); profiles != nil {
-		for _, id := range profiles.keys() {
-			if profile := tomlEditAsTableLike(profiles.get(id)); profile != nil {
-				profile.remove("subagents")
-			}
+	first, rest := path[0], path[1:]
+	keys := []string{first}
+	if first == "*" {
+		keys = table.keys()
+	}
+	for _, key := range keys {
+		if len(rest) == 0 {
+			table.remove(key)
+			continue
+		}
+		var writtenChild map[string]any
+		if written != nil {
+			writtenChild, _ = written[key].(map[string]any)
+		}
+		child := tomlEditAsTableLike(table.get(key))
+		if child == nil {
+			continue
+		}
+		hadKeys := len(child.keys()) > 0
+		removeRetired(child, rest, writtenChild)
+		if hadKeys && len(child.keys()) == 0 && writtenChild == nil {
+			table.remove(key)
 		}
 	}
-	return document.String(), true
 }
 
 // dropLegacyDefaultImages removes the historical default `image` from every
@@ -199,16 +246,17 @@ type documentTables struct {
 // value did not change exactly as the file wrote it.
 //
 // A key the save drops is removed when this build read it (the user cleared
-// it), and at the top level whatever this build no longer writes, such as an
-// obsolete section. A default the user wrote out stays.
-func documentApply(target tomlEditTableLike, tables documentTables, source tomlEditTableLike, topLevel bool, nextPosition *int) {
+// it). A default the user wrote out stays, at every level: it is absent from
+// both serializations, as a retired key is too, so retired keys are removed
+// by name instead (retiredKeys).
+func documentApply(target tomlEditTableLike, tables documentTables, source tomlEditTableLike, nextPosition *int) {
 	raw, before, after := tables.raw, tables.before, tables.after
 	var stale []string
 	for _, key := range target.keys() {
 		if _, kept := after[key]; kept {
 			continue
 		}
-		if _, read := before[key]; topLevel || before != nil && read {
+		if _, read := before[key]; before != nil && read {
 			stale = append(stale, key)
 		}
 	}
@@ -240,7 +288,7 @@ func documentApply(target tomlEditTableLike, tables documentTables, source tomlE
 		if valueIsTable && table != nil && sourceTable != nil {
 			spelledTable, _ := spelled.(map[string]any)
 			previousTable, _ := previous.(map[string]any)
-			documentApply(table, documentTables{raw: spelledTable, before: previousTable, after: valueTable}, sourceTable, false, nextPosition)
+			documentApply(table, documentTables{raw: spelledTable, before: previousTable, after: valueTable}, sourceTable, nextPosition)
 			continue
 		}
 		if current, ok := existing.(*tomlEditValue); ok {
@@ -514,6 +562,16 @@ func (t *tomlEditTable) insert(key string, item tomlEditItem) {
 func (t *tomlEditTable) replace(key string, item tomlEditItem) {
 	if entry := t.items.get(key); entry != nil {
 		entry.item = item
+	}
+}
+
+// tomlEditSet is toml_edit's `table[key] = item`: an existing key keeps its
+// spelling and place and takes the new item; a new key is appended.
+func tomlEditSet(table tomlEditTableLike, key string, item tomlEditItem) {
+	if table.get(key) != nil {
+		table.replace(key, item)
+	} else {
+		table.insert(key, item)
 	}
 }
 

@@ -63,7 +63,10 @@ type ActivityFacts struct {
 	// and user shells.
 	BackgroundStartedAtMs *int64 `json:"background_started_at_ms"`
 	BackgroundCommands    int    `json:"background_commands"`
-	ExpectedContinuation  *int64 `json:"expected_continuation"`
+	// AntigravityTaskStartedAtMs is the oldest live task reported by
+	// Antigravity's native task tracker.
+	AntigravityTaskStartedAtMs *int64 `json:"antigravity_task_started_at_ms,omitempty"`
+	ExpectedContinuation       *int64 `json:"expected_continuation"`
 	// InferredIdleSinceMs is a generation-checked Jev inference; does not
 	// discharge owned work.
 	InferredIdleSinceMs  *int64 `json:"inferred_idle_since_ms"`
@@ -74,8 +77,9 @@ type ActivityFacts struct {
 	GoalPendingResume    bool   `json:"goal_pending_resume"`
 	GoalDecision         bool   `json:"goal_decision"`
 	GoalSynchronized     bool   `json:"goal_synchronized"`
-	// BackgroundWorkKnown says whether provider-owned background work is
-	// known. Only Kimi reports it.
+	// BackgroundWorkKnown says whether the provider's task inventory is
+	// synchronized. Omitted when the worker does not track native background
+	// work for this harness.
 	BackgroundWorkKnown *bool `json:"background_work_known"`
 	// AcpReady says whether the worker has finished opening its ACP session.
 	// A worker too old to report it leaves this empty and is treated as ready.
@@ -160,14 +164,6 @@ func TurnImminent(facts *ActivityFacts, nowMs int64) bool {
 	}
 	age := activitySaturatingSub(nowMs, *facts.TaskSettledAtMs)
 	return age >= 0 && age <= ImminentTurnWindowMs
-}
-
-// leftoverProcessesCount reports whether the background commands and agent
-// terminals still count as work. A user's own shell always counts; Jev is
-// never asked about it.
-func leftoverProcessesCount(facts *ActivityFacts) bool {
-	notUnneeded := facts.BackgroundNeeded == nil || *facts.BackgroundNeeded
-	return notUnneeded && (facts.BackgroundCommands > 0 || facts.ActiveAgentTerminals > 0)
 }
 
 // ActivityStateKind names an ActivityState variant; the values are the wire
@@ -543,6 +539,11 @@ func Classify(facts *ActivityFacts) ActivityState {
 	if facts.GoalRunning || runningIsCorroborated {
 		return ActivityState{Kind: ActivityStateTurn, StartedAtMs: turnStartedAtMs, LastActivityAtMs: facts.LastAcpActivityAtMs}
 	}
+	// A verdict about leftover processes cannot settle a native task.
+	if facts.AntigravityTaskStartedAtMs != nil {
+		startedAtMs := *facts.AntigravityTaskStartedAtMs
+		return ActivityState{Kind: ActivityStateBackground, StartedAtMs: &startedAtMs}
+	}
 	if facts.InferredIdleSinceMs != nil &&
 		facts.ActiveUserShells == 0 &&
 		facts.QueuedCommands == 0 &&
@@ -669,8 +670,11 @@ func QuietAt(facts *ActivityFacts, nowMs int64) Quiet {
 	if facts.ActiveUserShells > 0 {
 		return no("user shell open")
 	}
-	// Layers 2 and 3: leftover processes, unless Jev judged them unneeded.
-	if leftoverProcessesCount(facts) {
+	// Only the provider can settle work it owns. For leftover processes we
+	// also take Jev's judgment into account.
+	if state.Kind == ActivityStateBackground ||
+		((facts.BackgroundNeeded == nil || *facts.BackgroundNeeded) &&
+			(facts.BackgroundCommands > 0 || facts.ActiveAgentTerminals > 0)) {
 		return no("background work")
 	}
 	if state.HasWorkInFlight() {
@@ -745,12 +749,50 @@ func IsQuiet(facts *ActivityFacts) bool {
 // SafeToReplace reports whether a controller may replace this worker without
 // losing work.
 //
-// Older Codex and Kimi workers cannot prove that native goals or background
-// agents are absent, even when their snapshots look quiet.
+// Older workers can appear quiet even when they cannot report native work.
 func SafeToReplace(facts *ActivityFacts, harness HarnessKind) bool {
-	return IsQuiet(facts) &&
-		(harness != HarnessKindCodex || facts.GoalSynchronized) &&
-		(harness != HarnessKindKimi || (facts.BackgroundWorkKnown != nil && *facts.BackgroundWorkKnown))
+	return SafeToReplaceFor(facts, harness, WorkerReplacementOther)
+}
+
+// WorkerReplacement is why a worker is being replaced.
+type WorkerReplacement int
+
+const (
+	WorkerReplacementAutomaticUpgrade WorkerReplacement = iota
+	// WorkerReplacementOther is an explicit replacement or another operation
+	// that needs idle admission.
+	WorkerReplacementOther
+)
+
+// SafeToReplaceFor reports whether a controller may replace this worker for
+// replacement without losing work.
+func SafeToReplaceFor(facts *ActivityFacts, harness HarnessKind, replacement WorkerReplacement) bool {
+	if !IsQuiet(facts) {
+		return false
+	}
+	_, blocked := replacementProviderBlocker(facts, harness, replacement)
+	return !blocked
+}
+
+// LegacyAntigravityWorker reports a worker that predates Antigravity task
+// tracking and cannot synchronize its inventory.
+func LegacyAntigravityWorker(harness HarnessKind, backgroundWorkKnown *bool) bool {
+	return harness == HarnessKindAntigravity && backgroundWorkKnown == nil
+}
+
+func replacementProviderBlocker(facts *ActivityFacts, harness HarnessKind, replacement WorkerReplacement) (string, bool) {
+	known := facts.BackgroundWorkKnown
+	switch {
+	case harness == HarnessKindCodex && !facts.GoalSynchronized:
+		return "the Codex adapter has not reported goal and execution state since the worker or adapter last restarted", true
+	case harness == HarnessKindKimi && (known == nil || !*known):
+		return "Kimi background-agent state is not synchronized", true
+	case replacement == WorkerReplacementAutomaticUpgrade && LegacyAntigravityWorker(harness, known):
+		return "this legacy Antigravity worker has no native task tracking and cannot upgrade automatically", true
+	case harness == HarnessKindAntigravity && known != nil && !*known:
+		return "Antigravity background-task state is not synchronized", true
+	}
+	return "", false
 }
 
 // MovePurpose is why a Move is being admitted. Checkpoint callers use this to
@@ -771,7 +813,7 @@ func SafeToMove(facts *ActivityFacts, harness HarnessKind, _ MovePurpose) bool {
 // ReplacementBlockers says what keeps SafeToReplace false, one name per
 // cause, so a caller that declines to replace a worker can say why. Empty
 // exactly when SafeToReplace is true.
-func ReplacementBlockers(facts *ActivityFacts, harness HarnessKind) []string {
+func ReplacementBlockers(facts *ActivityFacts, harness HarnessKind, replacement WorkerReplacement) []string {
 	blockers := []string{}
 	if facts.CheckpointBarrier {
 		blockers = append(blockers, "a checkpoint barrier is held")
@@ -792,11 +834,8 @@ func ReplacementBlockers(facts *ActivityFacts, harness HarnessKind) []string {
 			blockers = append(blockers, "work is in flight")
 		}
 	}
-	if harness == HarnessKindCodex && !facts.GoalSynchronized {
-		blockers = append(blockers, "the Codex adapter has not reported goal and execution state since the worker or adapter last restarted")
-	}
-	if harness == HarnessKindKimi && (facts.BackgroundWorkKnown == nil || !*facts.BackgroundWorkKnown) {
-		blockers = append(blockers, "Kimi background-agent state is not synchronized")
+	if blocker, ok := replacementProviderBlocker(facts, harness, replacement); ok {
+		blockers = append(blockers, blocker)
 	}
 	return blockers
 }

@@ -28,9 +28,15 @@
 package worker
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"os"
+	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -147,7 +153,136 @@ type ScanContext struct {
 // selectProcesses decides which rows are the agent's work. Pure: the
 // platform readers feed it.
 func selectProcesses(rows []ProcRow, scan *ScanContext, describe func(*ProcRow) Described) core.ProcessFacts {
-	panic("unported: mj-worker/src/work_facts.rs select_processes")
+	children := map[uint32][]uint32{}
+	for _, row := range rows {
+		children[row.Ppid] = append(children[row.Ppid], row.Pid)
+	}
+	// descend adds every descendant of pending to set.
+	descend := func(set map[uint32]struct{}, pending []uint32) {
+		for len(pending) > 0 {
+			pid := pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
+			for _, child := range children[pid] {
+				if _, seen := set[child]; !seen {
+					set[child] = struct{}{}
+					pending = append(pending, child)
+				}
+			}
+		}
+	}
+	tree := map[uint32]struct{}{}
+	descend(tree, []uint32{scan.WorkerPID})
+	// The observer's own subprocesses, with everything they started.
+	own := map[uint32]struct{}{}
+	pending := make([]uint32, 0, len(scan.ObserverChildren))
+	for pid := range scan.ObserverChildren {
+		own[pid] = struct{}{}
+		pending = append(pending, pid)
+	}
+	descend(own, pending)
+	type workItem struct {
+		row       *ProcRow
+		described Described
+		detached  bool
+	}
+	var work []workItem
+	unattributed := uint32(0)
+	for index := range rows {
+		row := &rows[index]
+		if _, mine := own[row.Pid]; row.Pid == scan.WorkerPID || row.Zombie || mine {
+			continue
+		}
+		_, inTree := tree[row.Pid]
+		if !inTree && row.Marker == WorkFactsMarkerUnreadable {
+			// Not the harness's descendant and not readable: it may be work
+			// the agent detached, and it is counted rather than left out.
+			if unattributed < math.MaxUint32 {
+				unattributed++
+			}
+			continue
+		}
+		if !inTree && row.Marker != WorkFactsMarkerPresent {
+			continue
+		}
+		// A descendant that existed when the harness session was configured
+		// is part of the harness. Before that moment nothing is the agent's.
+		// A process is taken to be a helper only when its age puts its start
+		// before readiness by more than the ages' resolution (whole seconds
+		// on macOS): one that may have started on either side of it is
+		// reported as work, so uncertainty shows a process and never hides
+		// one.
+		if inTree && (scan.HarnessAgeMs == nil || row.AgeMs >= workFactsSaturatingAdd(*scan.HarnessAgeMs, scan.ResolutionMs)) {
+			continue
+		}
+		described := describe(row)
+		if scan.OwnExe != nil && described.Exe != nil &&
+			slices.Equal(workFactsPathComponents(*described.Exe), workFactsPathComponents(*scan.OwnExe)) {
+			continue
+		}
+		work = append(work, workItem{row: row, described: described, detached: !inTree})
+	}
+	// Longest running first; the process ID makes the order total.
+	slices.SortStableFunc(work, func(a, b workItem) int {
+		if order := cmp.Compare(b.row.AgeMs, a.row.AgeMs); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.row.Pid, b.row.Pid)
+	})
+	running := uint32(min(len(work), math.MaxUint32))
+	shown := []core.RunningProcess{}
+	for _, item := range work[:min(len(work), core.ShownProcesses)] {
+		shown = append(shown, core.RunningProcess{
+			Pid:         item.row.Pid,
+			ElapsedSecs: uint64(max(item.row.AgeMs/1000, 0)),
+			Command:     commandText(item.described.Command),
+			Detached:    item.detached,
+		})
+	}
+	identities := []core.ProcessIdentity{}
+	for _, item := range work {
+		identities = append(identities, core.ProcessIdentity{Pid: item.row.Pid, Start: item.described.Identity})
+	}
+	return core.ProcessFacts{
+		Unattributed: unattributed,
+		Running:      running,
+		Omitted:      running - uint32(len(shown)),
+		Shown:        shown,
+		Identities:   identities,
+	}
+}
+
+// workFactsSaturatingAdd is Rust's i64::saturating_add.
+func workFactsSaturatingAdd(a, b int64) int64 {
+	sum := a + b
+	switch {
+	case a > 0 && b > 0 && sum < 0:
+		return math.MaxInt64
+	case a < 0 && b < 0 && sum >= 0:
+		return math.MinInt64
+	}
+	return sum
+}
+
+// workFactsSaturatingSub is Rust's i64::saturating_sub.
+func workFactsSaturatingSub(a, b int64) int64 {
+	if b == math.MinInt64 {
+		if a >= 0 {
+			return math.MaxInt64
+		}
+		return a - b
+	}
+	return workFactsSaturatingAdd(a, -b)
+}
+
+// workFactsBlocking runs blocking work as Rust's spawn_blocking does: a
+// panic in it becomes an error instead of ending the worker.
+func workFactsBlocking[T any](work func() T) (result T, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("task panicked: %v", recovered)
+		}
+	}()
+	return work(), nil
 }
 
 // commandText is one line, free of terminal controls and secrets, cut for
@@ -183,7 +318,34 @@ func scanProcesses(observer *WorkObserver) core.Observed[core.ProcessFacts] {
 }
 
 func scanProcessesFrom(observer *WorkObserver, readTable func(sessionID string) (ProcessTable, error)) core.Observed[core.ProcessFacts] {
-	panic("unported: mj-worker/src/work_facts.rs scan_processes_from")
+	// Held for the whole scan: a Git read that starts meanwhile waits to be
+	// recorded, and one already running is in the registry.
+	observer.Children.mu.Lock()
+	defer observer.Children.mu.Unlock()
+	var ownExe *string
+	if exe, err := os.Executable(); err == nil {
+		// A replaced executable reads back with this suffix.
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		ownExe = &exe
+	}
+	readyMs := observer.HarnessReadyMs.Load()
+	table, err := readTable(observer.SessionID)
+	if err != nil {
+		return core.ObservedUnavailable[core.ProcessFacts](err.Error())
+	}
+	scan := ScanContext{
+		WorkerPID:        observer.WorkerPID,
+		ResolutionMs:     table.ResolutionMs,
+		OwnExe:           ownExe,
+		ObserverChildren: observer.Children.pids,
+	}
+	// The configured moment is wall-clock; ages are monotonic, so convert
+	// through the instant the ages were sampled at, not the present.
+	if readyMs > 0 {
+		age := workFactsSaturatingSub(table.SampledMs, readyMs)
+		scan.HarnessAgeMs = &age
+	}
+	return core.ObservedKnown(selectProcesses(table.Rows, &scan, table.Reader.describe))
 }
 
 // ProcessReader reads the text and identity of a process the scan kept.
@@ -206,7 +368,44 @@ func (r ProcessReader) describe(row *ProcRow) Described {
 // the two reads would otherwise give the id of one commit the subject of
 // another, and the subject is then unavailable, with that reason.
 func readWorktree(ctx context.Context, children *ObserverChildren, git string, directory string) core.Observed[core.WorktreeFacts] {
-	panic("unported: mj-worker/src/work_facts.rs read_worktree")
+	var status []byte
+	var statusErr error
+	var reads sync.WaitGroup
+	reads.Go(func() {
+		status, statusErr = runGit(ctx, children, git, directory, []string{
+			"status",
+			"--porcelain=v2",
+			"-z",
+			"--branch",
+			// Whatever `status.showUntrackedFiles` says, and with untracked
+			// directories expanded to their files: a configured `no` would
+			// report a tree with new files as clean.
+			"--untracked-files=all",
+		})
+	})
+	head, headErr := runGit(ctx, children, git, directory, []string{
+		"log", "-1", "--format=%H%x00%s", "--no-show-signature", "HEAD", "--",
+	})
+	reads.Wait()
+	if statusErr != nil {
+		return core.ObservedUnavailable[core.WorktreeFacts](statusErr.Error())
+	}
+	facts := parseStatus(fromUTF8Lossy(status), directory)
+	if commit := facts.Head; commit != nil {
+		switch sha, subject, ok := strings.Cut(fromUTF8Lossy(head), "\x00"); {
+		case headErr != nil:
+			commit.Subject = core.ObservedUnavailable[string](headErr.Error())
+		// Exactly as Git reported it: redaction and cutting are for the
+		// rendering, which cannot tell a long branch name from a secret.
+		case ok && sha == commit.Sha:
+			commit.Subject = core.ObservedKnown(strings.TrimRight(subject, "\n"))
+		case ok:
+			commit.Subject = core.ObservedUnavailable[string]("HEAD moved while the working tree was being read")
+		default:
+			commit.Subject = core.ObservedUnavailable[string]("git log gave no subject")
+		}
+	}
+	return core.ObservedKnown(facts)
 }
 
 // runGit runs Git as a child the observation owns: in a process group of
@@ -217,14 +416,124 @@ func readWorktree(ctx context.Context, children *ObserverChildren, git string, d
 // a source: a git status takes as long as the tree needs. The error's text
 // is the reason the read is unavailable.
 func runGit(ctx context.Context, children *ObserverChildren, git string, directory string, args []string) ([]byte, error) {
-	panic("unported: mj-worker/src/work_facts.rs run_git")
+	command := exec.Command(git, append([]string{"-C", directory}, args...)...)
+	// GIT_OPTIONAL_LOCKS=0 keeps this read from taking the index lock a
+	// concurrent `git commit` of the agent's would need.
+	command.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	// Recorded as the child starts, under the registry's lock, which a scan
+	// holds for its whole duration: a scan sees a Git read that exists, or
+	// the read waits to be recorded. Removed when the read ends, however it
+	// ends, including when ctx ends on a disconnect.
+	children.mu.Lock()
+	locked := true
+	var registered *registeredChild
+	output, err := core.RunBoundedObserved(ctx, command, math.MaxInt, time.Duration(math.MaxInt64), func(pid int) {
+		if children.pids == nil {
+			children.pids = map[uint32]struct{}{}
+		}
+		children.pids[uint32(pid)] = struct{}{}
+		registered = &registeredChild{children: children, pid: uint32(pid)}
+		locked = false
+		children.mu.Unlock()
+	})
+	if locked {
+		children.mu.Unlock()
+	}
+	if registered != nil {
+		registered.release()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("could not run git: %w", err)
+	}
+	if output.Status.Success() {
+		return output.Stdout, nil
+	}
+	detail := ""
+	if lines := rustLines(fromUTF8Lossy(output.Stderr)); len(lines) > 0 {
+		detail = strings.TrimSpace(lines[0])
+	}
+	if detail == "" {
+		return nil, fmt.Errorf("git failed with %s", workFactsExitStatus(output.Status))
+	}
+	return nil, errors.New(detail)
 }
 
 // parseStatus parses `git status --porcelain=v2 -z --branch`: header
 // records beginning "# ", then NUL-separated change records. A rename
 // record is followed by one more field, the original path.
 func parseStatus(text string, directory string) core.WorktreeFacts {
-	panic("unported: mj-worker/src/work_facts.rs parse_status")
+	var headSha, branch *string
+	var changed, modified, untracked uint32
+	shown := []core.ChangedPath{}
+	fields := strings.Split(text, "\x00")
+	for index := 0; index < len(fields); index++ {
+		field := fields[index]
+		if header, ok := strings.CutPrefix(field, "# "); ok {
+			name, value, ok := strings.Cut(header, " ")
+			switch {
+			case ok && name == "branch.oid" && value != "(initial)":
+				headSha = &value
+			case ok && name == "branch.head" && value != "(detached)":
+				branch = &value
+			}
+			continue
+		}
+		if len(field) < 2 {
+			continue
+		}
+		var status, path string
+		switch record, rest := field[:2], field[2:]; record {
+		case "? ":
+			status, path = "?", rest
+		// `1 XY sub mH mI mW hH hI path`, `2 XY ... score path` and
+		// `u XY ... path` put the path after the eighth, ninth and tenth
+		// space-separated fields; paths may contain spaces.
+		case "1 ":
+			status, path = changeRecord(rest, 8)
+		case "2 ":
+			// The original path of a rename is its own field.
+			index++
+			status, path = changeRecord(rest, 9)
+		case "u ":
+			status, path = changeRecord(rest, 10)
+		default:
+			continue
+		}
+		changed = workFactsSaturatingIncrement(changed)
+		switch status {
+		case "?":
+			untracked = workFactsSaturatingIncrement(untracked)
+		case "M":
+			modified = workFactsSaturatingIncrement(modified)
+		}
+		if len(shown) < core.ShownPaths {
+			// Exactly as Git reported it; the rendering sanitizes and cuts.
+			shown = append(shown, core.ChangedPath{Status: status, Path: path})
+		}
+	}
+	facts := core.WorktreeFacts{
+		Directory: directory,
+		Branch:    branch,
+		Changed:   changed,
+		Modified:  modified,
+		Untracked: untracked,
+		Omitted:   changed - min(changed, uint32(len(shown))),
+		Shown:     shown,
+	}
+	if headSha != nil {
+		facts.Head = &core.HeadCommit{
+			Sha:     *headSha,
+			Subject: core.ObservedUnavailable[string]("the subject was not read"),
+		}
+	}
+	return facts
+}
+
+func workFactsSaturatingIncrement(count uint32) uint32 {
+	if count == math.MaxUint32 {
+		return count
+	}
+	return count + 1
 }
 
 // changeRecord is the status letter and path of a 1, 2 or u record whose
@@ -259,7 +568,18 @@ func changeRecord(rest string, leading int) (string, string) {
 // they start). The Git reads have no fixed duration; the caller that waits
 // for them cancels by ending ctx, which kills them.
 func WorkFactsCapture(ctx context.Context, observer *WorkObserver) core.WorkFacts {
-	panic("unported: mj-worker/src/work_facts.rs capture")
+	scan := func() core.Observed[core.ProcessFacts] {
+		facts, err := workFactsBlocking(func() core.Observed[core.ProcessFacts] { return scanProcesses(observer) })
+		if err != nil {
+			return core.ObservedUnavailable[core.ProcessFacts](fmt.Sprintf("process scan failed: %v", err))
+		}
+		return facts
+	}
+	// Read here, not handed to another goroutine to own: the Git children
+	// belong to this call and are killed when ctx ends.
+	return captureFrom(scan, func() core.Observed[core.WorktreeFacts] {
+		return readWorktree(ctx, observer.Children, observer.Git, observer.Directory)
+	})
 }
 
 // captureFrom runs the two observations of a capture together: the scan of
@@ -308,7 +628,53 @@ func countAlive(observer *WorkObserver, identities []core.ProcessIdentity) core.
 // succeeds. Returns only on a durable relay failure, which it reports, or
 // when ctx ends (Rust: the task is dropped).
 func WatchLiveness(ctx context.Context, relay *RelayCell, observer WorkObserver, interval time.Duration) error {
-	panic("unported: mj-worker/src/work_facts.rs watch_liveness")
+	releases := relay.Releases()
+	failing := false
+	for {
+		guard := relay.Observe()
+		liveness, identities, watched := guard.watchedWork()
+		guard.Unlock()
+		if !watched {
+			// Nothing to watch until a turn leaves processes running.
+			if err := releases.Changed(ctx); err != nil {
+				return err
+			}
+			continue
+		}
+		pause := time.NewTimer(interval)
+		select {
+		case <-pause.C:
+		case <-ctx.Done():
+			pause.Stop()
+			return ctx.Err()
+		}
+		counted, err := workFactsBlocking(func() core.Observed[uint32] { return countAlive(&observer, identities) })
+		if err != nil {
+			if !failing {
+				slog.Warn("work liveness scan task failed", "session_id", observer.SessionID, "error", err)
+			}
+			failing = true
+			continue
+		}
+		if counted.Value == nil {
+			if !failing {
+				slog.Warn("work liveness scan failed", "session_id", observer.SessionID, "reason", counted.Reason)
+			}
+			failing = true
+			continue
+		}
+		failing = false
+		locked := relay.Lock()
+		_, err = locked.recordWorkLiveness(core.WorkLiveness{
+			CompletedOrdinal: liveness.CompletedOrdinal,
+			Alive:            *counted.Value,
+			CheckedAtMs:      uint64(max(core.EpochMillis(), 0)),
+		})
+		locked.Unlock()
+		if err != nil {
+			return fmt.Errorf("recording work liveness: %w", err)
+		}
+	}
 }
 
 // workFactsExitStatus formats a process exit as Rust's ExitStatus Display
@@ -322,4 +688,22 @@ func workFactsExitStatus(state *os.ProcessState) string {
 		return fmt.Sprintf("signal: %d (%s)", int(status.Signal()), status.Signal())
 	}
 	return fmt.Sprintf("exit status: %d", state.ExitCode())
+}
+
+// workFactsPathComponents is a path's components as Rust's Path::components
+// yields them, for comparing paths as Rust's PathBuf equality does: the root
+// as "/", "." dropped except at the start, ".." kept.
+func workFactsPathComponents(path string) []string {
+	separator := func(r rune) bool { return r == '/' || (runtime.GOOS == "windows" && r == '\\') }
+	var components []string
+	if path != "" && separator(rune(path[0])) {
+		components = append(components, "/")
+	}
+	for index, part := range strings.FieldsFunc(path, separator) {
+		if part == "." && !(index == 0 && components == nil && strings.HasPrefix(path, ".")) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
 }

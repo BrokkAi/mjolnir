@@ -792,13 +792,13 @@ pub fn session_launch_config(
     // the default, so their launch files do not change.
     launch.subtle_subagents =
         !launch.subagents.uses_mjolnir() || config.subagents.offers_subtle(&launch.subagents);
-    launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents);
+    let owns_environment = state.owns_environment(session_id) == Some(true);
+    launch.oracle = oracle_launch_enabled(session, owns_environment, &config.subagents);
     // Registration decided whether this child can be given the tool.
     launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
     launch.subagent_kind = subagent.as_ref().map(|child| child.kind);
-    launch.supervisor = subagent.as_ref().is_some_and(|child| child.supervisor);
-    launch.supervisors_enabled =
-        subagent.is_none() && session.supervisors && launch.subagents.uses_mjolnir();
+    launch.orchestrator = subagent.as_ref().is_some_and(|child| child.orchestrator);
+    launch.orchestrators_enabled = subagent.is_none() && launch.subagents.orchestrators_enabled();
 
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).
@@ -852,10 +852,9 @@ pub fn session_launch_config(
                 .collect::<Result<Vec<_>>>()?;
         }
     }
-    // Only top-level sessions request review, before they push. A sub-agent
-    // never does: its parent reviews the integrated work. The worker derives
+    // The workspace owner requests review before pushing. The worker derives
     // the review tools and the push gate from this one value.
-    launch.review_trigger = if subagent.is_none() {
+    launch.review_trigger = if owns_environment {
         if let Err(missing) = state.effective_review(session_id) {
             tracing::warn!(session_id, missing = %missing,
                 "review choice cannot be resolved; launching without review tools");
@@ -1096,12 +1095,27 @@ mod tests {
                 mj_core::config::data_dir().join("profile"),
             ),
         );
+        let choice = mj_core::config::SubagentChoice {
+            model: "test-model".into(),
+            effort: None,
+        };
+        config.review.reviewers = vec![choice.clone()];
         let parent_id = "11111111111111111111111111111111";
         let child_id = "22222222222222222222222222222222";
         let mut parent = crate::database::test_fixtures::checkpoint_test_session(parent_id);
         parent.last_profile = "missing-profile".into();
         crate::database::save_session(&parent).unwrap();
         let mut child = crate::database::test_fixtures::checkpoint_test_session(child_id);
+        child.oracle = true;
+        child.oracle_choice = Some(Box::new(choice));
+        child.review = Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: None,
+        }));
+        child.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
+            straightforward: None,
+            subtle: None,
+        });
         let workspace = mj_core::config::data_dir().join("child-workspace");
         child.project_directory = Some(workspace.clone());
         child.target = Some(Box::new(TargetLocator::LocalBare {
@@ -1123,7 +1137,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: true,
+            orchestrator: true,
             resume_with_parent: false,
         };
         crate::database::register_subagent_with_startup(
@@ -1149,6 +1163,16 @@ mod tests {
             launch.environment[CHILD_REPORT_DIR_ENV],
             report.to_str().unwrap()
         );
+        assert!(launch.oracle);
+        assert!(launch.review_tools() && launch.review_gate() && launch.prepares_review());
+        assert_eq!(
+            launch.subagent_mcp_role(),
+            Some(mj_core::subagent::SubagentMcpRole::Orchestrator)
+        );
+        let saved = serde_json::to_value(&launch).unwrap();
+        assert!(saved.get("owns_environment").is_none());
+        let launch: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
+        assert!(launch.oracle && launch.review_gate());
         assert_eq!(launch.subagent_kind, Some(SubagentKind::Worker));
     }
 }

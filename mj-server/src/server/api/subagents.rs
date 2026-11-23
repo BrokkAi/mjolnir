@@ -56,7 +56,7 @@ pub(super) async fn spawn_subagent(
         .start_subagent(mj_session_types::RegisterSubagentRequest {
             no_github_credentials: request.no_github_credentials,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: task_type == mj_core::subagent::SubagentTaskType::Supervisor,
+            orchestrator: task_type == mj_core::subagent::SubagentTaskType::Orchestrator,
             reviewer_launch: None,
             parent_session_id: parent_session_id.clone(),
             task_name: request.task_name,
@@ -591,8 +591,8 @@ async fn resolve_choices_selection(
     let (anchor, placement) = match source {
         ModelProfileCandidateSource::Subagents { parent_profile } => (
             Some(parent_profile),
-            if category == Some("supervisor") {
-                Placement::Supervisor
+            if matches!(category, Some("supervisor" | "orchestrator")) {
+                Placement::Orchestrator
             } else {
                 Placement::Child
             },
@@ -1021,8 +1021,8 @@ async fn resolve_model_profile_selection_from(
         let (anchor, placement) = match source {
             ModelProfileCandidateSource::Subagents { parent_profile } => (
                 Some(parent_profile),
-                if category == Some("supervisor") {
-                    Placement::Supervisor
+                if matches!(category, Some("supervisor" | "orchestrator")) {
+                    Placement::Orchestrator
                 } else {
                     Placement::Child
                 },

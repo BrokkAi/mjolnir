@@ -5,9 +5,13 @@
 package worker
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -117,14 +121,146 @@ func DiscardQueuedPromptsBeforeStart(root, sessionID, commandID string) error {
 // publishes each one only where no directory has appeared since, then prints
 // `{"published": <bool>}`.
 func RestoreCheckoutFromSpecFile(path string) error {
-	panic("unported: mj-worker/src/checkpoint.rs restore_checkout_from_spec_file")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var spec checkpoint.CheckoutRecoverySpec
+	if err := json.Unmarshal(body, &spec); err != nil {
+		return err
+	}
+	if spec.Version != 1 || !spec.Restore.RestoreRepositories || spec.Restore.RestoreNative {
+		return errors.New("unsupported checkout recovery specification")
+	}
+	for _, field := range []*string{
+		&spec.Restore.ArchivePath, &spec.Restore.WorkspaceRoot,
+		&spec.StagedCheckout, &spec.DestinationCheckout, &spec.StagingRoot,
+	} {
+		if *field, err = checkpoint.ResolveTargetPath(*field); err != nil {
+			return err
+		}
+	}
+	publications := []checkpoint.CheckoutRecoveryPublication{{
+		StagedCheckout:      spec.StagedCheckout,
+		DestinationCheckout: spec.DestinationCheckout,
+	}}
+	for _, publication := range spec.AdditionalCheckouts {
+		if publication.StagedCheckout, err = checkpoint.ResolveTargetPath(publication.StagedCheckout); err != nil {
+			return err
+		}
+		if publication.DestinationCheckout, err = checkpoint.ResolveTargetPath(publication.DestinationCheckout); err != nil {
+			return err
+		}
+		publications = append(publications, publication)
+	}
+	missing := false
+	for _, publication := range publications {
+		exists, err := pathTryExists(publication.DestinationCheckout)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if info, err := os.Stat(publication.StagedCheckout); err != nil || !info.IsDir() {
+				return errors.New("staged checkout is missing")
+			}
+			missing = true
+		}
+	}
+	ready := filepath.Join(spec.StagingRoot, ".mj-checkouts-restored")
+	readyExists, err := pathTryExists(ready)
+	if err != nil {
+		return err
+	}
+	if missing && !readyExists {
+		if err := checkpoint.RestoreRepositories(spec.Restore.ArchivePath, spec.Restore.WorkspaceRoot, checkpoint.SystemGit{}); err != nil {
+			return err
+		}
+		if err := core.AtomicWrite(ready, []byte(spec.CheckpointSha256)); err != nil {
+			return err
+		}
+	}
+	if readyExists, err = pathTryExists(ready); err != nil {
+		return err
+	}
+	if readyExists {
+		recorded, err := os.ReadFile(ready)
+		if err != nil {
+			return err
+		}
+		if !utf8.Valid(recorded) {
+			return errors.New("stream did not contain valid UTF-8")
+		}
+		if string(recorded) != spec.CheckpointSha256 {
+			return errors.New("staged checkout recovery identity changed")
+		}
+	}
+	published := false
+	for _, publication := range publications {
+		exists, err := pathTryExists(publication.DestinationCheckout)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := os.MkdirAll(filepath.Dir(publication.DestinationCheckout), 0o777); err != nil {
+				return err
+			}
+			renamed, err := renameDirectoryWithoutReplacement(publication.StagedCheckout, publication.DestinationCheckout)
+			if err != nil {
+				return err
+			}
+			published = published || renamed
+		}
+		if info, err := os.Stat(filepath.Join(publication.DestinationCheckout, ".git")); err == nil && info.Mode().IsRegular() {
+			output, err := checkpoint.SystemGit{}.Run(publication.DestinationCheckout, &checkpoint.GitCommand{
+				Arguments: []string{"worktree", "repair", publication.DestinationCheckout},
+			})
+			if err != nil {
+				return err
+			}
+			if output.Status != 0 {
+				return fmt.Errorf("repair published worktree: %s", fromUTF8Lossy(output.Stderr))
+			}
+		}
+	}
+	fmt.Printf("{\"published\":%t}\n", published)
+	return nil
 }
 
 // RestoreMissingFromSpecFile restores the native state and relay of a parent
 // checkpoint where they are missing, then prints the outcome as JSON. seedPath
 // names the current relay seed, when there is one.
 func RestoreMissingFromSpecFile(path string, seedPath *string) error {
-	panic("unported: mj-worker/src/checkpoint.rs restore_missing_from_spec_file")
+	spec, err := readRestoreSpec(path)
+	if err != nil {
+		return err
+	}
+	owner, err := WorkerRootOwnerAcquire(spec.RelayRoot)
+	if err != nil {
+		return err
+	}
+	defer owner.Release()
+	var seed *core.RestoredRelaySeed
+	if seedPath != nil {
+		body, err := os.ReadFile(*seedPath)
+		if err != nil {
+			return err
+		}
+		var decoded core.RestoredRelaySeed
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			return err
+		}
+		seed = &decoded
+	}
+	outcome, err := checkpoint.RestoreMissingParentCheckpoint(&spec, checkpointNativeState{}, seed)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(outcome)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	return nil
 }
 
 func RestoreFromSpecFile(path string) error {
@@ -136,5 +272,18 @@ func RestoreFromSpecFile(path string) error {
 }
 
 func readRestoreSpec(path string) (checkpoint.CheckpointRestoreSpec, error) {
-	panic("unported: mj-worker/src/checkpoint.rs read_restore_spec")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return checkpoint.CheckpointRestoreSpec{}, fmt.Errorf("read checkpoint restore spec %s: %w", path, err)
+	}
+	var spec checkpoint.CheckpointRestoreSpec
+	if err := json.Unmarshal(body, &spec); err != nil {
+		return checkpoint.CheckpointRestoreSpec{}, fmt.Errorf("parse checkpoint restore spec %s: %w", path, err)
+	}
+	for _, field := range []*string{&spec.ArchivePath, &spec.WorkspaceRoot, &spec.RelayRoot, &spec.HarnessHome} {
+		if *field, err = checkpoint.ResolveTargetPath(*field); err != nil {
+			return checkpoint.CheckpointRestoreSpec{}, err
+		}
+	}
+	return spec, nil
 }

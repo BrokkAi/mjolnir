@@ -8,10 +8,15 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -83,7 +88,34 @@ func (o *OperatorAway) lockState() *OperatorAwayState {
 }
 
 func (s *OperatorAwayState) answerAway(entry *PendingElicitation) {
-	panic("unported: mj-worker/src/acp/operator_away.rs OperatorAwayState::answer_away")
+	// A turn withdrawal marks the turn before sending session/cancel and
+	// removes its forms after. AFK must not slip an answer through that gap.
+	// Leave the form for the withdrawal to remove.
+	if _, withdrawn := s.withdrawnTurns[entry.bridge]; withdrawn && strings.HasPrefix(entry.question.ID, core.ToolPermissionIDPrefix) {
+		s.pending = append(s.pending, entry)
+		return
+	}
+	responder, ok := entry.responder.(PendingResponderAcp)
+	if !ok {
+		// Command-loop recovery choices are never answered by AFK policy.
+		s.pending = append(s.pending, entry)
+		return
+	}
+	var evidence any
+	_, isQuestion := responder.identity.request.(AwayRequestQuestion)
+	if isQuestion {
+		evidence = questionEvidence(&entry.question)
+	}
+	if responder.answer.send(PendingAnswerOperatorAway{}) {
+		history := s.refused[responder.identity]
+		if isQuestion {
+			history = append(history, evidence)
+			s.refused[responder.identity] = history
+			s.changed.SendReplace(struct{}{})
+		} else {
+			s.refused[responder.identity] = history
+		}
+	}
 }
 
 // questionEvidence retains answer constraints, excluding transient identity,
@@ -92,7 +124,37 @@ func (s *OperatorAwayState) answerAway(entry *PendingElicitation) {
 // question, so the flag never reaches the classifier and cannot make two
 // forms differ.
 func questionEvidence(question *core.ElicitationRequest) any {
-	panic("unported: mj-worker/src/acp/operator_away.rs question_evidence")
+	value, err := acpFeaturesValue(question)
+	if err != nil {
+		panic("elicitation serializes: " + err.Error())
+	}
+	evidence, ok := value.(jsonvalue.Object)
+	if !ok {
+		panic("elicitation is an object")
+	}
+	evidence.SwapDelete("id")
+	fieldsValue, _ := evidence.Get("fields")
+	fields, ok := fieldsValue.([]any)
+	if !ok {
+		panic("elicitation fields are an array")
+	}
+	for index := range fields {
+		if index >= len(question.Fields) {
+			break
+		}
+		field, ok := fields[index].(jsonvalue.Object)
+		if !ok {
+			panic("elicitation field is an object")
+		}
+		field.SwapDelete("required")
+		if question.FieldIsSecret(&question.Fields[index]) {
+			field.SwapDelete("default")
+			field.Set("secret", true)
+		}
+		fields[index] = field
+	}
+	evidence.Set("fields", fields)
+	return evidence
 }
 
 // AwayRequest is the kind of request the operator-away policy answers.
@@ -109,6 +171,15 @@ type AwayRequestTool struct{ Value string }
 func (AwayRequestQuestion) isAwayRequest() {}
 func (AwayRequestPlan) isAwayRequest()     {}
 func (AwayRequestTool) isAwayRequest()     {}
+
+// keepFixtureQuestionLive registers question on a bridge of its own and
+// returns what keeps it live: the bridge and its answer receiver (Rust
+// `Box<dyn Send>`). The question stays live while the caller holds it.
+func (o *OperatorAway) keepFixtureQuestionLive(question core.ElicitationRequest) any {
+	bridge := o.pendingForBridgeWithSource(VerdictSourceDisabled{}, nil)
+	answer := bridge.register(question, "", AwayRequestQuestion{})
+	return []any{bridge, answer}
+}
 
 // liveQuestions are the forms still waiting on a live bridge and responder,
 // by id.
@@ -131,7 +202,27 @@ func (o *OperatorAway) liveQuestions() map[string]core.ElicitationRequest {
 // SetOperatorAway; other targets carry the default state so ACP request
 // handling has one type.
 func (o *OperatorAway) set(presence core.OperatorPresence) {
-	panic("unported: mj-worker/src/acp/operator_away.rs OperatorAway::set")
+	state := o.lockState()
+	defer o.mu.Unlock()
+	if presence.Revision > state.presence.Revision {
+		state.presence = presence
+		clear(state.refused)
+		if presence.Away {
+			// Slice order is registration order, including across bridge
+			// scopes.
+			pending := state.pending
+			state.pending = nil
+			for _, entry := range pending {
+				identity, ok := entry.responder.acpIdentity()
+				if _, refused := state.refused[identity]; ok && !refused {
+					state.answerAway(entry)
+				} else {
+					state.pending = append(state.pending, entry)
+				}
+			}
+		}
+		state.changed.SendReplace(struct{}{})
+	}
 }
 
 // pendingForBridgeWithSource opens a bridge scope. A nil source is the
@@ -166,12 +257,23 @@ type PendingBridge struct {
 
 // Close retires the bridge (Rust Drop of the last handle).
 func (b *PendingBridge) Close() {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingBridge::drop")
+	state := b.owner.lockState()
+	defer b.owner.mu.Unlock()
+	delete(state.bridges, b.id)
+	state.dropPending(func(entry *PendingElicitation) bool { return entry.bridge == b.id })
+	state.forgetReviews(b.id)
 }
 
 // forgetReviews withdraws a bridge's reviews in flight and forgets its turn.
 func (s *OperatorAwayState) forgetReviews(bridge uint64) {
-	panic("unported: mj-worker/src/acp/operator_away.rs OperatorAwayState::forget_reviews")
+	s.reviews = slices.DeleteFunc(s.reviews, func(review PendingReview) bool {
+		if review.bridge == bridge {
+			review.withdraw()
+			return true
+		}
+		return false
+	})
+	delete(s.withdrawnTurns, bridge)
 }
 
 // PendingReviewTicket is a Mjolnir guardian review registered as an
@@ -198,12 +300,20 @@ func (t *PendingReviewTicket) withdrawn() <-chan struct{} {
 // lock itself; an ACP responder only queues a message. settle ends the
 // ticket (Rust takes self), so the caller captures any result in answer.
 func (t *PendingReviewTicket) settle(answer func(withdrawn bool)) {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingReviewTicket::settle")
+	state := t.owner.lockState()
+	_, turnWithdrawn := state.withdrawnTurns[t.bridge]
+	withdrawn := t.withdrawnCtx.Err() != nil || turnWithdrawn ||
+		!slices.ContainsFunc(state.reviews, func(review PendingReview) bool { return review.id == t.id })
+	answer(withdrawn)
+	t.owner.mu.Unlock()
+	t.Close()
 }
 
 // Close unregisters the review (Rust Drop).
 func (t *PendingReviewTicket) Close() {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingReviewTicket::drop")
+	state := t.owner.lockState()
+	defer t.owner.mu.Unlock()
+	state.reviews = slices.DeleteFunc(state.reviews, func(review PendingReview) bool { return review.id == t.id })
 }
 
 // PendingBridgeLifetime makes the connection, rather than its cloned
@@ -222,7 +332,22 @@ func (p PendingElicitations) bridgeLifetime() PendingBridgeLifetime {
 }
 
 func (p PendingElicitations) registerCommandLoop(request core.ElicitationRequest) *CommandLoopQuestion {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::register_command_loop")
+	lifetime := &commandLoopLifetime{}
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	if _, live := state.bridges[p.bridge.id]; live {
+		state.pending = append(state.pending, &PendingElicitation{
+			bridge:    p.bridge.id,
+			question:  request,
+			responder: PendingResponderCommandLoop{lifetime: lifetime},
+		})
+	}
+	return &CommandLoopQuestion{
+		ElicitationRequest: request,
+		owner:              p.bridge.owner,
+		bridge:             p.bridge.id,
+		lifetime:           lifetime,
+	}
 }
 
 // register registers a form. Both immediate and later AFK decisions reach
@@ -230,7 +355,29 @@ func (p PendingElicitations) registerCommandLoop(request core.ElicitationRequest
 // answer, so AFK cannot resolve a form before the relay has observed the
 // question.
 func (p PendingElicitations) register(question core.ElicitationRequest, agent string, request AwayRequest) *PendingAnswerReceiver {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::register")
+	answer := newPendingAnswerSlot()
+	received := &PendingAnswerReceiver{slot: answer}
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	_, live := state.bridges[p.bridge.id]
+	_, withdrawn := state.withdrawnTurns[p.bridge.id]
+	if !live || (withdrawn && strings.HasPrefix(question.ID, core.ToolPermissionIDPrefix)) {
+		// Dropping the answer channel answers the request `cancelled`.
+		answer.drop()
+		return received
+	}
+	identity := awayIdentity{agent: agent, request: request}
+	entry := &PendingElicitation{
+		bridge:    p.bridge.id,
+		question:  question,
+		responder: PendingResponderAcp{identity: identity, answer: answer},
+	}
+	if _, refused := state.refused[identity]; state.presence.Away && !refused {
+		state.answerAway(entry)
+	} else {
+		state.pending = append(state.pending, entry)
+	}
+	return received
 }
 
 // refineQuestion asks the classifier whether question id repeats one already
@@ -238,11 +385,150 @@ func (p PendingElicitations) register(question core.ElicitationRequest, agent st
 // cancellation end ctx, which drops its HTTP work; only the presence owner
 // may accept the resulting answer.
 func (p PendingElicitations) refineQuestion(ctx context.Context, id string) {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::refine_question")
+	owner := p.bridge.owner
+	state := owner.lockState()
+	changed := state.changed
+	owner.mu.Unlock()
+	var client *VerdictClient
+	for {
+		// Mark the current value seen: a change after this point wakes the
+		// waits below.
+		changes := changed.Changed()
+		type afkSnapshot struct {
+			revision uint64
+			agent    string
+			question any
+			history  []any
+		}
+		var snapshot *afkSnapshot
+		state := owner.lockState()
+		index := slices.IndexFunc(state.pending, func(entry *PendingElicitation) bool {
+			return entry.bridge == p.bridge.id && entry.question.ID == id
+		})
+		if index < 0 {
+			owner.mu.Unlock()
+			return
+		}
+		entry := state.pending[index]
+		identity, ok := entry.responder.acpIdentity()
+		if !ok {
+			owner.mu.Unlock()
+			return
+		}
+		if _, isQuestion := identity.request.(AwayRequestQuestion); !isQuestion {
+			owner.mu.Unlock()
+			return
+		}
+		if state.presence.Away {
+			snapshot = &afkSnapshot{
+				revision: state.presence.Revision,
+				agent:    identity.agent,
+				question: questionEvidence(&entry.question),
+				history:  slices.Clone(state.refused[identity]),
+			}
+		}
+		owner.mu.Unlock()
+		if snapshot != nil {
+			type classified struct {
+				client *VerdictClient
+				same   bool
+				err    error
+			}
+			classifyCtx, cancelClassify := context.WithCancel(ctx)
+			result := make(chan classified, 1)
+			// Dropping the classification (Rust drops its future) ends it
+			// before this returns: cancelled mid-request it records its
+			// cancellation, and past the request it records its outcome.
+			drop := func() {
+				cancelClassify()
+				<-result
+			}
+			go func(client *VerdictClient) {
+				if client == nil {
+					client = verdictClientResolve(classifyCtx, p.bridge.source)
+				}
+				// Read at classification time: the log opens after the bridge
+				// starts.
+				session := ""
+				var log *core.DecisionLog
+				if turnContext := p.bridge.turnContext; turnContext != nil {
+					session = turnContext.SessionID()
+					if decisions, ok := turnContext.DecisionLog(); ok {
+						log = &decisions
+					}
+				}
+				if client == nil {
+					result <- classified{err: errors.New("the classifier is disabled or unavailable")}
+					return
+				}
+				same, err := client.withLog(log).sameAfkQuestion(classifyCtx, session, snapshot.question, snapshot.history)
+				result <- classified{client: client, same: same, err: err}
+			}(client)
+			var verdict classified
+			select {
+			case verdict = <-result:
+				cancelClassify()
+			case <-changes:
+				drop()
+				continue
+			case <-ctx.Done():
+				drop()
+				return
+			}
+			if verdict.client != nil {
+				client = verdict.client
+			}
+			switch {
+			case verdict.err == nil && !verdict.same:
+				state := owner.lockState()
+				// Compare and consume under the same owner lock. Concurrent new
+				// questions must reclassify against the accepted history.
+				current, known := state.refused[awayIdentity{agent: snapshot.agent, request: AwayRequestQuestion{}}]
+				if state.presence.Away && state.presence.Revision == snapshot.revision && known &&
+					operatorAwayHistoryEqual(current, snapshot.history) {
+					index := slices.IndexFunc(state.pending, func(entry *PendingElicitation) bool {
+						_, acp := entry.responder.acpIdentity()
+						return entry.bridge == p.bridge.id && entry.question.ID == id && acp
+					})
+					if index >= 0 {
+						entry := state.pending[index]
+						state.pending = slices.Delete(state.pending, index, index+1)
+						state.answerAway(entry)
+						owner.mu.Unlock()
+						slog.Info("Jev identified a new AFK question", "target", "mj_jev", "id", id, "revision", snapshot.revision)
+						return
+					}
+				}
+				owner.mu.Unlock()
+				continue
+			case verdict.err == nil:
+				slog.Info("Jev identified a repeated AFK question", "target", "mj_jev", "id", id, "revision", snapshot.revision)
+			default:
+				slog.Warn("AFK question classification unavailable; retaining existing behavior",
+					"target", "mj_jev", "id", id, "error", verdict.err.Error())
+			}
+		}
+		select {
+		case <-changes:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (p PendingElicitations) remove(id string) *PendingElicitation {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::remove")
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	index := slices.IndexFunc(state.pending, func(entry *PendingElicitation) bool {
+		_, acp := entry.responder.acpIdentity()
+		return entry.bridge == p.bridge.id && entry.question.ID == id && acp
+	})
+	if index < 0 {
+		return nil
+	}
+	entry := state.pending[index]
+	state.pending = slices.Delete(state.pending, index, index+1)
+	return entry
 }
 
 // takeTurnCancel claims Cancel before stopping the turn, so a resolved form
@@ -260,7 +546,31 @@ func (p PendingElicitations) takeTurnCancel(id string, response *core.Elicitatio
 // nil when the bridge is gone or its turn was already withdrawn: answer
 // `cancelled`.
 func (p PendingElicitations) beginReview() *PendingReviewTicket {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::begin_review")
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	_, live := state.bridges[p.bridge.id]
+	_, withdrawn := state.withdrawnTurns[p.bridge.id]
+	if !live || withdrawn {
+		return nil
+	}
+	id := state.nextReview
+	if id+1 < id {
+		panic("guardian review identity exhausted")
+	}
+	state.nextReview = id + 1
+	withdrawnCtx, withdraw := context.WithCancel(context.Background())
+	state.reviews = append(state.reviews, PendingReview{
+		bridge:    p.bridge.id,
+		id:        id,
+		withdrawn: withdrawnCtx,
+		withdraw:  withdraw,
+	})
+	return &PendingReviewTicket{
+		owner:        p.bridge.owner,
+		bridge:       p.bridge.id,
+		id:           id,
+		withdrawnCtx: withdrawnCtx,
+	}
 }
 
 // beginWithdrawal marks the turn withdrawn before the agent is told of the
@@ -277,7 +587,20 @@ func (p PendingElicitations) beginWithdrawal() {
 // the agent `cancelled` and closes the form), cancel every guardian review
 // in flight, and answer any that arrives later in this turn `cancelled`.
 func (p PendingElicitations) withdrawToolPermissions() {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::withdraw_tool_permissions")
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	state.dropPending(func(entry *PendingElicitation) bool {
+		_, acp := entry.responder.acpIdentity()
+		return entry.bridge == p.bridge.id && acp && strings.HasPrefix(entry.question.ID, core.ToolPermissionIDPrefix)
+	})
+	state.reviews = slices.DeleteFunc(state.reviews, func(review PendingReview) bool {
+		if review.bridge == p.bridge.id {
+			review.withdraw()
+			return true
+		}
+		return false
+	})
+	state.withdrawnTurns[p.bridge.id] = struct{}{}
 }
 
 // endWithdrawal: the withdrawn turn is over, its prompt answered, or a new
@@ -291,21 +614,50 @@ func (p PendingElicitations) endWithdrawal() {
 // onlyReviews reports whether the only outstanding requests are guardian
 // reviews, which end on their own within the review deadline.
 func (p PendingElicitations) onlyReviews() bool {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::only_reviews")
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	return slices.ContainsFunc(state.reviews, func(review PendingReview) bool { return review.bridge == p.bridge.id }) &&
+		!state.hasAcpEntry(p.bridge.id)
 }
 
 func (p PendingElicitations) isEmpty() bool {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::is_empty")
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	return !state.hasAcpEntry(p.bridge.id) &&
+		!slices.ContainsFunc(state.reviews, func(review PendingReview) bool { return review.bridge == p.bridge.id })
 }
 
 func (p PendingElicitations) close() {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::close")
+	p.bridge.Close()
 }
 
 // resolve gives the person's answer to form id; the error is the refusal to
 // report to whoever answered (Rust `Result<(), String>`).
 func (p PendingElicitations) resolve(id string, response core.ElicitationResponse) error {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitations::resolve")
+	state := p.bridge.owner.lockState()
+	defer p.bridge.owner.mu.Unlock()
+	index := slices.IndexFunc(state.pending, func(entry *PendingElicitation) bool {
+		_, acp := entry.responder.acpIdentity()
+		return entry.bridge == p.bridge.id && entry.question.ID == id && acp
+	})
+	if index < 0 {
+		return fmt.Errorf("elicitation %s is no longer pending", sessionConfigDebugString(id))
+	}
+	answer, err := state.pending[index].question.HarnessResponse(response)
+	if err != nil {
+		return err
+	}
+	entry := state.pending[index]
+	state.pending = slices.Delete(state.pending, index, index+1)
+	switch responder := entry.responder.(type) {
+	case PendingResponderAcp:
+		if !responder.answer.send(PendingAnswerHuman{Value: answer}) {
+			return fmt.Errorf("elicitation %s was cancelled before it was answered", sessionConfigDebugString(id))
+		}
+		return nil
+	default:
+		return fmt.Errorf("elicitation %s belongs to the command loop", sessionConfigDebugString(id))
+	}
 }
 
 type PendingElicitation struct {
@@ -363,13 +715,24 @@ type CommandLoopQuestion struct {
 
 // Close withdraws the question from the owner (Rust Drop).
 func (q *CommandLoopQuestion) Close() {
-	panic("unported: mj-worker/src/acp/operator_away.rs CommandLoopQuestion::drop")
+	q.lifetime.closed.Store(true)
+	state := q.owner.lockState()
+	defer q.owner.mu.Unlock()
+	state.pending = slices.DeleteFunc(state.pending, func(entry *PendingElicitation) bool {
+		responder, ok := entry.responder.(PendingResponderCommandLoop)
+		return entry.bridge == q.bridge && ok && responder.lifetime == q.lifetime
+	})
 }
 
 // cancel answers the form Cancel, preserving explicit user intent instead of
 // conflating it with a dropped bridge.
 func (e *PendingElicitation) cancel() {
-	panic("unported: mj-worker/src/acp/operator_away.rs PendingElicitation::cancel")
+	if responder, ok := e.responder.(PendingResponderAcp); ok {
+		if !responder.answer.send(PendingAnswerHuman{Value: core.ElicitationResponse{Action: core.ElicitationResponseCancel}}) {
+			slog.Debug("permission responder closed before cancellation was answered", "elicitation_id", e.question.ID)
+		}
+	}
+	e.Close()
 }
 
 // PendingAnswer is how a pending form was answered.
@@ -478,5 +841,81 @@ func (r *PendingAnswerReceiver) Close() {
 // kind, title and input, with every object's keys sorted. A nil input is no
 // input.
 func awayPermissionIdentity(request *schema.RequestPermissionRequest, input any) AwayRequest {
-	panic("unported: mj-worker/src/acp/operator_away.rs away_permission_identity")
+	var kind, title any
+	if request.ToolCall.Kind != nil {
+		kind = string(*request.ToolCall.Kind)
+	}
+	if request.ToolCall.Title != nil {
+		title = *request.ToolCall.Title
+	}
+	// ACP metadata may enable serde_json's preserve_order feature elsewhere.
+	identity := operatorAwaySortObjects(jsonvalue.Object{
+		{Key: "kind", Value: kind},
+		{Key: "title", Value: title},
+		{Key: "input", Value: input},
+	})
+	encoded, err := jsonvalue.Marshal(identity)
+	if err != nil {
+		panic("tool permission identity serializes: " + err.Error())
+	}
+	return AwayRequestTool{Value: string(encoded)}
+}
+
+// Close drops the form's answer channel (Rust Drop of a PendingElicitation):
+// an ACP responder still waiting answers its request `cancelled`. A form
+// already answered is unaffected.
+func (e *PendingElicitation) Close() {
+	if responder, ok := e.responder.(PendingResponderAcp); ok {
+		responder.answer.drop()
+	}
+}
+
+// dropPending removes the entries matches selects, dropping each: Rust's
+// `pending.retain` drops what it removes. The caller holds the owner's lock.
+func (s *OperatorAwayState) dropPending(matches func(entry *PendingElicitation) bool) {
+	s.pending = slices.DeleteFunc(s.pending, func(entry *PendingElicitation) bool {
+		if matches(entry) {
+			entry.Close()
+			return true
+		}
+		return false
+	})
+}
+
+// hasAcpEntry reports whether bridge has an ACP form outstanding. The caller
+// holds the owner's lock.
+func (s *OperatorAwayState) hasAcpEntry(bridge uint64) bool {
+	return slices.ContainsFunc(s.pending, func(entry *PendingElicitation) bool {
+		_, acp := entry.responder.acpIdentity()
+		return entry.bridge == bridge && acp
+	})
+}
+
+// operatorAwayHistoryEqual is `Vec<serde_json::Value>` equality.
+func operatorAwayHistoryEqual(a, b []any) bool {
+	return slices.EqualFunc(a, b, acpFeaturesJSONEqual)
+}
+
+// operatorAwaySortObjects is serde_json's Value::sort_all_objects: every
+// object's members in key order, at any depth.
+func operatorAwaySortObjects(value any) any {
+	switch typed := value.(type) {
+	case jsonvalue.Object:
+		keys := slices.Sorted(slices.Values(typed.Keys()))
+		sorted := make(jsonvalue.Object, 0, len(keys))
+		for _, key := range keys {
+			member, _ := typed.Get(key)
+			sorted = append(sorted, jsonvalue.Member{Key: key, Value: operatorAwaySortObjects(member)})
+		}
+		return sorted
+	case map[string]any:
+		return operatorAwaySortObjects(jsonvalue.ObjectOf(typed))
+	case []any:
+		items := make([]any, len(typed))
+		for index, item := range typed {
+			items[index] = operatorAwaySortObjects(item)
+		}
+		return items
+	}
+	return value
 }

@@ -4,7 +4,7 @@ Existing environment guidance
 
 # Delegation policy
 
-The user selected Mjolnir delegation. Use Mjolnir's `spawn`, `list_agents`, `send_message`, and `close` tools; Mjolnir supplies the configured
+The user selected Mjolnir delegation. Use Mjolnir's `spawn_worker`, `list_agents`, `send_message`, and `close` tools; Mjolnir supplies the configured
 child model and effort for each task type. Set `task_type` to `straightforward`
 for bounded work with a single clear path: locating and mapping code, running
 exact build, test, or gate commands, and small mechanical edits. Use `subtle`

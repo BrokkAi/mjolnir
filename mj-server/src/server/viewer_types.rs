@@ -37,10 +37,10 @@ pub struct ViewerSnapshot {
         std::collections::BTreeMap<String, mj_core::subagent::SubagentPolicy>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub last_oracle_choices: std::collections::BTreeMap<String, bool>,
-    pub last_supervisor_choices: std::collections::BTreeMap<String, bool>,
     #[serde(default)]
     pub oracle_configured: bool,
-    pub supervisors_available: bool,
+    #[serde(default)]
+    pub orchestrators_configured: bool,
     #[serde(default)]
     pub primary_configured: bool,
     #[serde(default)]
@@ -325,7 +325,6 @@ impl ViewerSnapshot {
                     form_holder: None,
                     notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
-                    supervisors: session.supervisors,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
@@ -503,8 +502,6 @@ impl ViewerSnapshot {
                 yolo: target.is_yolo(),
                 subagents_configured: config.subagents.is_configured(),
                 oracle_configured: config.subagents.oracle_configured(),
-                supervisors_available: config
-                    .supervisors_available_for_target(None, target.execution_policy()),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
                     target,
@@ -570,9 +567,8 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
             last_oracle_choices: state.last_oracle_choices.clone(),
-            last_supervisor_choices: state.last_supervisor_choices.clone(),
             oracle_configured: config.subagents.oracle_configured(),
-            supervisors_available: targets.iter().any(|target| target.supervisors_available),
+            orchestrators_configured: config.orchestrators_configured(),
             primary_configured: config.subagents.primary_configured(),
             operator_away: state.operator_presence.away,
             auto_afk_minutes: config.advanced.auto_afk_minutes,
@@ -661,8 +657,6 @@ pub struct ViewerSession {
     pub notifications_ignored: bool,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisors: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     #[serde(default)]
@@ -1249,7 +1243,6 @@ pub struct ViewerTarget {
     /// Whether the oracle this target would use is configured.
     #[serde(default)]
     pub oracle_configured: bool,
-    pub supervisors_available: bool,
     /// Target sizing class, used for create validation and the size picker.
     #[serde(default)]
     pub resource_allocation_kind: ResourceAllocationKind,

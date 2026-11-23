@@ -135,7 +135,6 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
             mj_core::state::SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -1102,7 +1101,6 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

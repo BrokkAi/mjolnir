@@ -284,7 +284,14 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 128c9a3de: revision-126 fixtures omitted historical harness constraints.
     connection
         .execute_batch(
-            "DROP INDEX IF EXISTS session_moves_source_environment;
+            "DROP INDEX materialized_transcript_update_ordinal;
+         DROP INDEX materialized_transcript_unsettled;
+         ALTER TABLE materialized_transcript_items DROP COLUMN detail_offset;
+         ALTER TABLE materialized_transcript_items DROP COLUMN detail_len;
+         ALTER TABLE materialized_transcript_items DROP COLUMN item_kind;
+         ALTER TABLE materialized_transcript_items DROP COLUMN settled;
+         ALTER TABLE materialized_transcript_items DROP COLUMN update_ordinal;
+         DROP INDEX IF EXISTS session_moves_source_environment;
          DROP INDEX IF EXISTS retained_move_sources_environment;
          ALTER TABLE session_moves DROP COLUMN source_environment_id;
          ALTER TABLE retained_move_sources DROP COLUMN environment_id;

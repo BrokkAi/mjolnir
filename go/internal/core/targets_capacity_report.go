@@ -16,7 +16,47 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
+
+// CapacityWindowSummary is a host's readings over a recent window.
+type CapacityWindowSummary struct {
+	WindowSeconds      uint64   `json:"window_seconds"`
+	SampleCount        uint32   `json:"sample_count"`
+	CPUPercentAvg      *float64 `json:"cpu_percent_avg"`
+	CPUPercentMax      *uint8   `json:"cpu_percent_max"`
+	MemoryUsedBytesAvg uint64   `json:"memory_used_bytes_avg"`
+	MemoryUsedBytesMax uint64   `json:"memory_used_bytes_max"`
+}
+
+// MarshalJSON writes the average as serde writes an f64, with a decimal
+// point.
+func (s CapacityWindowSummary) MarshalJSON() ([]byte, error) {
+	var average json.RawMessage
+	if s.CPUPercentAvg != nil {
+		encoded, err := jsonvalue.Marshal(*s.CPUPercentAvg)
+		if err != nil {
+			return nil, err
+		}
+		average = encoded
+	} else {
+		average = json.RawMessage("null")
+	}
+	return json.Marshal(struct {
+		WindowSeconds      uint64          `json:"window_seconds"`
+		SampleCount        uint32          `json:"sample_count"`
+		CPUPercentAvg      json.RawMessage `json:"cpu_percent_avg"`
+		CPUPercentMax      *uint8          `json:"cpu_percent_max"`
+		MemoryUsedBytesAvg uint64          `json:"memory_used_bytes_avg"`
+		MemoryUsedBytesMax uint64          `json:"memory_used_bytes_max"`
+	}{s.WindowSeconds, s.SampleCount, average, s.CPUPercentMax, s.MemoryUsedBytesAvg, s.MemoryUsedBytesMax})
+}
+
+func (s *CapacityWindowSummary) UnmarshalJSON(data []byte) error {
+	type plain CapacityWindowSummary
+	return transcriptStrictDecode(data, (*plain)(s), false)
+}
 
 // CapacitySampleStaleAfterSeconds: a reading older than this stopped
 // tracking the host. The poller samples every 30 seconds, so three missed
@@ -140,6 +180,8 @@ type HostCapacityRow struct {
 	// fleet answered.
 	HasReading            bool                `json:"has_reading"`
 	CPUPercent            *uint8              `json:"cpu_percent"`
+	EC2InstanceType       *string             `json:"ec2_instance_type,omitempty"`
+	PhysicalMemory        *HostMemoryUsage    `json:"physical_memory,omitempty"`
 	MemoryUsedBytes       uint64              `json:"memory_used_bytes"`
 	MemoryTotalBytes      uint64              `json:"memory_total_bytes"`
 	LogicalCores          uint64              `json:"logical_cores"`
@@ -194,11 +236,25 @@ func NewHostCapacityRow(target *DeploymentCapacityTarget, state *TargetCapacityS
 	}
 	if usage != nil {
 		row.CPUPercent = usage.CPUPercent
+		row.EC2InstanceType = usage.EC2InstanceType
+		row.PhysicalMemory = usage.PhysicalMemory
 		row.MemoryUsedBytes = usage.MemoryUsedBytes
 		row.MemoryTotalBytes = usage.MemoryTotalBytes
 		row.LogicalCores = usage.LogicalCores
 	}
 	return row
+}
+
+// HostMemory is the host's physical memory reading, or false without a
+// reading.
+func (r *HostCapacityRow) HostMemory() (HostMemoryUsage, bool) {
+	if !r.HasReading {
+		return HostMemoryUsage{}, false
+	}
+	if r.PhysicalMemory != nil {
+		return *r.PhysicalMemory, true
+	}
+	return HostMemoryUsage{UsedBytes: r.MemoryUsedBytes, TotalBytes: r.MemoryTotalBytes}, true
 }
 
 // Matches reports whether name selects this row: its host, or a target it

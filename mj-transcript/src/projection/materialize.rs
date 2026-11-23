@@ -419,8 +419,16 @@ fn canonical_item_owned(item: TranscriptItem) -> CanonicalTranscriptItem {
             terminal_refs,
             presentation: presentation.map(|boxed| *boxed),
         },
-        TranscriptBody::TerminalOutput { record } => CanonicalTranscriptBody::TerminalOutput {
+        TranscriptBody::TerminalOutput {
+            record,
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
+        } => CanonicalTranscriptBody::TerminalOutput {
             record: canonical_terminal_output(&record),
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
         },
         TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan },
         TranscriptBody::PlanProposal { proposal_id, plan } => {
@@ -468,8 +476,16 @@ fn canonical_item_shared(item: &TranscriptItem) -> CanonicalTranscriptItem {
             terminal_refs: terminal_refs.clone(),
             presentation: presentation.as_deref().cloned(),
         },
-        TranscriptBody::TerminalOutput { record } => CanonicalTranscriptBody::TerminalOutput {
+        TranscriptBody::TerminalOutput {
+            record,
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
+        } => CanonicalTranscriptBody::TerminalOutput {
             record: canonical_terminal_output(record),
+            output_line_count: *output_line_count,
+            first_error_line: first_error_line.clone(),
+            detail_trimmed: *detail_trimmed,
         },
         TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan: plan.clone() },
         TranscriptBody::PlanProposal { proposal_id, plan } => {
@@ -497,66 +513,8 @@ pub fn materialized_session_from_canonical(
     let transcript = canonical
         .transcript
         .iter()
-        .map(|item| {
-            let body = match &item.body {
-                CanonicalTranscriptBody::User { content } => TranscriptBody::User {
-                    content: content.clone(),
-                },
-                CanonicalTranscriptBody::Message { event } => TranscriptBody::Message {
-                    event: event.clone(),
-                },
-                // Chunks stored before streamed text was merged on the way in
-                // arrive one per token; collapse them as they come back.
-                CanonicalTranscriptBody::Agent { chunks, streaming } => TranscriptBody::Agent {
-                    chunks: coalesced_chunks(chunks),
-                    streaming: *streaming,
-                },
-                CanonicalTranscriptBody::Thought { chunks, streaming } => TranscriptBody::Thought {
-                    chunks: coalesced_chunks(chunks),
-                    streaming: *streaming,
-                },
-                CanonicalTranscriptBody::Tool {
-                    call,
-                    terminal_outputs,
-                    terminal_refs,
-                    presentation,
-                } => TranscriptBody::Tool {
-                    call: call.clone().into(),
-                    terminal_outputs: terminal_outputs
-                        .iter()
-                        .map(materialized_terminal_output)
-                        .collect(),
-                    terminal_refs: terminal_refs.clone(),
-                    presentation: presentation.clone().map(Box::new),
-                },
-                CanonicalTranscriptBody::TerminalOutput { record } => {
-                    TranscriptBody::TerminalOutput {
-                        record: materialized_terminal_output(record),
-                    }
-                }
-                CanonicalTranscriptBody::Plan { plan } => {
-                    TranscriptBody::Plan { plan: plan.clone() }
-                }
-                CanonicalTranscriptBody::PlanProposal { proposal_id, plan } => {
-                    TranscriptBody::PlanProposal {
-                        proposal_id: proposal_id.clone(),
-                        plan: plan.clone(),
-                    }
-                }
-                CanonicalTranscriptBody::System { text } => {
-                    TranscriptBody::System { text: text.clone() }
-                }
-            };
-            Ok(Arc::new(TranscriptItem {
-                stable_id: item.stable_id.clone(),
-                position: item.position,
-                latest_content_event_ordinal: item.latest_content_event_ordinal,
-                created_at_ms: item.created_at_ms,
-                last_changed_at_ms: item.last_changed_at_ms,
-                body,
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
+        .map(|item| Arc::new(materialized_transcript_item_from_canonical(item)))
+        .collect();
     Ok(MaterializedSession {
         session_id: session_id.into(),
         applied_event_ordinal: canonical.event_frontier,
@@ -582,6 +540,70 @@ pub fn materialized_session_from_canonical(
     })
 }
 
+pub fn materialized_transcript_item_from_canonical(
+    item: &CanonicalTranscriptItem,
+) -> TranscriptItem {
+    let body = match &item.body {
+        CanonicalTranscriptBody::User { content } => TranscriptBody::User {
+            content: content.clone(),
+        },
+        CanonicalTranscriptBody::Message { event } => TranscriptBody::Message {
+            event: event.clone(),
+        },
+        // Chunks stored before streamed text was merged on the way in
+        // arrive one per token; collapse them as they come back.
+        CanonicalTranscriptBody::Agent { chunks, streaming } => TranscriptBody::Agent {
+            chunks: coalesced_chunks(chunks),
+            streaming: *streaming,
+        },
+        CanonicalTranscriptBody::Thought { chunks, streaming } => TranscriptBody::Thought {
+            chunks: coalesced_chunks(chunks),
+            streaming: *streaming,
+        },
+        CanonicalTranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            terminal_refs,
+            presentation,
+        } => TranscriptBody::Tool {
+            call: call.clone().into(),
+            terminal_outputs: terminal_outputs
+                .iter()
+                .map(materialized_terminal_output)
+                .collect(),
+            terminal_refs: terminal_refs.clone(),
+            presentation: presentation.clone().map(Box::new),
+        },
+        CanonicalTranscriptBody::TerminalOutput {
+            record,
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
+        } => TranscriptBody::TerminalOutput {
+            record: materialized_terminal_output(record),
+            output_line_count: *output_line_count,
+            first_error_line: first_error_line.clone(),
+            detail_trimmed: *detail_trimmed,
+        },
+        CanonicalTranscriptBody::Plan { plan } => TranscriptBody::Plan { plan: plan.clone() },
+        CanonicalTranscriptBody::PlanProposal { proposal_id, plan } => {
+            TranscriptBody::PlanProposal {
+                proposal_id: proposal_id.clone(),
+                plan: plan.clone(),
+            }
+        }
+        CanonicalTranscriptBody::System { text } => TranscriptBody::System { text: text.clone() },
+    };
+    TranscriptItem {
+        stable_id: item.stable_id.clone(),
+        position: item.position,
+        latest_content_event_ordinal: item.latest_content_event_ordinal,
+        created_at_ms: item.created_at_ms,
+        last_changed_at_ms: item.last_changed_at_ms,
+        body,
+    }
+}
+
 /// Project archived queued commands onto the durable queue shape. Kept apart
 /// from the whole-projection build so a caller that only has to restore the
 /// queue does not have to rebuild the transcript with it.
@@ -601,7 +623,15 @@ pub fn materialized_queued_prompts_from_canonical(
                     }
                 }
             },
-            content: prompt.content.clone(),
+            // As in `queued_command_content`, the projection keeps no payload
+            // for a mailbox wake; the archive carries it only for the worker's
+            // queue. A restored wake shows and starts as a live one does, and
+            // the next checkpoint reads it from the worker again.
+            content: if mj_core::continuation::carries_mailbox_wake(&prompt.command_id) {
+                Vec::new()
+            } else {
+                prompt.content.clone()
+            },
             queued_at_ms: prompt.queued_at_ms,
             accepted_ordinal: None,
         })

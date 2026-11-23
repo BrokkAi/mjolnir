@@ -6,7 +6,10 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 152;
+/// Revision 153 is breaking because it publishes references to cold transcript
+/// bodies. Older readers cannot resolve them and older writers cannot clear them.
+#[cfg(test)]
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 153;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -2999,12 +3002,48 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         migrate_orchestrator_policies(&transaction)?;
         transaction.execute(
             "UPDATE schema_compatibility SET minimum_compatible_version = ?1 WHERE singleton = 1",
-            [MINIMUM_COMPATIBLE_VERSION],
+            [152],
         )?;
         transaction.execute_batch(
             "INSERT INTO schema_migrations(version, applied_at)
                  VALUES (152, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version=152;",
+        )?;
+        transaction.commit()?;
+    }
+    // Revision 153 is breaking: older readers cannot resolve spilled bodies,
+    // and older writers can replace the body without clearing its detail pointer.
+    if version < 153 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "ALTER TABLE materialized_transcript_items ADD COLUMN detail_offset INTEGER;
+             ALTER TABLE materialized_transcript_items ADD COLUMN detail_len INTEGER;
+             ALTER TABLE materialized_transcript_items ADD COLUMN item_kind TEXT NOT NULL DEFAULT '';
+             ALTER TABLE materialized_transcript_items ADD COLUMN settled INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE materialized_transcript_items ADD COLUMN update_ordinal INTEGER NOT NULL DEFAULT 0;
+             UPDATE materialized_transcript_items
+             SET update_ordinal = COALESCE(latest_content_event_ordinal, position),
+                 item_kind = CASE WHEN json_valid(body_json)
+                     THEN COALESCE(json_extract(body_json, '$.kind'), '') ELSE '' END,
+                 settled = CASE
+                     WHEN NOT json_valid(body_json) THEN 1
+                     WHEN json_extract(body_json, '$.kind') IN ('agent', 'thought')
+                          AND COALESCE(json_extract(body_json, '$.streaming'), 0) != 0 THEN 0
+                     WHEN json_extract(body_json, '$.kind') = 'tool'
+                          AND COALESCE(json_extract(body_json, '$.call.status'), 'pending')
+                              IN ('pending', 'in_progress') THEN 0
+                     ELSE 1
+                 END;
+             CREATE INDEX materialized_transcript_update_ordinal
+                 ON materialized_transcript_items (session_id, update_ordinal, position, stable_id);
+             CREATE INDEX materialized_transcript_unsettled
+                 ON materialized_transcript_items (session_id, position, stable_id) WHERE settled = 0;
+             UPDATE schema_compatibility
+                 SET minimum_compatible_version = 153 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (153, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=153;",
         )?;
         transaction.commit()?;
     }
@@ -3697,6 +3736,31 @@ fn create_baseline_schema(connection: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
+pub(super) fn restore_pre153_transcript_layout(connection: &Connection) {
+    if !legacy_schema::table_has_column(
+        connection,
+        "materialized_transcript_items",
+        "detail_offset",
+    )
+    .unwrap()
+    {
+        return;
+    }
+
+    connection
+        .execute_batch(
+            "DROP INDEX materialized_transcript_update_ordinal;
+         DROP INDEX materialized_transcript_unsettled;
+         ALTER TABLE materialized_transcript_items DROP COLUMN detail_offset;
+         ALTER TABLE materialized_transcript_items DROP COLUMN detail_len;
+         ALTER TABLE materialized_transcript_items DROP COLUMN item_kind;
+         ALTER TABLE materialized_transcript_items DROP COLUMN settled;
+         ALTER TABLE materialized_transcript_items DROP COLUMN update_ordinal;",
+        )
+        .unwrap();
+}
+
+#[cfg(test)]
 pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible: i64) {
     let connection = Connection::open(path).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
@@ -3939,7 +4003,9 @@ mod reader_tests {
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("orchestrator-policies.sqlite");
-        let mut connection = open_writer(&path).unwrap();
+        drop(open_writer(&path).unwrap());
+        stamp_schema_version(&path, 151);
+        let mut connection = Connection::open(&path).unwrap();
         let mjolnir = serde_json::json!({
             "mode": "mjolnir",
             "subtle": { "model": "preserved", "effort": "high" }
@@ -3952,13 +4018,12 @@ mod reader_tests {
             ("none", Some(serde_json::json!({"mode": "none"})), true),
             ("absent", None, true),
         ] {
-            let mut session = super::super::tests::session(id, "project");
-            session.supervisors = enabled;
+            let session = super::super::tests::session(id, "project");
             state_io::insert_session(&transaction, &session).unwrap();
             transaction
                 .execute(
-                    "UPDATE sessions SET subagents = ?2 WHERE session_id = ?1",
-                    params![id, policy.as_ref().map(ToString::to_string)],
+                    "UPDATE sessions SET subagents = ?2, supervisors = ?3 WHERE session_id = ?1",
+                    params![id, policy.as_ref().map(ToString::to_string), enabled],
                 )
                 .unwrap();
             transaction
@@ -3978,11 +4043,10 @@ mod reader_tests {
         }
         transaction
             .execute_batch(
-                "DELETE FROM schema_migrations WHERE version=152;
-             UPDATE schema_compatibility SET minimum_compatible_version=151;
-             PRAGMA user_version=151;
-             CREATE TRIGGER interrupt_152 BEFORE INSERT ON schema_migrations WHEN NEW.version=152
-             BEGIN SELECT RAISE(ABORT, 'fixture interruption'); END;",
+                "CREATE TRIGGER interrupt_152 BEFORE INSERT ON schema_migrations WHEN NEW.version=152
+             BEGIN SELECT RAISE(ABORT, 'fixture interruption'); END;
+             CREATE TRIGGER stop_at_152 BEFORE INSERT ON schema_migrations WHEN NEW.version > 152
+             BEGIN SELECT RAISE(ABORT, 'fixture revision 152 boundary'); END;",
             )
             .unwrap();
         transaction.commit().unwrap();
@@ -4004,7 +4068,8 @@ mod reader_tests {
         connection
             .execute_batch("DROP TRIGGER interrupt_152")
             .unwrap();
-        migrate_schema(&connection).unwrap();
+        let error = migrate_schema(&connection).unwrap_err();
+        assert!(error.to_string().contains("fixture revision 152 boundary"));
 
         let schema = read_schema_state(&connection).unwrap();
         assert_eq!(
@@ -4653,6 +4718,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
         restore_review_state_schema(&connection, 63);
@@ -4980,6 +5046,7 @@ mod reader_tests {
         // there are no lifecycle columns. Rewinding the ledger makes the next
         // open apply revision 130.
         let connection = Connection::open(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         legacy_schema::ensure_session_container_override_columns(&connection).unwrap();
         connection
             .execute_batch(
@@ -5268,6 +5335,7 @@ mod reader_tests {
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
         restore_review_state_schema(&connection, 76);
+        restore_pre153_transcript_layout(&connection);
         // Restore the previous table definition and migration ledger, retaining
         // a real row so the forward migration proves it copies existing data.
         connection
@@ -5385,6 +5453,106 @@ mod reader_tests {
         );
     }
 
+    #[test]
+    fn revision_153_backfills_transcript_metadata_and_refuses_revision_152() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        save_session_to(&path, &super::super::tests::session("details", "project")).unwrap();
+        stamp_schema_version(&path, 152);
+        let previous = Connection::open(&path).unwrap();
+        let before = read_schema_state(&previous).unwrap();
+        assert_eq!(before.revision, 152);
+        assert_eq!(before.minimum_compatible, Some(152));
+        before.ensure_supported_by(152).unwrap();
+        let cases = [
+            (
+                r#"{"kind":"agent","chunks":[],"streaming":true}"#,
+                Some(10),
+                "agent",
+                false,
+            ),
+            (
+                r#"{"kind":"agent","chunks":[],"streaming":false}"#,
+                Some(11),
+                "agent",
+                true,
+            ),
+            (
+                r#"{"kind":"thought","chunks":[],"streaming":true}"#,
+                None,
+                "thought",
+                false,
+            ),
+            (
+                r#"{"kind":"tool","call":{"status":"in_progress"}}"#,
+                None,
+                "tool",
+                false,
+            ),
+            (r#"{"kind":"tool","call":{}}"#, None, "tool", false),
+            (
+                r#"{"kind":"tool","call":{"status":"completed"}}"#,
+                None,
+                "tool",
+                true,
+            ),
+            (
+                r#"{"kind":"terminal_output","record":{}}"#,
+                None,
+                "terminal_output",
+                true,
+            ),
+        ];
+        for (position, (json, ordinal, _, _)) in (1_i64..).zip(cases) {
+            previous
+                .execute(
+                    "INSERT INTO materialized_transcript_items(
+                     session_id, stable_id, position, latest_content_event_ordinal,
+                     created_at_ms, last_changed_at_ms, body_json
+                 ) VALUES ('details', ?1, ?2, ?3, 1, 1, ?4)",
+                    params![position.to_string(), position, ordinal, json],
+                )
+                .unwrap();
+        }
+        drop(previous);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, 153);
+        assert_eq!(state.minimum_compatible, Some(153));
+        assert!(matches!(
+            state
+                .ensure_supported_by(152)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 153
+            }
+        ));
+        for (position, (json, ordinal, kind, settled)) in (1_i64..).zip(cases) {
+            let stored = upgraded.query_row(
+                "SELECT body_json, item_kind, settled, update_ordinal, detail_offset, detail_len
+                 FROM materialized_transcript_items WHERE session_id = 'details' AND position = ?1",
+                [position],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                          row.get::<_, bool>(2)?, row.get::<_, i64>(3)?,
+                          row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?)),
+            ).unwrap();
+            assert_eq!(
+                stored,
+                (
+                    json.to_owned(),
+                    kind.to_owned(),
+                    settled,
+                    ordinal.unwrap_or(position),
+                    None,
+                    None
+                )
+            );
+        }
+    }
+
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
     fn stamp_schema_version(path: &Path, version: i64) {
@@ -5393,6 +5561,9 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 153 {
+            restore_pre153_transcript_layout(&connection);
+        }
         if version < 146 {
             for (table, column) in [
                 ("session_turn_selections", "category"),
@@ -5711,7 +5882,7 @@ mod reader_tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         };
         super::super::usage::record_child_accounting(&connection, &relation, Some("subtle"))
             .unwrap();
@@ -5845,6 +6016,7 @@ mod reader_tests {
         let mut session = super::super::tests::session("existing", "project");
         save_session_to(&path, &session).unwrap();
         let connection = Connection::open(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         drop_environment_schema(&connection);
         restore_pre145_review_columns(&connection);
         connection
@@ -5893,6 +6065,7 @@ mod reader_tests {
             save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
         }
         let connection = Connection::open(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
         restore_review_state_schema(&connection, 55);
@@ -6117,6 +6290,7 @@ mod reader_tests {
         let record = super::super::tests::session("steered-session", "project");
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
         restore_review_state_schema(&connection, 47);
@@ -6151,6 +6325,7 @@ mod reader_tests {
         let record = super::super::tests::session("preserved-session", "project");
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
         restore_review_state_schema(&connection, 45);
@@ -6184,6 +6359,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         restore_github_v84_schema(&connection);
         restore_pre101_subagent_preference(&connection);
         restore_review_state_schema(&connection, 38);
@@ -6924,6 +7100,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         drop_environment_schema(&connection);
         // Rewind to revision 115, then store what a revision-115 build kept:
         // a top-level prompt, a child's spawn instructions and a destroyed
@@ -7062,6 +7239,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
+        restore_pre153_transcript_layout(&connection);
         drop_environment_schema(&connection);
         // Rewind to revision 116 and store what a revision-116 build left:
         // intents of a closed child, of a stopped session that still names a
@@ -7586,6 +7764,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         {
             let connection = open_writer(&path).unwrap();
+            restore_pre153_transcript_layout(&connection);
             connection
                 .execute_batch(
                     "ALTER TABLE sessions DROP COLUMN closing_consent;
@@ -7621,6 +7800,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         {
             let connection = open_writer(&path).unwrap();
+            restore_pre153_transcript_layout(&connection);
             connection
                 .execute_batch(
                     "DROP TABLE host_snapshot_cache;
@@ -7654,6 +7834,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         {
             let connection = open_writer(&path).unwrap();
+            restore_pre153_transcript_layout(&connection);
             connection
                 .execute_batch(
                     "DROP TABLE ec2_move_grants;

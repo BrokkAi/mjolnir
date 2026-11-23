@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::v1::schema::ToolCall;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
@@ -32,10 +33,19 @@ use mj_client::daemon::{
     SessionTextMatch, SessionTextMatchKind, WikiHitBlock, WikiHitTranscript, WikiIndexState,
     WikiRow, WikiSessionInfo, WikiSessionStatus, WikiStatus,
 };
+use mj_core::archive::CanonicalTranscriptBody;
 use mj_core::config::{Config, HarnessKind};
-use mj_core::state::{SessionRecord, State};
+use mj_core::state::{SessionRecord, State, TranscriptBody};
+use mj_core::transcript::{
+    TerminalOutputRecord, TerminalOutputs, TerminalRecord, ToolCallPresentation,
+    materialized_chunks_text, materialized_content_text,
+};
+use mj_transcript::transcript::{
+    materialized_tool_call_presentation, tool_output, tool_output_is_error,
+};
+use serde_json::{Value, json};
 use sessionwiki::adapters::{Adapter, Discovered, Store};
-use sessionwiki::model::{Message, Role, Session};
+use sessionwiki::model::{Message, Role, Session, ToolEvent, ToolSummary};
 
 use crate::database::load_config_and_state;
 use mj_store::managed_archive::managed_checkpoint_archive_name;
@@ -289,20 +299,45 @@ impl MjolnirAdapter {
         let snapshot = mj_checkpoint::archive::verify_archive_streaming(&archive.path)
             .with_context(|| format!("read checkpoint {}", archive.path.display()))?
             .canonical_session;
-        let mut evidence = provenance::Evidence::default();
+        let mut index = TranscriptIndex::default();
         for item in &snapshot.transcript {
-            if let mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } = &item.body {
-                evidence.observe(call, item.created_at_ms);
-            }
+            index.observe_boundary(&item.stable_id, item.position);
+            let text = match &item.body {
+                CanonicalTranscriptBody::User { content } => user_message(content),
+                CanonicalTranscriptBody::Agent { chunks, .. } => agent_message(chunks),
+                CanonicalTranscriptBody::Message { event } => {
+                    (Role::Tool, mj_core::mailbox::render_mailbox_event(event))
+                }
+                CanonicalTranscriptBody::Tool {
+                    call,
+                    presentation,
+                    terminal_outputs,
+                    terminal_refs,
+                } => {
+                    index.tool(
+                        &item.stable_id,
+                        item.position,
+                        item.created_at_ms,
+                        call,
+                        presentation.as_ref(),
+                        (terminal_outputs, terminal_refs),
+                    );
+                    continue;
+                }
+                CanonicalTranscriptBody::TerminalOutput { record, .. } => {
+                    index.terminals.standalone(record);
+                    continue;
+                }
+                _ => continue,
+            };
+            index.plain(item.position, item.created_at_ms, text);
         }
-        let messages = summary_messages(
-            mj_transcript::summary::TranscriptSummary::from_snapshot_keeping(&snapshot, usize::MAX),
-        );
-        Ok(IndexedTranscript {
-            messages,
-            title: snapshot.session.session_title.clone(),
-            evidence,
-        })
+        Ok(
+            index.finish(snapshot.session.session_title, |records, call| {
+                let terminals: Vec<_> = records.iter().map(TerminalOutputRecord::from).collect();
+                fill_tool_output(call, &terminals)
+            }),
+        )
     }
 
     /// The conversation of a session that has not stopped, read from the
@@ -312,17 +347,7 @@ impl MjolnirAdapter {
         let projection = crate::database::load_materialized_session(session_id)
             .with_context(|| format!("read the stored transcript of session {session_id}"))?
             .with_context(|| format!("no stored transcript for session {session_id}"))?;
-        let mut evidence = provenance::Evidence::default();
-        for item in &projection.transcript {
-            if let mj_core::state::TranscriptBody::Tool { call, .. } = &item.body {
-                evidence.observe(&call.value(), item.created_at_ms);
-            }
-        }
-        Ok(IndexedTranscript {
-            messages: projected_messages(&projection),
-            title: projection.session_title.clone(),
-            evidence,
-        })
+        Ok(projected_transcript(&projection))
     }
 
     /// The stable key for one session: its checkpoint directory and id. The
@@ -444,121 +469,221 @@ pub fn newest_checkpoint_archive(session_id: &str) -> Result<Option<PathBuf>> {
     Ok(newest.map(|(_, path)| path))
 }
 
-/// A running session's conversation, as SessionWiki stores it.
-fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<Message> {
-    summary_messages(
-        mj_transcript::summary::TranscriptSummary::from_materialized_keeping(
-            projection,
-            usize::MAX,
-        ),
-    )
-}
-
-/// A transcript summary as SessionWiki messages.
-///
-/// The summary must keep every tool call in full: a call's output line count
-/// and first error line come from its full record.
-fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<Message> {
-    use mj_transcript::summary::SummaryRole;
-    let mut messages = Vec::with_capacity(summary.entries.len());
-    for mut entry in summary.entries {
-        let role = match entry.role {
-            SummaryRole::User => Role::User,
-            SummaryRole::Assistant => Role::Assistant,
-            SummaryRole::Tool => {
-                if let Some(tool) = entry.tool.take() {
-                    messages.extend(tool_messages(tool, entry.created_at_ms));
-                    continue;
-                }
-                Role::Tool
+/// A running session's conversation and evidence, as SessionWiki stores them.
+fn projected_transcript(projection: &mj_core::state::MaterializedSession) -> IndexedTranscript {
+    let mut index = TranscriptIndex::default();
+    for item in &projection.transcript {
+        index.observe_boundary(&item.stable_id, item.position);
+        let text = match &item.body {
+            TranscriptBody::User { content } => user_message(content),
+            TranscriptBody::Agent { chunks, .. } => agent_message(chunks),
+            TranscriptBody::Message { event } => {
+                (Role::Tool, mj_core::mailbox::render_mailbox_event(event))
             }
-            // SessionWiki has no external-message role. Preserve sender
-            // provenance as received context in its tool channel.
-            SummaryRole::Message => Role::Tool,
-            SummaryRole::Plan => continue,
+            TranscriptBody::Tool {
+                call,
+                presentation,
+                terminal_outputs,
+                terminal_refs,
+            } => {
+                index.tool(
+                    &item.stable_id,
+                    item.position,
+                    item.created_at_ms,
+                    &call.value(),
+                    presentation.as_deref(),
+                    (terminal_outputs, terminal_refs),
+                );
+                continue;
+            }
+            TranscriptBody::TerminalOutput { record, .. } => {
+                index.terminals.standalone(record);
+                continue;
+            }
+            _ => continue,
         };
-        messages.extend(message(role, entry.body(), entry.created_at_ms));
+        index.plain(item.position, item.created_at_ms, text);
     }
-    messages
+    index.finish(projection.session_title.clone(), |records, call| {
+        fill_tool_output(call, records)
+    })
 }
 
-/// One tool call as SessionWiki's call and result parts, which its sync folds
-/// into a single summary line such as `→ execute(cargo test) ⇒ ok · 12 lines`.
-/// The result carries the output only so SessionWiki can count its lines and
-/// quote the first line of a failure; the index keeps neither in full.
-fn tool_messages(tool: serde_json::Value, created_at_ms: i64) -> Vec<Message> {
-    use sessionwiki::model::{ToolCall, ToolResult};
-    let ts = DateTime::from_timestamp_millis(created_at_ms);
-    let text = |key: &str| tool.get(key).and_then(serde_json::Value::as_str);
-    let id = text("toolCallId").map(str::to_owned);
-    // The title names the file or command; the presentation summary is often
-    // a single word such as "Edit".
-    let description = tool
-        .pointer("/call/title")
-        .and_then(serde_json::Value::as_str)
-        .filter(|title| !title.trim().is_empty())
-        .or_else(|| text("name"))
-        .unwrap_or("tool");
-    let mut messages = vec![Message::tool_call(
-        ts,
-        ToolCall {
-            id: id.clone(),
-            name: text("kind").unwrap_or("other").to_owned(),
-            args: serde_json::json!({ "description": description }),
-        },
-    )];
-    let failed = match text("status") {
-        Some("completed") => false,
-        Some("failed") => true,
-        _ => return messages,
-    };
-    let is_error = failed
-        || tool.get("signal").is_some()
-        || tool
-            .get("exit_code")
-            .and_then(serde_json::Value::as_i64)
-            .is_some_and(|code| code != 0);
-    messages.push(Message::tool_result(
-        ts,
-        ToolResult {
-            call_id: id,
-            text: tool_output(tool),
-            is_error,
-        },
-    ));
-    messages
-}
-
-/// The text a finished tool call produced, as Mjolnir's transcript shows it.
-fn tool_output(mut tool: serde_json::Value) -> String {
-    let Some(call) = tool.get_mut("call").and_then(|call| {
-        serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.take()).ok()
-    }) else {
-        return String::new();
-    };
-    let terminals: Vec<mj_core::transcript::TerminalOutputRecord> = tool
-        .get_mut("terminals")
-        .map(serde_json::Value::take)
-        .and_then(|value| match value {
-            serde_json::Value::Object(object) => Some(object),
-            _ => None,
-        })
-        .into_iter()
-        .flatten()
-        .filter_map(|(id, mut record)| {
-            record
-                .as_object_mut()?
-                .insert("terminal_id".into(), id.into());
-            serde_json::from_value(record).ok()
-        })
-        .collect();
-    mj_transcript::transcript::tool_content_details(
-        &call.content,
-        &terminals,
-        call.raw_output.as_ref(),
-        mj_transcript::transcript::tool_status(&call.status),
+fn user_message(content: &[Value]) -> (Role, String) {
+    (
+        Role::User,
+        mj_transcript::summary::user_text(materialized_content_text(content)),
     )
-    .join("\n")
+}
+
+fn agent_message(chunks: &[Value]) -> (Role, String) {
+    (Role::Assistant, materialized_chunks_text(chunks))
+}
+
+/// Visit each item once. Legacy tools with terminal links are resolved after
+/// visiting the last item because standalone close-time output can follow
+/// the call it belongs to. Modern summaries are complete at the tool row.
+struct TranscriptIndex<'a, R> {
+    messages: Vec<(u64, Message)>,
+    evidence: provenance::Evidence,
+    context_start: u64,
+    terminals: TerminalOutputs<'a, R>,
+    legacy_tools: Vec<(usize, &'a str, ToolCall)>,
+}
+
+impl<R: TerminalRecord> Default for TranscriptIndex<'_, R> {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            evidence: provenance::Evidence::default(),
+            context_start: 0,
+            terminals: TerminalOutputs::default(),
+            legacy_tools: Vec::new(),
+        }
+    }
+}
+
+impl<'a, R: TerminalRecord> TranscriptIndex<'a, R> {
+    fn observe_boundary(&mut self, stable_id: &str, position: u64) {
+        if mj_core::archive::is_context_boundary(stable_id) {
+            self.context_start = self.context_start.max(position);
+        }
+    }
+
+    fn plain(&mut self, position: u64, created_at_ms: i64, (role, text): (Role, String)) {
+        if let Some(message) = message(role, text, created_at_ms) {
+            self.messages.push((position, message));
+        }
+    }
+
+    fn tool(
+        &mut self,
+        stable_id: &'a str,
+        position: u64,
+        created_at_ms: i64,
+        value: &Value,
+        presentation: Option<&ToolCallPresentation>,
+        (terminal_outputs, terminal_refs): (&'a [R], &'a [String]),
+    ) {
+        let title = value
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.trim().is_empty());
+        let status = value.get("status").and_then(Value::as_str);
+        let settled = matches!(status, Some("completed" | "failed"));
+        let compact = presentation.and_then(|p| {
+            Some((
+                p.output_line_count?,
+                p.output_is_error?,
+                &p.first_error_line,
+            ))
+        });
+        let call = if title.is_none() || (settled && compact.is_none()) {
+            serde_json::from_value::<ToolCall>(value.clone()).ok()
+        } else {
+            None
+        };
+        if compact.is_some() || call.is_some() {
+            self.evidence
+                .observe_tool(value, presentation, created_at_ms);
+        }
+        let description = title.map(str::to_owned).unwrap_or_else(|| {
+            let summary = call.as_ref().map_or_else(
+                || "[invalid tool call]".to_owned(),
+                |call| materialized_tool_call_presentation(presentation, call).summary,
+            );
+            mj_core::activity::verdict::tool_title(&summary)
+        });
+        let mut summary = ToolSummary {
+            name: value
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("other")
+                .to_owned(),
+            args: json!({ "description": description }),
+            output: None,
+            lines: None,
+            is_error: None,
+        };
+        if settled {
+            if let Some((lines, is_error, first_error_line)) = compact {
+                summary.output = first_error_line.clone();
+                summary.lines = Some(lines as usize);
+                summary.is_error = Some(is_error);
+            } else if let Some(call) = call {
+                if terminal_outputs.is_empty() && terminal_refs.is_empty() {
+                    set_tool_output(&mut summary, fill_tool_output(&call, &[]));
+                } else {
+                    self.terminals
+                        .tool(stable_id, terminal_outputs, terminal_refs);
+                    self.legacy_tools
+                        .push((self.messages.len(), stable_id, call));
+                }
+            } else {
+                let outcome =
+                    mj_transcript::summary::ToolOutcome::from_raw_output(value.get("rawOutput"));
+                set_tool_output(
+                    &mut summary,
+                    (
+                        String::new(),
+                        status == Some("failed") || outcome.is_error(),
+                    ),
+                );
+            }
+        }
+        self.messages.push((
+            position,
+            Message {
+                role: Role::Tool,
+                text: sessionwiki::tool_summary::render_summary(&summary),
+                ts: DateTime::from_timestamp_millis(created_at_ms),
+                tool: Some(ToolEvent::Summary(summary)),
+                is_thought: false,
+            },
+        ));
+    }
+
+    fn finish(
+        mut self,
+        title: Option<String>,
+        legacy_output: impl Fn(&[R], &ToolCall) -> (String, bool),
+    ) -> IndexedTranscript {
+        let in_context = |position| self.context_start == 0 || position > self.context_start;
+        for (index, stable_id, call) in self.legacy_tools {
+            let (position, message) = &mut self.messages[index];
+            if in_context(*position)
+                && let Some(ToolEvent::Summary(summary)) = &mut message.tool
+            {
+                set_tool_output(
+                    summary,
+                    legacy_output(&self.terminals.for_tool(stable_id), &call),
+                );
+                message.text = sessionwiki::tool_summary::render_summary(summary);
+            }
+        }
+        IndexedTranscript {
+            messages: self
+                .messages
+                .into_iter()
+                .filter_map(|(position, message)| in_context(position).then_some(message))
+                .collect(),
+            title,
+            evidence: self.evidence,
+        }
+    }
+}
+
+fn fill_tool_output(call: &ToolCall, terminals: &[TerminalOutputRecord]) -> (String, bool) {
+    (
+        tool_output(call, terminals),
+        tool_output_is_error(call, terminals),
+    )
+}
+
+fn set_tool_output(summary: &mut ToolSummary, (output, is_error): (String, bool)) {
+    summary.lines = Some(output.lines().count());
+    summary.is_error = Some(is_error);
+    summary.output = Some(output);
 }
 
 /// One indexed message, or nothing when the item carried no text.
@@ -569,6 +694,7 @@ fn message(role: Role, text: String, created_at_ms: i64) -> Option<Message> {
         text,
         ts: DateTime::from_timestamp_millis(created_at_ms),
         tool: None,
+        is_thought: false,
     })
 }
 
@@ -712,6 +838,9 @@ impl Adapter for MjolnirAdapter {
             tool: TOOL,
             path: PathBuf::from(key),
             project,
+            raw_cwd: None,
+            operational_edited_paths: Vec::new(),
+            compacted_prefix: false,
             started: record.and_then(|record| parse_time(&record.created_at)),
             ended: record.and_then(|record| parse_time(&record.updated_at)),
             title,
@@ -733,6 +862,10 @@ impl Adapter for MjolnirAdapter {
 struct SharedMjolnirAdapter(Arc<MjolnirAdapter>);
 
 impl Adapter for SharedMjolnirAdapter {
+    fn native_id(&self, key: &str) -> Option<String> {
+        self.0.native_id(key)
+    }
+
     fn name(&self) -> &'static str {
         self.0.name()
     }
@@ -1226,7 +1359,7 @@ fn write_session_tags(
 /// unsupported harnesses (aider, gemini, cline, ...) are dropped, so they can
 /// neither trigger a home-directory walk nor add unrelated search results.
 ///
-/// Kimi Code, Grok Build, Muse and DSH use SessionWiki's public adapters
+/// Kimi Code, Grok Build, Muse, DSH and Antigravity CLI use SessionWiki's public adapters
 /// directly, one per enabled profile home. DSH histories are searchable even
 /// though Mjolnir does not yet import them for native resume.
 ///
@@ -1283,8 +1416,11 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
                 adapters.push(Box::new(sessionwiki::adapters::Dsh::in_home(home)));
             }
             HarnessKind::OpenCode => {}
-            // SessionWiki has no adapter for Antigravity's session records yet.
-            HarnessKind::Antigravity => {}
+            HarnessKind::Antigravity => {
+                adapters.push(Box::new(sessionwiki::adapters::Antigravity::cli_in_home(
+                    home,
+                )));
+            }
         }
     }
     adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
@@ -1901,6 +2037,9 @@ fn copy_session(session: &Session) -> Session {
         tool: session.tool,
         path: session.path.clone(),
         project: session.project.clone(),
+        raw_cwd: session.raw_cwd.clone(),
+        operational_edited_paths: session.operational_edited_paths.clone(),
+        compacted_prefix: session.compacted_prefix,
         started: session.started,
         ended: session.ended,
         title: session.title.clone(),
@@ -1913,6 +2052,7 @@ fn copy_session(session: &Session) -> Session {
                 text: message.text.clone(),
                 ts: message.ts,
                 tool: message.tool.clone(),
+                is_thought: message.is_thought,
             })
             .collect(),
         touched: session.touched.clone(),
@@ -2897,16 +3037,21 @@ pub fn wiki_continuation(
     }
     let harness = harness_tools::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
-    let native_session_id = match harness {
-        HarnessKind::Codex => sessionwiki::index::native_id_of(&path.to_string_lossy()),
-        _ => crate::import::native_session_id_from_path(harness, path),
-    }
-    .with_context(|| {
-        format!(
-            "no {tool} session id in the indexed path {}",
-            path.display()
-        )
-    })?;
+    anyhow::ensure!(
+        crate::import::native_sessions_enumerable(harness),
+        "Mjolnir cannot import {tool} sessions"
+    );
+    anyhow::ensure!(
+        harness != HarnessKind::Codex || !path.to_string_lossy().contains('\u{1f}'),
+        "Mjolnir can only import Codex sessions with a rollout log; this row is from the Codex history database"
+    );
+    let native_session_id = crate::import::native_session_id_from_path(harness, path)
+        .with_context(|| {
+            format!(
+                "no {tool} session id in the indexed path {}",
+                path.display()
+            )
+        })?;
     Ok(WikiContinuation::Import {
         harness,
         native_session_id,
@@ -3025,21 +3170,52 @@ mod tests {
         /// A Codex rollout's file name is a timestamp and the thread UUID, so
         /// the stem alone is not the id `mj import codex --session` takes.
         #[test]
-        fn a_codex_row_is_imported_with_the_uuid_from_its_rollout_name() {
-            for path in [
-                "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T09-15-00-7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl",
-                "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T09-15-00-7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl.zst",
-                "/home/user/.codex/thread_history_1.sqlite\u{1f}7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44",
-            ] {
+        fn a_codex_row_preserves_literal_source_and_archived_rollout_ids() {
+            let directory = tempfile::tempdir().unwrap();
+            let id = "7F3A1C20-0B11-4A55-9E0D-2C8A5D6F1B44";
+            let path = directory
+                .path()
+                .join(format!("rollout-2026-09-18T09-15-00-{id}.jsonl"));
+            let from_id = |id: &str| WikiContinuation::Import {
+                harness: HarnessKind::Codex,
+                native_session_id: id.to_owned(),
+            };
+            for path in [&path, &path.with_extension("jsonl.zst")] {
                 assert_eq!(
-                    wiki_continuation("abc123", "codex", Path::new(path), false).unwrap(),
-                    WikiContinuation::Import {
-                        harness: HarnessKind::Codex,
-                        native_session_id: "7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44".to_owned(),
-                    },
-                    "{path}"
+                    wiki_continuation("abc123", "codex", path, false).unwrap(),
+                    from_id(id)
                 );
             }
+            std::fs::write(
+                &path,
+                r#"{"type":"session_meta","payload":{"id":"Literal-ID","session_id":"parent"}}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                wiki_continuation("abc123", "codex", &path, false).unwrap(),
+                from_id("Literal-ID")
+            );
+        }
+
+        #[test]
+        fn searchable_native_rows_without_an_importable_source_cannot_continue() {
+            for tool in ["antigravity", "dsh", "opencode"] {
+                let error = wiki_continuation("abc123", tool, Path::new("/home/session"), false)
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains(&format!("cannot import {tool}")),
+                    "{error}"
+                );
+            }
+            let path = Path::new(
+                "/home/user/.codex/thread_history_1.sqlite\u{1f}7F3A1C20-0B11-4A55-9E0D-2C8A5D6F1B44",
+            );
+            let error = wiki_continuation("abc123", "codex", path, false).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("only import Codex sessions with a rollout log")
+            );
         }
     }
 
@@ -3325,7 +3501,6 @@ mod tests {
         SessionRecord {
             oracle_choice: None,
             oracle: true,
-            supervisors: false,
             notifications_ignored: false,
             project: None,
             target_runtime: None,
@@ -3478,44 +3653,169 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_command_is_indexed_as_one_line_without_its_output() {
-        let tool = serde_json::json!({
-            "toolCallId": "call-9",
-            "name": "cargo",
-            "kind": "execute",
-            "status": "failed",
-            "call": {
+    fn tool_retention_preserves_wiki_summary_and_file_evidence() {
+        use agent_client_protocol::v1::schema::SessionUpdate;
+        use mj_core::relay::{RelayEvent, RelayObservation, relay_event_digest};
+        use mj_core::state::{MaterializedSession, TranscriptItem};
+        use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+        use mj_transcript::transcript::compact_tool_call_for_retention;
+
+        fn relay(session: &mut MaterializedSession, observation: RelayObservation) {
+            let mut event = RelayEvent {
+                format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+                ordinal: session.applied_event_ordinal + 1,
+                previous_digest: session.applied_event_digest.clone(),
+                digest: String::new(),
+                recorded_at_ms: 1234,
+                command_id: None,
+                observation,
+            };
+            event.digest = relay_event_digest(&event).unwrap();
+            let mutation = project_relay_event(session, &event).unwrap().mutation;
+            apply_committed_projection_event(session, &event, mutation).unwrap();
+        }
+
+        for (status, terminal_exit, raw_exit, lines) in [
+            ("failed", None, None, 3),
+            ("completed", Some(101), None, 6),
+            ("completed", None, Some(101), 3),
+        ] {
+            let mut projection = MaterializedSession::empty("retained-tool");
+            let mut content = vec![
+                json!({"type":"content","content":{"type":"text","text":
+                    format!("  \n  error[E0063]: missing field  \n{}", "x".repeat(96 * 1024))}}),
+                json!({"type":"diff","path":"src\\new.rs","newText":"new line\n"}),
+                json!({"type":"diff","path":"src/unchanged.rs","newText":"",
+                "_meta":{(mj_core::diff::DIFF_PATCH_META_KEY):{
+                    "text":"", "insertions":0, "deletions":0, "truncated":true
+                }}}),
+            ];
+            if terminal_exit.is_some() {
+                content.push(json!({"type":"terminal","terminalId":"term-1"}));
+            }
+            let call = json!({
                 "toolCallId": "call-9",
                 "title": "cargo test",
                 "kind": "execute",
-                "status": "failed",
-                "content": [{"type": "terminal", "terminalId": "term-1"}]
-            },
-            "terminals": {
-                "term-1": {"output": "error[E0063]: missing field\nmore detail", "exit_code": 101}
+                "status": "in_progress",
+                "content": content,
+                "rawInput": {"command": format!("cargo test {}", "x".repeat(96 * 1024))},
+                "rawOutput": {"exit_code": raw_exit, "diagnostics": "x".repeat(96 * 1024)},
+                "_meta": {"extra": "large payload"},
+            });
+            relay(
+                &mut projection,
+                RelayObservation::SessionUpdate {
+                    update: Box::new(SessionUpdate::ToolCall(
+                        serde_json::from_value(call).unwrap(),
+                    )),
+                },
+            );
+            let TranscriptBody::Tool {
+                presentation: Some(pending),
+                ..
+            } = &projection.transcript[0].body
+            else {
+                panic!("missing pending presentation")
+            };
+            assert!(!pending.source.is_empty());
+            assert_eq!(pending.output_line_count, None);
+
+            relay(&mut projection, RelayObservation::SessionUpdate {
+                update: Box::new(serde_json::from_value(json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": "call-9", "status": status,
+                })).unwrap()),
+            });
+            if terminal_exit.is_some() {
+                let old = projected_transcript(&projection);
+                assert!(old.messages[0].text.contains(" ⇒ ok · "));
+                relay(
+                    &mut projection,
+                    RelayObservation::TerminalOutput {
+                        terminal_id: "term-1".into(),
+                        output: "stdout\nstderr".into(),
+                        truncated: false,
+                        exit_code: terminal_exit,
+                        signal: None,
+                    },
+                );
             }
-        });
-        let mut session = Session {
-            id: "s".into(),
-            tool: "mjolnir",
-            path: PathBuf::new(),
-            project: String::new(),
-            started: None,
-            ended: None,
-            title: String::new(),
-            subagent: false,
-            messages: tool_messages(tool, 0),
-            touched: Vec::new(),
-            edits: Vec::new(),
-        };
+            let TranscriptBody::Tool {
+                presentation: Some(settled),
+                ..
+            } = &projection.transcript[0].body
+            else {
+                panic!("missing settled presentation")
+            };
+            assert!(settled.source.is_empty());
+            assert_eq!(settled.output_line_count, Some(lines));
+            assert_eq!(settled.output_is_error, Some(true));
 
-        sessionwiki::tool_summary::fold_tool_parts(&mut session);
+            let before = projected_transcript(&projection);
+            assert_eq!(
+                before.messages[0].text,
+                format!(
+                    "→ execute(cargo test) ⇒ error · {lines} lines — error[E0063]: missing field"
+                ),
+            );
+            if status == "completed" {
+                assert_eq!(
+                    before.evidence.paths,
+                    BTreeSet::from(["src/new.rs".into(), "src/unchanged.rs".into()])
+                );
+                assert_eq!(before.evidence.edits.len(), 1);
+                assert_eq!(
+                    before.evidence.edits[0].kind,
+                    sessionwiki::model::EditKind::Write
+                );
+                assert!(before.evidence.edits[0].snippet.contains("new line"));
+            } else {
+                assert!(before.evidence.paths.is_empty());
+                assert!(before.evidence.edits.is_empty());
+            }
 
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(
-            session.messages[0].text,
-            "→ execute(cargo test) ⇒ error · 3 lines — error[E0063]: missing field"
-        );
+            // Verify the old raw fallback produces the same result and
+            // compacting a legacy row fills in the missing metadata.
+            let modern = TranscriptItem::clone(&projection.transcript[0]);
+            let mut legacy = modern.clone();
+            let TranscriptBody::Tool { presentation, .. } = &mut legacy.body else {
+                unreachable!()
+            };
+            *presentation = None;
+            let expected_edits = serde_json::to_value(&before.evidence.edits).unwrap();
+            projection.transcript[0] = Arc::new(legacy.clone());
+            let raw = projected_transcript(&projection);
+            assert_eq!(raw.messages[0].text, before.messages[0].text);
+            assert_eq!(raw.evidence.paths, before.evidence.paths);
+            assert_eq!(
+                serde_json::to_value(&raw.evidence.edits).unwrap(),
+                expected_edits
+            );
+
+            for mut item in [modern, legacy] {
+                assert!(compact_tool_call_for_retention(&mut item.body));
+                assert!(!compact_tool_call_for_retention(&mut item.body));
+                let compact_json = serde_json::to_vec(&item.body).unwrap();
+                assert!(compact_json.len() < 1024, "{} bytes", compact_json.len());
+                item.body = serde_json::from_slice(&compact_json).unwrap();
+                let TranscriptBody::Tool {
+                    presentation: Some(trimmed),
+                    ..
+                } = &item.body
+                else {
+                    panic!("missing compacted presentation")
+                };
+                assert!(trimmed.source.is_empty() && trimmed.detail_trimmed);
+                projection.transcript[0] = Arc::new(item);
+                let after = projected_transcript(&projection);
+                assert_eq!(after.messages[0].text, before.messages[0].text);
+                assert_eq!(after.evidence.paths, before.evidence.paths);
+                assert_eq!(
+                    serde_json::to_value(&after.evidence.edits).unwrap(),
+                    expected_edits
+                );
+            }
+        }
     }
 
     #[test]
@@ -3949,6 +4249,9 @@ mod tests {
             tool: "mjolnir",
             path: PathBuf::from("/sessions/0123456789abcdef0123456789abcdef"),
             project: "/home/dev/project".into(),
+            raw_cwd: None,
+            operational_edited_paths: Vec::new(),
+            compacted_prefix: false,
             started: DateTime::from_timestamp_millis(1_700_000_000_000),
             ended: None,
             title: "the archived session".into(),
@@ -3960,6 +4263,7 @@ mod tests {
                     text: text.to_owned(),
                     ts: None,
                     tool: None,
+                    is_thought: false,
                 })
                 .collect(),
             touched: Vec::new(),
@@ -4139,7 +4443,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         }
     }
 
@@ -4649,7 +4953,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             }
             .into(),
         );
@@ -5315,6 +5619,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "antigravity",
                 "claude-code",
                 "codex",
                 "codex",

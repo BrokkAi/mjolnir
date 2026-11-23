@@ -1,13 +1,12 @@
 use super::*;
 
-/// Every top-level session of every harness gets the message-only `mj-agents`
-/// server, and that server carries ask_oracle; a child never does.
+/// Workspace owners can use their configured oracle.
 pub fn oracle_launch_enabled(
     session: &mj_core::state::SessionRecord,
-    managed_child: bool,
+    owns_environment: bool,
     choices: &mj_core::config::SubagentConfig,
 ) -> bool {
-    !managed_child && !session.effective_oracle(choices).is_empty()
+    owns_environment && !session.effective_oracle(choices).is_empty()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -136,7 +135,7 @@ pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child:
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-        supervisor: false,
+        orchestrator: false,
     });
     session
         .subagents
@@ -497,8 +496,8 @@ pub fn worker_launch_config_with_checkout(
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             subagent_kind: None,
-            supervisor: false,
-            supervisors_enabled: false,
+            orchestrator: false,
+            orchestrators_enabled: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
             initial_model: None,

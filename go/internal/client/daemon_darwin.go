@@ -19,8 +19,18 @@ const darwinZombieStatus = 5
 // table library cannot be used: its lookups skip zombies, so it reports an
 // exited, unreaped process as absent rather than as a zombie, and
 // `kill(pid, 0)` then calls it alive forever.
+//
+// The kernel's process table, read by `kern.proc.pid`, includes zombies;
+// Rust reads the same state through proc_pidinfo's PROC_PIDTBSDINFO.
 func ProcessIsZombie(pid uint32) bool {
-	panic("unported: mj-client/src/daemon.rs process_is_zombie (macos)")
+	if pid > 1<<31-1 {
+		return false
+	}
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", int(pid))
+	if err != nil || info == nil || info.Proc.P_pid != int32(pid) {
+		return false
+	}
+	return info.Proc.P_stat == darwinZombieStatus
 }
 
 // OwnedDaemonGroupIsAlive probes the process group a daemon leads.

@@ -2094,6 +2094,282 @@ fn a_move_checkpoint_can_verify_its_archive_without_source_harness_readiness() {
 }
 
 #[cfg(unix)]
+const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
+
+/// A worker that restarts during a mailbox wake requeues the wake as its
+/// restart continuation, and saving the failed session checkpoints that queue
+/// without a harness. The daemon's projection keeps no payload for a wake, so
+/// the latch archives the prompt the worker's queue holds at the cut. A
+/// checkpoint-only worker too old to report it saves the rest and says so: it
+/// never starts the wake, so waiting for it would never end.
+// Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
+    let reads_queue = mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL;
+    let Some(protocol) = std::env::var_os(QUEUED_WAKE_TEST_CHILD) else {
+        for protocol in [mj_core::relay::RELAY_PROTOCOL_VERSION, reads_queue - 1] {
+            let directory = tempfile::tempdir().unwrap();
+            let test_name = format!(
+                "{}::a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            IsolatedTest::new(test_name)
+                .env(QUEUED_WAKE_TEST_CHILD, protocol.to_string())
+                .env(LATCH_RELAY_MAX_PROTOCOL, protocol.to_string())
+                .env(LATCH_CHECKPOINT_ONLY, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .run();
+        }
+        return;
+    };
+    let protocol: u32 = protocol.to_str().unwrap().parse().unwrap();
+    let _writer = crate::database::install_isolated_test_writer();
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        eprintln!("the queued-wake checkpoint never returned");
+        std::process::exit(101);
+    });
+
+    /// Refuses every target command, keeping the export spec it was given
+    /// and the notices it showed.
+    #[derive(Default)]
+    struct ExportRecorder {
+        exported: std::sync::Mutex<Option<CheckpointExportSpec>>,
+        notices: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for ExportRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"no target is provisioned for this test".to_vec(),
+            })
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            if command.purpose == "export target checkpoint" {
+                *self.exported.lock().unwrap() = Some(serde_json::from_reader(input)?);
+            }
+            self.execute(command)
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
+        }
+    }
+
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let profile_home = data_directory.join("profile");
+    for directory in [&relay_root, &profile_home] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    // A parent's waking message started a turn, and the worker restarted
+    // before it finished.
+    let wake_prompt = {
+        let mut relay =
+            mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                native_session_id: "native-session".into(),
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+                resumed: true,
+            })
+            .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let delivered = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "deliver-parent-task".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: "deliver-parent-task".into(),
+                command: RelayCommand::DeliverMailboxEvent {
+                    event: mj_core::mailbox::MailboxEvent {
+                        key: "parent-task".into(),
+                        source: "parent".into(),
+                        wake: true,
+                        created_at_ms: 1,
+                        body: mj_core::mailbox::MailboxEventBody::PlainText {
+                            text: "Review the migration and report what breaks.".into(),
+                        },
+                    },
+                },
+            },
+        });
+        assert!(
+            matches!(delivered.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "{delivered:?}"
+        );
+        let started = relay.claim_pending_commands(true).unwrap();
+        let [wake] = started.as_slice() else {
+            panic!("expected only the mailbox wake to start: {started:?}");
+        };
+        assert!(matches!(wake.command, RelayCommand::MailboxWake { .. }));
+        wake.command.prompt_blocks().unwrap().into_owned()
+    };
+    drop(mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap());
+
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
+    }));
+    crate::database::save_session(&session).unwrap();
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(mj_core::config::HarnessKind::Codex, profile_home),
+    );
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "project".into(),
+            repositories: vec![ProjectRepository {
+                id: "project".into(),
+                github: Some("example/project".into()),
+                local: None,
+                destination: "project".into(),
+                git_ref: None,
+                mbx_namespace: None,
+            }],
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        },
+    };
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            &relay_root,
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let executor = ExportRecorder::default();
+    let result = controller
+        .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+            LATCH_RELAY_SESSION,
+            &executor,
+            Some(&channels.control),
+            LatchExclusivity::HoldThroughClose,
+            CheckpointExportPolicy::ReuseUnchangedArchive,
+            None,
+            None,
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("a checkpoint exported to a target that refuses every command");
+    };
+    assert!(
+        format!("{error:#}").contains("no target is provisioned for this test"),
+        "{error:#}"
+    );
+    let spec = executor
+        .exported
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the checkpoint never reached its export");
+    spec.canonical_session.validate().unwrap();
+    let notices = executor.notices.lock().unwrap().clone();
+    if protocol < reads_queue {
+        assert!(
+            spec.canonical_session.queued_prompts.is_empty(),
+            "a wake this worker cannot report was archived: {:?}",
+            spec.canonical_session.queued_prompts
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.starts_with("1 queued message turn could not be saved")),
+            "the unsaved wake went unreported: {notices:?}"
+        );
+    } else {
+        let [queued] = spec.canonical_session.queued_prompts.as_slice() else {
+            panic!(
+                "expected only the wake's continuation in the archived queue: {:?}",
+                spec.canonical_session.queued_prompts
+            );
+        };
+        assert!(mj_core::continuation::is_restart_continuation(
+            &queued.command_id
+        ));
+        assert!(mj_core::continuation::carries_mailbox_wake(
+            &queued.command_id
+        ));
+        assert_eq!(
+            queued.content,
+            wake_prompt
+                .iter()
+                .map(|block| serde_json::to_value(block).unwrap())
+                .collect::<Vec<_>>()
+        );
+        assert!(notices.is_empty(), "{notices:?}");
+        // Restored, the wake shows and starts as a live one: no payload.
+        assert!(
+            mj_transcript::projection::materialized_queued_prompts_from_canonical(
+                &spec.canonical_session.queued_prompts
+            )[0]
+            .content
+            .is_empty()
+        );
+    }
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in an
@@ -3198,7 +3474,6 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
 
     let selection = mj_core::state::MoveSelection {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),
@@ -4346,4 +4621,153 @@ async fn checkpoint_report_notices_are_deduplicated_in_the_relay_transcript() {
         .await
         .unwrap();
     assert_eq!(notices(&relay.sync_snapshot().await.unwrap()).len(), 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn suspended_archive_serializes_compact_tool_and_terminal_bodies() {
+    use mj_core::relay::RelayObservation;
+    use mj_core::transcript::{TerminalOutputRecord, TranscriptBody};
+
+    if !in_close_cut_child(
+        "suspended_archive_serializes_compact_tool_and_terminal_bodies",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let data_dir = mj_core::config::data_dir();
+    let relay_root = data_dir.join("relay");
+    std::fs::create_dir_all(&relay_root).unwrap();
+    let mut relay =
+        mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    for observation in [
+        RelayObservation::SessionOpened {
+            native_session_id: "native-session".into(),
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+            resumed: true,
+        },
+        RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        },
+    ] {
+        relay.record_observation(observation).unwrap();
+    }
+    let mut full_body_bytes = 0;
+    for turn in 1..=2 {
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: turn,
+            })
+            .unwrap();
+        let output = "tool output\n".repeat(8 * 1024);
+        let patch = (0..8192)
+            .map(|line| format!("changed line {line:04}\n"))
+            .collect::<String>();
+        let raw_input = "i".repeat(64 * 1024);
+        let tool = serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": format!("edit-{turn}"),
+            "title": "Edit", "kind": "edit", "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": output}},
+                {"type": "diff", "path": "notes.txt", "newText": patch},
+            ],
+            "rawInput": raw_input,
+        });
+        full_body_bytes += serde_json::to_vec(&tool).unwrap().len();
+        relay
+            .record_session_update(serde_json::from_value(tool).unwrap())
+            .unwrap();
+        let terminal_id = format!("unclaimed-{turn}");
+        let output = "one\n".repeat(64 * 1024);
+        let terminal = TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: terminal_id.clone(),
+            output: output.clone().into(),
+            truncated: false,
+            exit_code: Some(1),
+            signal: None,
+        });
+        full_body_bytes += serde_json::to_vec(&terminal).unwrap().len();
+        relay
+            .record_observation(RelayObservation::TerminalOutput {
+                terminal_id,
+                output,
+                truncated: false,
+                exit_code: Some(1),
+                signal: None,
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                autonomous: None,
+                origin: None,
+                prompt_in_flight: false,
+            })
+            .unwrap();
+    }
+    drop(relay);
+
+    let (mut controller, channels, handle) = close_cut_controller(SessionState::Running).await;
+    wait_until_the_actor_serves_again(&handle).await;
+    let archive_directory = data_dir.join("fresh-checkpoints");
+    std::fs::create_dir_all(&archive_directory).unwrap();
+    let executor = RestartCheckpointExecutor {
+        archive_directory,
+        ..Default::default()
+    };
+    let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+    let result = controller
+        .suspend_session_managed_controlled(
+            &admission,
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
+        )
+        .await;
+    channels.shutdown.shutdown().await.unwrap();
+    result.unwrap();
+
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Stopped);
+    let checkpoint = record.checkpoint.as_ref().unwrap();
+    let verified = verify_archive_streaming(&checkpoint.archive_path).unwrap();
+    let restored = mj_transcript::projection::materialized_session_from_canonical(
+        LATCH_RELAY_SESSION,
+        &verified.canonical_session,
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .transcript
+            .iter()
+            .filter(|item| item.body.detail_trimmed())
+            .count(),
+        4
+    );
+    let mut archive =
+        zip::ZipArchive::new(std::fs::File::open(&checkpoint.archive_path).unwrap()).unwrap();
+    let canonical_bytes = archive.by_name("canonical/session.json").unwrap().size();
+    assert!(
+        canonical_bytes * 5 < full_body_bytes as u64,
+        "{canonical_bytes} of {full_body_bytes}"
+    );
+    let database = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    let body_bytes: u64 = database.query_row(
+        "SELECT sum(length(CAST(body_json AS BLOB))) FROM materialized_transcript_items WHERE session_id = ?1",
+        [LATCH_RELAY_SESSION], |row| row.get(0),
+    ).unwrap();
+    assert!(
+        body_bytes * 5 < full_body_bytes as u64,
+        "{body_bytes} of {full_body_bytes}"
+    );
+
+    let details = data_dir
+        .join("tool-details")
+        .join(format!("{LATCH_RELAY_SESSION}.mjtd"));
+    assert!(details.exists());
+    crate::database::delete_session(LATCH_RELAY_SESSION).unwrap();
+    assert!(!details.exists());
 }

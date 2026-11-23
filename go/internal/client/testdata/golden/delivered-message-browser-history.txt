@@ -34,6 +34,7 @@
         "tone": "message"
       },
       {
+        "stable_id": "tool:tool-ask",
         "id": 11,
         "updated_seq": 12,
         "role": "tool",
@@ -47,6 +48,7 @@
         "tool_status": "waiting for approval"
       },
       {
+        "stable_id": "tool:tool-queued",
         "id": 12,
         "updated_seq": 12,
         "role": "tool",

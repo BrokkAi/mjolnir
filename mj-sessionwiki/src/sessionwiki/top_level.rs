@@ -159,6 +159,10 @@ pub(super) fn is_child(
 }
 
 impl Adapter for PreparedFiles {
+    fn native_id(&self, key: &str) -> Option<String> {
+        self.adapter.native_id(key)
+    }
+
     fn name(&self) -> &'static str {
         self.adapter.name()
     }

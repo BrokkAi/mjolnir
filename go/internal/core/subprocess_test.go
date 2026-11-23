@@ -205,6 +205,40 @@ func TestRunWithInputCompletesWhenChildEchoesInputLargerThanPipeBuffer(t *testin
 	}
 }
 
+func TestRunWithInputToFileDrainsStderrWhileFeedingStdin(t *testing.T) {
+	// Feed >64KB on stdin while the child writes >64KB to stderr before
+	// reading stdin, ensuring stdin writes and stderr draining run
+	// concurrently while stdout streams directly to the file.
+	input := bytes.Repeat([]byte{'x'}, 512*1024)
+	path := filepath.Join(t.TempDir(), "stdout")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	command := exec.Command("sh", "-c", `dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\0' 'e' >&2; cat`)
+	output, err := RunWithInputToFile(command, input, file)
+	if err != nil {
+		t.Fatalf("run with file stdout while draining stderr: %v", err)
+	}
+	if !output.Status.Success() {
+		t.Fatalf("status %v", output.Status)
+	}
+	if len(output.Stdout) != 0 {
+		t.Fatalf("stdout %d bytes", len(output.Stdout))
+	}
+	if !bytes.Equal(output.Stderr, bytes.Repeat([]byte{'e'}, 128*1024)) {
+		t.Fatalf("stderr %d bytes", len(output.Stderr))
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(written, input) {
+		t.Fatalf("file %d bytes", len(written))
+	}
+}
+
 func TestRunWithInputReportsChildStatusWhenChildExitsBeforeReadingAllInput(t *testing.T) {
 	// The child exits immediately without reading stdin, so the writer hits
 	// a broken pipe partway through writing. That must not surface as a

@@ -94,7 +94,7 @@ pub(super) fn viewer_capacity(
         .collect()
 }
 
-pub(super) fn host_capacity_for_target<'a>(
+pub(crate) fn host_capacity_for_target<'a>(
     metadata: &'a mj_client::runtime_feed::RuntimeMetadata,
     target_id: &str,
 ) -> Option<&'a mj_client::runtime_feed::RuntimeHostCapacity> {
@@ -104,13 +104,13 @@ pub(super) fn host_capacity_for_target<'a>(
         .find(|host| host.reading.target_ids.iter().any(|id| id == target_id))
 }
 
-pub(super) struct TargetContainerSizing {
+pub(crate) struct TargetContainerSizing {
     pub(super) remembered: Option<mj_core::state::HostContainerSize>,
     pub(super) capacity: Option<mj_core::state::HostContainerCapacity>,
-    pub(super) default: mj_core::state::HostContainerSize,
+    pub(crate) default: mj_core::state::HostContainerSize,
 }
 
-pub(super) fn target_container_sizing(
+pub(crate) fn target_container_sizing(
     template: &mj_core::config::TargetTemplate,
     metadata: &mj_client::runtime_feed::RuntimeMetadata,
     host: Option<&mj_client::runtime_feed::RuntimeHostCapacity>,

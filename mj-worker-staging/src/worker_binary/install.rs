@@ -134,14 +134,14 @@ pub fn append_subagent_policy(
     Ok(())
 }
 
-pub fn append_supervisor_policy(
+pub fn append_orchestrator_policy(
     harness: mj_core::config::HarnessKind,
     destination: &Path,
 ) -> Result<()> {
     append_staged_instructions(
         harness,
         destination,
-        mj_core::subagent::supervisor_delegation_policy(),
+        mj_core::subagent::orchestrator_delegation_policy(),
     )
 }
 
@@ -159,8 +159,8 @@ pub fn append_composed_session_instructions(
     if !text.is_empty() {
         append_staged_instructions(launch.harness, destination, &text)?;
     }
-    if launch.supervisor {
-        append_supervisor_policy(launch.harness, destination)?;
+    if launch.orchestrator {
+        append_orchestrator_policy(launch.harness, destination)?;
     }
     Ok(())
 }

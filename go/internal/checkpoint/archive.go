@@ -55,6 +55,10 @@ const zstdLevel = 1
 const zipMethodZstd uint16 = 93
 
 type RepositorySnapshot struct {
+	// OriginDeltaPack is the file holding an origin-delta snapshot's pack,
+	// when origin does not supply every object. Only an origin-delta
+	// repository (Metadata.OriginDelta set) may have one.
+	OriginDeltaPack *string
 	Metadata        core.RepositoryMetadata
 	CommittedBundle []byte
 	StagedPatch     []byte
@@ -345,6 +349,12 @@ func WriteArchiveHashed(path string, input *ArchiveInput) (string, error) {
 	return writeArchiveHashedView(path, input.view())
 }
 
+// WriteArchiveHashedWithManifest is WriteArchiveHashed that also returns the
+// manifest written into the archive.
+func WriteArchiveHashedWithManifest(path string, input *ArchiveInput) (string, core.ArchiveManifest, error) {
+	return writeArchiveHashedViewWithManifest(path, input.view())
+}
+
 func WriteArchiveHashedBorrowed(
 	path string,
 	session *core.SessionManifest,
@@ -354,7 +364,21 @@ func WriteArchiveHashedBorrowed(
 	nativeArtifacts []core.NativeArtifact,
 	repositories []RepositorySnapshot,
 ) (string, error) {
-	return writeArchiveHashedView(path, archiveInputView{
+	digest, _, err := WriteArchiveHashedBorrowedWithManifest(path, session, target, bundle, canonicalSession,
+		nativeArtifacts, repositories)
+	return digest, err
+}
+
+func WriteArchiveHashedBorrowedWithManifest(
+	path string,
+	session *core.SessionManifest,
+	target *core.TargetManifest,
+	bundle *core.BundleManifest,
+	canonicalSession *core.CanonicalSessionSnapshot,
+	nativeArtifacts []core.NativeArtifact,
+	repositories []RepositorySnapshot,
+) (string, core.ArchiveManifest, error) {
+	return writeArchiveHashedViewWithManifest(path, archiveInputView{
 		session:          session,
 		target:           target,
 		bundle:           bundle,
@@ -365,19 +389,25 @@ func WriteArchiveHashedBorrowed(
 }
 
 func writeArchiveHashedView(path string, input archiveInputView) (string, error) {
-	if err := writeArchiveInstalledView(path, input, payloadPartBytes); err != nil {
-		return "", err
+	digest, _, err := writeArchiveHashedViewWithManifest(path, input)
+	return digest, err
+}
+
+func writeArchiveHashedViewWithManifest(path string, input archiveInputView) (string, core.ArchiveManifest, error) {
+	manifest, err := writeArchiveInstalledView(path, input, payloadPartBytes)
+	if err != nil {
+		return "", core.ArchiveManifest{}, err
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("open %s: %w", path, err)
+		return "", core.ArchiveManifest{}, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer file.Close()
 	digest, err := digestReader(file)
 	if err != nil {
-		return "", fmt.Errorf("hash newly written archive %s: %w", path, err)
+		return "", core.ArchiveManifest{}, fmt.Errorf("hash newly written archive %s: %w", path, err)
 	}
-	return digest, nil
+	return digest, manifest, nil
 }
 
 func writeArchiveInstalled(path string, input *ArchiveInput) error {
@@ -385,14 +415,24 @@ func writeArchiveInstalled(path string, input *ArchiveInput) error {
 }
 
 func writeArchiveInstalledWithPartSize(path string, input *ArchiveInput, partBytes int) error {
-	return writeArchiveInstalledView(path, input.view(), partBytes)
+	_, err := writeArchiveInstalledView(path, input.view(), partBytes)
+	return err
 }
 
-func writeArchiveInstalledView(path string, input archiveInputView, partBytes int) error {
+func writeArchiveInstalledView(path string, input archiveInputView, partBytes int) (core.ArchiveManifest, error) {
 	manifest, payloads, err := prepareArchiveViewWithPartSize(input, partBytes)
 	if err != nil {
-		return err
+		return core.ArchiveManifest{}, err
 	}
+	if err := installArchive(path, &manifest, payloads); err != nil {
+		return core.ArchiveManifest{}, err
+	}
+	return manifest, nil
+}
+
+// installArchive writes the ZIP beside path and atomically renames it into
+// place: the body of Rust's write_archive_installed_view after preparation.
+func installArchive(path string, manifest *core.ArchiveManifest, payloads []pendingPayload) error {
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o777); err != nil {
 		return fmt.Errorf("create archive directory %s: %w", parent, err)
@@ -414,7 +454,7 @@ func writeArchiveInstalledView(path string, input archiveInputView, partBytes in
 	if err := restrictArchivePermissions(temporary.Name()); err != nil {
 		return err
 	}
-	if err := writeZip(temporary, parent, &manifest, payloads); err != nil {
+	if err := writeZip(temporary, parent, manifest, payloads); err != nil {
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
@@ -564,6 +604,24 @@ func (d *payloadDestination) Write(data []byte) (int, error) {
 	return count, err
 }
 
+// ArchivePurgeCancel is the shared probe for a legacy untracked purge.
+//
+// Returning true stops verification and rewriting. The daemon's probe is
+// true when the HTTP client has disconnected or the upgrade gate has closed.
+type ArchivePurgeCancel func() bool
+
+// ArchiveReadCancelled is a read stopped because ArchivePurgeCancel (or a
+// cancellation flag) asked it to.
+type ArchiveReadCancelled struct{}
+
+func (ArchiveReadCancelled) Error() string { return "archive verification cancelled" }
+
+// ArchiveVerificationCancelled is whether err is a read that
+// ArchiveReadCancelled stopped.
+func ArchiveVerificationCancelled(err error) bool {
+	return errors.Is(err, ArchiveReadCancelled{})
+}
+
 // VerifyArchiveStreaming verifies an archive without materializing repository
 // or native payloads. Every ZIP entry is still fully read, hashed, and
 // checked; the Git tar payloads (untracked files, and an unfinished
@@ -581,7 +639,20 @@ func VerifyArchiveStreaming(path string) (VerifiedArchiveMetadata, error) {
 // cancelled is set. Cancellation is checked on every physical archive read,
 // including parallel payload readers.
 func VerifyArchiveStreamingCancellable(path string, cancelled *atomic.Bool) (VerifiedArchiveMetadata, error) {
-	contents, err := readVerifiedZipCancellable(path, payloadRetentionCanonicalOnly, cancelled)
+	return verifyArchiveStreamingProbed(path, cancelled, nil)
+}
+
+// VerifyArchiveStreamingUnless is VerifyArchiveStreaming that stops when
+// cancelled returns true.
+//
+// The probe runs on every physical archive read, including parallel payload
+// readers.
+func VerifyArchiveStreamingUnless(path string, cancelled ArchivePurgeCancel) (VerifiedArchiveMetadata, error) {
+	return verifyArchiveStreamingProbed(path, nil, cancelled)
+}
+
+func verifyArchiveStreamingProbed(path string, cancelled *atomic.Bool, probe ArchivePurgeCancel) (VerifiedArchiveMetadata, error) {
+	contents, err := readVerifiedZipCancellable(path, payloadRetentionCanonicalOnly, cancelled, probe)
 	if err != nil {
 		return VerifiedArchiveMetadata{}, err
 	}
@@ -594,7 +665,7 @@ func VerifyArchiveStreamingCancellable(path string, cancelled *atomic.Bool) (Ver
 	if err != nil {
 		return VerifiedArchiveMetadata{}, err
 	}
-	reader := &archiveFile{cancelled: cancelled, file: file, len: uint64(info.Size())}
+	reader := &archiveFile{cancelled: cancelled, probe: probe, file: file, len: uint64(info.Size())}
 	digest, err := digestReader(reader.reader())
 	if err != nil {
 		return VerifiedArchiveMetadata{}, err
@@ -659,42 +730,50 @@ func committedBundleDescriptor(manifest *core.ArchiveManifest, repository *core.
 	return nil, fmt.Errorf("repository %s has no committed bundle payload", archiveDebugString(repository.Metadata.ID))
 }
 
-// ReadCheckpointRepositoryBundles reads only the repository bundles from a
-// checkpoint whose complete archive digest was already persisted after full
-// verification.
+// ReadCheckpointManifestAndRepositoryBundles reads the manifest and only the
+// legacy Git bundle payloads from a checkpoint whose complete archive digest
+// was persisted after full verification.
 //
 // Resume uses this narrow reader for its source-availability preflight. The
 // restore path still performs full payload verification before changing any
 // target state. This deliberately avoids re-hashing the archive or bundle:
 // Git validates the pack during the preflight, and restore validates every
 // payload before using it.
-func ReadCheckpointRepositoryBundles(path string) ([]CheckpointRepositoryBundle, error) {
+func ReadCheckpointManifestAndRepositoryBundles(path string) (core.ArchiveManifest, []CheckpointRepositoryBundle, error) {
 	archive, err := openArchive(path)
 	if err != nil {
-		return nil, err
+		return core.ArchiveManifest{}, nil, err
 	}
 	defer archive.close()
 	manifest, err := readCheckpointManifestFrom(archive)
 	if err != nil {
-		return nil, err
+		return core.ArchiveManifest{}, nil, err
 	}
 	repositories := make([]CheckpointRepositoryBundle, 0, len(manifest.Repositories))
 	for index := range manifest.Repositories {
 		repository := &manifest.Repositories[index]
+		if repository.Metadata.OriginDelta != nil {
+			continue
+		}
 		descriptor, err := committedBundleDescriptor(&manifest, repository)
 		if err != nil {
-			return nil, err
+			return core.ArchiveManifest{}, nil, err
 		}
 		committedBundle, err := readCheckpointPayload(archive, descriptor)
 		if err != nil {
-			return nil, err
+			return core.ArchiveManifest{}, nil, err
 		}
 		repositories = append(repositories, CheckpointRepositoryBundle{
 			Metadata:        repository.Metadata,
 			CommittedBundle: committedBundle,
 		})
 	}
-	return repositories, nil
+	return manifest, repositories, nil
+}
+
+func ReadCheckpointRepositoryBundles(path string) ([]CheckpointRepositoryBundle, error) {
+	_, bundles, err := ReadCheckpointManifestAndRepositoryBundles(path)
+	return bundles, err
 }
 
 // ReadCheckpointManifest reads the manifest of an archive that the caller has
@@ -706,6 +785,20 @@ func ReadCheckpointManifest(path string) (core.ArchiveManifest, error) {
 	}
 	defer archive.close()
 	return readCheckpointManifestFrom(archive)
+}
+
+// CheckpointArchiveUsesOriginDelta is whether the archive manifest records
+// any OriginDelta repository snapshot.
+func CheckpointArchiveUsesOriginDelta(path string) (bool, error) {
+	manifest, err := ReadCheckpointManifest(path)
+	if err != nil {
+		return false, err
+	}
+	return ManifestUsesOriginDelta(&manifest), nil
+}
+
+func ManifestUsesOriginDelta(manifest *core.ArchiveManifest) bool {
+	return carriesOriginDelta(manifest.Repositories)
 }
 
 // ReadVerifiedCheckpointPayload reads one payload from an archive whose
@@ -950,6 +1043,12 @@ func prepareArchiveViewWithPartSize(input archiveInputView, partBytes int) (core
 	}
 	var schemaVersion uint32
 	switch {
+	case input.canonicalSession.NativeUseEvidence != nil:
+		schemaVersion = core.ArchiveSchemaVersionNativeUse
+	case carriesOriginDelta(repositories):
+		schemaVersion = core.ArchiveSchemaVersionOriginDelta
+	case input.canonicalSession.Mailbox != nil:
+		schemaVersion = core.ArchiveSchemaVersionMailbox
 	case input.canonicalSession.NotificationStack != nil:
 		schemaVersion = core.ArchiveSchemaVersionNotificationStack
 	case carriesLinkedWorktrees(repositories):
@@ -1039,10 +1138,44 @@ func prepareRepository(payloads *[]pendingPayload, repository *RepositorySnapsho
 			return core.RepositoryManifest{}, fmt.Errorf("repository '%s' is a plain directory but carries Git state", metadata.ID)
 		}
 	}
+	root := "repositories/" + metadata.ID
+	if metadata.OriginDelta != nil {
+		if len(repository.CommittedBundle) > 0 ||
+			len(repository.StagedPatch) > 0 ||
+			len(repository.UnstagedPatch) > 0 ||
+			len(repository.UntrackedTar) > 0 ||
+			repository.OperationPayloads != nil ||
+			len(repository.LinkedWorktrees) > 0 {
+			return core.RepositoryManifest{}, errors.New("origin delta repository has legacy Git payloads")
+		}
+		var originDeltaPackPath *string
+		if pack := repository.OriginDeltaPack; pack != nil {
+			path := root + "/origin.pack"
+			if err := pushPayload(payloads, path, nil, 0o600,
+				core.PayloadRole{Kind: core.PayloadRoleGitOriginDeltaPack, RepositoryID: metadata.ID}); err != nil {
+				return core.RepositoryManifest{}, err
+			}
+			payload := &(*payloads)[len(*payloads)-1]
+			source := *pack
+			payload.source = &source
+			info, err := os.Stat(source)
+			if err != nil {
+				return core.RepositoryManifest{}, err
+			}
+			payload.descriptor.Size = uint64(info.Size())
+			originDeltaPackPath = &path
+		}
+		return core.RepositoryManifest{
+			Metadata:            *metadata,
+			OriginDeltaPackPath: originDeltaPackPath,
+		}, nil
+	}
+	if repository.OriginDeltaPack != nil {
+		return core.RepositoryManifest{}, errors.New("legacy repository has an origin delta pack")
+	}
 	if err := validateUntrackedTar(repository.UntrackedTar); err != nil {
 		return core.RepositoryManifest{}, err
 	}
-	root := "repositories/" + metadata.ID
 	var operation *GitOperationPayloads
 	switch {
 	case metadata.GitOperation == nil && repository.OperationPayloads == nil:
@@ -1244,7 +1377,7 @@ func pushPayload(payloads *[]pendingPayload, path string, data []byte, mode uint
 // well with Zstandard, which is substantially faster than DEFLATE for
 // checkpoint-sized history.
 func payloadCompression(role *core.PayloadRole) uint16 {
-	if role.Kind == core.PayloadRoleGitBundle {
+	if role.Kind == core.PayloadRoleGitBundle || role.Kind == core.PayloadRoleGitOriginDeltaPack {
 		return zip.Store
 	}
 	return zipMethodZstd
@@ -1610,10 +1743,14 @@ type archiveZip struct {
 }
 
 func openArchive(path string) (*archiveZip, error) {
-	return openArchiveCancellable(path, nil)
+	return openArchiveCancellable(path, nil, nil)
 }
 
-func openArchiveCancellable(path string, cancelled *atomic.Bool) (*archiveZip, error) {
+func openArchiveProbed(path string, probe ArchivePurgeCancel) (*archiveZip, error) {
+	return openArchiveCancellable(path, nil, probe)
+}
+
+func openArchiveCancellable(path string, cancelled *atomic.Bool, probe ArchivePurgeCancel) (*archiveZip, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -1623,7 +1760,7 @@ func openArchiveCancellable(path string, cancelled *atomic.Bool) (*archiveZip, e
 		file.Close()
 		return nil, fmt.Errorf("read the size of %s: %w", path, err)
 	}
-	archive := &archiveFile{cancelled: cancelled, file: file, len: uint64(info.Size())}
+	archive := &archiveFile{cancelled: cancelled, probe: probe, file: file, len: uint64(info.Size())}
 	reader, err := zip.NewReader(archive, int64(archive.len))
 	// Entry names are checked by the archive's own path rules, so an
 	// insecure name is reported there rather than refused here.
@@ -1678,18 +1815,17 @@ func (a *archiveZip) close() error {
 // archiveFile is a file read at explicit offsets, so readers share one open
 // file and each keeps its own position (through io.SectionReader). A
 // duplicated handle would share the position. Every read fails once
-// cancelled is set.
+// cancelled is set or probe returns true.
 type archiveFile struct {
 	cancelled *atomic.Bool
+	probe     ArchivePurgeCancel
 	file      *os.File
 	len       uint64
 }
 
-var errArchiveVerificationCancelled = errors.New("archive verification cancelled")
-
 func (f *archiveFile) ReadAt(buffer []byte, offset int64) (int, error) {
-	if f.cancelled != nil && f.cancelled.Load() {
-		return 0, errArchiveVerificationCancelled
+	if (f.cancelled != nil && f.cancelled.Load()) || (f.probe != nil && f.probe()) {
+		return 0, ArchiveReadCancelled{}
 	}
 	if offset < 0 {
 		return 0, errors.New("seek before the start of the archive")
@@ -1717,12 +1853,17 @@ func retainsPayload(retention payloadRetention, role *core.PayloadRole) bool {
 	}
 	switch retention {
 	case payloadRetentionRepositories:
-		return role.Kind != core.PayloadRoleNativeArtifact
+		return role.Kind != core.PayloadRoleNativeArtifact && role.Kind != core.PayloadRoleGitOriginDeltaPack
 	case payloadRetentionRestore:
-		return role.Kind != core.PayloadRoleNativeArtifact ||
-			archivePathStartsWith(role.RelativePath, core.ArchiveAttachmentDir) ||
-			archivePathStartsWith(role.RelativePath, core.ArchiveReportDir) ||
-			archivePathStartsWith(role.RelativePath, core.NativeArtifactRoot)
+		switch role.Kind {
+		case core.PayloadRoleNativeArtifact:
+			return archivePathStartsWith(role.RelativePath, core.ArchiveAttachmentDir) ||
+				archivePathStartsWith(role.RelativePath, core.ArchiveReportDir) ||
+				archivePathStartsWith(role.RelativePath, core.NativeArtifactRoot)
+		case core.PayloadRoleGitOriginDeltaPack:
+			return false
+		}
+		return true
 	case payloadRetentionCanonicalAndGitBundles:
 		return role.Kind == core.PayloadRoleGitBundle
 	}
@@ -1737,11 +1878,11 @@ func retainsParts(retention payloadRetention, role *core.PayloadRole) bool {
 }
 
 func readVerifiedZip(path string, retention payloadRetention) (verifiedZipContents, error) {
-	return readVerifiedZipCancellable(path, retention, nil)
+	return readVerifiedZipCancellable(path, retention, nil, nil)
 }
 
-func readVerifiedZipCancellable(path string, retention payloadRetention, cancelled *atomic.Bool) (verifiedZipContents, error) {
-	archive, err := openArchiveCancellable(path, cancelled)
+func readVerifiedZipCancellable(path string, retention payloadRetention, cancelled *atomic.Bool, probe ArchivePurgeCancel) (verifiedZipContents, error) {
+	archive, err := openArchiveCancellable(path, cancelled, probe)
 	if err != nil {
 		return verifiedZipContents{}, err
 	}
@@ -1898,6 +2039,18 @@ func readVerifiedZipCancellable(path string, retention payloadRetention, cancell
 			if manifest.SchemaVersion < core.ArchiveSchemaVersionNotificationStack && snapshot.NotificationStack != nil {
 				return verifiedZipContents{}, fmt.Errorf("notification stack requires archive schema %d",
 					core.ArchiveSchemaVersionNotificationStack)
+			}
+			if manifest.SchemaVersion < core.ArchiveSchemaVersionMailbox && snapshot.Mailbox != nil {
+				return verifiedZipContents{}, fmt.Errorf("archived mailbox requires archive schema %d",
+					core.ArchiveSchemaVersionMailbox)
+			}
+			if manifest.SchemaVersion < core.ArchiveSchemaVersionNativeUse && snapshot.NativeUseEvidence != nil {
+				return verifiedZipContents{}, fmt.Errorf("native-session-use evidence requires archive schema %d",
+					core.ArchiveSchemaVersionNativeUse)
+			}
+			if manifest.SchemaVersion == core.ArchiveSchemaVersionNativeUse && snapshot.NativeUseEvidence == nil {
+				return verifiedZipContents{}, fmt.Errorf("archive schema %d requires native-session-use evidence",
+					core.ArchiveSchemaVersionNativeUse)
 			}
 			if canonicalSession != nil {
 				return verifiedZipContents{}, errors.New("archive contains duplicate canonical session payloads")
@@ -2070,7 +2223,10 @@ func parseArchiveManifest(manifestBytes []byte) (core.ArchiveManifest, error) {
 		core.ArchiveSchemaVersionMessages,
 		core.ArchiveSchemaVersionReviewRefs,
 		core.ArchiveSchemaVersionLinkedWorktrees,
-		core.ArchiveSchemaVersionNotificationStack:
+		core.ArchiveSchemaVersionNotificationStack,
+		core.ArchiveSchemaVersionMailbox,
+		core.ArchiveSchemaVersionOriginDelta,
+		core.ArchiveSchemaVersionNativeUse:
 	default:
 		return core.ArchiveManifest{}, fmt.Errorf("incompatible Mjolnir archive schema %d; this build requires schema %d",
 			header.SchemaVersion, core.ArchiveSchemaVersion)
@@ -2146,9 +2302,25 @@ func carriesReviewRefs(repositories []core.RepositoryManifest) bool {
 	})
 }
 
+func carriesOriginDelta(repositories []core.RepositoryManifest) bool {
+	return slices.ContainsFunc(repositories, func(repository core.RepositoryManifest) bool {
+		return repository.Metadata.OriginDelta != nil
+	})
+}
+
 func validateManifest(manifest *core.ArchiveManifest) error {
+	hasOriginDelta := ManifestUsesOriginDelta(manifest)
+	schemaAgrees := manifest.SchemaVersion != core.ArchiveSchemaVersionOriginDelta
+	if hasOriginDelta {
+		schemaAgrees = manifest.SchemaVersion >= core.ArchiveSchemaVersionOriginDelta
+	}
+	if !schemaAgrees {
+		return errors.New("origin delta repository metadata and archive schema disagree")
+	}
 	var expectedSchema uint32
 	switch {
+	case hasOriginDelta:
+		expectedSchema = core.ArchiveSchemaVersionOriginDelta
 	case carriesLinkedWorktrees(manifest.Repositories):
 		expectedSchema = core.ArchiveSchemaVersionLinkedWorktrees
 	case carriesReviewRefs(manifest.Repositories):
@@ -2164,6 +2336,8 @@ func validateManifest(manifest *core.ArchiveManifest) error {
 	}
 	schema := manifest.SchemaVersion
 	if !(schema == expectedSchema ||
+		schema == core.ArchiveSchemaVersionNativeUse ||
+		schema == core.ArchiveSchemaVersionMailbox ||
 		schema == core.ArchiveSchemaVersionNotificationStack ||
 		schema == core.ArchiveSchemaVersionLinkedWorktrees ||
 		(schema == core.ArchiveSchemaVersionReviewRefs &&
@@ -2257,6 +2431,14 @@ func validateManifest(manifest *core.ArchiveManifest) error {
 		switch role.Kind {
 		case core.PayloadRoleCanonicalSession, core.PayloadRoleNativeArtifact:
 			continue
+		case core.PayloadRoleGitOriginDeltaPack:
+			referenced := slices.ContainsFunc(manifest.Repositories, func(repository core.RepositoryManifest) bool {
+				return repository.Metadata.ID == role.RepositoryID &&
+					repository.OriginDeltaPackPath != nil && *repository.OriginDeltaPackPath == payload.Path
+			})
+			if !referenced {
+				return fmt.Errorf("unreferenced origin delta pack '%s'", payload.Path)
+			}
 		case core.PayloadRoleGitConflictedWorktreeTar, core.PayloadRoleGitOperationStateTar:
 			recorded := slices.ContainsFunc(manifest.Repositories, func(repository core.RepositoryManifest) bool {
 				return repository.Metadata.ID == role.RepositoryID && repository.Metadata.GitOperation != nil
@@ -2308,6 +2490,44 @@ func validateManifestRepository(manifest *core.ArchiveManifest, repository *core
 	}
 	if metadata.RemoteWorkspace && metadata.BaseCommit == "" {
 		return fmt.Errorf("repository '%s' managed workspace has no base commit", metadata.ID)
+	}
+	if snapshot := metadata.OriginDelta; snapshot != nil {
+		var originMatches bool
+		switch {
+		case snapshot.HistoryCutoff:
+			originMatches = snapshot.OriginURL == nil && metadata.Origin == ""
+		case snapshot.OriginURL != nil:
+			originMatches = *snapshot.OriginURL != "" && metadata.Origin == *snapshot.OriginURL
+		default:
+			originMatches = metadata.Origin == "" && repository.OriginDeltaPackPath == nil
+		}
+		if !originMatches ||
+			snapshot.Head.Commit != metadata.HeadCommit ||
+			metadata.RemoteWorkspace ||
+			metadata.PlainDirectory ||
+			metadata.GitOperation != nil ||
+			repository.CommittedBundlePath != "" ||
+			repository.StagedPatchPath != "" ||
+			repository.UnstagedPatchPath != "" ||
+			repository.UntrackedTarPath != "" ||
+			repository.ConflictedWorktreeTarPath != nil ||
+			repository.OperationStateTarPath != nil ||
+			len(repository.LinkedWorktrees) > 0 {
+			return fmt.Errorf("repository '%s' carries incompatible origin delta metadata", metadata.ID)
+		}
+		if path := repository.OriginDeltaPackPath; path != nil {
+			role := core.PayloadRole{Kind: core.PayloadRoleGitOriginDeltaPack, RepositoryID: metadata.ID}
+			listed := slices.ContainsFunc(manifest.Payloads, func(payload core.PayloadDescriptor) bool {
+				return payload.Path == *path && payload.Size > 0 && payload.Role == role
+			})
+			if !listed {
+				return fmt.Errorf("repository '%s' is missing its origin delta pack", metadata.ID)
+			}
+		}
+		return nil
+	}
+	if repository.OriginDeltaPackPath != nil {
+		return errors.New("legacy repository has an origin delta pack")
 	}
 	type expectedPayload struct {
 		path string
@@ -2545,20 +2765,10 @@ func validateWorktreeRelativePath(path string) error {
 	return nil
 }
 
-// slashPath is a validated relative path as /-separated text.
+// slashPath is a validated relative path as /-separated text (Rust re-exports
+// mj-core's archive_path_text under this name).
 func slashPath(path string) (string, error) {
-	if err := validateArchiveRelativePath(path); err != nil {
-		return "", err
-	}
-	components := archivePathComponents(path)
-	parts := make([]string, 0, len(components))
-	for _, component := range components {
-		if !utf8.ValidString(component.text) {
-			return "", fmt.Errorf("archive path '%s' is not UTF-8", path)
-		}
-		parts = append(parts, component.text)
-	}
-	return strings.Join(parts, "/"), nil
+	return core.ArchivePathText(path)
 }
 
 func ValidateComponent(value, label string) error {

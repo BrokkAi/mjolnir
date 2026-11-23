@@ -2143,7 +2143,7 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
     .unwrap();
 
     let mut config = Config::load_from(&path).unwrap();
-    assert_eq!(config.subagents.max_concurrent, 6);
+    assert_eq!(config.subagents.max_concurrent, 8);
 
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
@@ -2151,7 +2151,7 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
     assert!(!saved.contains("[subagents]"), "{saved}");
     assert_eq!(
         Config::load_from(&path).unwrap().subagents.max_concurrent,
-        6
+        8
     );
 
     // Other settings in the same section survive the same round trip.
@@ -2183,7 +2183,7 @@ fn version_eight_enables_parent_only_subagents_by_default() {
     let config = Config::load_from(&path).unwrap();
 
     assert_eq!(config.version, CONFIG_VERSION);
-    assert_eq!(config.subagents.max_concurrent, 6);
+    assert_eq!(config.subagents.max_concurrent, 8);
 }
 
 #[test]

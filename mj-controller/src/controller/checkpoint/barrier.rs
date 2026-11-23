@@ -357,6 +357,16 @@ impl CheckpointDeferred {
         )
     }
 
+    /// A worker older than `RELAY_CHECKPOINT_MAILBOX_PROTOCOL` cannot give the
+    /// checkpoint a queued mailbox wake's prompt. Its harness starts the wake
+    /// once the barrier lets go, and the next checkpoint finds it gone.
+    pub(super) fn queued_mailbox_wake() -> Self {
+        Self(
+            "a delivered message is waiting to start its turn, and this worker cannot save it; try again once it has started"
+                .to_owned(),
+        )
+    }
+
     pub(super) fn harness_turn_during_capture() -> Self {
         Self(
             "the agent started a turn of its own while target state was captured, so this checkpoint was deferred"

@@ -123,6 +123,7 @@ pub fn check_keep_dir_consent(
     checkout: &CheckoutKey,
     keep_dir: &Path,
     consent: &UntrackedConsent,
+    move_keep: Option<&mj_core::session_keep::MoveKeep>,
 ) -> Result<()> {
     let (entries, _) = scan_keep_dir(checkout, keep_dir)?;
     if entries.is_empty() {
@@ -130,6 +131,7 @@ pub fn check_keep_dir_consent(
     }
     let uncovered: Vec<UntrackedItem> = entries
         .into_iter()
+        .filter(|entry| !move_keep.is_some_and(|keep| keep.carries(keep_dir, &entry.path)))
         .map(|entry| UntrackedItem::KeepDirFile {
             checkout: entry.checkout,
             path: entry.path,
@@ -2232,10 +2234,7 @@ pub fn capture_session_snapshot(
 ) -> Result<SessionSnapshot> {
     let capture = CaptureGit::new(runner);
     let runner: &dyn GitCommandRunner = &capture;
-    let none = CaptureConsent {
-        untracked: UntrackedConsent::None,
-        operations: OperationConsent::None,
-    };
+    let none = CaptureConsent::default();
     enum CaptureMode {
         InPlaceOnly,
         Transfer(Box<WorkspaceInventory>),
@@ -2301,6 +2300,7 @@ pub fn capture_session_snapshot(
                     &repository_key(&repository.id),
                     keep_dir,
                     &repo_consent.untracked,
+                    repo_consent.move_keep.as_ref(),
                 )
                 .map_err(|error| session_error(&repository.id, error))?;
             }
@@ -2487,6 +2487,9 @@ fn capture_in_place_metadata(
     })
 }
 
+/// Notices recorded with the final inventory of an origin-delta capture.
+pub const DROPPED_UNTRACKED_NOTICE_PREFIX: &str = "Dropped untracked items: ";
+
 fn capture_prepared_workspace(
     runner: &dyn GitCommandRunner,
     repository: &RepositoryInput,
@@ -2533,6 +2536,26 @@ fn capture_prepared_workspace(
         &repository.exclusions,
     )?;
     let mut notices = inventory.notices.clone();
+    if !inventory.raw && matches!(consent.untracked, UntrackedConsent::Any) {
+        let mut dropped = check_unconditional_blockers(&inventory)?.untracked;
+        if let Some(keep_dir) = &repository.keep_dir {
+            dropped.extend(scan_keep_dir(key, keep_dir)?.0.into_iter().map(|entry| {
+                UntrackedItem::KeepDirFile {
+                    checkout: entry.checkout,
+                    path: entry.path,
+                    identity: entry.identity,
+                }
+            }));
+        }
+        if !dropped.is_empty() {
+            // Keep the durable summary bounded. Capture can see an arbitrarily
+            // large working tree, and the manifest has its own size limit.
+            notices.push(format!(
+                "{DROPPED_UNTRACKED_NOTICE_PREFIX}{}",
+                mj_core::suspend_consent::format_dropped_untracked(&dropped)
+            ));
+        }
+    }
     notices.extend(exclusions.notice.clone());
     let original_stash = selected_stash(runner, checkout, ownership)?;
     if !inventory.raw {
@@ -2940,6 +2963,7 @@ pub fn require_managed_snapshot_without_consent(
         false,
         inputs,
         &CaptureConsent {
+            move_keep: None,
             untracked: UntrackedConsent::None,
             operations: OperationConsent::None,
         },
@@ -4302,6 +4326,7 @@ mod tests {
                 ownership,
                 &self.temp.path().join("snapshot"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -4760,6 +4785,7 @@ mod tests {
                     &ownership,
                     &r.temp.path().join("raw.pack"),
                     &CaptureConsent {
+                        move_keep: None,
                         untracked: if raw {
                             UntrackedConsent::None
                         } else {
@@ -5029,6 +5055,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &root.temp.path().join("refused.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -5085,6 +5112,7 @@ mod tests {
             &ownership,
             &r.temp.path().join("snapshot.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::None,
                 operations: OperationConsent::None,
             },
@@ -5100,6 +5128,7 @@ mod tests {
             &ownership,
             &r.temp.path().join("snapshot.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Shown(vec![item_stash(
                     original[0].commit.clone(),
                     original[0].message.clone(),
@@ -5208,6 +5237,7 @@ mod tests {
                 (
                     "a".into(),
                     CaptureConsent {
+                        move_keep: None,
                         untracked: UntrackedConsent::Shown(vec![scoped_item_path(
                             &a.checkout,
                             repository_key("a"),
@@ -5219,6 +5249,7 @@ mod tests {
                 (
                     "b".into(),
                     CaptureConsent {
+                        move_keep: None,
                         untracked: UntrackedConsent::Shown(vec![scoped_item_path(
                             &a.checkout,
                             repository_key("a"),
@@ -5374,6 +5405,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &pack_base,
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -5407,6 +5439,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &pack_base,
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -5493,6 +5526,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &root.temp.path().join("quoted.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -5597,6 +5631,7 @@ mod tests {
                 &CheckoutOwnership::Managed,
                 &root.temp.path().join("refused.pack"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -5761,6 +5796,7 @@ mod tests {
                 &CheckoutOwnership::Managed,
                 &root.temp.path().join("refused.pack"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Shown(shown),
                     operations: OperationConsent::None,
                 },
@@ -6059,6 +6095,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &root.temp.path().join("refused.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -6182,6 +6219,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &root.temp.path().join("structure.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -6234,6 +6272,7 @@ mod tests {
                 ownership,
                 &root.temp.path().join("work.pack"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -6310,6 +6349,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &root.temp.path().join("refused.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -6350,6 +6390,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &root.temp.path().join("invalid-provider.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::Any,
                 operations: OperationConsent::Any,
             },
@@ -6505,6 +6546,7 @@ mod tests {
                 &CheckoutOwnership::Managed,
                 &root.temp.path().join("refused.pack"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -6639,6 +6681,7 @@ mod tests {
                 &CheckoutOwnership::Managed,
                 &root.temp.path().join("refused.pack"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -6749,6 +6792,7 @@ mod tests {
                 &CheckoutOwnership::Managed,
                 &root.temp.path().join("refused.pack"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -6805,6 +6849,7 @@ mod tests {
                 &CheckoutOwnership::Managed,
                 &root.temp.path().join("refused"),
                 &CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::Any,
                 },
@@ -7021,6 +7066,7 @@ mod tests {
                     (
                         input.id.clone(),
                         CaptureConsent {
+                            move_keep: None,
                             untracked: UntrackedConsent::Any,
                             operations: OperationConsent::Any,
                         },
@@ -7445,6 +7491,7 @@ mod tests {
             repositories: [(
                 "workspace".to_owned(),
                 CaptureConsent {
+                    move_keep: None,
                     untracked: UntrackedConsent::Shown(vec![shown_item]),
                     operations: OperationConsent::None,
                 },
@@ -7492,6 +7539,7 @@ mod tests {
             &inv2["workspace"].checkout,
             &keep_dir,
             &UntrackedConsent::None,
+            None,
         )
         .expect_err("keep-dir check must refuse unapproved keep file");
         assert!(
@@ -7500,6 +7548,35 @@ mod tests {
                 Some(SnapshotRefused::Untracked(_))
             ),
             "expected Untracked refusal for keep-dir file, got: {err:#}"
+        );
+        // Blanket discard consent covers the final inventory, and the
+        // resulting manifest can report what was omitted after preflight.
+        fs::write(
+            r.checkout.join("late-scratch.txt"),
+            "new scratch
+",
+        )
+        .unwrap();
+        let consent = SessionCaptureConsent {
+            repositories: BTreeMap::from([(
+                "workspace".to_owned(),
+                CaptureConsent {
+                    untracked: UntrackedConsent::Any,
+                    operations: OperationConsent::None,
+                    move_keep: None,
+                },
+            )]),
+        };
+        let snapshot = capture_session_snapshot(&FileGit, &[input], &consent).unwrap();
+        let notice = snapshot.repositories["workspace"]
+            .notices
+            .iter()
+            .find(|notice| notice.starts_with(DROPPED_UNTRACKED_NOTICE_PREFIX))
+            .unwrap();
+        assert!(notice.starts_with("Dropped untracked items: 2"), "{notice}");
+        assert!(
+            notice.contains("late-scratch.txt") && notice.contains(".mj/keep/note.txt"),
+            "{notice}"
         );
     }
 }

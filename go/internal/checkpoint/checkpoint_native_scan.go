@@ -356,11 +356,35 @@ func collectKimiRegistryArtifacts(home string, sessionID string, output *[]core.
 	if !found {
 		return errors.New("Kimi native session state artifact is missing")
 	}
+	// Kimi ACP sessions run without a workspace registry; a missing one is
+	// not part of the session (#1622).
 	workspacesPath := core.Join(home, "workspaces.json")
 	info, err := os.Lstat(workspacesPath)
-	if err != nil {
+	switch {
+	case err == nil:
+		if err := collectKimiWorkspaceRegistry(workspacesPath, info, sourceWorkspace, output); err != nil {
+			return err
+		}
+	case errors.Is(err, fs.ErrNotExist):
+	default:
 		return fmt.Errorf("read Kimi workspace registry %s: %w", workspacesPath, err)
 	}
+
+	indexPath := core.Join(home, "session_index.jsonl")
+	info, err = os.Lstat(indexPath)
+	switch {
+	case err == nil:
+		return collectKimiSessionIndex(indexPath, info, sessionID, output)
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("read Kimi session index %s: %w", indexPath, err)
+	}
+}
+
+// collectKimiWorkspaceRegistry selects the session's source workspace from
+// Kimi's workspace registry.
+func collectKimiWorkspaceRegistry(workspacesPath string, info fs.FileInfo, sourceWorkspace string, output *[]core.NativeArtifact) error {
 	if checkpointIsSymlink(info) || !info.Mode().IsRegular() {
 		return errors.New("Kimi workspace registry is not a regular file")
 	}
@@ -372,11 +396,13 @@ func collectKimiRegistryArtifacts(home string, sessionID string, output *[]core.
 	if err != nil {
 		return fmt.Errorf("parse Kimi workspace registry: %w", err)
 	}
-	workspace, ok := checkpointJSONPointer(workspaces, "/workspaces/"+sourceWorkspace)
+	registry, _ := workspaces.(jsonvalue.Object)
+	entries, _ := registry.Get("workspaces")
+	entriesObject, _ := entries.(jsonvalue.Object)
+	workspace, ok := entriesObject.Get(sourceWorkspace)
 	if !ok {
 		return fmt.Errorf("Kimi workspace %s is missing from registry", checkpointDebugString(sourceWorkspace))
 	}
-	registry, _ := workspaces.(jsonvalue.Object)
 	version, _ := registry.Get("version")
 	selected, err := jsonvalue.Marshal(jsonvalue.Object{
 		{Key: "version", Value: version},
@@ -391,12 +417,12 @@ func collectKimiRegistryArtifacts(home string, sessionID string, output *[]core.
 		Data:         core.NativeArtifactDataBytes(selected),
 		Mode:         fileMode(info),
 	})
+	return nil
+}
 
-	indexPath := core.Join(home, "session_index.jsonl")
-	info, err = os.Lstat(indexPath)
-	if err != nil {
-		return fmt.Errorf("read Kimi session index %s: %w", indexPath, err)
-	}
+// collectKimiSessionIndex selects the session's entries from Kimi's session
+// index.
+func collectKimiSessionIndex(indexPath string, info fs.FileInfo, sessionID string, output *[]core.NativeArtifact) error {
 	if checkpointIsSymlink(info) || !info.Mode().IsRegular() {
 		return errors.New("Kimi session index is not a regular file")
 	}
@@ -459,40 +485,6 @@ func checkpointReadLine(reader *bufio.Reader) (string, bool, error) {
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 	}
 	return line, true, nil
-}
-
-// checkpointJSONPointer is serde_json's Value::pointer.
-func checkpointJSONPointer(value any, pointer string) (any, bool) {
-	if pointer == "" {
-		return value, true
-	}
-	if !strings.HasPrefix(pointer, "/") {
-		return nil, false
-	}
-	target := value
-	for _, token := range strings.Split(pointer, "/")[1:] {
-		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
-		switch current := target.(type) {
-		case jsonvalue.Object:
-			next, ok := current.Get(token)
-			if !ok {
-				return nil, false
-			}
-			target = next
-		case []any:
-			if strings.HasPrefix(token, "+") || (strings.HasPrefix(token, "0") && len(token) != 1) {
-				return nil, false
-			}
-			index, err := strconv.ParseUint(token, 10, 64)
-			if err != nil || index >= uint64(len(current)) {
-				return nil, false
-			}
-			target = current[index]
-		default:
-			return nil, false
-		}
-	}
-	return target, true
 }
 
 // checkpointCloneJSON is Value::clone for a decoded JSON value.

@@ -1038,6 +1038,7 @@ mod tests {
         let mut db = open(&path).unwrap();
         let subscription = subscription();
         push_subscribe_with(&db, subscription.clone()).unwrap();
+        super::super::schema::restore_pre153_transcript_layout(&db);
         db.execute_batch(
             "DROP TABLE push_entry_deliveries;
              DROP TABLE push_entries;

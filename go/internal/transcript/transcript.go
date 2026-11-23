@@ -43,16 +43,124 @@ const unnamedCommandSummary = "…"
 
 // ToolSummaryVersion is the parser-rule version stored with cached tool
 // summaries.
-const ToolSummaryVersion uint8 = 8
+const ToolSummaryVersion uint8 = 11
 
-// CompactToolCallForRetention reduces a tool call to what a reader still
-// needs, once a verified checkpoint holds the whole of it.
-//
-// Tool output is where a projection's bytes are: on one measured session,
-// 561 MB of 635 MiB. Behind a checkpoint nothing reads it — the checkpoint
-// archive carries the complete transcript, and restoring it brings the output
-// back — so what stays here is what the transcript still shows: which tool
-// ran, on what, with what result, and how many lines each edit changed.
+const errorLineBytes = 256
+const editSnippetBytes = 512
+
+// truncateUTF8 is text cut to at most maxBytes at a character boundary
+// (Rust's floor_char_boundary).
+func truncateUTF8(text string, maxBytes int) string {
+	if maxBytes >= len(text) {
+		return text
+	}
+	for maxBytes > 0 && !utf8.RuneStart(text[maxBytes]) {
+		maxBytes--
+	}
+	return text[:maxBytes]
+}
+
+// firstErrorLine is the first non-blank line of a failed tool's output,
+// bounded to errorLineBytes; nil when the tool did not fail or printed
+// nothing.
+func firstErrorLine(output string, isError bool) *string {
+	if !isError {
+		return nil
+	}
+	for _, line := range rustLines(output) {
+		if line = strings.TrimSpace(line); line != "" {
+			line = truncateUTF8(line, errorLineBytes)
+			return &line
+		}
+	}
+	return nil
+}
+
+// ToolOutput is everything a tool call shows as its output: its content,
+// terminal outputs and raw output, one detail per line.
+func ToolOutput(call *acp.ToolCall, terminalOutputs []core.TerminalOutputRecord) string {
+	return strings.Join(ToolContentDetails(call.Content, terminalOutputs, call.RawOutput, core.ToolStatusOf(toolCallStatus(call))), "\n")
+}
+
+// ToolOutputIsError reports whether a tool call failed, by its status, its
+// raw output or any of its terminals.
+func ToolOutputIsError(call *acp.ToolCall, terminalOutputs []core.TerminalOutputRecord) bool {
+	var rawOutput any
+	if call.RawOutput != nil {
+		rawOutput, _ = jsonvalue.Parse(call.RawOutput)
+	}
+	outcome := ToolOutcomeFromRawOutput(rawOutput)
+	for i := range terminalOutputs {
+		outcome.ObserveTerminal(terminalOutputs[i].ExitCode, terminalOutputs[i].Signal)
+	}
+	return toolCallStatus(call) == acp.ToolCallStatusFailed || outcome.IsError()
+}
+
+// enrichSettledTool captures compact output and edit evidence after all
+// parts of a tool event have been applied, including a terminal arriving
+// after ACP settlement. body is a pointer to the interface so a Tool body,
+// held by value, can be replaced; a stored presentation is copied before it
+// changes, because other snapshots share it.
+func enrichSettledTool(body *core.TranscriptBody) {
+	tool, ok := (*body).(core.TranscriptBodyTool)
+	if !ok {
+		return
+	}
+	switch tool.Call.TypedStatus() {
+	case acp.ToolCallStatusCompleted, acp.ToolCallStatusFailed:
+	default:
+		return
+	}
+	if tool.Presentation != nil && tool.Presentation.DetailTrimmed {
+		return
+	}
+	call, err := tool.Call.Decode()
+	if err != nil {
+		slog.Warn("could not enrich a stored tool call", "error", err)
+		return
+	}
+	var presentation core.ToolCallPresentation
+	if tool.Presentation != nil {
+		presentation = *tool.Presentation
+	} else {
+		presentation = ToolCallPresentation(&call)
+	}
+	output := ToolOutput(&call, tool.TerminalOutputs)
+	isError := ToolOutputIsError(&call, tool.TerminalOutputs)
+	lineCount := uint64(len(rustLines(output)))
+	presentation.OutputLineCount = &lineCount
+	presentation.OutputIsError = &isError
+	presentation.FirstErrorLine = firstErrorLine(output, isError)
+	presentation.EditSnippets = nil
+	if toolCallStatus(&call) == acp.ToolCallStatusCompleted {
+		for i := range call.Content {
+			diff := call.Content[i].Diff
+			if call.Content[i].Kind != acp.ToolCallContentKindDiff || diff == nil {
+				continue
+			}
+			path := strings.ReplaceAll(diff.Path, "\\", "/")
+			patch := core.PatchOf(&schema.Diff{Path: diff.Path, OldText: diff.OldText, NewText: diff.NewText, Meta: diff.Meta})
+			if path != "" && patch.Text != "" {
+				kind := core.ToolEditKindEdit
+				if patch.Created {
+					kind = core.ToolEditKindWrite
+				}
+				presentation.EditSnippets = append(presentation.EditSnippets, core.ToolEditSnippet{
+					Path:    path,
+					Kind:    kind,
+					Snippet: truncateUTF8(patch.Text, editSnippetBytes),
+				})
+			}
+		}
+	}
+	presentation.Source = core.PackedText{}
+	tool.Presentation = &presentation
+	*body = tool
+}
+
+// CompactToolCallForRetention keeps the visible tool summary and the
+// identities needed to attach a late terminal result. The caller is
+// responsible for persisting the full body.
 //
 // Returns whether anything changed, so a caller can skip the write. body is
 // a pointer to the interface so a Tool body, held by value, can be replaced.
@@ -61,20 +169,45 @@ func CompactToolCallForRetention(body *core.TranscriptBody) bool {
 	if !ok {
 		return false
 	}
-	changed := false
+	switch tool.Call.TypedStatus() {
+	case acp.ToolCallStatusCompleted, acp.ToolCallStatusFailed:
+	default:
+		return false
+	}
+	if tool.Presentation != nil && tool.Presentation.DetailTrimmed {
+		return false
+	}
+	if tool.Presentation == nil || tool.Presentation.OutputLineCount == nil || tool.Presentation.OutputIsError == nil {
+		enrichSettledTool(body)
+		tool = (*body).(core.TranscriptBodyTool)
+	}
+	if tool.Presentation == nil {
+		return false
+	}
+	presentation := *tool.Presentation
+	presentation.Source = core.PackedText{}
+	presentation.DetailTrimmed = true
+	tool.Presentation = &presentation
+	refs := slices.Clone(tool.TerminalRefs)
+	ids := slices.Clone(tool.Call.TerminalIDs())
+	for i := range tool.TerminalOutputs {
+		ids = append(ids, tool.TerminalOutputs[i].TerminalID)
+	}
+	for _, id := range ids {
+		if !slices.Contains(refs, id) {
+			refs = append(refs, id)
+		}
+	}
+	tool.TerminalRefs = refs
+	tool.TerminalOutputs = nil
 	tool.Call.Edit(func(value *any) {
 		object, ok := (*value).(jsonvalue.Object)
 		if !ok {
 			return
 		}
-		changed = len(tool.TerminalOutputs) != 0 || len(tool.TerminalRefs) != 0
-		tool.TerminalOutputs = nil
-		tool.TerminalRefs = nil
 		// serde_json's Map::remove under preserve_order is swap_remove.
 		for _, field := range []string{"rawInput", "rawOutput", "_meta"} {
-			if object.SwapDelete(field) {
-				changed = true
-			}
+			object.SwapDelete(field)
 		}
 		*value = object
 		member, ok := object.Get("content")
@@ -95,19 +228,36 @@ func CompactToolCallForRetention(body *core.TranscriptBody) bool {
 				retained = append(retained, item)
 			}
 		}
-		if len(retained) != len(content) {
-			changed = true
-		}
 		for i := range retained {
-			if dropDiffBody(&retained[i]) {
-				changed = true
-			}
+			dropDiffBody(&retained[i])
 		}
 		object.Set("content", retained)
 		*value = object
 	})
 	*body = tool
-	return changed
+	return true
+}
+
+// CompactTranscriptBodyForRetention trims a settled row's detail to what
+// its compact form still shows: a standalone terminal keeps its outcome,
+// line count and first error line; a tool call is compacted by
+// CompactToolCallForRetention. Returns whether anything changed.
+func CompactTranscriptBodyForRetention(body *core.TranscriptBody) bool {
+	if terminal, ok := (*body).(core.TranscriptBodyTerminalOutput); ok {
+		if terminal.DetailTrimmed {
+			return false
+		}
+		output := terminal.Record.Output.Text()
+		lineCount := uint64(len(rustLines(output)))
+		terminal.OutputLineCount = &lineCount
+		terminal.FirstErrorLine = firstErrorLine(output,
+			terminal.Record.Signal != nil || (terminal.Record.ExitCode != nil && *terminal.Record.ExitCode != 0))
+		terminal.Record.Output = core.PackedText{}
+		terminal.DetailTrimmed = true
+		*body = terminal
+		return true
+	}
+	return CompactToolCallForRetention(body)
 }
 
 // transcriptGetString is value.get(key).and_then(Value::as_str) on a
@@ -131,34 +281,33 @@ func transcriptGetString(value any, key string) (string, bool) {
 // Round-trip through ToolCallContent, not Diff: the variant tag lives on the
 // enum, and writing back a bare Diff would strip it and make the whole tool
 // call unreadable.
-func dropDiffBody(item *any) bool {
+func dropDiffBody(item *any) {
 	encoded, err := jsonvalue.Marshal(*item)
 	if err != nil {
 		slog.Warn("skipping unreadable tool content during retention", "error", err)
-		return false
+		return
 	}
 	var content schema.ToolCallContent
 	if err := json.Unmarshal(encoded, &content); err != nil {
 		// Content this cannot read is content it must not rewrite.
 		slog.Warn("skipping unreadable tool content during retention", "error", err)
-		return false
+		return
 	}
 	if content.Diff == nil {
-		return false
+		return
 	}
 	if !core.DropPatchText(content.Diff) {
-		return false
+		return
 	}
 	rewritten, err := json.Marshal(content)
 	if err == nil {
 		var value any
 		if value, err = jsonvalue.Parse(rewritten); err == nil {
 			*item = value
-			return true
+			return
 		}
 	}
 	slog.Warn("could not rewrite a diff during retention", "error", err)
-	return false
 }
 
 // toolSummarySource is where a tool summary is read from. Rust enum
@@ -318,19 +467,32 @@ func ToolCallPresentation(call *acp.ToolCall) core.ToolCallPresentation {
 // Retention drops a finished call's raw input and output, so a summary made
 // from them is kept: rebuilt from what remains, it could only get worse.
 func MaterializedToolCallPresentation(stored *core.ToolCallPresentation, call *acp.ToolCall) core.ToolCallPresentation {
-	if stored != nil {
-		keep := stored.SummaryVersion >= ToolSummaryVersion
-		switch stored.SourceKind {
-		case core.ToolSummarySourceKindRawInput:
-			keep = keep || call.RawInput == nil
-		case core.ToolSummarySourceKindRawOutput:
-			keep = keep || call.RawOutput == nil
-		}
-		if keep {
-			return *stored
-		}
+	if stored == nil {
+		return ToolCallPresentation(call)
 	}
-	return ToolCallPresentation(call)
+	keep := stored.SummaryVersion >= ToolSummaryVersion || stored.DetailTrimmed
+	switch stored.SourceKind {
+	case core.ToolSummarySourceKindRawInput:
+		keep = keep || call.RawInput == nil
+	case core.ToolSummarySourceKindRawOutput:
+		keep = keep || call.RawOutput == nil
+	}
+	if keep {
+		return *stored
+	}
+	// A stale summary is rebuilt; what retention recorded about the call's
+	// output is kept.
+	rebuilt := ToolCallPresentation(call)
+	if stored.OutputLineCount != nil {
+		rebuilt.Source = core.PackedText{}
+	}
+	presentation := *stored
+	presentation.Summary = rebuilt.Summary
+	presentation.Source = rebuilt.Source
+	presentation.SourceKind = rebuilt.SourceKind
+	presentation.ToolKind = rebuilt.ToolKind
+	presentation.SummaryVersion = rebuilt.SummaryVersion
+	return presentation
 }
 
 // UpdateToolCallPresentation applies the presentation-relevant portion of a
@@ -676,8 +838,70 @@ func presentationFromTitle(title string, toolKind acp.ToolKind) core.ToolCallPre
 	}
 }
 
+// ToolDisplayTitle is the short name shown for a call to one of Mjolnir's
+// own MCP servers (`mj-agents`, `mj-review`, `mj-memory`; Codex registers
+// them as `mj_agents` and so on): `mj_<tool>`. Harnesses title such a call
+// `mcp__<server>__<tool>`, `mcp:<server>/<tool>`, `mcp.<server>.<tool>`,
+// `<server>.<tool>`, or Antigravity's `Run mcp_<server>_<tool>` /
+// `mcp_<server>_<tool>`, sometimes followed by a bracketed status such as
+// ` [in_progress]`, which is kept. For other Antigravity MCP calls titled
+// `Run mcp_<...>`, the leading `Run ` is stripped. Any other title is left
+// alone. Stored titles and the logic that matches on them keep the raw
+// spelling.
+func ToolDisplayTitle(title string) string {
+	trimmed := strings.TrimSpace(title)
+	strippedRun, rest := false, trimmed
+	if after, ok := strings.CutPrefix(trimmed, "Run "); ok && strings.HasPrefix(after, "mcp_") {
+		strippedRun, rest = true, after
+	}
+	name, suffix := rest, ""
+	if head, tail, ok := strings.Cut(rest, " "); ok {
+		if !strings.HasPrefix(tail, "[") {
+			return title
+		}
+		name, suffix = head, rest[len(head):]
+	}
+	// The first spelling that matches decides; its server must then be one
+	// of Mjolnir's.
+	server, tool, found := "", "", false
+	if after, ok := strings.CutPrefix(name, "mcp__"); ok {
+		server, tool, found = strings.Cut(after, "__")
+	}
+	if !found {
+		if after, ok := strings.CutPrefix(name, "mcp:"); ok {
+			server, tool, found = strings.Cut(after, "/")
+		}
+	}
+	if !found {
+		if after, ok := strings.CutPrefix(name, "mcp."); ok {
+			server, tool, found = strings.Cut(after, ".")
+		}
+	}
+	if !found {
+		if after, ok := strings.CutPrefix(name, "mcp_"); ok && strings.HasPrefix(after, "mj-") {
+			server, tool, found = strings.Cut(after, "_")
+		}
+	}
+	if !found {
+		server, tool, found = strings.Cut(name, ".")
+	}
+	if found && (strings.HasPrefix(server, "mj-") || strings.HasPrefix(server, "mj_")) && tool != "" &&
+		strings.IndexFunc(tool, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_')
+		}) < 0 {
+		return "mj_" + tool + suffix
+	}
+	if strippedRun {
+		return rest
+	}
+	return title
+}
+
 func titleSource(title string) string {
 	title = strings.TrimSpace(title)
+	if display := ToolDisplayTitle(title); display != title {
+		return display
+	}
 	if rest, ok := strings.CutPrefix(title, "Running:"); ok {
 		title = strings.TrimSpace(rest)
 	} else if rest, ok := strings.CutPrefix(title, "Starting background:"); ok {

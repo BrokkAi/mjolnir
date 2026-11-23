@@ -331,6 +331,21 @@ When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
 listener without changing the configured loopback fallback. Explicit TLS takes
 precedence. See [Web viewer](/web-viewer/) for access and login.
 
+## Guardian `[guardian]`
+
+```toml
+[guardian]
+enabled = true
+local_classifier = true
+use_gpu = true
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Globally enables or disables Mjolnir's permission guardian across all profiles. `false` sends pending requests to you immediately for daemon reviews and new sessions, overriding per-profile `mjolnir_guardian = true`. |
+| `local_classifier` | boolean | no | `true` | Runs the local zero-shot Wolf Defender Jev ONNX approve-only first stage before escalating to utility or ACP review. `false` skips Stage 1 immediately without loading the local model. |
+| `use_gpu` | boolean | no | `true` | Allows the local Wolf classifier to use a GPU execution provider when available (`false` keeps Stage-1 inference on CPU). Takes effect when the background server next starts. |
+
 ## Automatic review `[review]`
 
 ```toml
@@ -518,7 +533,7 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn_worker` tool. Create and Move offer
 Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
 as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
 no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
@@ -532,7 +547,7 @@ pairs (at most one model per provider):
 
 ```toml
 [subagents]
-max_concurrent = 6
+max_concurrent = 8
 
 [[subagents.primary]]
 model = "your-claude-model"
@@ -565,14 +580,14 @@ by that model when specified; omitted effort uses the harness default. Adaptive
 effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
-With both types configured, set the `spawn` tool's `task_type` to
+With both types configured, set the `spawn_worker` tool's `task_type` to
 `straightforward` for bounded work with a single clear path, such as locating
 and mapping code, running exact build, test, or gate commands, and small
 mechanical edits. Choose `subtle` for
 multi-file implementation, including settled designs, multi-stage operational
 runs or troubleshooting, ambiguous diagnosis, design choices, and work with a
 high risk of subtle bugs. Choose by scope and branching. With only
-straightforward configured, `spawn` omits `task_type` and every child uses that
+straightforward configured, `spawn_worker` omits `task_type` and every child uses that
 choice. The parent delegates bounded work and handles the more involved work
 itself. Mjolnir chooses the enabled profile offering that task type's model
 and effort with the strongest quota headroom paced against its reset times.
@@ -580,7 +595,7 @@ The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
 a notice and uses `native` where supported or `none` on DSH and Antigravity.
-An explicit `--subagents mjolnir` or `--supervisors enabled` requires Mjolnir
+An explicit `--subagents mjolnir` or `--orchestrators` requires Mjolnir
 delegation to be available. `mj move --subagents native|mjolnir|none` retains
 the recorded policy when omitted, including any session override.
 `--subagent-straightforward M` and `--subagent-subtle M` independently override
@@ -604,7 +619,7 @@ or moves the session with the oracle off and a notice.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `max_concurrent` | integer | no | `6` | Most live sub-agents one session may have at once; between `1` and `64`. A sub-agent counts while it holds processes on the target, including while it is idle. A parked sub-agent, one whose turn ended and whose worker Mjolnir stopped, does not count (see [Parked sub-agents](/sessions/#parked-sub-agents)). |
+| `max_concurrent` | integer | no | `8` | Between `1` and `64` slots. Live workers sharing an environment count against its owner. Each live orchestrator with its own environment uses one slot under its parent, and its workers count against its own limit. Idle live workers hold a slot. [Parked sub-agents](/sessions/#parked-sub-agents), reviewers, and oracles do not count. |
 
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
@@ -659,6 +674,7 @@ home = "/home/me/.codex-work"
 | `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. A DSH profile takes `DEEPSEEK_API_KEY` from the key saved in DSH (`.credentials.yaml` in its home) first, then the environment Mjolnir started with, then `.env` in its home, and only then from this table. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
+| `mjolnir_guardian` | boolean | no | `true` | Whether the Mjolnir guardian reviews tool permission requests that reach Mjolnir under configured approvals (when `[guardian].enabled` is also `true`). It uses the local classifier when enabled, then a configured direct utility model, with ACP review on the session's harness and model when no utility model is configured. `false` sends pending requests to the person's permission form. Available on every profile and applies to new sessions. See [Profiles](/profiles/#turn-off-the-mjolnir-guardian). |
 | `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
@@ -735,7 +751,7 @@ working everywhere.
 
 Use `mj new --no-github-credentials` to withhold GitHub authentication from a
 session and all its Mjolnir children, including oracles and reviewers. The API
-creation payload and child `spawn` tool accept `no_github_credentials: true`.
+creation payload and child `spawn_worker` tool accept `no_github_credentials: true`.
 A child can also opt out individually; it cannot undo its parent's opt-out.
 This choice is saved with the session and survives restart, resume and Move.
 `--no-github-events` independently controls watcher delivery.
@@ -847,16 +863,15 @@ Repository fields:
 | Field | TOML type | Required | Validation and behavior |
 | --- | --- | --- | --- |
 | `id` | string | yes | Valid, unique ID within the bundle. |
-| `github` | string | exactly one source | GitHub source in a supported form; cannot be combined with `local`. |
+| `github` | string | exactly one source | Network Git URL or GitHub shorthand; cannot be combined with `local`. |
 | `local` | path string | exactly one source | Absolute controller-side Git path used to resolve its network remotes; cannot be combined with `github`. |
 | `destination` | path string | yes | Non-empty relative path below the target workspace; no `.` or `..` components. |
 
-Supported GitHub forms are `owner/repository`,
-`https://github.com/owner/repository`, `git@github.com:owner/repository`, and
-`ssh://git@github.com/owner/repository`, with an optional `.git` suffix. Sources
-cannot contain whitespace or begin with `-`. At session creation, Mjolnir uses
-the source's default network fetch remote and preserves its configured push
-destination(s). A `local` path is inspected for that configuration; its local
+The `github` key accepts HTTP(S), SSH, scp-style SSH, and `git://` URLs on any
+host, plus GitHub `owner/repository` shorthand. Sources cannot contain whitespace
+or begin with `-`. Mjolnir removes HTTP userinfo before saving, retains SSH
+usernames, and uses the saved URL for fetch and push. Private repositories
+outside GitHub have no credential path in containers yet. A `local` path is inspected for that configuration; its local
 commits, staged changes, unstaged changes, and untracked files are excluded
 from an isolated clone. Repository destinations may not be equal, ancestors,
 or descendants of one another.
@@ -925,7 +940,7 @@ host.
 
 ### Persistent EC2 hosts
 
-`mj ec2 create <instance-type> --zone <zone>` provisions an SSH machine with a
+`mj ec2 create <instance-type> --zone <zone> --cpus <count> --memory-gib <GiB>` provisions an SSH machine with a
 Podman target. `mj ec2 list --region <region>` lists hosts and
 `mj ec2 destroy <name> --region <region>` removes one. Instances outlive sessions.
 The former `aws-ec2` machine kind is read only for historical records and cannot
@@ -1014,6 +1029,43 @@ existing local and SSH machine, including implicit `local`. This preserves the
 old global override even when a machine explicitly requested caching. The next
 save writes those machine settings and removes the global section. Machines
 added afterward use the normal enabled default.
+
+#### Shared build cache on Nitro
+
+Nitro sandboxes keep a guest-local mbx cache. Set `remote = "s3://bucket/prefix"`
+in `[machines.<id>.build_cache]` to read trusted CI's cache. Optional
+`remote_region` defaults to the Nitro host's region. New hosts can use
+`mj ec2 create --runtime nitro --cpus <count> --memory-gib <GiB> --mbx-remote s3://bucket/prefix` with optional
+`--mbx-remote-region` to create or reuse and attach the instance profile.
+For an existing host, use `aws ec2 associate-iam-instance-profile` and set
+the configuration keys. A manually attached role needs both
+`s3:GetObject` scoped to the cache prefix and unconditional `s3:ListBucket`
+on the cache bucket so missing objects can be distinguished from access
+failures. The proxy serves no bucket listing requests. Use `mj doctor`
+to check the remote.
+
+The namespace defaults to GitHub `owner/repository`, preserving the case
+from `github`. Set `mbx_namespace` on a bundle repository to override it or
+enable a repository without a GitHub source. The primary repository's
+namespace is the guest default, or the first available namespace if the
+primary has none. The guest can read every namespace in its bundle. The
+proxy uses the host instance role and serves only reads on the private
+guest-to-host link. mbx warns that this plain-HTTP hop does not protect
+traffic from reading or modification in transit.
+
+Grant S3 writes only to trusted CI. For GitHub Actions, run the seed build only
+on pushes to the protected default branch and scope the AWS OIDC trust
+policy to the repository, branch ref and `event_name:push` using a customized
+subject. The CI environment uses:
+
+```yaml
+env:
+  MBX_REMOTE_URL: s3://bucket/prefix
+  MBX_REMOTE_NAMESPACE: ${{ github.repository }}
+```
+
+See [Shared build cache on Nitro](/project-environments/#shared-build-cache-on-nitro)
+for the job and IAM trust configuration.
 
 ## Runtimes `[targets.<id>]`
 
@@ -1210,6 +1262,15 @@ non-default `workspace_storage` are supported, but a sandbox cannot attach host
 directories or share the host's mbx build cache: a session that asks for them
 starts without and says so. RAM is a hard limit, taken from the memory pool the
 host reserved at boot.
+
+Build Nitro images for the host's architecture. The session runs as root in
+the guest. The host pulls with crane as root. For a private registry, sign in
+with `ssh host sudo crane auth login <registry> -u <user> --password-stdin`, replacing
+the host, registry, and credentials.
+
+`mj ec2 create` warms the base image plus bundle images assigned for the
+host's platform. After a successful refresh, the Nitro host reclaims obsolete
+images and keeps disks used by retained sandboxes and staged root replacements.
 
 ### Files written before version 12
 

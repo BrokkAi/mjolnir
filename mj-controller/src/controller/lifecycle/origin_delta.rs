@@ -688,93 +688,100 @@ impl OriginDeltaSuspend {
         outcome
     }
 
-    pub(super) async fn start_worker(
-        &self,
-        controller: &Controller,
-        admission: &crate::recovery_gate::SessionAdmission,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        manager: Option<&SessionManagerControl>,
+    pub(super) fn start_worker<'a>(
+        &'a self,
+        controller: &'a Controller,
+        admission: &'a crate::recovery_gate::SessionAdmission,
+        session_id: &'a str,
+        executor: &'a (impl CommandExecutor + Sync),
+        manager: Option<&'a SessionManagerControl>,
         run_mode: WorkerRunMode,
-    ) -> Result<super::super::checkpoint::ControllerRelayLease> {
+    ) -> std::pin::Pin<
+        Box<impl Future<Output = Result<super::super::checkpoint::ControllerRelayLease>> + 'a>,
+    > {
         use super::super::checkpoint::adopt_restarted_checkpoint_relay;
         use super::super::worker_restart::{InstalledWorkerRestart, RESTART_FOR_CHECKPOINT};
 
-        let reconnect = targets::reconnect_plan(&self.backend, session_id)?
-            .commands
-            .into_iter()
-            .next()
-            .context("reconnect plan is missing")?;
-        let mut launch = controller.current_worker_launch_config(session_id, &self.backend)?;
-        launch.run_mode = run_mode;
-        let worker_root = self.root.as_str();
-        let mut restart = InstalledWorkerRestart {
-            backend: &self.backend,
-            worker_root,
-            reconnect: &reconnect,
-            launch: Some(&launch),
-            prepared: false,
-            messages: &RESTART_FOR_CHECKPOINT,
-            swap_admission: None,
-            discard_queued_prompts: None,
-        };
-        // Quiescence proved the original worker exited. If a worker has since
-        // booted in the requested mode, observe it through the existing launch
-        // owner, including when the daemon exited before recording readiness.
-        let installed = read_launch_config(&self.backend, session_id, worker_root, executor)?;
-        let same_mode = installed.run_mode == run_mode;
-        let existing = mj_core::runtime::off_async_worker(|| {
-            super::super::worker_binary::probe_worker_liveness(
-                executor,
-                &self.backend,
-                session_id,
+        // Suspend can start a checkpoint worker and restart the harness on
+        // rollback. Keep these futures out of its stack frame so it has room
+        // to decode relay replies during checkpoint capture.
+        Box::pin(async move {
+            let reconnect = targets::reconnect_plan(&self.backend, session_id)?
+                .commands
+                .into_iter()
+                .next()
+                .context("reconnect plan is missing")?;
+            let mut launch = controller.current_worker_launch_config(session_id, &self.backend)?;
+            launch.run_mode = run_mode;
+            let worker_root = self.root.as_str();
+            let mut restart = InstalledWorkerRestart {
+                backend: &self.backend,
                 worker_root,
-            )
-        })?;
-        ensure!(
-            existing.status == 0,
-            "cannot verify the retained worker's liveness"
-        );
-        let connection =
-            if same_mode && matches!(existing.stdout.as_slice(), b"alive\n" | b"starting\n") {
-                let pending = crate::database::load_worker_restart(session_id)?;
-                executor.begin_resumable_work()?;
-                let result = controller
-                    .observe_started_worker(session_id, executor, restart)
-                    .await;
-                executor.end_resumable_work("reattach to the retained suspend worker")?;
-                let connection = result?;
-                if let Some(pending) = pending {
-                    crate::database::finish_worker_restart(session_id, &pending.operation_id)?;
-                }
-                connection
-            } else {
-                const LABEL: &str = "start managed clone suspend worker";
-                // A draining handoff refuses the swap. Step aside instead of
-                // failing the accepted suspend: either the handoff closes the
-                // gate, which interrupts this lifecycle for shutdown and the
-                // next daemon resumes it from its durable intent, or the drain
-                // lapses and the swap is admitted.
-                restart.swap_admission = Some(loop {
-                    match crate::upgrade::activity_unless_draining(LABEL) {
-                        Ok(work) => break work,
-                        Err(_) if crate::upgrade::is_draining() => {
-                            executor.begin_resumable_work()?;
-                            executor.end_resumable_work(LABEL)?;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                });
-                let result = controller
-                    .restart_worker_with_installed_binary(session_id, executor, restart)
-                    .await;
-                // The restart releases admission only once the launch succeeds.
-                // Release it here too (idempotent) so a failed launch never
-                // waits for a draining handoff that is waiting for this hold.
-                executor.begin_resumable_work()?;
-                executor.end_resumable_work("record managed clone suspend worker readiness")?;
-                result?
+                reconnect: &reconnect,
+                launch: Some(&launch),
+                prepared: false,
+                messages: &RESTART_FOR_CHECKPOINT,
+                swap_admission: None,
+                discard_queued_prompts: None,
             };
-        adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await
+            // Quiescence proved the original worker exited. If a worker has since
+            // booted in the requested mode, observe it through the existing launch
+            // owner, including when the daemon exited before recording readiness.
+            let installed = read_launch_config(&self.backend, session_id, worker_root, executor)?;
+            let same_mode = installed.run_mode == run_mode;
+            let existing = mj_core::runtime::off_async_worker(|| {
+                super::super::worker_binary::probe_worker_liveness(
+                    executor,
+                    &self.backend,
+                    session_id,
+                    worker_root,
+                )
+            })?;
+            ensure!(
+                existing.status == 0,
+                "cannot verify the retained worker's liveness"
+            );
+            let connection =
+                if same_mode && matches!(existing.stdout.as_slice(), b"alive\n" | b"starting\n") {
+                    let pending = crate::database::load_worker_restart(session_id)?;
+                    executor.begin_resumable_work()?;
+                    let result = controller
+                        .observe_started_worker(session_id, executor, restart)
+                        .await;
+                    executor.end_resumable_work("reattach to the retained suspend worker")?;
+                    let connection = result?;
+                    if let Some(pending) = pending {
+                        crate::database::finish_worker_restart(session_id, &pending.operation_id)?;
+                    }
+                    connection
+                } else {
+                    const LABEL: &str = "start managed clone suspend worker";
+                    // A draining handoff refuses the swap. Step aside instead of
+                    // failing the accepted suspend: either the handoff closes the
+                    // gate, which interrupts this lifecycle for shutdown and the
+                    // next daemon resumes it from its durable intent, or the drain
+                    // lapses and the swap is admitted.
+                    restart.swap_admission = Some(loop {
+                        match crate::upgrade::activity_unless_draining(LABEL) {
+                            Ok(work) => break work,
+                            Err(_) if crate::upgrade::is_draining() => {
+                                executor.begin_resumable_work()?;
+                                executor.end_resumable_work(LABEL)?;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    });
+                    let result = controller
+                        .restart_worker_with_installed_binary(session_id, executor, restart)
+                        .await;
+                    // The restart releases admission only once the launch succeeds.
+                    // Release it here too (idempotent) so a failed launch never
+                    // waits for a draining handoff that is waiting for this hold.
+                    executor.begin_resumable_work()?;
+                    executor.end_resumable_work("record managed clone suspend worker readiness")?;
+                    result?
+                };
+            adopt_restarted_checkpoint_relay(admission, session_id, manager, connection).await
+        })
     }
 }

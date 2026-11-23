@@ -3364,10 +3364,6 @@ function rememberedOracleChoice(profileId) {
   return snapshot?.last_oracle_choices?.[profileId] ?? true;
 }
 
-function rememberedSupervisorChoice(profileId) {
-  return snapshot?.last_supervisor_choices?.[profileId] ?? false;
-}
-
 function selectNewProfile(draft, profileId) {
   if (draft.profileId === profileId) return;
   draft.profileId = profileId;
@@ -3377,7 +3373,7 @@ function selectNewProfile(draft, profileId) {
 function initializeNewDelegation(draft) {
   draft.subagents = rememberedDelegationPolicy(draft.profileId);
   draft.oracle = rememberedOracleChoice(draft.profileId);
-  draft.supervisors = rememberedSupervisorChoice(draft.profileId);
+  draft.lastMjolnirPolicy = draft.subagents?.mode === 'mjolnir' ? draft.subagents : null;
   if (draft.subagents?.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
 }
 
@@ -3411,12 +3407,9 @@ function targetOracleConfigured(draft) {
   return draftTarget(draft)?.oracle_configured ?? snapshot?.oracle_configured === true;
 }
 
-function targetSupervisorsAvailable(draft) {
-  return draftTarget(draft)?.supervisors_available === true;
-}
-
-function supervisorsChoiceApplies(draft = newDraft) {
-  return shownDelegation(draft, draft?.subagents)?.mode === 'mjolnir' && targetSupervisorsAvailable(draft);
+function orchestratorsChoiceApplies(draft) {
+  return snapshot?.orchestrators_configured === true
+    && shownDelegation(draft, draft.subagents).mode === 'mjolnir';
 }
 
 function subagentSetupReason() {
@@ -3454,7 +3447,7 @@ function delegationPolicy(policy) {
       ? { model: value.model, ...(value.effort != null ? { effort: value.effort } : {}) } : legacy;
     const straightforward = choice(policy.straightforward);
     const subtle = choice(policy.subtle);
-    return { mode: 'mjolnir', ...(straightforward ? { straightforward } : {}), ...(subtle ? { subtle } : {}) };
+    return { mode: 'mjolnir', ...(policy.orchestrators === true ? { orchestrators: true } : {}), ...(straightforward ? { straightforward } : {}), ...(subtle ? { subtle } : {}) };
   }
   if (policy?.mode === 'none') return { mode: 'none' };
   return { mode: ['mjolnir', 'single_model', 'all_models'].includes(policy?.mode) ? 'mjolnir' : 'native' };
@@ -3491,16 +3484,21 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
     oracleField.append(oracleSelect);
     body.append(oracleField);
   }
-  if (supervisorsChoiceApplies(draft)) {
-    const supField = el('label', 'field field-checkbox');
-    const supInput = el('input');
-    supInput.type = 'checkbox';
-    supInput.id = `${prefix}-supervisors`;
-    supInput.checked = draft.supervisors === true;
-    supInput.disabled = draft.queueLocked === true;
-    supInput.onchange = () => { draft.supervisors = supInput.checked; onChange(); rerender(); };
-    supField.append(supInput, document.createTextNode('Supervisors'));
-    body.append(supField);
+  if (orchestratorsChoiceApplies(draft)) {
+    const orchestratorsField = el('label', 'field field-checkbox');
+    const orchestratorsInput = el('input');
+    orchestratorsInput.type = 'checkbox';
+    orchestratorsInput.id = `${prefix}-orchestrators`;
+    orchestratorsInput.checked = draft.subagents?.orchestrators === true;
+    orchestratorsInput.disabled = draft.queueLocked === true;
+    orchestratorsInput.onchange = () => {
+      draft.subagents = delegationPolicy({ ...shownDelegation(draft, draft.subagents), orchestrators: orchestratorsInput.checked });
+      draft.lastMjolnirPolicy = draft.subagents;
+      onChange();
+      rerender();
+    };
+    orchestratorsField.append(orchestratorsInput, document.createTextNode('Orchestrators'));
+    body.append(orchestratorsField);
   }
   const field = el('label', 'field');
   field.append(document.createTextNode('Delegation'));
@@ -3526,8 +3524,10 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
     // Compare with the draft as it is now: the control can change more than
     // once before the form renders again.
     if (!draft.subagents || select.value !== shownDelegation(draft, draft.subagents).mode) {
-      draft.subagents = select.value === 'mjolnir' && draft.storedSubagents?.mode === 'mjolnir'
-        ? { ...draft.storedSubagents } : { mode: select.value };
+      if (draft.subagents?.mode === 'mjolnir') draft.lastMjolnirPolicy = draft.subagents;
+      draft.subagents = select.value === 'mjolnir'
+        ? draft.lastMjolnirPolicy ?? { mode: 'mjolnir' }
+        : { mode: select.value };
     }
     onChange();
     rerender();
@@ -4629,7 +4629,6 @@ async function commitNew() {
     no_github_events: false,
   };
   if (oracleChoiceApplies(draft) && (targetOracleConfigured(draft) || draft.oracleChoice)) body.oracle = draft.oracle;
-  if (supervisorsChoiceApplies(draft)) body.supervisors = draft.supervisors === true;
   if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
   const kind = targetResourceKind(draft.targetId);
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
@@ -5685,8 +5684,6 @@ function freshMoveDraft(session) {
     subagents: delegationPolicy(recovery?.subagents || session.subagents),
     storedOracle: session.oracle !== false,
     oracle: recovery?.oracle ?? (session.oracle !== false),
-    storedSupervisors: session.supervisors === true,
-    supervisors: recovery?.supervisors ?? (session.supervisors === true),
     storedOracleChoice: session.oracle_choice,
     oracleChoice: recovery?.oracle_choice ?? session.oracle_choice,
   };
@@ -6024,7 +6021,6 @@ async function prepareMove() {
         subagents: moveSubagentChange(draft),
         oracle: draft.oracle === draft.storedOracle ? null : draft.oracle,
         oracle_choice: JSON.stringify(draft.oracleChoice) === JSON.stringify(draft.storedOracleChoice) ? null : draft.oracleChoice,
-        supervisors: draft.supervisors === draft.storedSupervisors ? null : draft.supervisors === true,
       }),
     });
     if (draft.preparation.container_upgrade) {
@@ -6773,6 +6769,7 @@ function showLogin() {
   conversationGeneration += 1;
   draftWriters.clear();
   currentSession = null;
+  syncToolDetailSession(null);
   if (eventSource) {
     eventSource.close();
     eventSource = undefined;
@@ -9399,6 +9396,75 @@ function entryTimestamp(entry) {
   return node;
 }
 
+let toolDetailSession = null;
+let toolDetailCache = new Map();
+
+function toolDetailBody(detail) {
+  const body = el('div', 'entry-body');
+  if (detail.status !== 'full') {
+    body.append(el('p', 'dim', detail.unavailable_reason || 'Tool details unavailable.'));
+    return body;
+  }
+  const entry = detail.entry;
+  if (entry.tool_input != null) {
+    body.append(renderToolOutput(JSON.stringify(entry.tool_input, null, 2)));
+  }
+  if (entry.tool_error) body.append(renderToolOutput(entry.tool_error));
+  if (entry.tool_content?.length) body.append(renderToolOutput(entry.tool_content.join('\n')));
+  if (!entry.tool_content?.length && entry.text) {
+    body.append(renderToolOutput(entry.text));
+  }
+  for (const diff of detail.diffs || []) {
+    body.append(renderToolOutput(diff.text));
+  }
+  return body;
+}
+
+function syncToolDetailSession(sessionId) {
+  if (toolDetailSession === sessionId) return;
+  toolDetailSession = sessionId;
+  toolDetailCache.clear();
+  toolDetailCache = new Map();
+}
+
+function toolDetailFold(sessionId, stableId, version) {
+  syncToolDetailSession(sessionId);
+  const cache = toolDetailCache;
+  const cached = cache.get(stableId);
+  if (cached && cached.version !== version) cache.delete(stableId);
+  const fold = el('details', 'block-fold tool-detail-fold');
+  fold.dataset.foldKey = `tool-detail-${stableId}`;
+  const content = el('div');
+  fold.append(el('summary', '', 'Tool details'), content);
+  fold.addEventListener('toggle', async () => {
+    let load = cache.get(stableId);
+    if (load && load.version !== version) {
+      cache.delete(stableId);
+      load = undefined;
+    }
+    if (!fold.open) {
+      if (load?.result?.status === 'unavailable') cache.delete(stableId);
+      return;
+    }
+    if (!load) {
+      load = { version };
+      load.pending = request(`/api/sessions/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(stableId)}/detail`)
+        .catch(error => ({ status: 'unavailable', unavailable_reason: error.message }))
+        .then(result => {
+          load.result = result;
+          return result;
+        });
+      cache.set(stableId, load);
+    }
+    if (!load.result) content.replaceChildren(el('p', 'dim', 'Loading tool details…'));
+    const detail = await load.pending;
+    if (fold.open && cache.get(stableId) === load) {
+      content.replaceChildren(toolDetailBody(detail));
+    }
+  });
+  return fold;
+}
+
 /// Rewrite one entry's row.
 ///
 /// Thinking and mailbox events are collapsed by default, and which folds the
@@ -9442,6 +9508,10 @@ function paintEntry(node, entry, unansweredPrompt) {
     node.replaceChildren(heading, fold);
   } else {
     node.replaceChildren(heading, entryBody(entry));
+    if (entry.tool_detail_trimmed && entry.stable_id && currentSession) {
+      const version = `${entry.updated_seq ?? ''}:${entry.tool_ended_at_ms ?? ''}`;
+      node.append(toolDetailFold(currentSession, entry.stable_id, version));
+    }
   }
   if (unansweredPrompt) {
     const controls = el('div', 'row');
@@ -9553,6 +9623,7 @@ function retireConversationRequest() {
 }
 
 function clearConversationContents() {
+  syncToolDetailSession(currentSession);
   entryNodes.clear();
   feed.replaceChildren();
   jumpToLatest.classList.add('hidden');

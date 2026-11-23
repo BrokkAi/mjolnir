@@ -33,7 +33,7 @@ use mj_core::remote_git::is_github_https_url;
 use super::backend::{backend_locator, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
 use super::provisioning::{
-    ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
+    ProvisioningFailureDisposition, RepositorySeed, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
 };
 use super::readiness::{
@@ -1999,26 +1999,10 @@ impl Controller {
                 .context("cross-target Move source target is missing")?;
             let source_backend = backend_locator(source_locator, &previous, &self.config)?;
             let source_worker_root = targets::worker_root(&source_backend, session_id)?;
-            let source_cwd = if let Some(dir) = previous_project_directory.as_deref() {
-                dir.to_path_buf()
-            } else if let Some(worktree) = previous_managed_worktree.as_ref() {
-                worktree.worktree_root.clone()
-            } else {
-                let source_ws = PathBuf::from(super::network_git::workspace_root(
-                    &source_backend,
-                    previous.container_workspace.as_deref(),
-                ));
-                previous
-                    .project_bundle(&self.config)
-                    .and_then(|bundle| bundle.primary())
-                    .map(|primary| source_ws.join(&primary.destination))
-                    .unwrap_or(source_ws)
-            };
-            let source_keep_dir = Some(resolve_move_keep_dir(
-                executor,
+            let source_keep_dir = Some(self.move_source_keep_dir(
+                &previous,
                 &source_backend,
-                session_id,
-                &source_cwd,
+                executor,
             )?);
             Some((source_backend, source_worker_root, source_keep_dir))
         } else {
@@ -2572,6 +2556,7 @@ impl Controller {
                 .and_then(ResumeConversion::workspace_to_raw)
             {
                 if origin_delta {
+                    let mut received_local_keep = false;
                     let local_restore_archive = if matches!(
                         &conversion.worktree.target,
                         mj_core::state::ManagedWorktreeTarget::Local
@@ -2585,16 +2570,14 @@ impl Controller {
                         // `restore_managed_clone_origin_delta` reads it locally.
                         let local_worker_root =
                             mj_core::config::data_dir().join("workers").join(session_id);
-                        std::fs::create_dir_all(&local_worker_root).with_context(|| {
-                            format!(
-                                "create local destination worker root {}",
-                                local_worker_root.display()
-                            )
-                        })?;
-                        let local_dest_locator = targets::TargetLocator::LocalBare {
-                            worker_root: local_worker_root.to_string_lossy().into_owned(),
-                        };
-                        let local_worker_root_str = local_worker_root.to_string_lossy().into_owned();
+                        self.reserve_provisioning_target(
+                            session_id,
+                            mj_core::state::TargetLocator::LocalBare {
+                                worker_root: local_worker_root.clone(),
+                            },
+                        )?;
+                        let (local_dest_locator, local_worker_root_str) =
+                            self.worker_placement(session_id)?;
                         self.prepare_worker_files(
                             session_id,
                             &local_dest_locator,
@@ -2603,14 +2586,14 @@ impl Controller {
                             super::worker_binary::LaunchHistory::Restored(&canonical_session),
                         )?;
                         let local_archive = local_worker_root.join("restore.hel.zip");
-                        let dest_keep_dir = mj_checkpoint::checkpoint::session_keep_dir(
-                            &conversion.worktree.worktree_root,
-                            session_id,
-                        )?;
+                        // The clone path must stay absent until Git restore
+                        // publishes it. Stage keep on the same filesystem.
+                        let staged_keep =
+                            super::worktree::managed_clone_move_keep_stage(&conversion.worktree);
                         operation.phase = mj_core::state::MovePhase::Transferring;
                         operation.updated_at = now();
                         crate::database::save_move_operation(operation)?;
-                        super::move_session::transfer_move_snapshot_to_destination(
+                        let receipt = super::move_session::transfer_move_snapshot_to_destination(
                             operation,
                             source_backend,
                             source_worker_root,
@@ -2618,9 +2601,10 @@ impl Controller {
                             &local_worker_root_str,
                             &local_archive,
                             source_keep_dir.as_deref(),
-                            Some(&dest_keep_dir),
+                            Some(&staged_keep),
                             executor,
                         )?;
+                        received_local_keep = receipt.keep_bytes > 0;
                         direct_already_transferred = true;
                         local_archive
                     } else {
@@ -2638,6 +2622,12 @@ impl Controller {
                         super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
                             remote_origin_delta_clone_restore = true;
                         }
+                    }
+                    if received_local_keep {
+                        super::worktree::publish_managed_clone_move_keep(
+                            &conversion.worktree,
+                            session_id,
+                        )?;
                     }
                 } else {
                     if conversion.reuse_existing_branch {
@@ -2752,7 +2742,7 @@ impl Controller {
                         executor,
                         github_token.as_deref(),
                         ProvisioningFailureDisposition::Preserve,
-                        move_manifest,
+                        RepositorySeed::Restore(move_manifest),
                     )
                     .await?;
                     None
@@ -3510,7 +3500,7 @@ fn provision_with_cross_harness_handoff(
                     &provision_executor,
                     github_token,
                     ProvisioningFailureDisposition::Preserve,
-                    move_manifest,
+                    RepositorySeed::Restore(move_manifest),
                 ),
             )
         },
@@ -3721,6 +3711,35 @@ pub(in crate::controller) async fn utility_handoff_while_cancellable(
 /// the same Git top-level interpretation worker startup uses for `MJ_KEEP_DIR`,
 /// so sessions started inside a repository subdirectory or nested repository
 /// transfer the exact scratch directory their worker created.
+impl Controller {
+    pub(super) fn move_source_keep_dir(
+        &self,
+        source: &SessionRecord,
+        backend: &targets::TargetLocator,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<PathBuf> {
+        let checkout = self.state.checkout(&source.id)?;
+        let cwd = if let Some(path) = checkout.project_directory() {
+            path.to_path_buf()
+        } else if let Some(worktree) = checkout.managed_worktree() {
+            worktree.worktree_root.clone()
+        } else {
+            let workspace = PathBuf::from(super::network_git::workspace_root(
+                backend,
+                source.container_workspace.as_deref(),
+            ));
+            source
+                .project_bundle(&self.config)
+                .and_then(|bundle| bundle.primary())
+                .map(|primary| workspace.join(&primary.destination))
+                .unwrap_or(workspace)
+        };
+        mj_core::runtime::off_async_worker(|| {
+            resolve_move_keep_dir(executor, backend, &source.id, &cwd)
+        })
+    }
+}
+
 pub(super) fn resolve_move_keep_dir(
     executor: &impl CommandExecutor,
     backend: &targets::TargetLocator,
@@ -3736,12 +3755,13 @@ pub(super) fn resolve_move_keep_dir(
             "-C".into(),
             cwd.to_string_lossy().into_owned(),
             "rev-parse".into(),
+            "--show-prefix".into(),
             "--show-toplevel".into(),
         ],
         "resolve checkout top level for session keep directory",
     )?;
     let output = executor.execute(&command)?;
-    let (top_level, _) = mj_core::session_keep::interpret_checkout_top_level(
+    let (top_level, _) = mj_core::session_keep::interpret_checkout_top_level_as_given(
         cwd,
         Some(output.status),
         &output.stdout,
