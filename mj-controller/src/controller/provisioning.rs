@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use mj_checkpoint::archive::ArchiveManifest;
 use mj_core::config::{TargetTemplate, atomic_write, data_dir};
-use mj_core::state::{SessionState, State, TargetLocator};
+use mj_core::state::{MovePhase, SessionState, State, TargetLocator};
 use mj_session_runtime::host_git_config::controller_git_settings;
 
 use crate::targets::{
@@ -31,6 +31,24 @@ use crate::launch_timing::LaunchPhaseTimer;
 pub(super) enum RepositorySeed<'a> {
     ConfiguredBundle,
     Restore(Option<&'a ArchiveManifest>),
+}
+
+/// A cross-target Move keeps its source until the destination owns the
+/// session. Reserve a distinct name even when both targets share an engine.
+fn provisioned_resource_name(session_id: &str) -> Result<(String, bool)> {
+    if let Some(operation) = crate::database::load_move_operation(session_id)?
+        && !operation.in_place
+        && matches!(
+            operation.phase,
+            MovePhase::Transferring | MovePhase::Restoring | MovePhase::DestinationStarting
+        )
+    {
+        return Ok((
+            targets::move_resource_name(session_id, &operation.operation_id)?,
+            true,
+        ));
+    }
+    Ok((targets::resource_name(session_id)?, false))
 }
 
 /// How many sub-agent children may be brought up inside one container at the
@@ -630,6 +648,19 @@ impl Controller {
         Ok(failure)
     }
 
+    pub(super) fn reserve_provisioning_target(
+        &mut self,
+        session_id: &str,
+        target: TargetLocator,
+    ) -> Result<()> {
+        self.state
+            .sessions
+            .get_mut(session_id)
+            .context("session disappeared before target reservation")?
+            .target = Some(Box::new(target));
+        self.persist_session_state(session_id)
+    }
+
     pub(super) async fn provision_session_with_failure_disposition(
         &mut self,
         session_id: &str,
@@ -815,25 +846,13 @@ impl Controller {
             for notice in enforce_cgroup_capable_limits(&mut target, executor) {
                 executor.notify_notice(&notice);
             }
-            let resource_name = crate::database::load_move_operation(session_id)?
-                .filter(|op| {
-                    !op.in_place
-                        && matches!(
-                            op.phase,
-                            mj_core::state::MovePhase::Restoring
-                                | mj_core::state::MovePhase::DestinationStarting
-                        )
-                })
-                .map(|op| targets::move_resource_name(session_id, &op.operation_id))
-                .unwrap_or_else(|| targets::resource_name(session_id))?;
-            let moving_workspace = resource_name != targets::resource_name(session_id)?;
+            let (resource_name, moving_workspace) = provisioned_resource_name(session_id)?;
             // Reserve physical ownership before creation, including a target
             // whose creation or locator discovery later fails. Rollback uses
             // the same owner and writer inventory as ordinary teardown.
             let reserved_target = super::backend::locator_after_provision_named(
                 template,&target,session_id,None,executor,&resource_name)?;
-            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(Box::new(reserved_target));
-            self.persist_session_state(session_id)?;
+            self.reserve_provisioning_target(session_id, reserved_target)?;
 
             let tool_cache = super::tool_cache::prepare(
                 &self.config,

@@ -2556,6 +2556,7 @@ impl Controller {
                 .and_then(ResumeConversion::workspace_to_raw)
             {
                 if origin_delta {
+                    let mut received_local_keep = false;
                     let local_restore_archive = if matches!(
                         &conversion.worktree.target,
                         mj_core::state::ManagedWorktreeTarget::Local
@@ -2569,16 +2570,14 @@ impl Controller {
                         // `restore_managed_clone_origin_delta` reads it locally.
                         let local_worker_root =
                             mj_core::config::data_dir().join("workers").join(session_id);
-                        std::fs::create_dir_all(&local_worker_root).with_context(|| {
-                            format!(
-                                "create local destination worker root {}",
-                                local_worker_root.display()
-                            )
-                        })?;
-                        let local_dest_locator = targets::TargetLocator::LocalBare {
-                            worker_root: local_worker_root.to_string_lossy().into_owned(),
-                        };
-                        let local_worker_root_str = local_worker_root.to_string_lossy().into_owned();
+                        self.reserve_provisioning_target(
+                            session_id,
+                            mj_core::state::TargetLocator::LocalBare {
+                                worker_root: local_worker_root.clone(),
+                            },
+                        )?;
+                        let (local_dest_locator, local_worker_root_str) =
+                            self.worker_placement(session_id)?;
                         self.prepare_worker_files(
                             session_id,
                             &local_dest_locator,
@@ -2587,14 +2586,14 @@ impl Controller {
                             super::worker_binary::LaunchHistory::Restored(&canonical_session),
                         )?;
                         let local_archive = local_worker_root.join("restore.hel.zip");
-                        let dest_keep_dir = mj_checkpoint::checkpoint::session_keep_dir(
-                            &conversion.worktree.worktree_root,
-                            session_id,
-                        )?;
+                        // The clone path must stay absent until Git restore
+                        // publishes it. Stage keep on the same filesystem.
+                        let staged_keep =
+                            super::worktree::managed_clone_move_keep_stage(&conversion.worktree);
                         operation.phase = mj_core::state::MovePhase::Transferring;
                         operation.updated_at = now();
                         crate::database::save_move_operation(operation)?;
-                        super::move_session::transfer_move_snapshot_to_destination(
+                        let receipt = super::move_session::transfer_move_snapshot_to_destination(
                             operation,
                             source_backend,
                             source_worker_root,
@@ -2602,9 +2601,10 @@ impl Controller {
                             &local_worker_root_str,
                             &local_archive,
                             source_keep_dir.as_deref(),
-                            Some(&dest_keep_dir),
+                            Some(&staged_keep),
                             executor,
                         )?;
+                        received_local_keep = receipt.keep_bytes > 0;
                         direct_already_transferred = true;
                         local_archive
                     } else {
@@ -2622,6 +2622,12 @@ impl Controller {
                         super::worktree::ManagedCloneRestoreOutcome::SeededForRemoteRestore => {
                             remote_origin_delta_clone_restore = true;
                         }
+                    }
+                    if received_local_keep {
+                        super::worktree::publish_managed_clone_move_keep(
+                            &conversion.worktree,
+                            session_id,
+                        )?;
                     }
                 } else {
                     if conversion.reuse_existing_branch {
