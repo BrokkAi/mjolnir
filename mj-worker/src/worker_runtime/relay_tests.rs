@@ -4744,7 +4744,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     coordinator.await.unwrap().unwrap();
 }
 
-/// Esc's non-targeted cancellation interrupts a Claude cycle with no active
+/// Esc's exact cancellation interrupts a Claude cycle with no active
 /// prompt; the queued user prompt starts once that cycle reports its result.
 // Hard-won: #1225: adapter cancellation could discard a prompt Hel had already shown as active.
 #[tokio::test]
@@ -4803,19 +4803,35 @@ async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once(
         "Esc's prompt remains owned by the relay until cancellation settles"
     );
 
-    submit(
-        &mut relay.lock().unwrap(),
-        "stop-harness-turn",
-        RelayCommand::CancelTurn,
-    );
+    let start_ordinal = {
+        let mut state = relay.lock().unwrap();
+        let interrupt = state
+            .operational_state()
+            .turn_controls
+            .unwrap()
+            .interrupt
+            .unwrap();
+        let RelayCommand::CancelTurnTarget {
+            target: mj_core::relay::TurnInterruptTarget::Autonomous { start_ordinal },
+        } = interrupt
+        else {
+            panic!("Claude must publish its autonomous turn ordinal");
+        };
+        submit(&mut state, "stop-harness-turn", interrupt);
+        start_ordinal
+    };
     wake_tx.try_send(()).unwrap();
-    let CommandRequest::Cancel {
+    let CommandRequest::CancelUnpromptedTurn {
         request_id,
-        steering_prompt: None,
+        target:
+            mj_core::relay::TurnInterruptTarget::Autonomous {
+                start_ordinal: dispatched_ordinal,
+            },
     } = next_command(&mut command_rx).await
     else {
-        panic!("CancelTurn must reach session/cancel without adapter-queued text");
+        panic!("the autonomous target must reach the ACP command loop");
     };
+    assert_eq!(dispatched_ordinal, start_ordinal);
     assert_eq!(request_id, "stop-harness-turn");
     event_tx
         .send(RuntimeEvent::CancelApplied {

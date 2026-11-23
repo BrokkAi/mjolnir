@@ -6,7 +6,7 @@
 //! beyond formatting; the rules live behind the API.
 
 use std::io::{IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, ValueEnum};
@@ -1444,18 +1444,22 @@ async fn infer_new_session_inputs(
     if let Some(workspace_id) = &workspace_id
         && args.target.is_some()
         && (args.profile.is_some() || args.model.is_some())
-        && args
-            .project_directory
-            .as_ref()
-            .map_or(args.bundle.is_some(), |path| path.is_absolute())
+        && (args.project_directory.is_some() || args.bundle.is_some())
     {
-        return Ok((
-            ApiClient::connect().await?,
-            workspace_id.clone(),
-            args.target.clone(),
-            args.project_directory.clone(),
-            None,
-        ));
+        let connector = mj_client::daemon::connector::DaemonConnector::shared().await?;
+        if args
+            .project_directory
+            .as_deref()
+            .is_none_or(|path| new_session_project_path_is_absolute(path, connector.is_ssh()))
+        {
+            return Ok((
+                ApiClient::connect().await?,
+                workspace_id.clone(),
+                args.target.clone(),
+                args.project_directory.clone(),
+                None,
+            ));
+        }
     }
     let mut listed = if workspace_id.is_none() {
         crate::listed_workspaces_without_starting().await
@@ -1597,6 +1601,14 @@ async fn infer_new_session_inputs(
         project_directory,
         options,
     ))
+}
+
+fn new_session_project_path_is_absolute(path: &Path, daemon_is_ssh: bool) -> bool {
+    if daemon_is_ssh {
+        mj_core::target_path::is_absolute(path)
+    } else {
+        path.is_absolute()
+    }
 }
 
 pub(crate) fn write_start_notice(
@@ -3929,6 +3941,27 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    #[test]
+    fn new_session_fast_path_uses_ssh_daemon_path_semantics() {
+        let project = Path::new("/srv/project");
+        assert!(new_session_project_path_is_absolute(project, true));
+        assert!(!new_session_project_path_is_absolute(
+            Path::new("srv/project"),
+            true
+        ));
+        assert_eq!(
+            new_session_project_path_is_absolute(project, false),
+            project.is_absolute()
+        );
+        #[cfg(windows)]
+        {
+            assert!(!new_session_project_path_is_absolute(project, false));
+            let drive_path = Path::new(r"C:\srv\project");
+            assert!(new_session_project_path_is_absolute(drive_path, false));
+            assert!(!new_session_project_path_is_absolute(drive_path, true));
+        }
+    }
 
     #[cfg(unix)]
     #[test]

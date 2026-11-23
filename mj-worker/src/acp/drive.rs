@@ -1811,7 +1811,16 @@ pub(super) async fn apply_cancel(
     terminals: &TerminalRegistry,
     pending: &PendingElicitations,
 ) -> Result<()> {
-    match cancel_prompt_turn(connection, session_id, terminals, pending) {
+    let outcome = cancel_prompt_turn(connection, session_id, terminals, pending);
+    report_cancel(events, cancel_id, outcome).await
+}
+
+pub(super) async fn report_cancel(
+    events: &mpsc::Sender<RuntimeEvent>,
+    cancel_id: String,
+    outcome: std::result::Result<(), agent_client_protocol::Error>,
+) -> Result<()> {
+    match outcome {
         Ok(()) => {
             emit_runtime_event(
                 events,
@@ -2025,6 +2034,9 @@ pub(super) fn drain_requests_from_the_previous_bridge(
                 ("RestoreExecutionMode", Some(request_id))
             }
             CommandRequest::CancelTurnFor { request_id, .. } => ("CancelTurnFor", Some(request_id)),
+            CommandRequest::CancelUnpromptedTurn { request_id, .. } => {
+                ("CancelUnpromptedTurn", Some(request_id))
+            }
             CommandRequest::Steer { request_id, .. } => ("Steer", Some(request_id)),
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),

@@ -1502,18 +1502,19 @@ mod tests {
     #[test]
     fn guardian_alignment_omits_fields_unknown_to_old_peers() {
         let request = aligned_review_request();
-        for version in [82, 83, 85, 86] {
+        let current = crate::relay::RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL;
+        for version in [82, 83, current - 1, current] {
             let wire = serde_json::to_value(request.for_protocol(version)).unwrap();
             assert_eq!(wire.get("project_instructions").is_some(), version >= 83);
             for field in ["trusted_user_inputs", "prior_reviews", "retry_reason"] {
                 assert_eq!(
                     wire.get(field).is_some(),
-                    version == 86,
+                    version >= current,
                     "{field} at {version}"
                 );
             }
             let decoded: GuardianReviewRequest = serde_json::from_value(wire).unwrap();
-            if version < 86 {
+            if version < current {
                 assert!(decoded.trusted_user_inputs.is_empty());
                 assert!(decoded.prior_reviews.is_empty());
                 assert!(decoded.retry_reason.is_none());

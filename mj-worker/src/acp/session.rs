@@ -1408,6 +1408,13 @@ pub(super) async fn serve_session(
                                     cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                 }
                             }
+                            Some(CommandRequest::CancelUnpromptedTurn { request_id, .. }) => {
+                                emit_runtime_event(events, RuntimeEvent::CommandRejected {
+                                    reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                                    request_id,
+                                    message: "The requested turn is no longer running".into(),
+                                }).await?;
+                            }
                             Some(CommandRequest::Steer { request_id: steer_id, active_prompt_id, steering_prompt }) => {
                                 if active_prompt_id != request_id || !prompt_running || cancel_deadline.is_some() || pending_steer.is_some() || !steering_supported {
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected {
@@ -1894,6 +1901,32 @@ pub(super) async fn serve_session(
                     },
                 )
                 .await?;
+            }
+            CommandRequest::CancelUnpromptedTurn { request_id, target } => {
+                let outcome = spec.terminal_owner.as_ref().and_then(|owner| {
+                    let relay = owner.upgrade()?;
+                    let relay = relay.lock().expect("relay state lock poisoned");
+                    // Keep the relay's turn identity pinned until the ACP
+                    // notification is sent. The coordinator may settle this
+                    // turn while the request is waiting in the ACP inbox.
+                    relay.owns_unprompted_interrupt(&target).then(|| {
+                        cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
+                    })
+                });
+                if let Some(outcome) = outcome {
+                    pending_elicitations.end_withdrawal();
+                    report_cancel(events, request_id, outcome).await?;
+                } else {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                            request_id,
+                            message: "The requested turn is no longer running".into(),
+                        },
+                    )
+                    .await?;
+                }
             }
             CommandRequest::Cancel { request_id, .. } => {
                 apply_cancel(

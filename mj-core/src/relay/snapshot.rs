@@ -163,6 +163,10 @@ pub enum RelayCommand {
     CancelTurnFor {
         active_prompt_id: String,
     },
+    /// Interrupt exactly the worker-published target.
+    CancelTurnTarget {
+        target: TurnInterruptTarget,
+    },
     /// Interrupt this turn only while the intended queued change is still first.
     ApplyQueuedFor {
         active_prompt_id: String,
@@ -291,6 +295,7 @@ impl RelayCommand {
             Self::ClearNotifications { .. } | Self::NotificationsRead { .. } => {
                 super::RELAY_NOTIFICATION_STACK_PROTOCOL
             }
+            Self::CancelTurnTarget { .. } => super::RELAY_CANCEL_TURN_TARGET_PROTOCOL,
             Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
@@ -378,6 +383,7 @@ impl RelayCommand {
                 | Self::CancelTurn
                 | Self::Steer { .. }
                 | Self::CancelTurnFor { .. }
+                | Self::CancelTurnTarget { .. }
                 | Self::ApplyQueuedFor { .. }
                 | Self::Cancel
                 | Self::Close { .. }
@@ -410,7 +416,9 @@ impl RelayCommand {
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
             Self::Steer { .. } => RelayCommandKind::Steer,
-            Self::CancelTurnFor { .. } => RelayCommandKind::CancelTurn,
+            Self::CancelTurnFor { .. } | Self::CancelTurnTarget { .. } => {
+                RelayCommandKind::CancelTurn
+            }
             Self::ApplyQueuedFor { .. } => RelayCommandKind::CancelTurn,
             Self::ResolveSteering { .. } => RelayCommandKind::ResolveSteering,
             Self::Cancel => RelayCommandKind::Cancel,
@@ -1005,6 +1013,11 @@ impl RelayOperationalState {
 
     /// Targeted turn control was introduced with relay protocol 17.
     #[must_use]
+    pub fn publishes_interrupt_targets(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_CANCEL_TURN_TARGET_PROTOCOL)
+    }
+
     pub fn supports_targeted_turn_control(&self) -> bool {
         self.relay_protocol_version.is_some_and(|version| {
             version
