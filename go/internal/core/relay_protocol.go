@@ -361,6 +361,8 @@ func RelayRequestMethodName(request RelayRequest) string {
 		return "read_pending_elicitation"
 	case RelayRequestReadQueuedCommand:
 		return "read_queued_command"
+	case RelayRequestReadCheckpointMailbox:
+		return "read_checkpoint_mailbox"
 	case RelayRequestBeginLiveBaseline:
 		return "begin_live_baseline"
 	case RelayRequestReadLiveBaselinePage:
@@ -505,6 +507,8 @@ func RelayRequestMinimumProtocol(request RelayRequest) uint32 {
 	case RelayRequestReadPendingElicitation, RelayRequestReadQueuedCommand, RelayRequestCommandRetentionStatus,
 		RelayRequestUpdateCommandRetention:
 		return RelayCommandRetentionProtocol
+	case RelayRequestReadCheckpointMailbox:
+		return RelayCheckpointMailboxProtocol
 	case RelayRequestSubmit:
 		return RelayCommandMinimumProtocol(request.Command)
 	case RelayRequestReviewer:
@@ -927,6 +931,9 @@ func InvalidRelayRequestResponse(requestID string, protocolVersion uint32, messa
 		Body:            RelayError(RelayErrorCodeInvalidRequest, message, false, nil),
 	}
 }
+
+// RustDebugString renders text as Rust's {:?} does for a str.
+func RustDebugString(text string) string { return rustDebugString(text) }
 
 // rustDebugString renders text as Rust's {:?} does for a str.
 func rustDebugString(text string) string {
@@ -1469,6 +1476,23 @@ func (RelayRequestReadQueuedCommand) isRelayRequest() {}
 func (v RelayRequestReadQueuedCommand) MarshalJSON() ([]byte, error) {
 	type plain RelayRequestReadQueuedCommand
 	return relayAdjacentJSON("method", "params", "read_queued_command", plain(v))
+}
+
+// RelayRequestReadCheckpointMailbox asks for the mail the relay holds at the
+// cut of a ready checkpoint barrier. Refused unless that barrier is ready at
+// exactly Cut and nothing has been journaled since, so the answer describes
+// the archived cut. Protocol 75.
+type RelayRequestReadCheckpointMailbox struct {
+	BarrierCommandID string      `json:"barrier_command_id"`
+	Cut              RelayCursor `json:"cut"`
+}
+
+func (RelayRequestReadCheckpointMailbox) isRelayRequest() {}
+
+// MarshalJSON writes the serde-tagged form of RelayRequestReadCheckpointMailbox.
+func (v RelayRequestReadCheckpointMailbox) MarshalJSON() ([]byte, error) {
+	type plain RelayRequestReadCheckpointMailbox
+	return relayAdjacentJSON("method", "params", "read_checkpoint_mailbox", plain(v))
 }
 
 type RelayRequestReadPendingElicitation struct {
@@ -2114,6 +2138,7 @@ var relayRequestVariants = map[string]func(json.RawMessage) (RelayRequest, error
 	"abort_live_baseline":             relayRequiredVariant[RelayRequestAbortLiveBaseline, RelayRequest](),
 	"read_queued_command":             relayRequiredVariant[RelayRequestReadQueuedCommand, RelayRequest](),
 	"read_pending_elicitation":        relayRequiredVariant[RelayRequestReadPendingElicitation, RelayRequest](),
+	"read_checkpoint_mailbox":         relayRequiredVariant[RelayRequestReadCheckpointMailbox, RelayRequest](),
 	"update_command_retention":        relayRequiredVariant[RelayRequestUpdateCommandRetention, RelayRequest](),
 	"status":                          relayRequiredVariant[RelayRequestStatus, RelayRequest](),
 	"drain_mailbox":                   relayRequiredVariant[RelayRequestDrainMailbox, RelayRequest](),
@@ -2552,6 +2577,20 @@ func (v *RelayResponsePayloadQueuedCommand) UnmarshalJSON(data []byte) error {
 		v.Command = decoded
 	}
 	return nil
+}
+
+// RelayResponsePayloadCheckpointMailbox is the mail at a ready checkpoint
+// cut (protocol 75).
+type RelayResponsePayloadCheckpointMailbox struct {
+	Mailbox CanonicalMailbox `json:"mailbox"`
+}
+
+func (RelayResponsePayloadCheckpointMailbox) isRelayResponsePayload() {}
+
+// MarshalJSON writes the serde-tagged form of RelayResponsePayloadCheckpointMailbox.
+func (v RelayResponsePayloadCheckpointMailbox) MarshalJSON() ([]byte, error) {
+	type plain RelayResponsePayloadCheckpointMailbox
+	return relayAdjacentJSON("type", "data", "checkpoint_mailbox", plain(v))
 }
 
 type RelayResponsePayloadPendingElicitation struct {
@@ -3000,6 +3039,7 @@ var relayResponsePayloadVariants = map[string]func(json.RawMessage) (RelayRespon
 	"live_baseline_aborted":                    relayVariant[RelayResponsePayloadLiveBaselineAborted, RelayResponsePayload](false),
 	"queued_command":                           relayVariant[RelayResponsePayloadQueuedCommand, RelayResponsePayload](false),
 	"pending_elicitation":                      relayVariant[RelayResponsePayloadPendingElicitation, RelayResponsePayload](false),
+	"checkpoint_mailbox":                       relayVariant[RelayResponsePayloadCheckpointMailbox, RelayResponsePayload](false),
 	"mailbox_drained":                          relayVariant[RelayResponsePayloadMailboxDrained, RelayResponsePayload](false),
 	"mailbox_acknowledged":                     relayVariant[RelayResponsePayloadMailboxAcknowledged, RelayResponsePayload](false),
 	"attachment_present":                       relayVariant[RelayResponsePayloadAttachmentPresent, RelayResponsePayload](false),

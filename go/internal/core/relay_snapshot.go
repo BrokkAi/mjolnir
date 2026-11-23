@@ -634,6 +634,9 @@ type RelayOperationalState struct {
 	// Retired at protocol 70: workers no longer set it, and no reader asks
 	// it. It stays so that an older daemon still decodes the snapshot.
 	AuthenticationRetryWaiting *string `json:"authentication_retry_waiting,omitempty"`
+	// The Jev rate limit still in force for this worker, if any. (Rust
+	// 4273087e6, after this file's base; ported for mj-worker's relay.)
+	JevRateLimit *RateLimitKind `json:"jev_rate_limit,omitempty"`
 	// Worker-published: the access-token hash of the failed turn this
 	// worker still owes a retry for. Present while the durable intent holds
 	// (the turn failed authentication, nothing newer was accepted or
