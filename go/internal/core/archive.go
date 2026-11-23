@@ -1393,7 +1393,7 @@ func validateCanonicalSession(snapshot *CanonicalSessionSnapshot) error {
 		}
 		for _, commandID := range slices.Sorted(maps.Keys(mailbox.PromptContexts)) {
 			queued := slices.ContainsFunc(snapshot.QueuedPrompts, func(prompt CanonicalQueuedPrompt) bool {
-				return prompt.CommandID == commandID && prompt.Kind.Kind == CanonicalQueuedCommandKindPrompt
+				return prompt.CommandID == commandID && prompt.Kind.isPrompt()
 			})
 			if !queued {
 				return fmt.Errorf("canonical mailbox context belongs to '%s', which is not a queued prompt", commandID)
