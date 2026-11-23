@@ -8,7 +8,8 @@ ettin-tokenizer.json: 28c5e078e4c52aa37cf0e6de1a212878f3dbd58dd1c70466298efe0b6b
 out/python-unicode-ranges.json: babeb3d0c214138040d7c77e0c00b3c2360bb25361893d99b41f737e1d3c7daf
 out/rust-port-fixtures.jsonl.gz: 1a8960f99d031753bf06d51ab1b304b4e49fc0f97229bd8e68f0c08b1ce81734
 
-reference.jsonl is the decompressed 16-row frozen fixture corpus, with an
+`mj-github-relevance/tests/fixtures/github-history/reference.jsonl` is the
+decompressed 16-row frozen fixture corpus, with an
 expected_evidence_json field added by Python json.dumps using the reference
 session_order and each existing expected_history. No Rust output generated
 expected values. unicode-adversarial.json was generated with the same frozen

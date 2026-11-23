@@ -342,6 +342,12 @@ func sessionVerdictEqual(a, b *SessionVerdict) bool { return a.Equal(*b) }
 // runtimeSessionViewEqual is RuntimeSessionView's PartialEq: its serialized
 // fields and the in-process ones serde skips.
 func runtimeSessionViewEqual(a, b *RuntimeSessionView) bool {
+	if (a.Materialized == nil) != (b.Materialized == nil) {
+		return false
+	}
+	if a.Materialized != nil && !a.Materialized.Equal(*b.Materialized, feedJSONEqual[RuntimeMaterializedSession]) {
+		return false
+	}
 	return a.MaterializedOnly == b.MaterializedOnly && feedJSONEqual(a, b)
 }
 
@@ -856,6 +862,9 @@ type RuntimeMetadata struct {
 	OperatorPresence    core.OperatorPresence                                 `json:"operator_presence"`
 	ProfileCapabilities core.SharedSnapshot[core.ProfileCapabilitiesSnapshot] `json:"profile_capabilities"`
 	Config              core.SharedSnapshot[core.Config]                      `json:"config"`
+	// Availability is the daemon's verdict on every profile and target.
+	// Absent from a daemon that predates it, which reads as nothing known.
+	Availability core.SharedSnapshot[RuntimeAvailability] `json:"availability"`
 	// DefaultTargets is the ids in Config.Targets that the daemon supplied
 	// as default candidates rather than the user's file naming them. Config
 	// never serializes this set (it is not file content), so the feed
@@ -967,6 +976,11 @@ func (m RuntimeMetadata) MarshalJSON() ([]byte, error) {
 // history serde skips.
 func (m *RuntimeMetadata) Equal(other *RuntimeMetadata) bool {
 	if !m.MountHistory.Equal(other.MountHistory, func(a, b *[]string) bool { return slices.Equal(*a, *b) }) {
+		return false
+	}
+	if !m.Availability.Equal(other.Availability, func(a, b *RuntimeAvailability) bool {
+		return feedJSONEqual(&a.Browser, &b.Browser)
+	}) {
 		return false
 	}
 	return feedJSONEqual(m, other)

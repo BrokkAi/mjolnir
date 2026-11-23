@@ -864,6 +864,77 @@ func DecodeTranscriptBody(data []byte) (TranscriptBody, error) {
 		"terminal_output", "plan", "plan_proposal", "system")
 }
 
+// ToolCallDetailResult is a stored tool row's full detail, reloaded on
+// demand, or why it cannot be. Serialized internally tagged by "status".
+// Decode with DecodeToolCallDetailResult.
+type ToolCallDetailResult interface {
+	isToolCallDetailResult()
+}
+
+type ToolCallDetailResultFull struct {
+	Body TranscriptBody `json:"body"`
+}
+
+type ToolCallDetailResultUnavailable struct {
+	// Summary is the row as stored, nil when there is none.
+	Summary TranscriptBody `json:"summary,omitempty"`
+	Reason  string         `json:"reason"`
+}
+
+func (ToolCallDetailResultFull) isToolCallDetailResult()        {}
+func (ToolCallDetailResultUnavailable) isToolCallDetailResult() {}
+
+func (r ToolCallDetailResultFull) MarshalJSON() ([]byte, error) {
+	type plain ToolCallDetailResultFull
+	return transcriptMarshalTagged("status", "full", plain(r))
+}
+
+func (r ToolCallDetailResultUnavailable) MarshalJSON() ([]byte, error) {
+	type plain ToolCallDetailResultUnavailable
+	return transcriptMarshalTagged("status", "unavailable", plain(r))
+}
+
+// DecodeToolCallDetailResult reads a ToolCallDetailResult, tagged by
+// "status".
+func DecodeToolCallDetailResult(data []byte) (ToolCallDetailResult, error) {
+	tag, err := transcriptTag(data, "status", "ToolCallDetailResult")
+	if err != nil {
+		return nil, err
+	}
+	switch tag {
+	case "full":
+		var v struct {
+			Body json.RawMessage `json:"body"`
+		}
+		if err := transcriptStrictDecode(data, &v, false, "status"); err != nil {
+			return nil, err
+		}
+		body, err := DecodeTranscriptBody(v.Body)
+		if err != nil {
+			return nil, err
+		}
+		return ToolCallDetailResultFull{Body: body}, nil
+	case "unavailable":
+		var v struct {
+			Summary json.RawMessage `json:"summary" serde:"default"`
+			Reason  string          `json:"reason"`
+		}
+		if err := transcriptStrictDecode(data, &v, false, "status"); err != nil {
+			return nil, err
+		}
+		result := ToolCallDetailResultUnavailable{Reason: v.Reason}
+		if len(v.Summary) > 0 && string(v.Summary) != "null" {
+			summary, err := DecodeTranscriptBody(v.Summary)
+			if err != nil {
+				return nil, err
+			}
+			result.Summary = summary
+		}
+		return result, nil
+	}
+	return nil, transcriptUnknownVariant(tag, "full", "unavailable")
+}
+
 // PushContentChunk appends one ACP ContentChunk value to a transcript item's
 // chunk list, merging it into the previous chunk when the two are the same
 // text stream.

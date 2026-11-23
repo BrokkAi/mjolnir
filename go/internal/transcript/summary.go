@@ -48,9 +48,9 @@ const LegacyHandoffPreamble = "Continue this coding session from the portable tr
 // summary of a summary.
 const HandoffPlaceholder = "[cross-harness resume handoff: continuing work from a prior harness]"
 
-// userText: prior handoffs repeat history already represented in the
+// UserText: prior handoffs repeat history already represented in the
 // lineage.
-func userText(text string) string {
+func UserText(text string) string {
 	trimmed := strings.TrimLeftFunc(text, unicode.IsSpace)
 	for _, preamble := range []string{HandoffPreamble, ArchiveHandoffPreamble, LegacyHandoffPreamble} {
 		if strings.HasPrefix(trimmed, preamble) {
@@ -151,6 +151,51 @@ func summaryIsCharBoundary(text string, index int) bool {
 	return index == 0 || index == len(text) || (index < len(text) && utf8.RuneStart(text[index]))
 }
 
+// ToolOutcome is how a tool call ended, as its raw output and terminals
+// report it.
+type ToolOutcome struct {
+	ExitCode *int64
+	Signal   *string
+}
+
+// ToolOutcomeFromRawOutput reads the outcome a raw output reports. output is
+// the raw output as a jsonvalue value, nil when the call has none.
+func ToolOutcomeFromRawOutput(output any) ToolOutcome {
+	var outcome ToolOutcome
+	if code, ok := jsonAsI64(jsonMember(output, "exit_code")); ok {
+		outcome.ExitCode = &code
+	}
+	if signal, ok := transcriptGetString(output, "signal"); ok {
+		outcome.Signal = &signal
+	}
+	return outcome
+}
+
+// ObserveTerminal records what one terminal reports; a terminal that says
+// nothing leaves the earlier report.
+func (o *ToolOutcome) ObserveTerminal(code *uint32, signal *string) {
+	if code != nil {
+		exitCode := int64(*code)
+		o.ExitCode = &exitCode
+	}
+	if signal != nil {
+		o.Signal = signal
+	}
+}
+
+func (o *ToolOutcome) IsError() bool {
+	return o.Signal != nil || (o.ExitCode != nil && *o.ExitCode != 0)
+}
+
+func (o *ToolOutcome) writeTo(value *jsonvalue.Object) {
+	if o.ExitCode != nil {
+		value.Set("exit_code", *o.ExitCode)
+	}
+	if o.Signal != nil {
+		value.Set("signal", *o.Signal)
+	}
+}
+
 func toolValue(call json.RawMessage, presentation *core.ToolCallPresentation, full bool) jsonvalue.Object {
 	var name string
 	var decoded acp.ToolCall
@@ -173,13 +218,8 @@ func toolValue(call json.RawMessage, presentation *core.ToolCallPresentation, fu
 		{Key: "kind", Value: member("kind", "other")},
 		{Key: "status", Value: member("status", "pending")},
 	}
-	rawOutput := jsonMember(parsed, "rawOutput")
-	if code, ok := jsonAsI64(jsonMember(rawOutput, "exit_code")); ok {
-		compact.Set("exit_code", code)
-	}
-	if signal, ok := transcriptGetString(rawOutput, "signal"); ok {
-		compact.Set("signal", signal)
-	}
+	outcome := ToolOutcomeFromRawOutput(jsonMember(parsed, "rawOutput"))
+	outcome.writeTo(&compact)
 	if full {
 		compact.Set("call", parsed)
 	}
@@ -318,7 +358,7 @@ func TranscriptSummaryFromSnapshotKeeping(snapshot *core.CanonicalSessionSnapsho
 		var tool jsonvalue.Object
 		switch body := item.Body.(type) {
 		case core.CanonicalTranscriptBodyUser:
-			role, text = SummaryRoleUser, userText(core.MaterializedContentText(body.Content))
+			role, text = SummaryRoleUser, UserText(core.MaterializedContentText(body.Content))
 		case core.CanonicalTranscriptBodyMessage:
 			role, text = SummaryRoleMessage, core.RenderMailboxEvent(body.Event)
 		case core.CanonicalTranscriptBodyAgent:
@@ -426,7 +466,7 @@ func TranscriptSummaryFromMaterializedKeeping(session *core.MaterializedSession,
 		var tool jsonvalue.Object
 		switch body := item.Body.(type) {
 		case core.TranscriptBodyUser:
-			role, text = SummaryRoleUser, userText(core.MaterializedContentText(body.Content))
+			role, text = SummaryRoleUser, UserText(core.MaterializedContentText(body.Content))
 		case core.TranscriptBodyMessage:
 			role, text = SummaryRoleMessage, core.RenderMailboxEvent(body.Event)
 		case core.TranscriptBodyAgent:
@@ -467,7 +507,7 @@ func (s *TranscriptSummary) MarkEarlierHistoryOmitted() {
 
 func (s *TranscriptSummary) PushUser(text string) {
 	s.openMessage = nil
-	s.push(SummaryRoleUser, "", userText(text), nil)
+	s.push(SummaryRoleUser, "", UserText(text), nil)
 }
 
 func (s *TranscriptSummary) push(role SummaryRole, id, text string, tool jsonvalue.Object) {
@@ -894,15 +934,15 @@ type attachedTerminal struct {
 }
 
 func attachTerminals(value *jsonvalue.Object, terminals []attachedTerminal) {
+	var outcome ToolOutcome
 	for _, terminal := range terminals {
+		outcome.ObserveTerminal(terminal.code, terminal.signal)
 		var code, signal any
 		if terminal.code != nil {
 			code = *terminal.code
-			value.Set("exit_code", code)
 		}
 		if terminal.signal != nil {
 			signal = *terminal.signal
-			value.Set("signal", signal)
 		}
 		if _, ok := value.Get("call"); ok {
 			records, ok := jsonMember(*value, "terminals").(jsonvalue.Object)
@@ -918,6 +958,7 @@ func attachTerminals(value *jsonvalue.Object, terminals []attachedTerminal) {
 			value.Set("terminals", records)
 		}
 	}
+	outcome.writeTo(value)
 }
 
 // boundValue excerpts every string longer than limit in a jsonvalue value,

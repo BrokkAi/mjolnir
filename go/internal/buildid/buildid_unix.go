@@ -1,6 +1,8 @@
-// Port of the `test-hooks` part of mj-build-id/src/lib.rs and build.rs.
+// Port of fake_worker_dispatcher in mj-build-id/src/lib.rs and the stand-in
+// build.rs stamps. Rust builds it on Unix whenever the workspace fixture is
+// present, no longer only under the removed `test-hooks` feature.
 
-//go:build unix && testhooks
+//go:build unix
 
 package buildid
 

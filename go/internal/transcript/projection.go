@@ -66,6 +66,9 @@ func sortedProjectionStreams(streams map[projectionStream]struct{}) []projection
 
 type HistoricalReferences struct {
 	IDs []string
+	// Terminals is Rust's BTreeSet<String>: the terminals the events refer
+	// to, sorted.
+	Terminals []string
 }
 
 // HistoricalReferencesOf lists explicit references that may address rows
@@ -79,24 +82,14 @@ func HistoricalReferencesOf(events []core.RelayEvent) (HistoricalReferences, err
 		switch observation := event.Observation.(type) {
 		case core.RelayObservationSessionUpdate:
 			update := &observation.Update
-			var value json.RawMessage
+			var content []schema.ToolCallContent
 			switch {
 			case update.ToolCall != nil:
-				ids["tool:"+string(update.ToolCall.ToolCallID)] = struct{}{}
-				encoded, err := projectionJSON(update.ToolCall)
-				if err != nil {
-					return HistoricalReferences{}, err
-				}
-				value = encoded
+				ids[ToolItemID(string(update.ToolCall.ToolCallID))] = struct{}{}
+				content = update.ToolCall.Content
 			case update.ToolCallUpdate != nil:
-				ids["tool:"+string(update.ToolCallUpdate.ToolCallID)] = struct{}{}
-				// Rust serializes only the update fields; terminal references
-				// are read from their content alone, which both forms share.
-				encoded, err := projectionJSON(update.ToolCallUpdate)
-				if err != nil {
-					return HistoricalReferences{}, err
-				}
-				value = encoded
+				ids[ToolItemID(string(update.ToolCallUpdate.ToolCallID))] = struct{}{}
+				content = update.ToolCallUpdate.Content
 			case update.AgentMessageChunk != nil:
 				if id := update.AgentMessageChunk.MessageID; id != nil {
 					ids["agent:"+string(*id)] = struct{}{}
@@ -106,9 +99,9 @@ func HistoricalReferencesOf(events []core.RelayEvent) (HistoricalReferences, err
 					ids["thought:"+string(*id)] = struct{}{}
 				}
 			}
-			if value != nil {
-				for _, terminal := range toolCallTerminalIDs(value) {
-					terminals[terminal] = struct{}{}
+			for j := range content {
+				if block := &content[j]; block.Kind == schema.ToolCallContentKindTerminal && block.Terminal != nil {
+					terminals[string(block.Terminal.TerminalID)] = struct{}{}
 				}
 			}
 		case core.RelayObservationTerminalOutput:
@@ -158,7 +151,10 @@ func HistoricalReferencesOf(events []core.RelayEvent) (HistoricalReferences, err
 		ids[terminalItemID(terminal)] = struct{}{}
 		ids[fallbackTerminalToolItemID(terminal)] = struct{}{}
 	}
-	return HistoricalReferences{IDs: slices.Sorted(maps.Keys(ids))}, nil
+	return HistoricalReferences{
+		IDs:       slices.Sorted(maps.Keys(ids)),
+		Terminals: slices.Sorted(maps.Keys(terminals)),
+	}, nil
 }
 
 // historicalCommandReferences adds the user shell and user rows a command's
@@ -288,7 +284,7 @@ func (x *ProjectionIndex) openStreams(agent bool) []*core.TranscriptItem {
 	return items
 }
 
-func (x *ProjectionIndex) terminalReferrers(terminalID string) []*core.TranscriptItem {
+func (x *ProjectionIndex) TerminalReferrers(terminalID string) []*core.TranscriptItem {
 	var items []*core.TranscriptItem
 	for _, stableID := range slices.Sorted(maps.Keys(x.terminalReferrerIDs[terminalID])) {
 		if item, ok := x.transcript[stableID]; ok {

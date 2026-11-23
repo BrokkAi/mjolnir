@@ -155,12 +155,7 @@ func (c *DaemonConnector) remote(ctx context.Context, intent DiscoveryIntent, st
 			}
 		}
 	}
-	instance := "default"
-	if c.placement.Instance != nil {
-		instance = *c.placement.Instance
-	} else if name, ok := core.InstanceName(); ok {
-		instance = name
-	}
+	instance := c.placement.RemoteInstance()
 	// Replacing the published lease never stops the old tunnel: clients
 	// still holding it keep it until they are gone (#1514).
 	replacement, err := Open(ctx, c.placement, instance, intent, nil)

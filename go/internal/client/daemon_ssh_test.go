@@ -163,17 +163,17 @@ func TestRealSshEndpointDiscovery(t *testing.T) {
 		t.Fatal("the old lease outlived every client holding it")
 	}
 	connector = nil
-	endpoint, err := Discover(ctx, placement, instance, DiscoveryIntentStart)
+	endpoint, err := Discover(ctx, placement, &instance, DiscoveryIntentStart)
 	must(err)
 	if !endpoint.ControlAddress.Addr().IsLoopback() {
 		t.Fatalf("control address %s", endpoint.ControlAddress)
 	}
-	existing, err := Discover(ctx, placement, instance, DiscoveryIntentExisting)
+	existing, err := Discover(ctx, placement, &instance, DiscoveryIntentExisting)
 	must(err)
 	if existing.Token != endpoint.Token || existing.InstanceID != endpoint.InstanceID {
 		t.Fatal("existing discovery found another daemon")
 	}
-	lease, err := Open(ctx, placement, instance, DiscoveryIntentExisting, nil)
+	lease, err := Open(ctx, placement, &instance, DiscoveryIntentExisting, nil)
 	must(err)
 	if lease.Endpoint.InstanceID != endpoint.InstanceID {
 		t.Fatal("the tunnel reaches another daemon")
@@ -184,7 +184,7 @@ func TestRealSshEndpointDiscovery(t *testing.T) {
 	defer occupied.Close()
 	occupiedPort := uint16(occupied.Addr().(*net.TCPAddr).Port)
 	first := true
-	second, err := openWithPort(ctx, placement, instance, DiscoveryIntentExisting, func() (uint16, error) {
+	second, err := openWithPort(ctx, placement, &instance, DiscoveryIntentExisting, func() (uint16, error) {
 		if first {
 			first = false
 			return occupiedPort, nil
@@ -205,7 +205,7 @@ func TestRealSshEndpointDiscovery(t *testing.T) {
 	missing := placement
 	missingCommand := "/missing/mj-discovery-test"
 	missing.RemoteCommand = &missingCommand
-	_, err = Discover(ctx, missing, instance, DiscoveryIntentExisting)
+	_, err = Discover(ctx, missing, &instance, DiscoveryIntentExisting)
 	if err == nil {
 		t.Fatal("a missing remote command was discovered")
 	}

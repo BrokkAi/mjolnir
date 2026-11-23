@@ -127,6 +127,82 @@ func daemonSameJSON(v, want any) error {
 	return nil
 }
 
+func TestContainerOwnerToleratesFutureFieldsWhileLegacyMetadataStaysStrict(t *testing.T) {
+	directory := t.TempDir()
+	owner := filepath.Join(directory, "daemon-container.json")
+	err := os.WriteFile(owner, []byte(`{
+		"runtime": "podman",
+		"container_id": "full-id",
+		"container_name": "mj-daemon",
+		"address": "127.0.0.1:8787",
+		"token": "fixture-token",
+		"started_at": "2026-11-23T00:00:00Z",
+		"future_field": {"extra": true}
+	}`), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := readContainerOwnerAt(owner)
+	if err != nil || record == nil {
+		t.Fatalf("read owner: %v, %v", record, err)
+	}
+	if record.Schema != ContainerOwnerSchema {
+		t.Fatalf("schema %d", record.Schema)
+	}
+	if record.ContainerID != "full-id" {
+		t.Fatalf("container id %q", record.ContainerID)
+	}
+	otherAddress := netip.MustParseAddrPort("127.0.0.1:8788")
+	if err := removeContainerOwnerAt(owner, otherAddress, record.Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeContainerOwnerAt(owner, record.Address, "replacement-token"); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := readContainerOwnerAt(owner)
+	if err != nil || kept == nil || *kept != *record {
+		t.Fatalf("a different daemon's removal changed the owner: %v, %v", kept, err)
+	}
+	if err := removeContainerOwnerAt(owner, record.Address, record.Token); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := readContainerOwnerAt(owner); err != nil || gone != nil {
+		t.Fatalf("owner after its removal: %v, %v", gone, err)
+	}
+
+	metadata := filepath.Join(directory, "daemon.json")
+	fixture := map[string]any{
+		"protocol_version": ProtocolVersion,
+		"pid":              0,
+		"address":          record.Address.String(),
+		"token":            record.Token,
+		"started_at":       record.StartedAt,
+		"build_version":    "2.73.0",
+	}
+	write := func() {
+		body, err := json.Marshal(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadata, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	read, err := readMetadataAt(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Matches(&read) {
+		t.Fatal("the owner does not match its daemon's metadata")
+	}
+	fixture["container_id"] = record.ContainerID
+	write()
+	if _, err := readMetadataAt(metadata); err == nil || !strings.Contains(err.Error(), "unknown field `container_id`") {
+		t.Fatalf("legacy metadata accepted a container field: %v", err)
+	}
+}
+
 // Hard-won: 372572b0b7b6: stopped daemon endpoint removal broke status and session refresh
 func TestAMissingEndpointFileReadsAsAStoppedDaemon(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.json")
@@ -218,7 +294,7 @@ func TestCancelledRequestCannotReuseACompleteOrPartialResponse(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		result := make(chan error, 1)
 		go func() {
-			_, err := client.Identity(ctx)
+			_, err := client.RequestSingle(ctx, DaemonActionIdentity{})
 			result <- err
 		}()
 		select {
@@ -880,9 +956,11 @@ func TestUnavailableLifecycleObservationDistinguishesDisconnectFromOperationFail
 	for _, disconnected := range []bool{true, false} {
 		client := daemonTestConnect(t, metadata)
 		_, err := client.StartSessionLifecycle(ctx, SessionLifecycleRequestSuspend{
-			SessionID:                  "observed-session",
-			AcknowledgeUnpublishedWork: true,
-			IgnoreNestedRepositories:   false,
+			SessionID:           "observed-session",
+			DiscardUntracked:    core.UntrackedConsent{Kind: core.UntrackedConsentAny},
+			AbortOperations:     core.OperationConsent{Kind: core.OperationConsentNone},
+			WithoutCheckpoint:   false,
+			ConfirmNoCheckpoint: false,
 		})
 		if disconnected {
 			var unconfirmed LifecycleAdmissionUnconfirmed

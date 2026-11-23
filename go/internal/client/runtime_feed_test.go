@@ -174,7 +174,43 @@ func TestNativeBrowserProjectPathsDoNotBreakControlFrames(t *testing.T) {
 }
 
 func TestBrowserPromptBodiesCannotExhaustTheControlFrame(t *testing.T) {
-	t.Skip("blocked on client-daemon: RuntimeSessionView.Materialized and RuntimeMaterializedSession (daemon.rs) are not declared in this worktree")
+	var first RuntimeProjection
+	view := feedSession("queued")
+	materialized := core.NewSharedSnapshot(RuntimeMaterializedSession{
+		QueuedPrompts: []core.QueuedPrompt{{
+			ID:          "large",
+			Kind:        core.QueuedCommandKindPrompt{},
+			Text:        strings.Repeat("x", MaxFrameBytes+1),
+			Attachments: []core.Attachment{},
+			CreatedAtMs: 8,
+		}},
+	})
+	view.Materialized = &materialized
+	first.Sessions.Insert("queued", view)
+	second := first
+	second.Sessions.GetMut("queued").Connected = true
+	replacement := RuntimeDeltaBetween(&first, &second)
+	encoded, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= MaxFrameBytes {
+		t.Fatalf("delta is %d bytes", len(encoded))
+	}
+	var delivered RuntimeDelta
+	if err := json.Unmarshal(encoded, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	delivery := delivered.Sessions[0].Value
+	if delivery == nil {
+		t.Fatal("the session change was lost")
+	}
+	if delivery.Materialized != nil {
+		t.Fatal("prompt bodies crossed the control frame")
+	}
+	if !delivery.Connected {
+		t.Fatal("the connection change was lost")
+	}
 }
 
 // Hard-won: AFK review #3: a coalesced feed hid transitions with equal availability.
