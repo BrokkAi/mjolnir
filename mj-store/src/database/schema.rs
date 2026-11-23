@@ -6,10 +6,8 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
-/// Revision 153 is breaking because it publishes references to cold transcript
-/// bodies. Older readers cannot resolve them and older writers cannot clear them.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 153;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 154;
 
 fn migrate_orchestrator_policies(transaction: &Transaction<'_>) -> Result<()> {
     use mj_core::subagent::{SubagentPolicy, parse_stored_policy};
@@ -3047,6 +3045,34 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Revision 154 is breaking: older daemons restage sessions without updating
+    // staged_aws_profile, leaving it out of sync with aws-config and AWS_PROFILE.
+    // The restart intent carries that selection until the worker is ready.
+    if version < 154 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        if !legacy_schema::table_has_column(&transaction, "sessions", "staged_aws_profile")? {
+            transaction
+                .execute_batch("ALTER TABLE sessions ADD COLUMN staged_aws_profile TEXT;")?;
+        }
+        if !legacy_schema::table_has_column(
+            &transaction,
+            "worker_restart_intents",
+            "staged_aws_profile",
+        )? {
+            transaction.execute_batch(
+                "ALTER TABLE worker_restart_intents ADD COLUMN staged_aws_profile TEXT;",
+            )?;
+        }
+        transaction.execute_batch(
+            "UPDATE schema_compatibility
+                 SET minimum_compatible_version = 154 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (154, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=154;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5454,6 +5480,52 @@ mod reader_tests {
     }
 
     #[test]
+    fn revision_154_persists_staged_aws_profile_and_refuses_revision_153() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut session = super::super::tests::session("pinned", "project");
+        save_session_to(&path, &session).unwrap();
+        stamp_schema_version(&path, 153);
+        let previous = Connection::open(&path).unwrap();
+        previous
+            .execute_batch("ALTER TABLE sessions DROP COLUMN staged_aws_profile;")
+            .unwrap();
+        read_schema_state(&previous)
+            .unwrap()
+            .ensure_supported_by(153)
+            .unwrap();
+        assert!(
+            !legacy_schema::table_has_column(&previous, "sessions", "staged_aws_profile").unwrap()
+        );
+        drop(previous);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, 154);
+        assert!(matches!(
+            state
+                .ensure_supported_by(153)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 154
+            }
+        ));
+        let load = || {
+            state_io::load_session_with(&upgraded, &session.id)
+                .unwrap()
+                .unwrap()
+                .staged_aws_profile
+        };
+        assert_eq!(load(), None);
+        session.staged_aws_profile = Some("team".into());
+        save_session_to(&path, &session).unwrap();
+        assert_eq!(load().as_deref(), Some("team"));
+    }
+
+    #[test]
     fn revision_153_backfills_transcript_metadata_and_refuses_revision_152() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -5517,8 +5589,8 @@ mod reader_tests {
         drop(previous);
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
-        assert_eq!(state.revision, 153);
-        assert_eq!(state.minimum_compatible, Some(153));
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(matches!(
             state
                 .ensure_supported_by(152)
@@ -5527,7 +5599,7 @@ mod reader_tests {
                 .unwrap()
                 .reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 153
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
         ));
         for (position, (json, ordinal, kind, settled)) in (1_i64..).zip(cases) {
@@ -6671,8 +6743,10 @@ mod reader_tests {
         assert_eq!(intents(&path), ["created"]);
         // Committing or failing for good settles it with the same write.
         created.state = SessionState::Running;
-        super::super::sessions::mark_session_worker_connected_to(&path, "created", None, "now")
-            .unwrap();
+        super::super::sessions::mark_session_worker_connected_to(
+            &path, "created", None, "now", false,
+        )
+        .unwrap();
         assert!(intents(&path).is_empty());
         let mut failed = super::super::tests::session("failed", "project");
         failed.state = SessionState::Provisioning;

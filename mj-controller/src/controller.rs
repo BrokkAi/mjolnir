@@ -1216,6 +1216,7 @@ impl Controller {
             title: title.into(),
             harness_kind: profile.kind,
             last_profile: profile_id.to_string(),
+            staged_aws_profile: None,
             bundle_id,
             project_directory,
             managed_worktree: None,

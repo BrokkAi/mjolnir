@@ -478,6 +478,7 @@ impl Controller {
             title: request.task_name.clone(),
             harness_kind: profile.kind,
             last_profile: request.profile_id.clone(),
+            staged_aws_profile: None,
             bundle_id: parent.bundle_id.clone(),
             project_directory: parent.project_directory.clone(),
             managed_worktree: None,

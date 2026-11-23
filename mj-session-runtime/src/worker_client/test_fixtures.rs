@@ -58,6 +58,15 @@ for line in sys.stdin:
     params = req["request"].get("params", {})
     if method == "hello":
         payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "aws-sync-fixture", "session_id": session}}
+    elif method in ("credential_state", "slopcop_login_state"):
+        name = "login" if method == "credential_state" else "slopcop"
+        payload = {"type": "credential_state", "data": state(name)}
+    elif method == "install_credentials":
+        open(path("login"), "wb").write(base64.b64decode(params["data"]))
+        payload = {"type": "credential_state", "data": state("login")}
+    elif method == "remove_slopcop_login":
+        os.remove(path("slopcop"))
+        payload = {"type": "credential_state", "data": state("slopcop")}
     elif method == "aws_credentials_state":
         hold()
         payload = {"type": "credential_state", "data": state("aws")}
@@ -82,13 +91,7 @@ for line in sys.stdin:
             stored = json.load(open(path("aws-scope.json")))
             if stored["secret_fingerprint"] == hashlib.sha256(open(path("aws"), "rb").read()).hexdigest():
                 scope = stored["scope"]
-        profile = None
-        if os.path.exists(path("aws-config")):
-            for line in open(path("aws-config")).read().splitlines():
-                if line.startswith("[profile ") and line.endswith("]"):
-                    profile = line[len("[profile "):-1]
-                    break
-        payload = {"type": "aws_credentials_scope", "data": {"scope": scope, "profile": profile}}
+        payload = {"type": "aws_credentials_scope", "data": {"scope": scope, "profile": None}}
     elif method == "remove_aws_credentials":
         if os.path.exists(path("remove-fails")): sys.exit(1)
         for name in ("aws", "aws-scope.json"):
@@ -185,7 +188,6 @@ pub fn aws_sync_session_named(
         ]),
         role: Some(role_config()),
         mints: true,
-        selection: None,
     });
     target
 }

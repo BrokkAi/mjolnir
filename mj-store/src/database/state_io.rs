@@ -742,8 +742,8 @@ pub(super) fn insert_session_with_parent(
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
              review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials,
-             notifications_ignored
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
+             notifications_ignored, staged_aws_profile
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -780,7 +780,8 @@ pub(super) fn insert_session_with_parent(
              oracle = excluded.oracle,
              oracle_choice = excluded.oracle_choice,
              no_github_credentials = excluded.no_github_credentials,
-             notifications_ignored = excluded.notifications_ignored",
+             notifications_ignored = excluded.notifications_ignored,
+             staged_aws_profile = excluded.staged_aws_profile",
         params![
             session.id,
             session.title,
@@ -835,6 +836,7 @@ pub(super) fn insert_session_with_parent(
             session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
             session.no_github_credentials,
             session.notifications_ignored,
+            session.staged_aws_profile,
         ],
     )?;
     tx.execute(
@@ -872,6 +874,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         title,
         harness_kind,
         last_profile,
+        staged_aws_profile,
         target_template_id,
         state,
         updated_at,
@@ -935,6 +938,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              project_json = coalesce(?16,project_json),
              oracle = ?17,
              oracle_choice = ?18,
+             staged_aws_profile = ?19,
              closing_consent = CASE WHEN ?6 = 'closing' THEN closing_consent ELSE NULL END
          WHERE session_id = ?1",
         params![
@@ -974,6 +978,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            staged_aws_profile,
         ],
     )?;
     if changed != 1 {
@@ -1507,7 +1512,8 @@ const SESSION_QUERY: &str =
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
                 s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
-                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation,
+                s.staged_aws_profile
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(
@@ -1583,6 +1589,7 @@ fn decode_session(
         id: row.get(0)?,
         title: row.get(1)?,
         last_profile: row.get(3)?,
+        staged_aws_profile: row.get("staged_aws_profile")?,
         bundle_id: row.get(4)?,
         project_directory: row.get_ref(16)?.blob_or_null()?.map(blob_to_path),
         managed_worktree: row

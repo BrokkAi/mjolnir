@@ -1003,6 +1003,7 @@ fn adopted_session_record(
         title: format!("Recovered {}", &session_id[..session_id.len().min(8)]),
         harness_kind,
         last_profile: profile_id,
+        staged_aws_profile: None,
         bundle_id,
         project_directory: None,
         managed_worktree: None,

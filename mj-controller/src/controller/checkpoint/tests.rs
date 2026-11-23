@@ -1268,6 +1268,7 @@ async fn live_resume_discards_queue_before_native_readiness() {
                     launch: None,
                     prepared: true,
                     discard_queued_prompts: Some("discard-before-ready".into()),
+                    staged_aws_profile: None,
                     swap_admission: None,
                     messages: &super::super::worker_restart::RESTART_FOR_CHECKPOINT,
                 },
