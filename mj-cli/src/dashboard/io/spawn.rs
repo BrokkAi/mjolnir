@@ -252,6 +252,8 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
         async move {
             Ok(daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .workspace_layouts(workspace_ids)
                 .await?
                 .pane_sizes
@@ -274,6 +276,8 @@ pub(crate) fn spawn_workspace_layouts_load(
         SAVE_ACK_TIMEOUT,
         async move {
             Ok(daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .workspace_layouts(workspace_ids)
                 .await?
@@ -901,6 +905,8 @@ pub(crate) fn spawn_stopped_subagent_transcript(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .stored_projection_tail(session_id, mj_chat::chat::TAIL_SEED_ITEMS)
                 .await
         },
@@ -929,7 +935,7 @@ pub(crate) fn spawn_notification_message_read(
             updates,
             SAVE_ACK_TIMEOUT,
             async move {
-                let mut daemon = daemon::connect_or_start().await?;
+                let daemon = daemon::connect_or_start().await?.http().await?;
                 let item = match source {
                     mj_tui::NotificationReadSource::Item(stable_id) => {
                         daemon.stored_transcript_item(session_id, stable_id).await?
@@ -947,8 +953,7 @@ pub(crate) fn spawn_notification_message_read(
                             &item.stable_id,
                         )
                     }
-                    mj_client::daemon::StoredTranscriptItem::Missing
-                    | mj_client::daemon::StoredTranscriptItem::Unsupported => None,
+                    mj_client::daemon::StoredTranscriptItem::Missing => None,
                 })
             },
             move |result| DashboardIoUpdate::NotificationMessageRead {
@@ -982,6 +987,8 @@ pub(crate) fn spawn_stored_session_summary(
             SAVE_ACK_TIMEOUT,
             async move {
                 let summary = daemon::connect_or_start()
+                    .await?
+                    .http()
                     .await?
                     .stored_session_summary(session_id.clone())
                     .await?
@@ -1041,6 +1048,8 @@ pub(crate) fn spawn_dashboard_rename(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .set_session_title(renamed_session_id, requested_title)
                 .await
         },
@@ -1062,6 +1071,8 @@ pub(crate) fn spawn_dashboard_notifications_ignored(
         SAVE_ACK_TIMEOUT,
         async move {
             daemon::connect_existing()
+                .await?
+                .http()
                 .await?
                 .set_session_notifications_ignored(session_id, ignored)
                 .await
@@ -1086,6 +1097,8 @@ pub(crate) fn spawn_dashboard_change_workspace(
         SAVE_ACK_TIMEOUT,
         async move {
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .set_session_workspace(moved_session_id, workspace_id)
                 .await
@@ -1129,6 +1142,8 @@ pub(crate) fn spawn_config_rename(
                 daemon.rename_target(old_id, new_id).await?;
             }
             daemon
+                .http()
+                .await?
                 .stored_session_metadata()
                 .await
                 .map(DashboardMetadata::from)
@@ -1212,6 +1227,8 @@ pub(crate) fn spawn_dashboard_container_settings(
                 mount_history,
             } = request;
             let preview = daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .set_session_container_settings(
                     session_id,
@@ -1405,6 +1422,8 @@ pub(crate) fn spawn_imported_session_apply(
             let _archive_directory = imported._archive_directory;
             let mut client = daemon::connect_or_start().await?;
             let published = client
+                .http()
+                .await?
                 .session_record_with_verdict(imported.session_id)
                 .await?
                 .context("imported session disappeared")?;
@@ -1438,7 +1457,14 @@ pub(crate) fn spawn_resume_candidates(
         "load suspended sessions",
         updates,
         SAVE_ACK_TIMEOUT,
-        async { daemon::connect_or_start().await?.resume_candidates().await },
+        async {
+            daemon::connect_or_start()
+                .await?
+                .http()
+                .await?
+                .resume_candidates()
+                .await
+        },
         move |result| DashboardIoUpdate::ResumeCandidates {
             discovery_id,
             result: Box::new(result),
@@ -1458,6 +1484,8 @@ pub(crate) fn spawn_resume_record(
         SAVE_ACK_TIMEOUT,
         async move {
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .session_record_with_verdict(requested)
                 .await
@@ -1813,6 +1841,8 @@ pub(crate) fn spawn_wiki_search(
                             }
                             daemon::connect_or_start()
                                 .await?
+                                .http()
+                                .await?
                                 .session_text_search(live_query)
                                 .await
                         })
@@ -1916,6 +1946,8 @@ pub(crate) fn spawn_sessions_text_search(
             tokio::time::sleep(WIKI_SEARCH_DEBOUNCE).await;
             let result = supervised_wiki_task("searching session conversations", async move {
                 daemon::connect_or_start()
+                    .await?
+                    .http()
                     .await?
                     .session_text_search(query)
                     .await

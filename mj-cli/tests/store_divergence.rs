@@ -163,25 +163,36 @@ fn daemon_survives_compatible_migration_then_exits_on_an_incompatible_one() {
 
     // Exercise both the queued production writer and strict reader, without
     // starting a replacement daemon if this process incorrectly shuts down.
-    let endpoint = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
         tokio::time::timeout(METADATA_WAIT, async {
-            let mut client = mj_client::daemon::DaemonClient::connect(endpoint)
-                .await
-                .unwrap();
+            let endpoint_path = mj_client::daemon::api_endpoint_path_in(&data_directory);
+            let endpoint = loop {
+                if let Some(endpoint) =
+                    mj_client::daemon::read_api_endpoint_from(&endpoint_path).unwrap()
+                {
+                    break endpoint;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            let client = mj_client::http::HttpDaemonClient::new(
+                format!("http://{}", endpoint.address),
+                endpoint.token,
+            )
+            .unwrap();
             let workspace = client
-                .http()
-                .await
-                .unwrap()
                 .create_workspace("compatible migration".into())
                 .await
                 .unwrap();
-            let snapshot = client.snapshot(workspace.id).await.unwrap();
-            assert_eq!(snapshot.workspace.name, "compatible migration");
+            let workspaces = client.list_workspaces().await.unwrap();
+            assert!(
+                workspaces
+                    .iter()
+                    .any(|row| row.id == workspace.id && row.name == "compatible migration")
+            );
         })
         .await
         .expect("daemon stopped serving after compatible migration");

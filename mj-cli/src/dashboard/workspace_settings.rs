@@ -45,6 +45,8 @@ impl WorkspaceSettingPersistence<PaneSize> {
             |_, size| async move {
                 crate::daemon::connect_existing()
                     .await?
+                    .http()
+                    .await?
                     .save_sidebar_size(size)
                     .await
             },
@@ -60,6 +62,8 @@ impl WorkspaceSettingPersistence<PaneSizes> {
             notices,
             |workspace_id, sizes| async move {
                 crate::daemon::connect_existing()
+                    .await?
+                    .http()
                     .await?
                     .save_workspace_pane_sizes(workspace_id, sizes)
                     .await
@@ -79,6 +83,8 @@ impl WorkspaceSettingPersistence<ConversationLayout> {
             notices,
             |workspace_id, layout| async move {
                 crate::daemon::connect_existing()
+                    .await?
+                    .http()
                     .await?
                     .save_workspace_layout(workspace_id, layout)
                     .await

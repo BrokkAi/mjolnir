@@ -14,7 +14,6 @@ use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{RelayCommand, RelayOperationalState};
 use mj_core::state::*;
 use mj_core::targets::{AdditionalMount, ProvisionStage};
-use mj_core::workspace::WorkspaceRecord;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
@@ -22,12 +21,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-/// A single-message read has a terminal unsupported result on older daemons.
+
 #[derive(Debug)]
 pub enum StoredTranscriptItem {
     Found(Box<TranscriptItem>),
     Missing,
-    Unsupported,
 }
 
 /// Durable terminal results for caller-owned startup prompt identities.
@@ -322,18 +320,6 @@ pub struct ImportedBundle {
     pub bundle: mj_core::config::ProjectBundle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionPreview {
-    pub id: String,
-    pub title: String,
-    pub project: String,
-    pub harness: String,
-    pub state: String,
-    pub active: bool,
-    pub updated_at: String,
-}
-
 /// One session in the user's SessionWiki index, as a control surface shows it.
 ///
 /// It is the daemon's own shape rather than SessionWiki's row: it carries the
@@ -590,14 +576,6 @@ pub struct WorkspaceLayouts {
 pub struct StoredSessionMetadata {
     pub mount_history: mj_core::snapshot_map::SnapshotMap<String, Vec<PathBuf>>,
     pub container_sizes: mj_core::snapshot_map::SnapshotMap<String, HostContainerSize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceSnapshot {
-    pub workspace: WorkspaceRecord,
-    pub sessions: Vec<SessionPreview>,
-    pub drafts: Vec<DraftPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -953,10 +931,6 @@ pub enum RecoveryAdoptionProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
-    DismissNotification {
-        session_id: String,
-        target: mj_core::attention::NotificationDismissal,
-    },
     ProveIdentity {
         nonce: String,
     },
@@ -1025,15 +999,6 @@ pub enum DaemonAction {
         preferred_profile: String,
         blob: String,
     },
-    RecordOperatorActivity,
-    SetOperatorAway {
-        away: bool,
-    },
-    NativeAgentHistory {
-        owner: String,
-        child: String,
-        before: Option<(u64, String)>,
-    },
     Ping,
     /// Frozen upgrade handshake, available from daemon protocol 33 onward.
     /// Busy replies leave every operation and control channel running.
@@ -1093,31 +1058,10 @@ pub enum DaemonAction {
     /// Write the daemon host's global Git commit author.
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
-    /// Every workspace's detached drafts, without their text: the workspace
-    /// manager's details answer. Added in protocol 100.
-    /// Take or renew a client's attachment lease.
-    Attach {
-        client_id: String,
-    },
-    Detach {
-        client_id: String,
-    },
     RecordAbandonedPrompt {
         session_id: String,
         bundle_id: String,
         text: String,
-    },
-    /// Persist the shared sidebar preference and publish it before replying.
-    SaveSidebarSize {
-        size: mj_core::workspace::PaneSize,
-    },
-    SaveWorkspacePaneSizes {
-        workspace_id: String,
-        sizes: mj_core::workspace::PaneSizes,
-    },
-    SaveWorkspaceLayout {
-        workspace_id: String,
-        layout: mj_core::workspace::ConversationLayout,
     },
     ImportSession {
         blob: String,
@@ -1127,39 +1071,9 @@ pub enum DaemonAction {
         #[serde(default)]
         bundle: Option<ImportedBundle>,
     },
-    SetSessionTitle {
-        session_id: String,
-        title: String,
-    },
-    SetSessionNotificationsIgnored {
-        session_id: String,
-        ignored: bool,
-    },
-    SetSessionWorkspace {
-        session_id: String,
-        workspace_id: String,
-    },
-    SetSessionContainerSettings {
-        session_id: String,
-        resource_allocation: Option<SessionResourceAllocation>,
-        mounts: Vec<AdditionalMount>,
-        mount_history: Vec<PathBuf>,
-    },
-    MarkSessionTargetMissing {
-        session_id: String,
-        detail: String,
-        updated_at: String,
-    },
     /// Legacy wire tombstone: rejected with guidance to suspend.
     CheckpointSession {
         session_id: String,
-    },
-    /// Search the user's SessionWiki index. An empty query lists the most
-    /// recent sessions.
-    /// The live sessions whose user or agent messages contain a query,
-    /// ignoring case. Tool calls and tool output do not count.
-    SessionTextSearch {
-        query: String,
     },
     ScanRecovery {
         all_instances: bool,
@@ -1170,39 +1084,6 @@ pub enum DaemonAction {
         target_id: String,
         confirmation: String,
         all_instances: bool,
-    },
-    Snapshot {
-        workspace_id: String,
-    },
-    /// Everything the terminal dashboard reads from the store at startup.
-    DashboardStartup {
-        client_id: String,
-        workspace_id: String,
-    },
-    /// Stored pane sizes and conversation layouts of these workspaces.
-    WorkspaceLayouts {
-        workspace_ids: Vec<String>,
-    },
-    /// Mount history and remembered container sizes.
-    StoredSessionMetadata,
-    /// The last `items` entries of a stored projection.
-    StoredProjectionTail {
-        session_id: String,
-        items: usize,
-    },
-    /// One stored transcript item, addressed by its stable identity.
-    StoredTranscriptItem {
-        session_id: String,
-        stable_id: String,
-    },
-    /// The newest agent transcript item complete through this relay ordinal.
-    StoredAgentMessageThrough {
-        session_id: String,
-        through: u64,
-    },
-    /// The stored projection summary of one session.
-    StoredSessionSummary {
-        session_id: String,
     },
     /// Check that a stopped session's checkpointed repositories can be
     /// fetched again before it resumes on `target_id`.
@@ -1231,27 +1112,6 @@ pub enum DaemonAction {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
         subagent_parents: std::collections::BTreeSet<String>,
-    },
-    /// One live session's transcript tail as it was at `cursor`, so the
-    /// deltas after that cursor apply to it exactly.
-    SessionTail {
-        session_id: String,
-        cursor: crate::runtime_feed::RuntimeCursor,
-    },
-    /// The sessions the resume dialog lists. The runtime feed carries only
-    /// live sessions, so the dialog asks for these when it opens.
-    ResumeCandidates,
-    /// One session's whole record, live or stopped. The resume wizard reads
-    /// it for the row picked in the resume dialog.
-    SessionRecord {
-        session_id: String,
-    },
-    /// The session `mj go` opens: the remembered one while it is still
-    /// eligible, otherwise the most recently updated eligible session of the
-    /// workspace, live or stopped.
-    GoStartupSession {
-        workspace_id: String,
-        last_session_id: Option<String>,
     },
     /// Every host and fleet with the capacity service's latest CPU, RAM and
     /// filesystem readings. Added in protocol 101.
@@ -1501,7 +1361,6 @@ pub enum DaemonReply {
     /// Only a captured operation result may report this failure.
     LifecycleFailed(String),
     LifecycleObservationUnavailable(LifecycleReceipt),
-    NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     UpgradePending,
     /// Labels for the work holding an automatic handoff open, empty when
@@ -1520,25 +1379,10 @@ pub enum DaemonReply {
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
     HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
-    Snapshot(WorkspaceSnapshot),
-    DashboardStartup(Box<DashboardStartup>),
-    WorkspaceLayouts(WorkspaceLayouts),
-    StoredSessionMetadata(StoredSessionMetadata),
-    /// Legacy count-mode reply: older clients require this to stay unchunked.
-    StoredProjectionTail(
-        #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
-        Option<Box<MaterializedSession>>,
-    ),
-    StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
-    StoredTranscriptItem(Option<Box<TranscriptItem>>),
     SavedSetup(Box<Config>),
     ArchiveSpacePreview(ArchiveSpacePreview),
     ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
-    SessionTail(Box<crate::runtime_feed::SessionTailReply>),
-    ResumeCandidates(Box<ResumeCandidates>),
-    GoStartupSession(Option<Box<SessionRecord>>),
-    SessionRecord(Option<Box<SessionRecordWithVerdict>>),
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
@@ -1547,15 +1391,11 @@ pub enum DaemonReply {
         finished: bool,
     },
     RegisteredSession(Box<RegisteredSession>),
-    ContainerUpgradePreview(mj_core::state::ContainerUpgradePreview),
     SuspendPreflight(Box<mj_core::suspend_consent::SuspendPreflight>),
     MoveOutcome(MoveOutcome),
     MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
     Ordinal(u64),
-    Text(String),
-    OptionalSessionState(Option<SessionState>),
     RecoveryScan(mj_core::state::RecoveryScan),
-    SessionTextMatches(SessionTextSearchPage),
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
     StartupPromptIdentityConflict,
@@ -1567,15 +1407,7 @@ impl DaemonReply {
     /// Replies that can outgrow one frame. The daemon sends them as
     /// [`DaemonReply::ReplyChunk`] fragments and the client reassembles them.
     pub fn is_chunked(&self) -> bool {
-        matches!(
-            self,
-            Self::Configuration(_)
-                | Self::DashboardStartup(_)
-                | Self::RuntimeChanges(_)
-                | Self::SessionTail(_)
-                | Self::StoredTranscriptItem(_)
-                | Self::ResumeCandidates(_)
-        )
+        matches!(self, Self::Configuration(_) | Self::RuntimeChanges(_))
     }
 }
 
@@ -1612,7 +1444,7 @@ pub struct ResumeCandidates {
 /// One row of the resume dialog's Mjolnir tab: what the row shows, without
 /// the rest of the record. A session's title can be tens of kilobytes, and
 /// most of a store's history is never resumed, so the resume wizard fetches
-/// the whole record (`DaemonAction::SessionRecord`) only for the row picked.
+/// the whole record (`GET /api/v1/sessions/{id}/record`) only for the row picked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeCandidate {
@@ -2633,20 +2465,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn attach(&mut self, client_id: String) -> Result<()> {
-        match self.request(DaemonAction::Attach { client_id }).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected attach reply {reply:?}"),
-        }
-    }
-
-    pub async fn detach(&mut self, client_id: String) -> Result<()> {
-        match self.request(DaemonAction::Detach { client_id }).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected detach reply {reply:?}"),
-        }
-    }
-
     /// Persist a prompt the user abandoned in the chat composer.
     pub async fn record_abandoned_prompt(
         &mut self,
@@ -2667,13 +2485,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn save_sidebar_size(&mut self, size: mj_core::workspace::PaneSize) -> Result<()> {
-        match self.request(DaemonAction::SaveSidebarSize { size }).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected sidebar-size save reply {reply:?}"),
-        }
-    }
-
     /// Write the load-balancing preference order, most preferred first.
     pub async fn set_quota_preferences(&mut self, prefer: Vec<String>) -> Result<()> {
         match self
@@ -2682,40 +2493,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected quota-preference save reply {reply:?}"),
-        }
-    }
-
-    pub async fn save_workspace_pane_sizes(
-        &mut self,
-        workspace_id: String,
-        sizes: mj_core::workspace::PaneSizes,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SaveWorkspacePaneSizes {
-                workspace_id,
-                sizes,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected pane-size save reply {reply:?}"),
-        }
-    }
-
-    pub async fn save_workspace_layout(
-        &mut self,
-        workspace_id: String,
-        layout: mj_core::workspace::ConversationLayout,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SaveWorkspaceLayout {
-                workspace_id,
-                layout,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected layout save reply {reply:?}"),
         }
     }
 
@@ -2735,113 +2512,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected imported-session reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_title(&mut self, session_id: String, title: String) -> Result<String> {
-        match self
-            .request(DaemonAction::SetSessionTitle { session_id, title })
-            .await?
-        {
-            DaemonReply::Text(title) => Ok(title),
-            reply => bail!("unexpected session-title reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_notifications_ignored(
-        &mut self,
-        session_id: String,
-        ignored: bool,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionNotificationsIgnored {
-                session_id,
-                ignored,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected notifications-ignored reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_workspace(
-        &mut self,
-        session_id: String,
-        workspace_id: String,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionWorkspace {
-                session_id,
-                workspace_id,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected session-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_session_container_settings(
-        &mut self,
-        session_id: String,
-        resource_allocation: Option<SessionResourceAllocation>,
-        mounts: Vec<AdditionalMount>,
-        mount_history: Vec<PathBuf>,
-    ) -> Result<Option<mj_core::state::ContainerUpgradePreview>> {
-        match self
-            .request(DaemonAction::SetSessionContainerSettings {
-                session_id,
-                resource_allocation,
-                mounts,
-                mount_history,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(None),
-            DaemonReply::ContainerUpgradePreview(preview) => Ok(Some(preview)),
-            reply => bail!("unexpected container-settings reply {reply:?}"),
-        }
-    }
-
-    pub async fn mark_session_target_missing(
-        &mut self,
-        session_id: String,
-        detail: String,
-        updated_at: String,
-    ) -> Result<Option<SessionState>> {
-        match self
-            .request(DaemonAction::MarkSessionTargetMissing {
-                session_id,
-                detail,
-                updated_at,
-            })
-            .await?
-        {
-            DaemonReply::OptionalSessionState(state) => Ok(state),
-            reply => bail!("unexpected target-missing reply {reply:?}"),
-        }
-    }
-
-    async fn request_without_reconnect(&mut self, action: DaemonAction) -> Result<DaemonReply> {
-        match self.request_once(action).await? {
-            DaemonReply::UpgradePending => {
-                bail!("the daemon refused admission while being replaced; reopen to sync again")
-            }
-            reply => Ok(reply),
-        }
-    }
-
-    /// The live sessions whose user or agent messages contain `query`, and
-    /// which of the two matched. Answers from the SessionWiki index, so a very
-    /// new message can be missing until the next sync.
-    pub async fn session_text_search(&mut self, query: String) -> Result<SessionTextSearchPage> {
-        match self
-            .request_without_reconnect(DaemonAction::SessionTextSearch { query })
-            .await?
-        {
-            DaemonReply::SessionTextMatches(matches) => Ok(matches),
-            reply => bail!("unexpected session text search reply {reply:?}"),
         }
     }
 
@@ -2936,123 +2606,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn snapshot(&mut self, workspace_id: String) -> Result<WorkspaceSnapshot> {
-        match self
-            .request(DaemonAction::Snapshot { workspace_id })
-            .await?
-        {
-            DaemonReply::Snapshot(snapshot) => Ok(snapshot),
-            reply => bail!("unexpected snapshot reply {reply:?}"),
-        }
-    }
-
-    pub async fn dashboard_startup(
-        &mut self,
-        client_id: String,
-        workspace_id: String,
-    ) -> Result<DashboardStartup> {
-        match self
-            .request(DaemonAction::DashboardStartup {
-                client_id,
-                workspace_id,
-            })
-            .await?
-        {
-            DaemonReply::DashboardStartup(startup) => Ok(*startup),
-            reply => bail!("unexpected dashboard startup reply {reply:?}"),
-        }
-    }
-
-    pub async fn workspace_layouts(
-        &mut self,
-        workspace_ids: Vec<String>,
-    ) -> Result<WorkspaceLayouts> {
-        match self
-            .request(DaemonAction::WorkspaceLayouts { workspace_ids })
-            .await?
-        {
-            DaemonReply::WorkspaceLayouts(layouts) => Ok(layouts),
-            reply => bail!("unexpected workspace layouts reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_session_metadata(&mut self) -> Result<StoredSessionMetadata> {
-        match self.request(DaemonAction::StoredSessionMetadata).await? {
-            DaemonReply::StoredSessionMetadata(metadata) => Ok(metadata),
-            reply => bail!("unexpected stored session metadata reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_projection_tail(
-        &mut self,
-        session_id: String,
-        items: usize,
-    ) -> Result<Option<MaterializedSession>> {
-        match self
-            .request(DaemonAction::StoredProjectionTail { session_id, items })
-            .await?
-        {
-            DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
-            reply => bail!("unexpected stored projection reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_transcript_item(
-        &mut self,
-        session_id: String,
-        stable_id: String,
-    ) -> Result<StoredTranscriptItem> {
-        // Never send an unknown action to an older daemon or retry its refusal.
-        if self.metadata.protocol_version < STORED_TRANSCRIPT_READ_PROTOCOL {
-            return Ok(StoredTranscriptItem::Unsupported);
-        }
-        match self
-            .request(DaemonAction::StoredTranscriptItem {
-                session_id,
-                stable_id,
-            })
-            .await?
-        {
-            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
-            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
-            reply => bail!("unexpected stored transcript item reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_agent_message_through(
-        &mut self,
-        session_id: String,
-        through: u64,
-    ) -> Result<StoredTranscriptItem> {
-        if self.metadata.protocol_version < NOTIFICATION_STACK_PROTOCOL {
-            return Ok(StoredTranscriptItem::Unsupported);
-        }
-        match self
-            .request(DaemonAction::StoredAgentMessageThrough {
-                session_id,
-                through,
-            })
-            .await?
-        {
-            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
-            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
-            reply => bail!("unexpected stored agent message reply {reply:?}"),
-        }
-    }
-
-    pub async fn stored_session_summary(
-        &mut self,
-        session_id: String,
-    ) -> Result<Option<MaterializedSessionSummary>> {
-        match self
-            .request(DaemonAction::StoredSessionSummary { session_id })
-            .await?
-        {
-            DaemonReply::StoredSessionSummary(summary) => Ok(summary.map(|summary| *summary)),
-            reply => bail!("unexpected stored session summary reply {reply:?}"),
-        }
-    }
-
     pub async fn resume_repository_preflight(
         &mut self,
         session_id: String,
@@ -3137,64 +2690,6 @@ impl DaemonClient {
         {
             DaemonReply::RuntimeChanges(frame) => Ok(*frame),
             reply => bail!("unexpected runtime changes reply {reply:?}"),
-        }
-    }
-
-    pub async fn session_tail(
-        &mut self,
-        session_id: String,
-        cursor: crate::runtime_feed::RuntimeCursor,
-    ) -> Result<crate::runtime_feed::SessionTailReply> {
-        match self
-            .request(DaemonAction::SessionTail { session_id, cursor })
-            .await?
-        {
-            DaemonReply::SessionTail(reply) => Ok(*reply),
-            reply => bail!("unexpected session tail reply {reply:?}"),
-        }
-    }
-
-    pub async fn resume_candidates(&mut self) -> Result<ResumeCandidates> {
-        match self.request(DaemonAction::ResumeCandidates).await? {
-            DaemonReply::ResumeCandidates(candidates) => Ok(*candidates),
-            reply => bail!("unexpected resume candidates reply {reply:?}"),
-        }
-    }
-
-    pub async fn session_record(&mut self, session_id: String) -> Result<Option<SessionRecord>> {
-        Ok(self
-            .session_record_with_verdict(session_id)
-            .await?
-            .map(|session| session.record))
-    }
-
-    pub async fn session_record_with_verdict(
-        &mut self,
-        session_id: String,
-    ) -> Result<Option<SessionRecordWithVerdict>> {
-        match self
-            .request(DaemonAction::SessionRecord { session_id })
-            .await?
-        {
-            DaemonReply::SessionRecord(record) => Ok(record.map(|record| *record)),
-            reply => bail!("unexpected session record reply {reply:?}"),
-        }
-    }
-
-    pub async fn go_startup_session(
-        &mut self,
-        workspace_id: String,
-        last_session_id: Option<String>,
-    ) -> Result<Option<SessionRecord>> {
-        match self
-            .request(DaemonAction::GoStartupSession {
-                workspace_id,
-                last_session_id,
-            })
-            .await?
-        {
-            DaemonReply::GoStartupSession(record) => Ok(record.map(|record| *record)),
-            reply => bail!("unexpected go startup session reply {reply:?}"),
         }
     }
 
@@ -3316,25 +2811,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected elicitation reply {reply:?}"),
-        }
-    }
-
-    pub async fn native_agent_history(
-        &mut self,
-        owner: String,
-        child: String,
-        before: Option<(u64, String)>,
-    ) -> Result<mj_core::native_agent::NativeAgentHistoryPage> {
-        match self
-            .request(DaemonAction::NativeAgentHistory {
-                owner,
-                child,
-                before,
-            })
-            .await?
-        {
-            DaemonReply::NativeAgentHistory(page) => Ok(page),
-            reply => bail!("unexpected native agent history reply {reply:?}"),
         }
     }
 
@@ -3673,8 +3149,6 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 105: indexed single-item stored transcript reads for notification
 // text use chunked replies; legacy count-mode stored projection tails remain
 // unchunked.
-/// The first protocol with notification cards and completion-bound transcript reads.
-pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
 /// The first protocol with daemon-owned notify-once alert events.
 pub const ALERT_EVENTS_PROTOCOL: u32 = 109;
 // Version 107: explicit SessionWiki sync generations and progress watches.
@@ -3704,13 +3178,11 @@ pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
 const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
-/// Attachments, reviews, task stops, container upgrades, and wiki actions use HTTP.
-pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 2;
+/// Dashboard reads, terminal presence, and session settings use HTTP.
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 3;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
-/// The first protocol with indexed stored transcript item reads.
-pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

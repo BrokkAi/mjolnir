@@ -2557,18 +2557,18 @@ async fn observe_attachment(client_id: &str) -> Result<DaemonPresence> {
     if let Some(target) = upgraded_daemon_executable().await? {
         return Ok(DaemonPresence::Upgraded(target));
     }
-    match connect_existing()
+    let attached = connect_existing()
         .await?
-        .request_single(DaemonAction::Attach {
-            client_id: client_id.to_owned(),
-        })
+        .http()
         .await?
-    {
-        DaemonReply::Done => Ok(DaemonPresence::Attached),
-        DaemonReply::UpgradePending => Ok(DaemonPresence::Missing(
+        .try_attach(client_id.to_owned())
+        .await?;
+    if attached {
+        Ok(DaemonPresence::Attached)
+    } else {
+        Ok(DaemonPresence::Missing(
             "daemon upgrade handoff is in progress".into(),
-        )),
-        reply => bail!("unexpected attach reply {reply:?}"),
+        ))
     }
 }
 
@@ -3691,39 +3691,70 @@ esac
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
-        let (listener, metadata) = fake_daemon(std::process::id()).await;
+        let (listener, mut metadata) = fake_daemon(std::process::id()).await;
+        let identity = test_daemon_identity(&metadata.build_version);
+        metadata.instance_id.clone_from(&identity.instance_id);
         fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        mj_client::daemon::write_api_endpoint(&mj_client::daemon::ApiEndpointMetadata {
+            address: api.local_addr().unwrap(),
+            token: "attachment-test".into(),
+            pid: metadata.pid,
+            instance_id: metadata.instance_id.clone(),
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+        let refusing = std::sync::Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new().route(
+            "/api/v1/terminal-clients/display-client/attach",
+            axum::routing::post({
+                let refusing = refusing.clone();
+                move || async move {
+                    refusing.notified().await;
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "error": "handoff in progress", "code": "daemon_handoff"
+                        })),
+                    )
+                }
+            }),
+        );
+        let api = mj_core::runtime::spawn(async move { axum::serve(api, app).await.unwrap() });
+        let control = mj_core::runtime::spawn(async move {
+            // One identity check for the running build and one for the HTTP endpoint.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(request.action, DaemonAction::Identity));
+                answer(
+                    &mut stream,
+                    request,
+                    Ok(DaemonReply::Identity(identity.clone())),
+                )
+                .await;
+            }
+        });
         let cancellation = CancellationToken::new();
         let Attachment { task, mut presence } =
             maintain_attachment("display-client".into(), cancellation.clone());
-        let serve = async {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            assert!(matches!(request.action, DaemonAction::Identity));
-            let identity = test_daemon_identity(&metadata.build_version);
-            answer(&mut stream, request, Ok(DaemonReply::Identity(identity))).await;
-
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            assert!(
-                matches!(&request.action, DaemonAction::Attach { client_id } if client_id == "display-client")
-            );
-            assert!(
-                tokio::time::timeout(Duration::from_millis(2100), presence.changed())
-                    .await
-                    .is_err()
-            );
-            assert_eq!(*presence.borrow(), DaemonPresence::Attached);
-            answer(&mut stream, request, Ok(DaemonReply::UpgradePending)).await;
-            presence.changed().await.unwrap();
-            assert_eq!(
-                *presence.borrow(),
-                DaemonPresence::Missing("daemon upgrade handoff is in progress".into())
-            );
-        };
-        tokio::time::timeout(Duration::from_secs(4), serve)
+        assert!(
+            tokio::time::timeout(Duration::from_millis(2100), presence.changed())
+                .await
+                .is_err()
+        );
+        assert_eq!(*presence.borrow(), DaemonPresence::Attached);
+        refusing.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), presence.changed())
             .await
+            .unwrap()
             .unwrap();
+        assert_eq!(
+            *presence.borrow(),
+            DaemonPresence::Missing("daemon upgrade handoff is in progress".into())
+        );
+        control.await.unwrap();
+        api.abort();
         cancellation.cancel();
         task.await.unwrap();
     }

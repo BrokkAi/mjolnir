@@ -1349,6 +1349,7 @@ struct FakeBackend {
     bundle_calls: Mutex<Option<mpsc::Sender<BundleCall>>>,
     purge_calls: Mutex<Option<mpsc::Sender<PurgeCall>>>,
     wiki_restore_requests: Mutex<Vec<mj_client::daemon::WikiRestoreRequest>>,
+    native_history_cursors: Mutex<Vec<Option<(u64, String)>>>,
     login_errors: std::collections::BTreeMap<String, String>,
     /// When set, a history write announces itself on the first and waits
     /// for the second before it finishes.
@@ -1430,6 +1431,22 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn native_agent_history(
+        &self,
+        _owner: String,
+        _child: String,
+        before: Option<(u64, String)>,
+    ) -> BoxFuture<'_, AnyResult<mj_core::native_agent::NativeAgentHistoryPage>> {
+        self.native_history_cursors.lock().unwrap().push(before);
+        Box::pin(async {
+            Ok(mj_core::native_agent::NativeAgentHistoryPage {
+                generation_ordinal: 7,
+                items: Vec::new(),
+                has_more: true,
+            })
+        })
+    }
+
     fn create_bundle(
         &self,
         source: String,
@@ -9508,4 +9525,202 @@ async fn workspace_and_project_mutations_refuse_upgrade_draining() {
         bundles.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
+}
+
+#[tokio::test]
+async fn dashboard_routes_enforce_terminal_auth_and_mutations_refuse_drain() {
+    let backend = Arc::new(FakeBackend::default());
+    let (mut options, _, _, _, _) =
+        api_options_with_client_state(backend.clone(), |_| {}, absent_preferences_path(), None);
+    options.set_loopback_token("dashboard-test-token".into());
+    let app = router(options);
+    let cookie = login_cookie(&app).await;
+    let cursor = r#"{"cursor":{"incarnation":"test","sequence":0,"alert_sequence":0,"subagent_parents":[]}}"#;
+    let terminal_routes = [
+        (
+            "POST",
+            "/dashboard/startup",
+            r#"{"client_id":"term","workspace_id":"default"}"#,
+            false,
+        ),
+        (
+            "POST",
+            "/workspaces/layouts",
+            r#"{"workspace_ids":["default"]}"#,
+            false,
+        ),
+        ("GET", "/sessions/stored-metadata", "", false),
+        (
+            "GET",
+            "/sessions/session-1/stored-projection-tail?items=5",
+            "",
+            false,
+        ),
+        ("GET", "/sessions/session-1/stored-items/item-1", "", false),
+        (
+            "GET",
+            "/sessions/session-1/stored-agent-message?through=12",
+            "",
+            false,
+        ),
+        ("GET", "/sessions/session-1/stored-summary", "", false),
+        ("POST", "/sessions/session-1/tail", cursor, false),
+        ("GET", "/sessions/resume-candidates", "", false),
+        ("GET", "/sessions/session-1/record", "", false),
+        (
+            "GET",
+            "/workspaces/default/go-startup?last_session_id=session-1",
+            "",
+            false,
+        ),
+        ("GET", "/sessions/text-search?q=text", "", false),
+        (
+            "GET",
+            "/sessions/session-1/native-agents/child/history?full=true&before_position=12&before_id=item-1",
+            "",
+            false,
+        ),
+        ("POST", "/terminal-clients/term/attach", "", true),
+        ("POST", "/terminal-clients/term/detach", "", true),
+        ("PUT", "/ui/sidebar-size", r#"{"size":"standard"}"#, true),
+        (
+            "PUT",
+            "/workspaces/default/pane-sizes",
+            r#"{"sizes":{"sessions":"standard","targets":"standard","quota":"standard"}}"#,
+            true,
+        ),
+        (
+            "PUT",
+            "/workspaces/default/layout",
+            r#"{"layout":{"root":{"kind":"pane","id":1},"focus":1,"sessions":{}}}"#,
+            true,
+        ),
+        (
+            "PUT",
+            "/sessions/session-1/container-settings",
+            r#"{"resource_allocation":null,"mounts":[],"mount_history":[]}"#,
+            true,
+        ),
+    ];
+    let request = |method, path, body, header, value: &str| {
+        app.clone().oneshot(
+            Request::builder()
+                .method(method)
+                .uri(format!("/api/v1{path}"))
+                .header(header, value)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    backend.upgrade_gate.begin_draining();
+    for (method, path, body, mutation) in terminal_routes {
+        for (header, value) in [
+            (AUTHORIZATION, "Bearer test-api-token"),
+            (COOKIE, cookie.as_str()),
+        ] {
+            let response = request(method, path, body, header, value).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+        if mutation {
+            let response = request(
+                method,
+                path,
+                body,
+                AUTHORIZATION,
+                "Bearer dashboard-test-token",
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {path}"
+            );
+            assert_eq!(
+                json_body(response).await["code"],
+                "daemon_handoff",
+                "{method} {path}"
+            );
+        }
+    }
+    for (method, path, body) in [
+        (
+            "POST",
+            "/sessions/session-1/notifications/dismiss",
+            r#"{"target":{"read_through":12}}"#,
+        ),
+        ("PUT", "/operator/away", r#"{"away":true}"#),
+        ("PUT", "/sessions/session-1/title", r#"{"title":"renamed"}"#),
+        (
+            "PUT",
+            "/sessions/session-1/notifications-ignored",
+            r#"{"ignored":true}"#,
+        ),
+        (
+            "PUT",
+            "/sessions/session-1/workspace",
+            r#"{"workspace_id":"default"}"#,
+        ),
+    ] {
+        let response = request(method, path, body, AUTHORIZATION, "Bearer test-api-token")
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {path}"
+        );
+        assert_eq!(
+            json_body(response).await["code"],
+            "daemon_handoff",
+            "{method} {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_agent_history_full_page_preserves_the_browser_contract_and_cursor() {
+    let backend = Arc::new(FakeBackend::default());
+    let (mut options, _, _, _, _) =
+        api_options_with_client_state(backend.clone(), |_| {}, absent_preferences_path(), None);
+    options.set_loopback_token("dashboard-test-token".into());
+    let app = router(options);
+    let path = "/api/v1/sessions/session-1/native-agents/child/history?before_position=12&before_id=tool%3Aedit";
+    let browser = app
+        .clone()
+        .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(browser.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(browser).await,
+        serde_json::json!({
+            "generation": 7,
+            "items": [],
+            "has_more": true,
+        })
+    );
+
+    let full = app
+        .oneshot(
+            Request::get(format!("{path}&full=true"))
+                .header(AUTHORIZATION, "Bearer dashboard-test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full.status(), StatusCode::OK);
+    let page: mj_core::native_agent::NativeAgentHistoryPage =
+        serde_json::from_value(json_body(full).await).unwrap();
+    assert_eq!(page.generation_ordinal, 7);
+    assert!(page.has_more);
+    assert_eq!(
+        *backend.native_history_cursors.lock().unwrap(),
+        vec![
+            Some((12, "tool:edit".into())),
+            Some((12, "tool:edit".into())),
+        ]
+    );
 }

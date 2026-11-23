@@ -16,6 +16,8 @@ use tokio::sync::RwLock;
 
 mod projects;
 mod sessions;
+mod terminal;
+pub use terminal::{ContainerSettingsRequest, ContainerSettingsResponse};
 mod workspaces;
 
 pub use workspaces::{
@@ -582,6 +584,38 @@ mod tests {
             })
         }));
         (client, reconnects)
+    }
+
+    #[tokio::test]
+    async fn attachment_renewal_and_detach_return_without_reconnecting_during_handoff() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+
+        let server = async {
+            for action in ["attach", "detach"] {
+                let (stream, line, _, _) = read_request(&initial).await;
+                assert_eq!(
+                    line,
+                    format!("POST /api/v1/terminal-clients/display-client/{action} HTTP/1.1")
+                );
+                respond(stream, UNAVAILABLE, HANDOFF).await;
+            }
+        };
+        let requests = async {
+            assert!(!client.try_attach("display-client".into()).await.unwrap());
+            let error = client.detach("display-client".into()).await.unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<HttpApiError>()
+                    .is_some_and(HttpApiError::is_handoff)
+            );
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(server, requests);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

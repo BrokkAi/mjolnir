@@ -23,6 +23,10 @@ impl UploadBody {
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn dashboard_backend(&self) -> Option<Arc<dyn DashboardBackend>> {
+        None
+    }
+
     fn create_bundle(
         &self,
         _source: String,

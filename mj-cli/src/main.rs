@@ -1502,7 +1502,11 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             && args.subagents.is_none()
             && args.subagent_straightforward.is_none()
             && args.subagent_subtle.is_none()
-            && let Some(record) = daemon.session_record(args.session.clone()).await?
+            && let Some(record) = daemon
+                .http()
+                .await?
+                .session_record(args.session.clone())
+                .await?
             && let Some(mj_core::subagent::SubagentPolicy::Mjolnir {
                 straightforward,
                 subtle,
@@ -2151,7 +2155,7 @@ async fn run_workspace_dashboard(
         (startup, None)
     };
     let DashboardStartup {
-        mut daemon,
+        http,
         go: go_mode,
         loaded,
     } = startup;
@@ -2159,7 +2163,7 @@ async fn run_workspace_dashboard(
 
     // Attach only once the dashboard is certain to run, so a startup that
     // fails or is cancelled never leaves an attachment behind.
-    daemon.attach(client_id.clone()).await?;
+    http.attach(client_id.clone()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
     let attachment =
         daemon::maintain_attachment(client_id.clone(), attachment_cancellation.clone());
@@ -2200,8 +2204,8 @@ async fn run_workspace_dashboard(
     let detach_connect_started_at = std::time::Instant::now();
     let detach_connect;
     let mut detach_request = std::time::Duration::ZERO;
-    match daemon::connect_existing().await {
-        Ok(mut current_daemon) => {
+    match async { daemon::connect_existing().await?.http().await }.await {
+        Ok(current_daemon) => {
             detach_connect = detach_connect_started_at.elapsed();
             let detach_request_started_at = std::time::Instant::now();
             if let Err(error) = current_daemon.detach(client_id).await {
@@ -2230,7 +2234,7 @@ fn print_noninteractive_welcome() {
 
 /// What the dashboard needs before it can draw.
 struct DashboardStartup {
-    daemon: daemon::DaemonClient,
+    http: mj_client::http::HttpDaemonClient,
     go: Option<mj_tui::GoMode>,
     /// The store as the dashboard first shows it; absent without a terminal.
     loaded: Option<dashboard::LoadedDashboard>,
@@ -2247,7 +2251,6 @@ async fn start_dashboard(
 ) -> Result<DashboardStartup> {
     let mut daemon = daemon::connect_or_start().await?;
     let http = daemon.http().await?;
-    let initial_instance = http.instance_id().await;
     let workspaces = http.list_workspaces().await?;
     let selected = if let Some(resumed) = resumed_workspace
         .filter(|resumed| workspaces.iter().any(|workspace| workspace.id == *resumed))
@@ -2279,13 +2282,8 @@ async fn start_dashboard(
     } else {
         None
     };
-    // HTTP handoff recovery owns its own endpoint. If it switched daemons,
-    // use a fresh control connection for the snapshot and later attachment.
-    if http.instance_id().await != initial_instance {
-        daemon = daemon::connect_or_start().await?;
-    }
     let loaded = if let Some(workspaces) = startup_workspaces {
-        let startup = daemon
+        let startup = http
             .dashboard_startup(client_id.clone(), selected.clone())
             .await?;
         Some(dashboard::LoadedDashboard::from_daemon(
@@ -2294,7 +2292,7 @@ async fn start_dashboard(
     } else {
         None
     };
-    Ok(DashboardStartup { daemon, go, loaded })
+    Ok(DashboardStartup { http, go, loaded })
 }
 
 async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
@@ -2522,12 +2520,11 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             let mut client = daemon::connect_or_start().await?;
             if !matches!(command, AfkCommand::Status) {
                 let away = matches!(command, AfkCommand::On);
-                match client
-                    .request(daemon::DaemonAction::SetOperatorAway { away })
-                    .await?
-                {
-                    daemon::DaemonReply::Done => {}
-                    reply => bail!("unexpected operator away reply: {reply:?}"),
+                let http = client.http().await?;
+                let instance = http.instance_id().await;
+                http.set_operator_away(away).await?;
+                if http.instance_id().await != instance {
+                    client = daemon::connect_existing().await?;
                 }
             }
             let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } =

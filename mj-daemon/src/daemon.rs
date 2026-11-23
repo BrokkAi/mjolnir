@@ -909,6 +909,7 @@ mod machine;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;
+mod dashboard_api;
 mod dashboard_reads;
 
 #[cfg(test)]

@@ -659,7 +659,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         // chooses the session to start in.
         let startup = match context.dashboard.active_workspace_id().map(str::to_owned) {
             Some(workspace_id) => {
-                let mut client = crate::daemon::connect_or_start().await?;
+                let client = crate::daemon::connect_or_start().await?.http().await?;
                 let startup = client
                     .go_startup_session(workspace_id, mode.last_session_id.clone())
                     .await?;

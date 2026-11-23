@@ -563,7 +563,7 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(super) async fn runtime_changes(
+    pub(crate) async fn runtime_changes(
         &self,
         cursor: Option<RuntimeCursor>,
         wait: bool,

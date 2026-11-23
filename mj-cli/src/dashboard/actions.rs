@@ -135,14 +135,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
                 std::time::Duration::from_secs(30),
                 async move {
-                    let mut client = daemon::connect_or_start().await?;
-                    match client
-                        .request(daemon::DaemonAction::SetOperatorAway { away })
+                    daemon::connect_or_start()
                         .await?
-                    {
-                        daemon::DaemonReply::Done => Ok(()),
-                        reply => bail!("unexpected operator-presence reply {reply:?}"),
-                    }
+                        .http()
+                        .await?
+                        .set_operator_away(away)
+                        .await
                 },
                 move |result| DashboardIoUpdate::OperatorAway {
                     away,
@@ -265,6 +263,8 @@ pub(crate) async fn apply_dashboard_action(
             mj_core::runtime::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
+                        .await?
+                        .http()
                         .await?
                         .native_agent_history(owner.clone(), child.clone(), before)
                         .await
@@ -758,6 +758,8 @@ pub(crate) async fn apply_dashboard_action(
                 async move {
                     let history = async {
                         daemon::connect_or_start()
+                            .await?
+                            .http()
                             .await?
                             .stored_session_metadata()
                             .await
@@ -2327,14 +2329,12 @@ async fn request_notification_dismissal(
     session_id: String,
     target: mj_core::attention::NotificationDismissal,
 ) -> Result<u64> {
-    let mut client = daemon::connect_existing().await?;
-    match client
-        .request(mj_client::daemon::DaemonAction::DismissNotification { session_id, target })
+    daemon::connect_existing()
         .await?
-    {
-        mj_client::daemon::DaemonReply::Ordinal(ordinal) => Ok(ordinal),
-        reply => anyhow::bail!("unexpected dismissal reply: {reply:?}"),
-    }
+        .http()
+        .await?
+        .dismiss_notification(session_id, target)
+        .await
 }
 
 #[cfg(test)]

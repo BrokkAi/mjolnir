@@ -756,19 +756,8 @@ async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions(
     let mut state = test_runtime_state();
     Arc::get_mut(&mut state).unwrap().committed =
         Some(mj_controller::database::subscribe_committed_state().unwrap());
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    let cancellation = CancellationToken::new();
-    assert!(matches!(
-        handle_action(
-            DaemonAction::SetOperatorAway { away: true },
-            &metadata,
-            &state,
-            &cancellation
-        )
-        .await
-        .unwrap(),
-        DaemonReply::Done
-    ));
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    http.set_operator_away(true).await.unwrap();
     let mut replica = RuntimeReplica::default();
     replica
         .apply(state.runtime_changes(None, false).await.unwrap())
@@ -836,17 +825,7 @@ async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions(
         })
         .unwrap();
     }
-    assert!(matches!(
-        handle_action(
-            DaemonAction::SetOperatorAway { away: false },
-            &metadata,
-            &state,
-            &cancellation
-        )
-        .await
-        .unwrap(),
-        DaemonReply::Done
-    ));
+    http.set_operator_away(false).await.unwrap();
     let reloaded =
         mj_controller::database::load_state_from(&mj_controller::database::database_path())
             .unwrap();
@@ -868,24 +847,23 @@ async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions(
         })
         .collect::<Vec<_>>();
     assert_eq!(returned, vec![("unblocked".into(), true)]);
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn client_presence_is_global_and_detach_and_prune_remove_it() {
+    let Some(_writer) =
+        startup_prompt_test_store("client_presence_is_global_and_detach_and_prune_remove_it")
+    else {
+        return;
+    };
     let state = test_runtime_state();
     let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     let cancellation = CancellationToken::new();
 
-    handle_action(
-        DaemonAction::Attach {
-            client_id: "client-a".into(),
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect("attach presence");
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    http.attach("client-a".into()).await.unwrap();
     state.attachments().insert(
         "dead-client".into(),
         Attachment {
@@ -902,17 +880,10 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
     };
     assert_eq!(status.attached_clients, 1);
 
-    handle_action(
-        DaemonAction::Detach {
-            client_id: "client-a".into(),
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect("detach presence");
+    http.detach("client-a".into()).await.unwrap();
     assert!(state.attachments().is_empty());
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -1164,7 +1135,7 @@ fn zombie_only_daemon_group_counts_as_gone() {
     child.wait().expect("reap process-group leader");
 }
 
-pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
+pub(crate) fn test_runtime_state() -> Arc<RuntimeState> {
     test_runtime_state_with(Controller {
         config: Config::default(),
         state: mj_core::state::State::default(),
@@ -2045,13 +2016,7 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
         read_frame::<ResponseEnvelope>(stream).await.unwrap().result
     };
 
-    let refused = ask(
-        &mut stream,
-        DaemonAction::Snapshot {
-            workspace_id: "workspace-a".into(),
-        },
-    )
-    .await;
+    let refused = ask(&mut stream, DaemonAction::HostCapacity).await;
     assert_eq!(
         refused.unwrap_err(),
         "daemon is shutting down; retry to reach a fresh daemon"
@@ -7206,6 +7171,57 @@ pub(crate) async fn start_test_http_api(
     (http, shutdown, server)
 }
 
+// Exercise the HTTP routes and the real runtime without starting unrelated
+// viewer maintenance jobs that also publish runtime revisions.
+pub(super) async fn start_test_dashboard_http_api(
+    state: Arc<RuntimeState>,
+) -> (
+    mj_client::http::HttpDaemonClient,
+    CancellationToken,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    start_test_dashboard_http_api_on(state, listener).await
+}
+
+pub(crate) async fn start_test_dashboard_http_api_on(
+    state: Arc<RuntimeState>,
+    listener: TcpListener,
+) -> (
+    mj_client::http::HttpDaemonClient,
+    CancellationToken,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let address = listener.local_addr().unwrap();
+    let token = "direct-test-token";
+    let shutdown = CancellationToken::new();
+    let (action_tx, _actions) = tokio::sync::mpsc::channel(1);
+    let mut options = crate::server::ServerOptions::new(
+        address,
+        state.subscribe_browser_views().unwrap(),
+        state.browser_conversations(),
+        crate::server::ServerRequests { action_tx },
+        crate::server::BrowserSource {
+            revisions: state.revisions(),
+            views: Arc::new({
+                let state = state.clone();
+                move |cursor| state.browser_views(cursor)
+            }),
+        },
+    )
+    .unwrap();
+    options.shutdown = shutdown.clone();
+    options.set_loopback_token(token.into());
+    options.set_subagent_backend(Arc::new(crate::server_runtime::api::ApiBackend::new(
+        state.session_manager.client(),
+        Arc::new(|_| None),
+        state,
+    )));
+    let task = mj_core::runtime::spawn(crate::server::run_server_on_listener(options, listener));
+    let http = mj_client::http::HttpDaemonClient::new(format!("http://{address}"), token).unwrap();
+    (http, shutdown, task)
+}
+
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
 pub(crate) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
@@ -8520,38 +8536,19 @@ async fn saved_sidebar_size_is_in_the_next_dashboard_startup_without_a_refresh()
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
     let state = test_runtime_state_loading_the_store();
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    let cancellation = CancellationToken::new();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state).await;
     // No periodic config refresher runs in this fixture: the save itself must
     // install the preference before acknowledging it to the terminal.
     for size in [
         mj_core::workspace::PaneSize::Minimized,
         mj_core::workspace::PaneSize::Standard,
     ] {
-        let reply = handle_action(
-            DaemonAction::SaveSidebarSize { size },
-            &metadata,
-            &state,
-            &cancellation,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(reply, DaemonReply::Done));
+        http.save_sidebar_size(size).await.unwrap();
         assert_eq!(Config::load().unwrap().sidebar_size, size);
-        let reply = handle_action(
-            DaemonAction::DashboardStartup {
-                client_id: "reopened-dashboard".into(),
-                workspace_id: "default".into(),
-            },
-            &metadata,
-            &state,
-            &cancellation,
-        )
-        .await
-        .unwrap();
-        let DaemonReply::DashboardStartup(startup) = reply else {
-            panic!("dashboard startup reply");
-        };
+        let startup = http
+            .dashboard_startup("reopened-dashboard".into(), "default".into())
+            .await
+            .unwrap();
         assert_eq!(
             startup
                 .runtime
@@ -8562,90 +8559,35 @@ async fn saved_sidebar_size_is_in_the_next_dashboard_startup_without_a_refresh()
             size
         );
     }
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 // Hard-won: 0bd61a289: dashboard startup failed when live session state exceeded one frame.
 #[tokio::test]
 async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
-    let mut session = runtime_test_session("large-draft", "workspace", SessionState::Running);
-    session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
-    let startup = DashboardStartup {
-        runtime: mj_client::runtime_feed::RuntimeBootstrap {
-            cursor: mj_client::runtime_feed::RuntimeCursor {
-                alert_sequence: 0,
-                incarnation: "startup".into(),
-                sequence: 1,
-                subagent_parents: Default::default(),
-            },
-            projection: mj_client::runtime_feed::RuntimeProjection {
-                records: [(session.id.clone(), session)].into_iter().collect(),
-                ..Default::default()
-            },
-        },
-        metadata: Default::default(),
-        pane_sizes: Default::default(),
-        conversation_layouts: Default::default(),
-        queued_prompts: Default::default(),
+    let Some(_writer) =
+        startup_prompt_test_store("dashboard_startup_larger_than_a_frame_arrives_whole")
+    else {
+        return;
     };
-    let expected = serde_json::to_value(&startup).unwrap();
-    let payload_bytes = serde_json::to_vec(&startup).unwrap().len();
-    assert!(payload_bytes > MAX_FRAME_BYTES);
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = mj_core::runtime::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        for reply in [
-            DaemonReply::DashboardStartup(Box::new(startup)),
-            DaemonReply::Pong,
-        ] {
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            match &reply {
-                DaemonReply::DashboardStartup(_) => assert!(matches!(
-                    request.action,
-                    DaemonAction::DashboardStartup { client_id, workspace_id } if client_id == "large-dashboard" && workspace_id == "workspace"
-                )),
-                _ => assert!(matches!(request.action, DaemonAction::Ping)),
-            }
-            super::serve::write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(reply),
-                },
-            )
-            .await
-            .unwrap();
-        }
-    });
-    let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let proxy_address = proxy.local_addr().unwrap();
-    let copied = mj_core::runtime::spawn(async move {
-        let (mut incoming, _) = proxy.accept().await.unwrap();
-        let mut outgoing = TcpStream::connect(address).await.unwrap();
-        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
-            .await
-            .unwrap()
-    });
-    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(proxy_address))
+    let mut session = runtime_test_session("large-draft", "default", SessionState::Running);
+    session.draft_input = "draft 🙂\n".repeat(MAX_FRAME_BYTES / 8);
+    let expected = session.draft_input.clone();
+    assert!(expected.len() > MAX_FRAME_BYTES);
+    mj_controller::database::save_session(&session).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state).await;
+    let startup = http
+        .dashboard_startup("large-dashboard".into(), "default".into())
         .await
         .unwrap();
-    let received = client
-        .dashboard_startup("large-dashboard".into(), "workspace".into())
-        .await
-        .expect("load the complete dashboard startup state");
-    assert_eq!(serde_json::to_value(received).unwrap(), expected);
-    assert!(matches!(
-        client.request(DaemonAction::Ping).await.unwrap(),
-        DaemonReply::Pong
-    ));
-    drop(client);
-    server.await.unwrap();
-    let (_, response_bytes) = copied.await.unwrap();
-    assert!(
-        response_bytes < (payload_bytes * 3 / 2) as u64,
-        "base64 chunks must stay near 4/3 of JSON size: {response_bytes} wire bytes for {payload_bytes} JSON bytes"
+    assert_eq!(
+        startup.runtime.projection.records["large-draft"].draft_input,
+        expected
     );
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -8655,7 +8597,10 @@ async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let sender = mj_core::runtime::spawn(async move {
         let mut stream = TcpStream::connect(address).await.unwrap();
         for (request_id, result) in [
-            (7, Ok(DaemonReply::Text("x".repeat(MAX_FRAME_BYTES)))),
+            (
+                7,
+                Ok(DaemonReply::Transcription("x".repeat(MAX_FRAME_BYTES))),
+            ),
             (8, Ok(DaemonReply::Pong)),
         ] {
             super::serve::write_response(
@@ -8674,7 +8619,10 @@ async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
     assert_eq!(response.request_id, 7);
     let error = response.result.unwrap_err();
-    assert!(error.contains("text response for request 7"), "{error}");
+    assert!(
+        error.contains("transcription response for request 7"),
+        "{error}"
+    );
     assert!(error.contains(&MAX_FRAME_BYTES.to_string()), "{error}");
     let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
     assert_eq!(response.request_id, 8);
@@ -13556,17 +13504,21 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID
     );
 
-    handle_action(
-        DaemonAction::SetSessionWorkspace {
-            session_id: "session-1".into(),
-            workspace_id: destination.id.clone(),
-        },
-        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
-        &state,
-        &CancellationToken::new(),
-    )
-    .await
-    .expect("change the workspace");
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    let move_owner = MoveMutationGuard::reserve("session-1").unwrap();
+    let refused = http
+        .set_session_workspace("session-1".into(), destination.id.clone())
+        .await
+        .unwrap_err();
+    let refused = refused
+        .downcast_ref::<mj_client::http::HttpApiError>()
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    assert!(refused.message.contains("after Move finishes"));
+    drop(move_owner);
+    http.set_session_workspace("session-1".into(), destination.id.clone())
+        .await
+        .expect("change the workspace");
 
     let cursor = replica.cursor.clone();
     replica
@@ -13596,6 +13548,8 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
     };
     assert_eq!(members(&destination.id), ["session-1"]);
     assert!(members(mj_core::workspace::DEFAULT_WORKSPACE_ID).is_empty());
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 /// Toggling a session's notification mute persists it and reaches the
@@ -13622,17 +13576,10 @@ async fn ignoring_notifications_persists_and_reaches_the_published_projection() 
         SessionState::Running,
     ))
     .unwrap();
-    handle_action(
-        DaemonAction::SetSessionNotificationsIgnored {
-            session_id: "session-1".into(),
-            ignored: true,
-        },
-        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
-        &state,
-        &CancellationToken::new(),
-    )
-    .await
-    .expect("ignore notifications");
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    http.set_session_notifications_ignored("session-1".into(), true)
+        .await
+        .expect("ignore notifications");
     let fresh = state.runtime_changes(None, false).await.unwrap();
     let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } = fresh else {
         panic!("a new dashboard is given a snapshot")
@@ -13642,17 +13589,11 @@ async fn ignoring_notifications_persists_and_reaches_the_published_projection() 
         mj_controller::database::load_state().unwrap().sessions["session-1"].notifications_ignored,
         "the flag is durable"
     );
-    handle_action(
-        DaemonAction::SetSessionNotificationsIgnored {
-            session_id: "missing".into(),
-            ignored: true,
-        },
-        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
-        &state,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap_err();
+    http.set_session_notifications_ignored("missing".into(), true)
+        .await
+        .unwrap_err();
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -13765,6 +13706,11 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
 
 #[tokio::test]
 async fn go_startup_session_falls_back_when_the_remembered_session_is_archived() {
+    let Some(_writer) = startup_prompt_test_store(
+        "go_startup_session_falls_back_when_the_remembered_session_is_archived",
+    ) else {
+        return;
+    };
     let mut archived = runtime_test_session("remembered", "workspace", SessionState::Stopped);
     archived.archived = true;
     let mut older = runtime_test_session("older", "workspace", SessionState::Stopped);
@@ -13786,24 +13732,14 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
         child.id.clone(),
         runtime_test_subagent(&child.id, "parent").into(),
     );
+    state.environment_owners = state
+        .sessions
+        .keys()
+        .map(|id| (id.clone(), id.clone()))
+        .collect();
     let runtime = test_runtime_state_holding(state);
 
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(
-            stream,
-            test_metadata(address),
-            runtime,
-            CancellationToken::new(),
-        )
-        .await
-    });
-    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
-        .await
-        .expect("connect to daemon protocol test server");
-
+    let (client, shutdown, server) = start_test_dashboard_http_api(runtime).await;
     let selected = client
         .go_startup_session("workspace".into(), Some("remembered".into()))
         .await
@@ -13811,54 +13747,8 @@ async fn go_startup_session_falls_back_when_the_remembered_session_is_archived()
         .expect("eligible fallback session");
 
     assert_eq!(selected.id, "newest");
-    drop(client);
-    assert!(server.await.expect("daemon task").is_ok());
-}
-
-#[tokio::test]
-async fn resume_candidates_larger_than_a_frame_arrive_whole() {
-    let mut record = runtime_test_session("stopped", "workspace", SessionState::Stopped);
-    record.acp_session_title = Some("t".repeat(500));
-    let row = mj_client::daemon::ResumeCandidate::of(&record, &Config::default());
-    // Enough rows that the list outgrows one frame, as a large store's does.
-    let rows = MAX_FRAME_BYTES / serde_json::to_vec(&row).unwrap().len() + 1_000;
-    let candidates = mj_client::daemon::ResumeCandidates {
-        candidates: vec![row; rows],
-        ..Default::default()
-    };
-    assert!(serde_json::to_vec(&candidates).unwrap().len() > MAX_FRAME_BYTES);
-    let expected = candidates.clone();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let sender = mj_core::runtime::spawn(async move {
-        let mut stream = TcpStream::connect(address).await.unwrap();
-        for (request_id, result) in [
-            (3, Ok(DaemonReply::ResumeCandidates(Box::new(candidates)))),
-            (4, Ok(DaemonReply::Pong)),
-        ] {
-            super::serve::write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
-                    request_id,
-                    result,
-                },
-            )
-            .await
-            .unwrap();
-        }
-    });
-    let (mut stream, _) = listener.accept().await.unwrap();
-    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
-    assert_eq!(response.request_id, 3);
-    let Ok(DaemonReply::ResumeCandidates(received)) = response.result else {
-        panic!("expected the whole candidate list")
-    };
-    assert_eq!(*received, expected);
-    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
-    assert_eq!(response.request_id, 4);
-    assert!(matches!(response.result, Ok(DaemonReply::Pong)));
-    sender.await.unwrap();
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[cfg(unix)]
@@ -16006,11 +15896,15 @@ async fn daemon_upload_exchange() {
             .join("import-session.hel.zip")
             .is_file()
     );
-    let registered = client
+    let (http, shutdown, http_server) =
+        start_test_dashboard_http_api(test_runtime_state_loading_the_store()).await;
+    let registered = http
         .session_record("import-session".into())
         .await
         .unwrap()
         .unwrap();
+    shutdown.cancel();
+    http_server.await.unwrap().unwrap();
     let reply = client
         .request(DaemonAction::TranscriptionAvailable {
             preferred_profile: "missing".into(),
@@ -16986,49 +16880,8 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             .iter()
             .any(|item| item.stable_id == "reply-1")
     );
-    let state = test_runtime_state();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let metadata = test_metadata(listener.local_addr().unwrap());
-    let server_metadata = metadata.clone();
-    let server = mj_core::runtime::spawn(async move {
-        for _ in 0..3 {
-            let (stream, _) = listener.accept().await.unwrap();
-            serve_client(
-                stream,
-                server_metadata.clone(),
-                Arc::clone(&state),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        }
-    });
-    // Send the legacy action shape without new optional fields, in the
-    // daemon's advertised dialect (as DaemonClient::request does). Reading a
-    // single raw frame proves the reply never entered chunk transport.
-    let mut legacy = TcpStream::connect(metadata.address).await.unwrap();
-    write_frame(
-        &mut legacy,
-        &serde_json::json!({
-            "protocol_version": metadata.protocol_version,
-            "request_id": 41,
-            "token": metadata.token.clone(),
-            "action": {"action": "stored_projection_tail", "arguments": {
-                "session_id": "notification-history", "items": 512
-            }}
-        }),
-    )
-    .await
-    .unwrap();
-    let response: ResponseEnvelope = read_frame(&mut legacy).await.unwrap();
-    assert_eq!(response.request_id, 41);
-    let Ok(DaemonReply::StoredProjectionTail(Some(legacy_tail))) = response.result else {
-        panic!("legacy count requests must return an unchunked StoredProjectionTail frame");
-    };
-    assert_eq!(legacy_tail.transcript.first().unwrap().position, 89);
-    assert_eq!(legacy_tail.transcript.last().unwrap().position, 600);
-    drop(legacy);
-    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let (client, shutdown, server) = start_test_dashboard_http_api(state).await;
     let StoredTranscriptItem::Found(item) = client
         .stored_transcript_item("notification-history".into(), "reply-1".into())
         .await
@@ -17073,11 +16926,9 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     history.applied_event_digest = format!("{:064x}", 610);
     mj_controller::database::save_materialized_session(&history).unwrap();
     assert!(
-        serde_json::to_vec(&DaemonReply::StoredTranscriptItem(Some(Box::new(
-            history.transcript.last().unwrap().as_ref().clone()
-        ))))
-        .unwrap()
-        .len()
+        serde_json::to_vec(history.transcript.last().unwrap().as_ref())
+            .unwrap()
+            .len()
             > MAX_FRAME_BYTES
     );
     let StoredTranscriptItem::Found(large) = client
@@ -17088,29 +16939,31 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
         panic!("large item must be returned");
     };
     assert!(large.body == history.transcript.last().unwrap().body);
-    drop(client);
-    let mut old_metadata = metadata;
-    old_metadata.protocol_version = mj_client::daemon::STORED_TRANSCRIPT_READ_PROTOCOL - 1;
-    let mut older = DaemonClient::connect(old_metadata).await.unwrap();
     assert!(matches!(
-        older
-            .stored_transcript_item("notification-history".into(), "reply-1".into())
+        client
+            .stored_agent_message_through("missing".into(), 0)
             .await
             .unwrap(),
-        StoredTranscriptItem::Unsupported
+        StoredTranscriptItem::Missing
     ));
-    assert!(matches!(
-        older
-            .stored_agent_message_through("notification-history".into(), 1)
+    assert!(
+        client
+            .session_record("missing".into())
             .await
-            .unwrap(),
-        StoredTranscriptItem::Unsupported
-    ));
-    // No unknown action was sent and no error/reconnect loop was entered.
-    // The frozen management operation still works on the same connection.
-    older.status().await.unwrap();
-    drop(older);
-    server.await.unwrap();
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        client
+            .session_record("notification-history".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "notification-history"
+    );
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 // Hard-won: 41e5b2ddd: a phone Resume could outlive cancellation while queued for workspace admission.
@@ -18533,4 +18386,90 @@ async fn retired_harness_stop_keeps_independent_descendants() {
         assert!(!stopped_marker(&independent.id).exists());
         assert_eq!(std::fs::read(&data).unwrap(), b"independent work");
     }
+}
+
+#[tokio::test]
+async fn terminal_dashboard_routes_round_trip_and_reads_continue_during_drain() {
+    let Some(_writer) = startup_prompt_test_store(
+        "terminal_dashboard_routes_round_trip_and_reads_continue_during_drain",
+    ) else {
+        return;
+    };
+    use mj_core::workspace::{ConversationLayout, PaneSize, PaneSizes};
+    let mut config = Config::default();
+    config.targets.insert(
+        "container".into(),
+        mj_core::config::TargetTemplate::LocalPodman {
+            container: serde_json::from_value(serde_json::json!({})).unwrap(),
+        },
+    );
+    config.save().unwrap();
+    let workspace = mj_controller::database::create_workspace("Dashboard HTTP").unwrap();
+    let id = "stopped-dashboard-session";
+    let mut session = runtime_test_session(id, &workspace.id, SessionState::Stopped);
+    session.target_template_id = "container".into();
+    mj_controller::database::save_session(&session).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+
+    let sizes = PaneSizes {
+        sessions: PaneSize::Minimized,
+        ..Default::default()
+    };
+    let mut layout = ConversationLayout::default();
+    layout.sessions.insert(layout.focus, id.into());
+    http.save_workspace_pane_sizes(workspace.id.clone(), sizes)
+        .await
+        .unwrap();
+    http.save_workspace_layout(workspace.id.clone(), layout.clone())
+        .await
+        .unwrap();
+    let mount_history = vec![PathBuf::from("/retained/mount")];
+    assert!(
+        http.set_session_container_settings(id.into(), None, vec![], mount_history.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        http.stored_session_metadata()
+            .await
+            .unwrap()
+            .mount_history
+            .get("local"),
+        Some(&mount_history)
+    );
+
+    let gate = mj_controller::upgrade::gate();
+    gate.begin_draining();
+    assert!(gate.is_draining());
+    let layouts = http
+        .workspace_layouts(vec![workspace.id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(layouts.pane_sizes[&workspace.id], sizes);
+    assert_eq!(layouts.conversation_layouts[&workspace.id], layout);
+    let startup = http
+        .dashboard_startup("terminal".into(), workspace.id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        http.session_tail("missing".into(), startup.runtime.cursor)
+            .await
+            .unwrap(),
+        mj_client::runtime_feed::SessionTailReply::NoTail
+    ));
+    http.record_operator_activity().await.unwrap();
+    assert!(gate.is_draining());
+    let refused = http.attach("terminal".into()).await.unwrap_err();
+    assert!(
+        refused
+            .downcast_ref::<mj_client::http::HttpApiError>()
+            .unwrap()
+            .is_handoff()
+    );
+    assert!(state.attachments().is_empty());
+
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }

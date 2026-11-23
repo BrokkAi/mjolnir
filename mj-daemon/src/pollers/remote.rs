@@ -275,6 +275,8 @@ pub(super) async fn load_session_tail(
     };
     let reply = mj_client::daemon::connect_existing()
         .await?
+        .http()
+        .await?
         .session_tail(session_id.clone(), cursor.clone())
         .await?;
     let mut replica = replica.lock().await;
@@ -372,6 +374,50 @@ mod expired_tail_cursor_tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    fn answer_identity(
+        identity: &mj_client::daemon::DaemonIdentity,
+        request: mj_client::daemon::RequestEnvelope,
+    ) -> mj_client::daemon::ResponseEnvelope {
+        use mj_client::daemon::{DaemonAction, DaemonReply, ResponseEnvelope};
+        assert!(matches!(request.action, DaemonAction::Identity));
+        ResponseEnvelope {
+            protocol_version: request.protocol_version,
+            request_id: request.request_id,
+            result: Ok(DaemonReply::Identity(identity.clone())),
+        }
+    }
+
+    async fn tail_api(
+        metadata: &mj_client::daemon::DaemonMetadata,
+        state: Arc<crate::daemon::RuntimeState>,
+    ) -> (
+        mj_client::daemon::DaemonIdentity,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<Result<()>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (_, shutdown, server) =
+            crate::daemon::tests::start_test_dashboard_http_api_on(state, listener).await;
+        mj_client::daemon::write_api_endpoint(&mj_client::daemon::ApiEndpointMetadata {
+            address,
+            token: "direct-test-token".into(),
+            pid: metadata.pid,
+            instance_id: metadata.instance_id.clone(),
+            protocol_version: metadata.protocol_version,
+        })
+        .unwrap();
+        (
+            mj_client::daemon::DaemonIdentity {
+                instance_id: metadata.instance_id.clone(),
+                build_version: metadata.build_version.clone(),
+                placement: metadata.placement.clone(),
+            },
+            shutdown,
+            server,
+        )
+    }
+
     // Hard-won: 6b12ea8ea: acknowledged alert batches were copied into every later publication.
     #[tokio::test]
     async fn bootstrap_poll_keeps_tails_available_and_cancels_the_old_family_scope() {
@@ -392,7 +438,7 @@ mod expired_tail_cursor_tests {
             DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
         };
         use mj_client::runtime_feed::{
-            RuntimeBootstrap, RuntimeCursor, RuntimeFrame, RuntimeProjection, SessionTailReply,
+            RuntimeBootstrap, RuntimeCursor, RuntimeFrame, RuntimeProjection,
         };
         use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -405,18 +451,20 @@ mod expired_tail_cursor_tests {
             token: "bootstrap-scope".into(),
             started_at: "2026-11-04T00:00:00Z".into(),
             build_version: "test".into(),
-            instance_id: String::new(),
+            instance_id: "bootstrap-scope".into(),
             placement: mj_client::daemon::DaemonPlacement::Host,
         };
         let path = mj_client::daemon::metadata_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        let cursor = RuntimeCursor {
-            alert_sequence: 0,
-            incarnation: "bootstrap-daemon".into(),
-            sequence: 42,
-            subagent_parents: Default::default(),
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let state = crate::daemon::tests::test_runtime_state();
+        let RuntimeFrame::Snapshot { cursor, .. } =
+            state.runtime_changes(None, false).await.unwrap()
+        else {
+            panic!("expected runtime bootstrap");
         };
+        let (identity, shutdown, http_server) = tail_api(&metadata, state).await;
         let replica = Arc::new(tokio::sync::Mutex::new(
             RuntimeBootstrap {
                 cursor: cursor.clone(),
@@ -439,21 +487,11 @@ mod expired_tail_cursor_tests {
                 "startup must follow its bootstrap cursor instead of downloading another snapshot"
             );
             server_held.notify_one();
-            let (mut tail, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut tail).await.unwrap();
-            assert!(
-                matches!(request.action, DaemonAction::SessionTail { cursor: ref requested, .. } if requested == &cursor)
-            );
-            mj_client::daemon::write_frame(
-                &mut tail,
-                &ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(DaemonReply::SessionTail(Box::new(SessionTailReply::NoTail))),
-                },
-            )
-            .await
-            .unwrap();
+            let (mut control, _) = listener.accept().await.unwrap();
+            let request = mj_client::daemon::read_frame(&mut control).await.unwrap();
+            mj_client::daemon::write_frame(&mut control, &answer_identity(&identity, request))
+                .await
+                .unwrap();
             let (mut fresh, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = mj_client::daemon::read_frame(&mut fresh).await.unwrap();
             let DaemonAction::RuntimeChanges {
@@ -592,6 +630,8 @@ mod expired_tail_cursor_tests {
             );
         }
         server.await.unwrap();
+        shutdown.cancel();
+        http_server.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -610,10 +650,8 @@ mod expired_tail_cursor_tests {
             return;
         }
 
-        use mj_client::daemon::{
-            DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
-        };
-        use mj_client::runtime_feed::{RuntimeCursor, RuntimeReplica, SessionTailReply};
+        use mj_client::daemon::DaemonMetadata;
+        use mj_client::runtime_feed::{RuntimeCursor, RuntimeReplica};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -627,7 +665,7 @@ mod expired_tail_cursor_tests {
             token: "tail-cursor-test-token".into(),
             started_at: "2026-10-05T00:00:00Z".into(),
             build_version: "test".into(),
-            instance_id: String::new(),
+            instance_id: "expired-tail-cursor".into(),
             placement: mj_client::daemon::DaemonPlacement::Host,
         };
         let metadata_path = mj_client::daemon::metadata_path();
@@ -638,25 +676,15 @@ mod expired_tail_cursor_tests {
         )
         .expect("publish fake daemon metadata");
 
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let (identity, shutdown, http_server) =
+            tail_api(&metadata, crate::daemon::tests::test_runtime_state()).await;
         let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept tail request");
-            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut stream)
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = mj_client::daemon::read_frame(&mut stream).await.unwrap();
+            mj_client::daemon::write_frame(&mut stream, &answer_identity(&identity, request))
                 .await
-                .expect("read tail request");
-            let DaemonAction::SessionTail { session_id, cursor } = request.action else {
-                panic!("expected SessionTail request");
-            };
-            let response = ResponseEnvelope {
-                protocol_version: request.protocol_version,
-                request_id: request.request_id,
-                result: Ok(DaemonReply::SessionTail(Box::new(
-                    SessionTailReply::ResetRequired,
-                ))),
-            };
-            mj_client::daemon::write_frame(&mut stream, &response)
-                .await
-                .expect("write expired cursor response");
-            (session_id, cursor)
+                .unwrap();
         });
 
         let cursor = RuntimeCursor {
@@ -677,10 +705,9 @@ mod expired_tail_cursor_tests {
             "the daemon no longer holds this runtime cursor"
         );
         assert!(replica.lock().await.cursor.is_none());
-        assert_eq!(
-            server.await.expect("fake daemon task"),
-            ("session-7".to_owned(), cursor)
-        );
+        server.await.unwrap();
+        shutdown.cancel();
+        http_server.await.unwrap().unwrap();
     }
 }
 

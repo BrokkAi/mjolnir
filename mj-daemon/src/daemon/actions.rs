@@ -41,10 +41,6 @@ pub(super) async fn handle_action(
                     .await?;
             Ok(DaemonReply::TranscriptionAvailable(available))
         }
-        DaemonAction::RecordOperatorActivity => {
-            state.record_operator_activity().await;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::PrepareUpgrade => {
             if mj_controller::upgrade::gate().try_close() {
                 cancellation.cancel();
@@ -52,10 +48,6 @@ pub(super) async fn handle_action(
             } else {
                 Ok(DaemonReply::UpgradePending)
             }
-        }
-        DaemonAction::SetOperatorAway { away } => {
-            state.set_operator_away(away).await?;
-            Ok(DaemonReply::Done)
         }
         DaemonAction::ProveIdentity { .. } => {
             unreachable!("identity proof is served before authentication")
@@ -232,24 +224,6 @@ pub(super) async fn handle_action(
             );
             Ok(DaemonReply::WebListeners(processes))
         }
-        DaemonAction::Attach { client_id } => {
-            state.attachments().insert(
-                client_id,
-                Attachment {
-                    renewed: std::time::Instant::now(),
-                },
-            );
-            state.ever_attached.store(true, Ordering::Release);
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::Detach { client_id } => {
-            state.attachments().remove(&client_id);
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::DismissNotification { session_id, target } => {
-            let ordinal = state.dismiss_notification(session_id, target).await?;
-            Ok(DaemonReply::Ordinal(ordinal))
-        }
         DaemonAction::RecordAbandonedPrompt {
             session_id,
             bundle_id,
@@ -313,46 +287,6 @@ pub(super) async fn handle_action(
             state.publish_revision();
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SaveSidebarSize { size } => {
-            // Hold the configuration owner through persistence and publication:
-            // an acknowledged save must be visible to the next dashboard.
-            let mut inactivity = state.config_mutation.lock().await;
-            let config = blocking(move || {
-                Config::update(|config| {
-                    config.sidebar_size = size;
-                    Ok(())
-                })
-                .map(|(config, ())| config)
-            })
-            .await?;
-            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
-            state
-                .review_config
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone_from(&config.review);
-            state.owner().install_config(config);
-            state.publish_revision();
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::SaveWorkspacePaneSizes {
-            workspace_id,
-            sizes,
-        } => {
-            blocking(move || {
-                mj_controller::database::save_workspace_pane_sizes(&workspace_id, sizes)
-            })
-            .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::SaveWorkspaceLayout {
-            workspace_id,
-            layout,
-        } => {
-            blocking(move || mj_controller::database::save_workspace_layout(&workspace_id, layout))
-                .await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::ImportSession { .. } => bail!("blob action outside connection transport"),
         DaemonAction::SessionProjectSource { session_id } => {
             let controller =
@@ -370,70 +304,9 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::ProjectSource(source))
         }
-        DaemonAction::SetSessionTitle { session_id, title } => {
-            let title =
-                blocking(move || Controller::load()?.rename_session(&session_id, &title)).await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Text(title))
-        }
-        DaemonAction::SetSessionNotificationsIgnored {
-            session_id,
-            ignored,
-        } => {
-            blocking(move || {
-                Controller::load()?.set_session_notifications_ignored(&session_id, ignored)
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::SetSessionWorkspace {
-            session_id,
-            workspace_id,
-        } => {
-            ensure!(
-                !mj_controller::controller::move_session::move_owns_session(&session_id),
-                "session is moving; change its workspace after Move finishes"
-            );
-            blocking(move || Controller::load()?.set_session_workspace(&session_id, &workspace_id))
-                .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::SetSessionContainerSettings {
-            session_id,
-            resource_allocation,
-            mounts,
-            mount_history,
-        } => {
-            let settings = mj_core::state::ContainerSettingsChange {
-                resource_allocation,
-                mounts,
-                mount_history: Some(mount_history),
-            };
-            Ok(
-                match state.set_container_settings(session_id, settings).await? {
-                    Some(preview) => DaemonReply::ContainerUpgradePreview(preview),
-                    None => DaemonReply::Done,
-                },
-            )
-        }
-        DaemonAction::MarkSessionTargetMissing {
-            session_id: _,
-            detail: _,
-            updated_at: _,
-        } => {
-            // Older clients still send this action. Only the daemon's worker
-            // view owns a definitive missing-target observation and its
-            // revision; a client-supplied detail may already be stale.
-            Ok(DaemonReply::OptionalSessionState(None))
-        }
         DaemonAction::CheckpointSession { .. } => {
             anyhow::bail!(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE)
         }
-        DaemonAction::SessionTextSearch { query } => Ok(DaemonReply::SessionTextMatches(
-            state.session_text_search(query).await?,
-        )),
         DaemonAction::ScanRecovery { all_instances } => {
             let scan = blocking(move || {
                 Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor, all_instances))
@@ -476,87 +349,6 @@ pub(super) async fn handle_action(
             })
             .await?;
             Ok(DaemonReply::Done)
-        }
-        DaemonAction::Snapshot { workspace_id } => {
-            let snapshot = blocking(move || workspace_snapshot(&workspace_id)).await?;
-            Ok(DaemonReply::Snapshot(snapshot))
-        }
-        DaemonAction::DashboardStartup {
-            client_id,
-            workspace_id,
-        } => {
-            let stored = blocking(move || dashboard_reads::dashboard_stored(&workspace_id)).await?;
-            let frame = state
-                .runtime_changes_for_subagent_parents(None, false, stored.subagent_parents)
-                .await?;
-            let mj_client::runtime_feed::RuntimeFrame::Snapshot {
-                cursor,
-                mut projection,
-            } = frame
-            else {
-                bail!("dashboard bootstrap did not produce a runtime snapshot");
-            };
-            let records = std::mem::take(&mut projection.records);
-            projection.records =
-                blocking(move || dashboard_reads::client_read_frontiers(records, &client_id))
-                    .await?;
-            let queued_prompts = stored
-                .queued_prompts
-                .into_iter()
-                .filter(|(id, _)| projection.records.contains_key(id))
-                .collect();
-            Ok(DaemonReply::DashboardStartup(Box::new(DashboardStartup {
-                runtime: mj_client::runtime_feed::RuntimeBootstrap {
-                    cursor,
-                    projection: *projection,
-                },
-                metadata: stored.metadata,
-                pane_sizes: stored.layouts.pane_sizes,
-                conversation_layouts: stored.layouts.conversation_layouts,
-                queued_prompts,
-            })))
-        }
-        DaemonAction::WorkspaceLayouts { workspace_ids } => Ok(DaemonReply::WorkspaceLayouts(
-            blocking(move || dashboard_reads::workspace_layouts(workspace_ids)).await?,
-        )),
-        DaemonAction::StoredSessionMetadata => Ok(DaemonReply::StoredSessionMetadata(
-            blocking(dashboard_reads::stored_session_metadata).await?,
-        )),
-        DaemonAction::StoredProjectionTail { session_id, items } => {
-            let tail = blocking(move || {
-                mj_controller::database::load_materialized_projection_tail(&session_id, items)
-            })
-            .await?;
-            Ok(DaemonReply::StoredProjectionTail(
-                tail.map(|(session, _)| Box::new(session)),
-            ))
-        }
-        DaemonAction::StoredTranscriptItem {
-            session_id,
-            stable_id,
-        } => {
-            let item = blocking(move || {
-                mj_controller::database::load_materialized_transcript_item(&session_id, &stable_id)
-            })
-            .await?;
-            Ok(DaemonReply::StoredTranscriptItem(item.map(Box::new)))
-        }
-        DaemonAction::StoredAgentMessageThrough {
-            session_id,
-            through,
-        } => {
-            let item = blocking(move || {
-                mj_controller::database::load_materialized_agent_item_through(&session_id, through)
-            })
-            .await?;
-            Ok(DaemonReply::StoredTranscriptItem(item.map(Box::new)))
-        }
-        DaemonAction::StoredSessionSummary { session_id } => {
-            let summary = blocking(move || {
-                mj_controller::database::load_materialized_session_summary(&session_id)
-            })
-            .await?;
-            Ok(DaemonReply::StoredSessionSummary(summary.map(Box::new)))
         }
         DaemonAction::ResumeRepositoryPreflight {
             session_id,
@@ -621,31 +413,6 @@ pub(super) async fn handle_action(
                 .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
                 .await?,
         ))),
-        DaemonAction::SessionTail { session_id, cursor } => Ok(DaemonReply::SessionTail(Box::new(
-            state.session_tail(&session_id, &cursor),
-        ))),
-        DaemonAction::ResumeCandidates => Ok(DaemonReply::ResumeCandidates(Box::new(
-            state.resume_candidates(),
-        ))),
-        DaemonAction::SessionRecord { session_id } => {
-            let capture = state.runtime_publication()?;
-            Ok(DaemonReply::SessionRecord(
-                capture.records.get(&session_id).map(|record| {
-                    Box::new(SessionRecordWithVerdict {
-                        record: record.clone(),
-                        verdict: capture.verdicts[&session_id],
-                    })
-                }),
-            ))
-        }
-        DaemonAction::GoStartupSession {
-            workspace_id,
-            last_session_id,
-        } => Ok(DaemonReply::GoStartupSession(
-            state
-                .go_startup_session(&workspace_id, last_session_id.as_deref())
-                .map(Box::new),
-        )),
         DaemonAction::HostCapacity => Ok(DaemonReply::HostCapacity(
             state
                 .capacity_feed()
@@ -905,17 +672,6 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::NativeAgentHistory {
-            owner,
-            child,
-            before,
-        } => {
-            let page = blocking(move || {
-                mj_controller::database::native_agent_history(&owner, &child, before)
-            })
-            .await?;
-            Ok(DaemonReply::NativeAgentHistory(page))
-        }
         DaemonAction::StartSessionLifecycle(request) => {
             match state.start_session_lifecycle(request).await {
                 Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
@@ -1083,15 +839,6 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
         return mj_controller::upgrade::activity("spinner style setting").map(Some);
     }
-    if matches!(action, DaemonAction::DismissNotification { .. }) {
-        return mj_controller::upgrade::activity("notification dismissal").map(Some);
-    }
-    if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
-        return mj_controller::upgrade::activity("sidebar size setting").map(Some);
-    }
-    if matches!(action, DaemonAction::SetOperatorAway { .. }) {
-        return mj_controller::upgrade::activity("operator away setting").map(Some);
-    }
     if matches!(action, DaemonAction::LoginTerminal { .. })
         || action.is_cancellable_machine_action()
     {
@@ -1100,7 +847,6 @@ pub(super) fn upgrade_request_activity(
     if matches!(
         action,
         DaemonAction::TranscribeAudio { .. }
-            | DaemonAction::RecordOperatorActivity
             | DaemonAction::ProveIdentity { .. }
             | DaemonAction::Ping
             | DaemonAction::Identity
@@ -1112,14 +858,12 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::AdoptRecovery(_)
             | DaemonAction::MoveSession(_)
-            | DaemonAction::SetSessionContainerSettings { .. }
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
             | DaemonAction::CheckAvailability
             | DaemonAction::RuntimeChanges { .. }
-            | DaemonAction::SessionTail { .. }
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ImportSession { .. }
@@ -1143,61 +887,6 @@ pub(super) fn is_upgrade_handoff_refusal(error: &anyhow::Error) -> bool {
 fn repository_preflight_executor() -> CancellableProcessExecutor {
     CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
         .with_deadline(Duration::from_secs(30))
-}
-
-#[cfg(all(test, unix))]
-mod missing_target_compat_tests {
-    use super::*;
-
-    // Hard-won: #1444: an old client could mark a newly resumed session missing from a stale poll.
-    #[tokio::test]
-    async fn stale_client_missing_target_report_cannot_invalidate_a_resumed_session() {
-        const CHILD: &str = "MJ_TEST_STALE_MISSING_TARGET_ACTION_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let directory = tempfile::tempdir().unwrap();
-            mj_controller::controller::test_support::IsolatedTest::new(
-                mj_controller::controller::test_support::test_name(
-                    module_path!(),
-                    "stale_client_missing_target_report_cannot_invalidate_a_resumed_session",
-                ),
-            )
-            .env(CHILD, "1")
-            .isolated_store(directory.path())
-            .run();
-            return;
-        }
-        let _writer = mj_controller::database::install_isolated_test_writer();
-        let workspace = mj_controller::database::create_workspace("Resumed session").unwrap();
-        let mut session = super::super::tests::runtime_test_session(
-            "resumed",
-            &workspace.id,
-            SessionState::Running,
-        );
-        session.updated_at = "2026-11-02T18:00:00Z".into();
-        mj_controller::database::save_session(&session).unwrap();
-
-        let state = super::super::tests::test_runtime_state();
-        let metadata = super::super::tests::test_metadata("127.0.0.1:1".parse().unwrap());
-        let reply = handle_action(
-            DaemonAction::MarkSessionTargetMissing {
-                session_id: session.id.clone(),
-                detail: "old working directory was missing".into(),
-                updated_at: "2026-11-02T17:00:00Z".into(),
-            },
-            &metadata,
-            &state,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(reply, DaemonReply::OptionalSessionState(None)));
-        let stored = mj_controller::database::load_session_record(&session.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.state, SessionState::Running);
-        assert_eq!(stored.updated_at, session.updated_at);
-        assert_eq!(stored.last_error, None);
-    }
 }
 
 /// Credential selection lives on the machine owning the profiles.

@@ -631,6 +631,8 @@ fn persist_imported_session_cancellable(
             Err(error) => return Err(error),
         }
         client
+            .http()
+            .await?
             .session_record(session_id)
             .await?
             .context("imported session disappeared")

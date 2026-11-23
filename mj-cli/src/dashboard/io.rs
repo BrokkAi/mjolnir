@@ -581,6 +581,8 @@ impl From<mj_client::daemon::StoredSessionMetadata> for DashboardMetadata {
 pub(crate) async fn stored_session_metadata() -> Result<DashboardMetadata> {
     crate::daemon::connect_or_start()
         .await?
+        .http()
+        .await?
         .stored_session_metadata()
         .await
         .map(DashboardMetadata::from)

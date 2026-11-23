@@ -70,6 +70,10 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn dashboard_backend(self: Arc<Self>) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
+        None
+    }
+
     fn stop_viewer_background_task(
         &self,
         _session_id: String,
@@ -451,6 +455,10 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn dashboard_backend(self: Arc<Self>) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
+        Some(self)
+    }
+
     fn stop_viewer_background_task(
         &self,
         session_id: String,
@@ -4781,6 +4789,10 @@ fn bundle_failure(error: QuickBundleFailure) -> crate::server::BundleFailure {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn dashboard_backend(&self) -> Option<Arc<dyn crate::server::api::DashboardBackend>> {
+        self.exports.clone().dashboard_backend()
+    }
+
     fn create_bundle(
         &self,
         source: String,
@@ -5137,7 +5149,8 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             let reference =
                 new_command_id("container-settings").map_err(|_| viewer_unavailable())?;
-            let admission = viewer_activity("container settings")?;
+            let admission = mj_controller::upgrade::activity_unless_draining("container settings")
+                .map_err(|_| ApiFailure::handoff())?;
             let settings = ContainerSettingsChange {
                 resource_allocation,
                 mounts,

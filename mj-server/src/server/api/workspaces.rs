@@ -1,7 +1,6 @@
 //! Workspace routes.
 //!
 use super::*;
-use std::future::Future;
 
 pub(super) async fn list_workspaces(
     State(state): State<ServerState>,
@@ -73,29 +72,6 @@ pub(super) async fn workspace_for_new_session(
             "this instance holds more than one workspace. Supply workspace_id",
         )),
     }
-}
-
-/// Keep the admission with the task so disconnecting after acceptance cannot
-/// interrupt a mutation between its durable write and its publication.
-async fn run_admitted_mutation<T: Send + 'static>(
-    state: &ServerState,
-    label: &'static str,
-    work: impl Future<Output = Result<T, ApiFailure>> + Send + 'static,
-) -> Result<T, ApiFailure> {
-    let admission = state
-        .upgrade_gate
-        .enter_unless_draining(label)
-        .map_err(|_| ApiFailure::handoff())?;
-    mj_core::runtime::spawn(async move {
-        let _admission = admission;
-        let result = work.await;
-        if let Err(error) = &result {
-            tracing::debug!(label, %error, "daemon HTTP mutation failed");
-        }
-        result
-    })
-    .await
-    .context(label)?
 }
 
 pub(super) async fn rename_workspace(
@@ -176,20 +152,6 @@ pub(super) async fn remove_project(
         Ok(StatusCode::NO_CONTENT)
     })
     .await
-}
-
-fn require_terminal(
-    state: &ServerState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), ApiFailure> {
-    if loopback_authenticated(state, headers) {
-        Ok(())
-    } else {
-        Err(ApiFailure::new(
-            StatusCode::FORBIDDEN,
-            "terminal authentication is required",
-        ))
-    }
 }
 
 pub(super) async fn list_workspace_drafts(

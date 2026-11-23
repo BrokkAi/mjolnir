@@ -1615,7 +1615,8 @@ impl Controller {
 
     /// Record the per-session container size overrides and attached
     /// directories. Nothing is applied to a running container: the values are
-    /// read the next time the session's container is created.
+    /// read the next time the session's container is created. The daemon
+    /// caller holds upgrade admission through validation and publication.
     pub fn update_session_container_settings(
         &mut self,
         session_id: &str,
@@ -1630,10 +1631,6 @@ impl Controller {
             &additional_mounts,
             executor,
         )?;
-        // The host checks above can be abandoned during handoff. Only the
-        // deferred save takes admission, once it is ready to write.
-        let _admission =
-            crate::upgrade::activity_unless_draining("save deferred container settings")?;
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,

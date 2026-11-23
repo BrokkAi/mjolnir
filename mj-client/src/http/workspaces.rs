@@ -35,7 +35,7 @@ pub struct RecoveredDraft {
     pub revision: Option<i64>,
 }
 
-fn workspace_path(id: &str, suffix: &str) -> Result<String> {
+pub(super) fn workspace_path(id: &str, suffix: &str) -> Result<String> {
     Ok(format!(
         "/api/v1/workspaces/{}{suffix}",
         encode_segment(id)?

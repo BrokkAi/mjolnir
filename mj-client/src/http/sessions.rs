@@ -64,7 +64,7 @@ fn wiki_path(id: &str, suffix: &str) -> Result<String> {
     ))
 }
 
-fn optional<T>(result: Result<T>) -> Result<Option<T>> {
+pub(super) fn optional<T>(result: Result<T>) -> Result<Option<T>> {
     match result {
         Err(error)
             if error

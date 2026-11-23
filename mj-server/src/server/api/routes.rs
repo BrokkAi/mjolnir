@@ -30,6 +30,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         ));
 
     Router::new()
+        .merge(dashboard_routes())
         .route("/push/key", get(push_key))
         .route("/push/status", get(push_device_status))
         .route("/snapshot", get(viewer::snapshot))
