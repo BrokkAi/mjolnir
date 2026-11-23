@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ func relaySteeringAutomatically(t *testing.T, root string) *DurableRelay {
 func runningClaudeTurn(t *testing.T, root string, hookAvailable bool) *DurableRelay {
 	t.Helper()
 	relay := rtMust(DurableRelayOpenForHarness(root, session, "test", core.HarnessKindClaude, nil))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	relay.SetHarnessTurnPolicy(HarnessTurnPolicyClaudeAdapter)
 	relay.SetSteeringDeliveryMode(core.HarnessKindClaude, hookAvailable)
 	submitRelay(relay, "prompt-first", prompt("Work on the first request."))
@@ -121,6 +122,25 @@ func successfulShell(command, stdout string) core.UserShellResult {
 		Status:          core.UserShellStatusExited,
 		Error:           nil,
 	}
+}
+
+// setVerdictHarness is relay.SetTurnVerdictHarness(harness) for a relay
+// whose root the test removes. The harness opens the Jev decision log, whose
+// goroutine (Rust's writer thread) appends after the call that queued the
+// record returns. Rust's TempDir drop ignores a removal that races those
+// writes; Go's t.TempDir cleanup fails the test on it. So the drain is
+// registered here, where the writer starts: cleanups run last in, first out,
+// so it runs before the removal of a root created before the relay. It holds
+// the relay until the read is queued, so the writer cannot be collected
+// first and leave its queued appends unordered with the read.
+func setVerdictHarness(t *testing.T, relay *DurableRelay, harness core.HarnessKind) {
+	t.Helper()
+	relay.SetTurnVerdictHarness(harness)
+	t.Cleanup(func() {
+		// The read is ordered after every queued write; its answer is unused.
+		_, _ = core.JevRead(filepath.Join(relay.Root(), "jev-decisions"), session, nil)
+		runtime.KeepAlive(relay)
+	})
 }
 
 // relayTestsClaudeRelay builds a relay that models the turns Claude Code
@@ -325,7 +345,7 @@ func assertChunkOpenedAHarnessTurn(t *testing.T, relay *DurableRelay) {
 func clearableRelay(t *testing.T, root string) *DurableRelay {
 	t.Helper()
 	relay := rtMust(DurableRelayOpen(root, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	rtMust(relay.RecordObservation(rtOpenedSession("original")))
 	rtNoErr(relay.MarkNativeSessionUsed())
 	return relay
@@ -565,7 +585,7 @@ func legacyStartupWithPrunedReceipt(t *testing.T, clear, omitWatermark, removed 
 		startup = commands
 	}
 	relay := rtMust(DurableRelayOpenForHarness(temp, session, "old", core.HarnessKindCodex, startup))
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	rtMust(relay.RecordObservation(rtOpenedSession("old-thread")))
 	if removed {
 		submitRelay(relay, "blocking-prompt", prompt("already running"))
@@ -685,7 +705,7 @@ func TestInitialBriefIsNotReseededAfterClearAndAckPruning(t *testing.T) {
 		Optional:  false,
 	}}
 	relay := rtMust(DurableRelayOpenForHarness(temp, session, "test", core.HarnessKindCodex, commands))
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	rtMust(relay.RecordObservation(rtOpenedSession("original-thread")))
 	rtMust(relay.ClaimPendingCommands(true))
 	finishPrompt(relay, "original-brief")
@@ -809,7 +829,7 @@ func TestInitialFifoDoesNotReleaseTheBriefAfterRequiredConfigurationFails(t *tes
 func TestIdleUpgradeReservationDefersWithoutDelayingSteering(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "running-command", prompt("work"))
 	rtMust(relay.ClaimPendingCommands(true))
 	submitRelay(relay, "next-command", prompt("change direction"))
@@ -854,7 +874,7 @@ func rtPromptOutcome(stopReason string) core.RelayCommandOutcomePrompt {
 func TestIdleUpgradeReservationIsIdempotentAndDisconnectReleasesQueuedWork(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	rtMust(relay.RecordObservation(rtSessionConfigured()))
 	reserve := core.RelayRequestReserveIdle{CommandID: "upgrade-command"}
 	response := relay.Handle(relayRequest("reserve", reserve))
@@ -884,7 +904,7 @@ func TestIdleUpgradeReservationIsIdempotentAndDisconnectReleasesQueuedWork(t *te
 func TestClassifierInputHandoffPreservesRunningChildrenAndStopControls(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	relay.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
 	submitRelay(relay, "approval", prompt("Prepare deployment while analyzing the heap independently."))
 	rtMust(relay.ClaimPendingCommands(true))
@@ -940,7 +960,7 @@ func TestClassifierInputHandoffPreservesRunningChildrenAndStopControls(t *testin
 func TestInferredFinishedHandoffMarksTheTrackedTurnIdle(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "finished-prompt", prompt("Finish the implementation."))
 	rtMust(relay.ClaimPendingCommands(true))
 	rtMust(relay.RecordCommandCompleted("finished-prompt", rtPromptOutcome(core.InferredFinishedStopReason)))
@@ -1336,7 +1356,7 @@ func TestClaudeAttachmentSteerIsLeftForTheNextNormalPrompt(t *testing.T) {
 func TestCodexSteerStillClaimsAnAcpSteeringPrompt(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpenForHarness(temp, session, "test", core.HarnessKindCodex, nil))
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	relay.SetSteeringDeliveryMode(core.HarnessKindCodex, false)
 	submitRelay(relay, "prompt-first", prompt("work"))
 	rtMust(relay.ClaimPendingCommands(true))
@@ -2925,7 +2945,7 @@ func TestAnAutonomousTaskEndAfterOutputReleasesItsQueuedPromptOnce(t *testing.T)
 	for _, terminal := range []struct{ settled, failed bool }{{true, false}, {true, true}, {false, false}} {
 		temp := t.TempDir()
 		relay := relayTestsClaudeRelay(t, temp)
-		relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, relay, core.HarnessKindClaude)
 		rtNoErr(relay.applyClaudeTaskFixture("silent-turn", true, true, false, false))
 		rtMust(relay.RecordSessionUpdate(toolCallUpdate()))
 		submitRelay(relay, "next-prompt", prompt("answer next"))
@@ -3175,7 +3195,7 @@ func TestAHarnessTurnRefusedForQuotaEndsWithNothingLeftSet(t *testing.T) {
 func TestAgentOutputAtIdleOpensAHarnessTurnAndItsCycleResultSettlesIt(t *testing.T) {
 	temp := t.TempDir()
 	relay := relayTestsClaudeRelay(t, temp)
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 
 	rtMust(relay.RecordSessionUpdate(toolCallUpdate()))
 
@@ -4831,7 +4851,7 @@ func TestContinuationExpectationIsProcessLocalAndClearsWhenAHarnessTurnOpens(t *
 func TestNewPromptInvalidatesACompletedTurnVerdictAndResetsItsEvidence(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "1.0.0"))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "prior-prompt", prompt("Explain the options"))
 	rtMust(relay.ClaimPendingCommands(true))
 	rtMust(relay.RecordSessionUpdate(rtSessionUpdateJSON(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Should I stop at option 1?"}}`)))
@@ -4878,7 +4898,7 @@ func TestNewPromptInvalidatesACompletedTurnVerdictAndResetsItsEvidence(t *testin
 func TestFinishedTurnQueuesOnlyOneRepliedClassification(t *testing.T) {
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "1.0.0"))
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "prompt-1", prompt("instructions"))
 	rtMust(relay.ClaimPendingCommands(true))
 	if _, ok := relay.PendingRepliedVerdict(); ok {
@@ -4951,7 +4971,7 @@ func TestClearAdmissionMatchesThePublishedCapabilityPerHarness(t *testing.T) {
 	} {
 		temp := t.TempDir()
 		relay := rtMust(DurableRelayOpen(temp, session, "test"))
-		relay.SetTurnVerdictHarness(harness.kind)
+		setVerdictHarness(t, relay, harness.kind)
 		rtMust(relay.RecordObservation(rtOpenedSession("original")))
 		rtNoErr(relay.MarkNativeSessionUsed())
 		if relay.OperationalState().ClearContext != harness.supported {
@@ -5038,7 +5058,7 @@ func TestClearChangesOnlyNativeContextAndIsIdempotentAcrossReopen(t *testing.T) 
 		t.Fatalf("model is %q (%v)", model, ok)
 	}
 	relay = rtMust(DurableRelayOpen(temp, session, "test"))
-	relay.SetTurnVerdictHarness(core.HarnessKindCodex)
+	setVerdictHarness(t, relay, core.HarnessKindCodex)
 	_, refusal, err = relay.submitCommand("clear-request", clear)
 	rtNoErr(err)
 	if refusal != nil {
@@ -5516,7 +5536,7 @@ func rtAgentInitialized(runtime *core.RuntimeIdentity) core.RelayObservationAgen
 func TestOutputWhileAResumedSessionIsSetUpIsANoticeAndOpensNoTurn(t *testing.T) {
 	temp := t.TempDir()
 	relay := relayTestsClaudeRelay(t, temp)
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	// The recorded order: a restarted session, a new bridge, the notice,
 	// then the opened and configured session.
 	rtMust(relay.RecordObservation(core.RelayObservationSessionRestarted{}))
@@ -5590,7 +5610,7 @@ func rtTurnStarts(items []core.TranscriptItem) []core.TranscriptItem {
 func TestLateClaudeToolStatusPreservesTheTranscriptWithoutOpeningATurn(t *testing.T) {
 	temp := t.TempDir()
 	relay := relayTestsClaudeRelay(t, temp)
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	relay.SetHarnessTurnPolicy(HarnessTurnPolicyClaudeAdapter)
 	rtMust(relay.RecordObservation(rtSessionConfigured()))
 	rtMust(relay.RecordSessionUpdate(agentTextChunk("Checking the background command.")))
@@ -5761,7 +5781,7 @@ func TestATurnVerdictKeepsTheCompletionIdentityAHandbackReminderNames(t *testing
 	} {
 		temp := t.TempDir()
 		relay := rtMust(DurableRelayOpen(temp, session, "test"))
-		relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+		setVerdictHarness(t, relay, core.HarnessKindClaude)
 		submitRelay(relay, "first-command", prompt("work"))
 		rtMust(relay.ClaimPendingCommands(true))
 		completed := rtMust(relay.RecordCommandCompleted("first-command", rtPromptOutcome("end_turn")))
@@ -7541,7 +7561,7 @@ func TestAutonomousReplyAfterCompletedPromptHasItsOwnJudgmentTail(t *testing.T) 
 	temp := t.TempDir()
 	relay := rtMust(DurableRelayOpen(temp, session, "human-reply"))
 	relay.SetHarnessTurnPolicy(HarnessTurnPolicyClaudeAdapter)
-	relay.SetTurnVerdictHarness(core.HarnessKindClaude)
+	setVerdictHarness(t, relay, core.HarnessKindClaude)
 	submitRelay(relay, "human-prompt", prompt("do the work"))
 	rtMust(relay.ClaimPendingCommands(true))
 	rtMust(relay.RecordSessionUpdate(rtSessionUpdateJSON(`{"sessionUpdate":"agent_message_chunk","messageId":"human-reply","content":{"type":"text","text":"finished human work"}}`)))
