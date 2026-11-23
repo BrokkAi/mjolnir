@@ -1135,11 +1135,7 @@ pub(super) async fn handle_action(
         DaemonAction::StartSessionLifecycle(request) => {
             match state.start_session_lifecycle(request).await {
                 Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
-                Err(error)
-                    if Refusal::of(&error).is_some_and(|refusal| {
-                        refusal.code() == Some(mj_controller::upgrade::HANDOFF_REFUSAL_CODE)
-                    }) =>
-                {
+                Err(error) if is_upgrade_handoff_refusal(&error) => {
                     // Only unaccepted lifecycle admission carries this code.
                     // The client retries its original request and selections.
                     Ok(DaemonReply::UpgradePending)
@@ -1255,10 +1251,17 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::MoveSources(sources))
         }
         DaemonAction::DestroyStoppedSession { session_id } => {
-            state
-                .destroy_stopped_session(session_id, BranchDisposition::Keep)
-                .await?;
-            Ok(DaemonReply::Done)
+            match state
+                .start_destroy_stopped_session(session_id, BranchDisposition::Keep)
+                .await
+            {
+                Ok(started) => {
+                    RuntimeState::wait_lifecycle_result(started.result).await?;
+                    Ok(DaemonReply::Done)
+                }
+                Err(error) if is_upgrade_handoff_refusal(&error) => Ok(DaemonReply::UpgradePending),
+                Err(error) => Err(error),
+            }
         }
         DaemonAction::ForceDestroySession { session_id } => {
             state
@@ -1350,6 +1353,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Identity
             | DaemonAction::Configuration
             | DaemonAction::WaitSessionLifecycle(_)
+            | DaemonAction::DestroyStoppedSession { .. }
             // Answered from durable state, so it holds no daemon work and a
             // handoff does not wait for it; the client asks again.
             | DaemonAction::WaitCreateSession { .. }
@@ -1376,6 +1380,11 @@ pub(super) fn upgrade_request_activity(
     } else {
         mj_controller::upgrade::activity("client request").map(Some)
     }
+}
+
+pub(super) fn is_upgrade_handoff_refusal(error: &anyhow::Error) -> bool {
+    Refusal::of(error)
+        .is_some_and(|refusal| refusal.code() == Some(mj_controller::upgrade::HANDOFF_REFUSAL_CODE))
 }
 
 /// Repository preflights fetch over the network. The 30 seconds the terminal

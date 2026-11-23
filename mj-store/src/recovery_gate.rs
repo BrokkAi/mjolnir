@@ -471,17 +471,19 @@ impl RecoveryGate {
         self.busy.send_replace(state.busy.keys().cloned().collect());
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed
+    }
+
     pub async fn closed(&self) {
         loop {
             let notified = self.closed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .closed
-            {
+            if self.is_closed() {
                 return;
             }
             notified.await;
