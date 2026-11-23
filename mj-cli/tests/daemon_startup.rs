@@ -89,14 +89,15 @@ fn daemon_starts_a_stopped_apple_container_runtime_without_delaying_serving() {
         &tools,
         "container",
         r#"printf '%s\n' "$*" >> "$MJ_TEST_CONTAINER_LOG"
-if [ "$1 $2" = "system status" ]; then
+if [ "$*" = "system status --format json" ]; then
   if [ -f "$MJ_TEST_CONTAINER_READY" ]; then
+    printf '%s\n' '{"status":"running"}'
     exit 0
   fi
-  printf 'service is stopped\n' >&2
+  printf '%s\n' '{"status":"unregistered"}'
   exit 1
 fi
-if [ "$1 $2" = "system start" ] && [ "$3" = "--disable-kernel-install" ]; then
+if [ "$1 $2" = "system start" ] && [ "$3" = "--enable-kernel-install" ]; then
   : > "$MJ_TEST_CONTAINER_STARTED"
   while [ ! -f "$MJ_TEST_CONTAINER_RELEASE" ]; do
     /bin/sleep 0.05
@@ -200,7 +201,7 @@ exit 64
     }
     let calls = fs::read_to_string(&log).unwrap();
     assert!(
-        calls.starts_with("system status\nsystem start --disable-kernel-install\nsystem status\n"),
+        calls.starts_with("system status --format json\nsystem start --enable-kernel-install\nsystem status --format json\n"),
         "unexpected container CLI sequence:\n{calls}"
     );
 

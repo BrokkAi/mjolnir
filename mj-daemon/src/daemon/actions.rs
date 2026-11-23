@@ -123,7 +123,7 @@ pub(super) async fn handle_action(
                 let checks = mj_setup::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
                     &executor,
-                    mj_setup::doctor::current_apple_platform(&executor),
+                    mj_controller::targets::current_apple_platform(&executor),
                     mj_setup::doctor::DoctorOptions { smoke: false },
                 );
                 mj_setup::setup::welcome_errors(&checks)

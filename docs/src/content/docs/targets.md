@@ -282,8 +282,8 @@ machine = "mac"
 ```
 
 Settings › Runtimes offers that runtime when the probe finds Apple-silicon
-macOS 26 or newer with a running Apple container daemon; `mj doctor` checks it
-the way it checks a local one.
+macOS 26 or newer with a working Apple container installation. Mjolnir starts
+a stopped service when launching a session.
 
 ### Podman on an SSH machine
 

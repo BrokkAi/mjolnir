@@ -2873,12 +2873,19 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let line = format!("{} {}", command.program, command.args.join(" "));
-            let stopped = line == "container system status" && !self.service_running;
+            let is_status = line == "container system status --format json";
+            let stopped = is_status && !self.service_running;
             let failed = self.failed_command == Some(line.as_str());
             self.commands.lock().unwrap().push(line);
             Ok(CommandOutput {
                 status: i32::from(stopped || failed),
-                stdout: b"sha256:1111\n".to_vec(),
+                stdout: if stopped {
+                    br#"{"status":"unregistered"}"#.to_vec()
+                } else if is_status {
+                    br#"{"status":"running"}"#.to_vec()
+                } else {
+                    b"sha256:1111\n".to_vec()
+                },
                 stderr: if failed {
                     b"image store unavailable".to_vec()
                 } else {
@@ -2910,7 +2917,7 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
     );
     assert_eq!(
         *stopped.commands.lock().unwrap(),
-        ["container system status"],
+        ["container system status --format json"],
         "a stopped service is observed, never started, and nothing is pulled"
     );
     assert!(reports.taken().is_empty());
@@ -2932,7 +2939,7 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
     assert_eq!(
         *commands,
         [
-            "container system status",
+            "container system status --format json",
             "container image inspect ghcr.io/example/dev:latest",
             "container image pull ghcr.io/example/dev:latest",
             "container image inspect ghcr.io/example/dev:latest",

@@ -239,14 +239,14 @@ Then follow the target-specific result:
   working OverlayFS support on the daemon's filesystem host. Run `docker info`
   and follow [Docker for Mjolnir](/docker/).
 - **Apple container:** the controller must be Apple silicon on macOS 26 or
-  newer. The daemon starts an installed service automatically; if doctor still
-  reports it stopped, run `container system start` and review its output. See
+  newer. Mjolnir starts a stopped service automatically when launching a
+  session and installs the default kernel if needed. See
   [Apple container](/apple-container/).
 - **Apple container over SSH:** run
   `ssh <destination> /usr/local/bin/container --version` and
-  `ssh <destination> /usr/local/bin/container system status` as the configured
-  user. Install the signed package, start the service, and use macOS 26 or
-  newer on Apple silicon. Mjolnir finds `container` through the Mac's system
+  `ssh <destination> /usr/local/bin/container system status --format json`
+  as the configured user. Install the signed package on Apple silicon with
+  macOS 26 or newer. Mjolnir starts a stopped service at launch. Mjolnir finds `container` through the Mac's system
   `PATH`, so no shell configuration is needed. See
   [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
