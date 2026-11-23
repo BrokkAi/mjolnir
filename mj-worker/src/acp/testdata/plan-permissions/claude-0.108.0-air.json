@@ -1,0 +1,12 @@
+{
+  "_meta": {"jetbrains": {"air": {"permission": {"title": "Ready to code?", "version": 1}, "version": 1}}},
+  "options": [
+    {"kind": "allow_once", "name": "Yes, manually approve edits", "optionId": "exit-plan-default"},
+    {"kind": "allow_always", "name": "Yes, clear context (0% used) and use auto mode", "optionId": "exit-plan-clear-auto"},
+    {"kind": "allow_always", "name": "Yes, and use auto mode", "optionId": "exit-plan-auto"},
+    {"kind": "allow_always", "name": "Yes, and bypass permissions", "optionId": "exit-plan-bypass"},
+    {"kind": "reject_once", "name": "No, keep planning", "optionId": "reject"}
+  ],
+  "sessionId": "<session>",
+  "toolCall": {"rawInput": {"plan": "# Plan\n1. Do it"}, "title": "Approve Plan", "toolCallId": "toolu_plan"}
+}
