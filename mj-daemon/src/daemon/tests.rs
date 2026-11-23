@@ -12691,10 +12691,10 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         SessionState::Running,
     );
     mj_controller::database::save_session(&parent).unwrap();
-    let child = runtime_test_session(
+    let mut child = runtime_test_session(
         CHILD,
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
-        SessionState::Parked,
+        SessionState::Running,
     );
     let mut relation = runtime_test_subagent(CHILD, &parent.id);
     relation.model = Some("chosen-model".into());
@@ -12772,8 +12772,43 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             },
         )
         .unwrap();
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let first = mj_controller::database::next_startup_delivery(CHILD)
+        .unwrap()
+        .unwrap();
+    state.start_persisted_startup_delivery(first, &CancellationToken::new());
+    // Let the drain see a live child with no projected receipts, then
+    // advance beyond the old deadline while those receipts are still absent.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while mj_controller::database::load_startup_delivery(&model_id)
+            .unwrap()
+            .unwrap()
+            .phase
+            != "delivering"
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::pause();
+    for _ in 0..65 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    tokio::time::resume();
+    assert_eq!(
+        mj_controller::database::load_startup_delivery(&model_id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        "delivering"
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    child.state = SessionState::Parked;
+    mj_controller::database::save_session(&child).unwrap();
     // Replay the actual worker journal through the controller's storage
-    // boundary before attaching any daemon startup monitor.
+    // boundary after the child has parked.
     let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
     mj_controller::database::apply_projection_page(CHILD, move |page| {
         let mut current = mj_core::state::MaterializedSession::empty(CHILD);
@@ -12790,12 +12825,6 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         Ok(())
     })
     .unwrap();
-    let mut manager = TestRemoteManager::new().await;
-    let state = test_runtime_state_with_manager(&manager);
-    let first = mj_controller::database::next_startup_delivery(CHILD)
-        .unwrap()
-        .unwrap();
-    state.start_persisted_startup_delivery(first, &CancellationToken::new());
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if mj_controller::database::load_startup_group(CHILD, &group_id)
@@ -12822,6 +12851,134 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             .is_err(),
         "receipt monitoring must not contact or restart the parked worker"
     );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn child_startup_failure_waits_for_confirmed_worker_death() {
+    use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION as CHILD;
+    use mj_controller::session_manager::{
+        WorkerRecoveryOutcome, WorkerRecoveryPlan, recover_worker_controlled,
+    };
+
+    const NAME: &str = "child_startup_failure_waits_for_confirmed_worker_death";
+    const PARENT: &str = "parent-startup";
+    const CAUSE: &str = "provider refused required seeded model";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(CHILD);
+    seed_live_session(temp.path(), &root);
+    let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
+    let parent = runtime_test_session(PARENT, workspace, SessionState::Running);
+    mj_controller::database::save_session(&parent).unwrap();
+    let target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    };
+    let mut child = runtime_test_session(CHILD, workspace, SessionState::Running);
+    child.target = Some(Box::new(target.clone()));
+    let relation = runtime_test_subagent(CHILD, PARENT);
+    let group = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+    let (command_id, step) = super::startup_followup::api_followup_steps(
+        &group,
+        crate::server::api::StartFollowup {
+            model: Some("requested-model".into()),
+            ..Default::default()
+        },
+    )
+    .remove(0);
+    mj_controller::database::register_subagent_with_startup(
+        &child,
+        &relation,
+        vec![mj_controller::database::StartupDelivery {
+            session_id: CHILD.into(),
+            command_id: command_id.clone(),
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(group.clone()),
+            accepted_ordinal: None,
+            error: None,
+        }],
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let (channels, mut state) = serve_live_session(&root, true).await;
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(mj_controller::database::subscribe_committed_state().unwrap());
+    let backend = Arc::new(crate::server_runtime::api::ApiBackend::new(
+        channels.control.client(),
+        Arc::new({
+            let state = state.clone();
+            move |id| state.session_state(id)
+        }),
+        state.clone(),
+    ));
+    state.install_report_backend(&backend);
+    let row = || {
+        mj_controller::database::load_startup_delivery(&command_id)
+            .unwrap()
+            .unwrap()
+    };
+    let reports = || mj_controller::database::pending_subagent_finished_children(PARENT).unwrap();
+
+    assert!(
+        !state
+            .fail_subagent_start(CHILD, &group, CAUSE)
+            .await
+            .unwrap()
+    );
+    assert_eq!(row().phase, "pending");
+    assert!(reports().is_empty());
+
+    let exit_record = root.join(mj_core::relay::WORKER_EXIT_FILE);
+    channels.shutdown.shutdown().await.unwrap();
+    std::fs::write(
+        &exit_record,
+        serde_json::json!({"reason": "worker exited", "harness_startup_failure": {"message": CAUSE}})
+            .to_string(),
+    )
+    .unwrap();
+    state.start_persisted_startup_delivery(row(), &CancellationToken::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while row().phase != "delivering" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let outcome = blocking(move || {
+        recover_worker_controlled(
+            WorkerRecoveryPlan {
+                source_target: target,
+                target: None,
+                workspace: None,
+                liveness_probe: CommandSpec::new("printf", ["dead"]).into(),
+                exit_record: Some(CommandSpec::new("cat", [exit_record.to_str().unwrap()])),
+                binary_refresh: None,
+                launch_refresh: None,
+                restart: CommandSpec::new("false", Vec::<String>::new()).into(),
+            },
+            false,
+            Some(CHILD),
+            &mj_controller::targets::ProcessExecutor,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, WorkerRecoveryOutcome::HarnessStartupFailed);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while row().phase != "failed" || !reports().contains(CHILD) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state.session_state(CHILD), Some(SessionState::Error));
+    assert!(row().error.unwrap().contains(CAUSE));
     state.cancel_and_join_startup_prompts().await.unwrap();
 }
 

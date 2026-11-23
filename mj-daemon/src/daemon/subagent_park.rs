@@ -12,6 +12,24 @@ const PARK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Preparation may download a harness; it holds no daemon handoff admission.
 const UNPARK_TIMEOUT: Duration = Duration::from_secs(600);
 
+pub(super) fn startup_worker_is_terminal(state: Option<SessionState>) -> bool {
+    matches!(
+        state,
+        None | Some(
+            SessionState::Error
+                | SessionState::Lost
+                | SessionState::Stopped
+                | SessionState::DestroyedWithDataLoss
+        )
+    )
+}
+
+async fn startup_worker_stopped(session_id: &str) -> Result<bool> {
+    let id = session_id.to_owned();
+    let state = blocking(move || mj_controller::database::load_session_state(&id)).await?;
+    Ok(startup_worker_is_terminal(state))
+}
+
 impl RuntimeState {
     pub(crate) fn install_report_backend(
         &self,
@@ -138,13 +156,16 @@ impl RuntimeState {
         self.stop_idle_subagent(child_session_id, None).await
     }
 
-    /// Record a sub-agent whose first prompt was refused for good as failed
-    /// with `cause`, stopping its worker (I1-2). It runs as the child's park
-    /// operation: the same idle stop, serialized with its close and every
-    /// other lifecycle operation. A child that took work meanwhile is left
-    /// running. Failures are logged; the parent already reads the cause from
-    /// the failed startup whatever happens here.
-    pub(super) async fn fail_subagent_start(self: &Arc<Self>, child_session_id: &str, cause: &str) {
+    /// Publish startup failure only after the child's worker has stopped.
+    /// A busy worker keeps ownership of its original input.
+    pub(super) async fn fail_subagent_start(
+        self: &Arc<Self>,
+        child_session_id: &str,
+        group_id: &str,
+        cause: &str,
+    ) -> Result<bool> {
+        use mj_controller::controller::ParkOutcome;
+
         let parent_session_id = self
             .owner()
             .controller()
@@ -152,37 +173,30 @@ impl RuntimeState {
             .subagents
             .get(child_session_id)
             .map(|relation| relation.parent_session_id.clone());
-        if !self
-            .owner()
-            .controller()
-            .state
-            .subagents
-            .contains_key(child_session_id)
-        {
-            return;
-        }
-        match self
-            .stop_idle_subagent(child_session_id.to_owned(), Some(cause.to_owned()))
-            .await
-        {
-            Ok(mj_controller::controller::ParkOutcome::Parked) => {
-                tracing::info!(
-                    session_id = child_session_id,
-                    cause,
-                    "sub-agent recorded as failed: its first prompt was refused"
-                );
+        if !startup_worker_stopped(child_session_id).await? {
+            match self
+                .stop_idle_subagent(child_session_id.to_owned(), Some(cause.to_owned()))
+                .await?
+            {
+                ParkOutcome::Parked => {}
+                ParkOutcome::Busy => {
+                    tracing::info!(
+                        session_id = child_session_id,
+                        "child worker took work before startup rejection settled"
+                    );
+                    return Ok(false);
+                }
+                ParkOutcome::NotRunning => ensure!(
+                    startup_worker_stopped(child_session_id).await?,
+                    "child worker termination is still unconfirmed"
+                ),
             }
-            Ok(outcome) => tracing::warn!(
-                session_id = child_session_id,
-                ?outcome,
-                "a sub-agent whose first prompt was refused was left running"
-            ),
-            Err(error) => tracing::warn!(
-                session_id = child_session_id,
-                error = format!("{error:#}"),
-                "could not record a sub-agent whose first prompt was refused as failed"
-            ),
         }
+
+        let id = child_session_id.to_owned();
+        let group = group_id.to_owned();
+        let cause = cause.to_owned();
+        blocking(move || mj_controller::database::fail_startup_group(&id, &group, &cause)).await?;
         if let Some(parent_session_id) = parent_session_id
             && let Err(error) = self.reconcile_parent_reports(&parent_session_id).await
         {
@@ -193,6 +207,7 @@ impl RuntimeState {
                 "could not enqueue the parent's finished child reports after startup failure"
             );
         }
+        Ok(true)
     }
 
     /// The park lifecycle: stop an idle child's worker and record it

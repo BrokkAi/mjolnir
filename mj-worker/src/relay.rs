@@ -1356,11 +1356,16 @@ impl DurableRelay {
                 .get(&initial.command_id)
                 .and_then(|receipt| receipt.failure.as_deref())
             {
-                anyhow::bail!(
-                    "initial worker command {} ({:?}) failed: {failure}",
-                    initial.command_id,
-                    initial.command.kind()
-                );
+                return Err(anyhow::Error::new(
+                    mj_core::relay::WorkerHarnessStartupFailure {
+                        message: format!(
+                            "initial worker command {} ({:?}) failed: {failure}",
+                            initial.command_id,
+                            initial.command.kind()
+                        ),
+                        kind: None,
+                    },
+                ));
             }
         }
         Ok(())
