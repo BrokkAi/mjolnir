@@ -396,7 +396,7 @@ fn transfer_same_host(
 
 /// Same-host framed `export-move-stream | receive-move-stream` pipeline so
 /// `.mj/keep/` (with `--skip`) travels identically on the `SameHost` route.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn transfer_same_host_stream(
     source: &TargetLocator,
     source_path: &Path,

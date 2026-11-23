@@ -1321,10 +1321,31 @@ fn all_idle_subagent_scope_has_no_hidden_child_selected() {
         Some(SessionStateFilter::NotIdle)
     );
     dashboard.focus_sessions();
-    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
     assert!(dashboard.sessions_filter.is_none());
     assert_eq!(dashboard.ordered_sessions().len(), 1);
     assert_eq!(dashboard.selected_session_id(), None);
+
+    // An explicit search query in a non-empty child scope still clears on the
+    // first Esc, and the following Esc returns to the parent workspace.
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for letter in "child".chars() {
+        dashboard.handle_key(key(KeyCode::Char(letter)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(dashboard.ordered_sessions().len(), 1);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::ExitSubagentWorkspace
+    );
 }
 
 #[test]

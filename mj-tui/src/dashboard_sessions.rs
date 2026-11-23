@@ -509,11 +509,31 @@ impl DashboardState {
         self.session_order().hidden()
     }
 
+    /// Whether `Esc` on the Sessions pane (outside filter text editing) clears
+    /// the active filter instead of falling through to child-workspace exit.
+    ///
+    /// Top-level workspaces have no default filter, so any filter clears on
+    /// `Esc`. Worker child scopes default to `NotIdle`: while rows are visible
+    /// under that default filter alone, `Esc` returns to the parent workspace
+    /// instead of unmasking idle children; when the filter differs from the
+    /// scope default or hides every row (matching the empty pane's "Esc clears
+    /// the filter" prompt), `Esc` clears the filter first.
+    pub(crate) fn esc_clears_sessions_filter(&self) -> bool {
+        let Some(filter) = self.sessions_filter.as_ref() else {
+            return false;
+        };
+        let is_scope_default = filter.query.is_empty()
+            && Self::default_sessions_state_filter_for(self.child_workspace.as_ref())
+                .is_some_and(|default| filter.state == Some(default));
+        !is_scope_default || self.session_order().ids().is_empty()
+    }
+
     /// Answers a key for the Sessions filter, or `None` when the filter does
     /// not claim it. While editing, printable keys are text and the arrows
     /// still move the selection; `Enter` keeps the filter and returns the
-    /// letters to the pane; `Esc` clears the text and leaves the input. When not editing, the state letters narrow the
-    /// list and `Esc` drops the whole filter.
+    /// letters to the pane; `Esc` clears the text and leaves the input. When
+    /// not editing, the state letters narrow the list and `Esc` drops the whole
+    /// filter whenever [`Self::esc_clears_sessions_filter`] holds.
     pub(crate) fn handle_sessions_filter_key(&mut self, key: KeyEvent, plain: bool) -> Option<()> {
         let editing = self
             .sessions_filter
@@ -554,7 +574,7 @@ impl DashboardState {
             return None;
         }
         match key.code {
-            KeyCode::Esc if self.sessions_filter.is_some() && self.child_workspace.is_none() => {
+            KeyCode::Esc if self.esc_clears_sessions_filter() => {
                 self.clear_sessions_filter();
                 return Some(());
             }
