@@ -1875,35 +1875,19 @@ impl Controller {
                 })
             })
         };
-        let (suspend_preflight, skip_keep_sizes) = if !in_place
+        let (suspend_preflight, skip_keep_sizes) = if !keeps_workspace
             && matches!(
                 source.state,
                 SessionState::Running | SessionState::Disconnected
             )
             && source.target.is_some()
         {
-            match self.suspend_preflight(&source.id, true, false, executor) {
-                Ok(preflight) => {
-                    let skip_keep_sizes = selection
-                        .skip_keep_paths
-                        .iter()
-                        .map(|skip| {
-                            let bytes = preflight
-                                .keep_dir_entries
-                                .iter()
-                                .filter(|entry| {
-                                    entry
-                                        .path
-                                        .strip_prefix(&source.id)
-                                        .is_ok_and(|rel| rel == *skip || rel.starts_with(skip))
-                                })
-                                .map(|entry| entry.bytes)
-                                .sum();
-                            (skip.clone(), bytes)
-                        })
-                        .collect();
-                    (Some(Box::new(preflight)), skip_keep_sizes)
-                }
+            match self
+                .move_keep_selection(source, &selection, executor)
+                .and_then(|keep| {
+                    self.checkpoint_preflight(&source.id, true, false, Some(&keep), executor)
+                }) {
+                Ok((preflight, skip_keep_sizes)) => (Some(Box::new(preflight)), skip_keep_sizes),
                 Err(err) => {
                     tracing::debug!(
                         session_id = %source.id,
@@ -2213,6 +2197,21 @@ impl Controller {
         .await
 
         }).await
+    }
+
+    pub(super) fn move_keep_selection(
+        &self,
+        source: &mj_core::state::SessionRecord,
+        selection: &MoveSelection,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::session_keep::MoveKeep> {
+        let locator = source
+            .target
+            .as_deref()
+            .context("Move source target is missing")?;
+        let backend = super::backend::backend_locator(locator, source, &self.config)?;
+        let directory = self.move_source_keep_dir(source, &backend, executor)?;
+        mj_core::session_keep::MoveKeep::new(directory, &selection.skip_keep_paths)
     }
 
     pub fn finish_move_result(

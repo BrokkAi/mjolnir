@@ -1495,29 +1495,14 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&preparation)?);
         } else {
-            if let Some(route) = preparation.route_preview {
-                println!("Route: {}", route.label());
-            }
-            if !preparation.skip_keep_sizes.is_empty() {
-                println!(
-                    "Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):"
-                );
-                for (path, bytes) in &preparation.skip_keep_sizes {
-                    println!(
-                        "  {} ({})",
-                        path.display(),
-                        mj_core::move_workspace::format_bytes(*bytes)
-                    );
-                }
-            }
-            if let Some(preflight) = &preparation.suspend_preflight {
-                println!(
-                    "Untracked files: {}, nested repositories: {}, untracked stashes: {}",
-                    preflight.untracked.len(),
-                    preflight.nested_repositories.len(),
-                    preflight.untracked_stashes.len()
-                );
-            }
+            print!(
+                "{}",
+                format_move_dry_run(
+                    preparation.route_preview,
+                    &preparation.skip_keep_sizes,
+                    preparation.suspend_preflight.as_deref(),
+                )
+            );
         }
         return Ok(());
     }
@@ -1953,6 +1938,49 @@ fn confirm_move_prompt() -> io::Result<bool> {
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line.trim().eq_ignore_ascii_case("y"))
+}
+
+fn format_move_dry_run(
+    route: Option<mj_core::state::RoutePreview>,
+    skip_keep_sizes: &[(std::path::PathBuf, u64)],
+    preflight: Option<&mj_core::suspend_consent::SuspendPreflight>,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    if let Some(route) = route {
+        let _ = writeln!(out, "Route: {}", route.label());
+    }
+    if !skip_keep_sizes.is_empty() {
+        let _ = writeln!(
+            out,
+            "Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):"
+        );
+        for (path, bytes) in skip_keep_sizes {
+            let _ = writeln!(
+                out,
+                "  {} ({})",
+                path.display(),
+                mj_core::move_workspace::format_bytes(*bytes)
+            );
+        }
+    }
+    if let Some(preflight) = preflight {
+        let _ = writeln!(
+            out,
+            "Untracked files: {}, nested repositories: {}, untracked stashes: {}",
+            preflight.untracked.len() + preflight.keep_dir_entries.len(),
+            preflight.nested_repositories.len(),
+            preflight.untracked_stashes.len()
+        );
+        if preflight.has_blockers() {
+            let _ = writeln!(out, "Blockers:");
+            for blocker in &preflight.blockers {
+                let _ = writeln!(out, "  - {}", blocker.remedy);
+            }
+        }
+    }
+    out
 }
 
 fn move_error_outcome(
@@ -3038,6 +3066,31 @@ mod tests {
     use super::*;
     use mj_controller::controller::Controller;
     use mj_core::state::{SessionRecord, SessionState, State};
+
+    // Hard-won: #1659: Move dry-run discarded the inventory's outside-worktree blocker.
+    #[test]
+    fn golden_move_dry_run_reports_snapshot_blockers() {
+        let preflight = mj_core::suspend_consent::SuspendPreflight {
+            blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                kind: "unrepresented_git_state".into(),
+                paths: vec!["/workspace/outside".into()],
+                remedy: "unrepresented worktree /workspace/outside; push or copy out anything wanted, then run `git --git-dir /workspace/clone --work-tree /workspace/clone worktree remove --force /workspace/outside` or move it inside the clone before suspending".into(),
+            }],
+            keep_dir_entries: vec![mj_core::suspend_consent::KeepDirEntry {
+                checkout: Default::default(),
+                path: "legacy.txt".into(),
+                bytes: 8,
+                identity: mj_core::suspend_consent::FileIdentity::new("abc".into()),
+            }],
+            ..Default::default()
+        };
+        let output = format_move_dry_run(
+            Some(mj_core::state::RoutePreview::DirectOrDaemonStream),
+            &[],
+            Some(&preflight),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "move-dry-run", &output);
+    }
 
     // Hard-won: 0475c51230: Launch finding C-7 found the refusal say “1 queued command require”; this checks singular and plural counts agree.
     #[test]

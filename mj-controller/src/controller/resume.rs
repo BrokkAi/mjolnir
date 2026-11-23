@@ -1995,26 +1995,10 @@ impl Controller {
                 .context("cross-target Move source target is missing")?;
             let source_backend = backend_locator(source_locator, &previous, &self.config)?;
             let source_worker_root = targets::worker_root(&source_backend, session_id)?;
-            let source_cwd = if let Some(dir) = previous_project_directory.as_deref() {
-                dir.to_path_buf()
-            } else if let Some(worktree) = previous_managed_worktree.as_ref() {
-                worktree.worktree_root.clone()
-            } else {
-                let source_ws = PathBuf::from(super::network_git::workspace_root(
-                    &source_backend,
-                    previous.container_workspace.as_deref(),
-                ));
-                previous
-                    .project_bundle(&self.config)
-                    .and_then(|bundle| bundle.primary())
-                    .map(|primary| source_ws.join(&primary.destination))
-                    .unwrap_or(source_ws)
-            };
-            let source_keep_dir = Some(resolve_move_keep_dir(
-                executor,
+            let source_keep_dir = Some(self.move_source_keep_dir(
+                &previous,
                 &source_backend,
-                session_id,
-                &source_cwd,
+                executor,
             )?);
             Some((source_backend, source_worker_root, source_keep_dir))
         } else {
@@ -3717,6 +3701,35 @@ pub(in crate::controller) async fn utility_handoff_while_cancellable(
 /// the same Git top-level interpretation worker startup uses for `MJ_KEEP_DIR`,
 /// so sessions started inside a repository subdirectory or nested repository
 /// transfer the exact scratch directory their worker created.
+impl Controller {
+    pub(super) fn move_source_keep_dir(
+        &self,
+        source: &SessionRecord,
+        backend: &targets::TargetLocator,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<PathBuf> {
+        let checkout = self.state.checkout(&source.id)?;
+        let cwd = if let Some(path) = checkout.project_directory() {
+            path.to_path_buf()
+        } else if let Some(worktree) = checkout.managed_worktree() {
+            worktree.worktree_root.clone()
+        } else {
+            let workspace = PathBuf::from(super::network_git::workspace_root(
+                backend,
+                source.container_workspace.as_deref(),
+            ));
+            source
+                .project_bundle(&self.config)
+                .and_then(|bundle| bundle.primary())
+                .map(|primary| workspace.join(&primary.destination))
+                .unwrap_or(workspace)
+        };
+        mj_core::runtime::off_async_worker(|| {
+            resolve_move_keep_dir(executor, backend, &source.id, &cwd)
+        })
+    }
+}
+
 pub(super) fn resolve_move_keep_dir(
     executor: &impl CommandExecutor,
     backend: &targets::TargetLocator,

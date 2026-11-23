@@ -722,6 +722,7 @@ mod tests {
             &CheckoutOwnership::Managed,
             &archive_dir.path().join("origin-delta.pack"),
             &CaptureConsent {
+                move_keep: None,
                 untracked: UntrackedConsent::None,
                 operations: OperationConsent::None,
             },
