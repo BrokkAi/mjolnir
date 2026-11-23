@@ -170,38 +170,61 @@ impl RuntimeState {
     ) -> Result<bool> {
         use mj_controller::controller::ParkOutcome;
 
-        let parent_session_id = self
+        let (parent_session_id, is_reviewer) = self
             .owner()
             .controller()
             .state
             .subagents
             .get(child_session_id)
-            .map(|relation| relation.parent_session_id.clone());
+            .map(|relation| {
+                (
+                    Some(relation.parent_session_id.clone()),
+                    relation.kind == mj_core::subagent::SubagentKind::Reviewer,
+                )
+            })
+            .unwrap_or((None, false));
         if !startup_worker_stopped(child_session_id).await? {
             match self
                 .stop_idle_subagent(child_session_id.to_owned(), Some(cause.to_owned()))
-                .await?
+                .await
             {
-                ParkOutcome::Parked => {}
-                ParkOutcome::Busy => {
+                Ok(ParkOutcome::Parked) => {}
+                Ok(ParkOutcome::Busy) => {
                     tracing::info!(
                         session_id = child_session_id,
                         "child worker took work before startup rejection settled"
                     );
                     return Ok(false);
                 }
-                ParkOutcome::NotRunning => ensure!(
+                Ok(ParkOutcome::NotRunning) if is_reviewer => {
+                    tracing::warn!(
+                        session_id = child_session_id,
+                        "rejected reviewer worker was not running during startup cleanup"
+                    );
+                }
+                Ok(ParkOutcome::NotRunning) => ensure!(
                     startup_worker_stopped(child_session_id).await?,
                     "child worker termination is still unconfirmed"
                 ),
+                Err(error) if is_reviewer => {
+                    tracing::warn!(
+                        session_id = child_session_id,
+                        error = format!("{error:#}"),
+                        "could not stop rejected reviewer worker"
+                    );
+                }
+                Err(error) => return Err(error),
             }
         }
 
         let id = child_session_id.to_owned();
         let group = group_id.to_owned();
-        let cause = cause.to_owned();
-        blocking(move || mj_controller::database::fail_startup_group(&id, &group, &cause)).await?;
-        if let Some(parent_session_id) = parent_session_id
+        let persisted = cause.to_owned();
+        blocking(move || mj_controller::database::fail_startup_group(&id, &group, &persisted))
+            .await?;
+        if is_reviewer {
+            self.report_reviewer_startup_rejection(child_session_id, cause);
+        } else if let Some(parent_session_id) = parent_session_id
             && let Err(error) = self.reconcile_parent_reports(&parent_session_id).await
         {
             tracing::warn!(
@@ -212,20 +235,6 @@ impl RuntimeState {
             );
         }
         Ok(true)
-    }
-
-    /// Best-effort worker stop for a rejected reviewer child; the review host
-    /// settles the role even when a disconnected worker cannot be stopped.
-    pub(super) async fn stop_failed_subagent_best_effort(
-        self: &Arc<Self>,
-        child_session_id: &str,
-        cause: &str,
-    ) -> Result<()> {
-        if !startup_worker_stopped(child_session_id).await? {
-            self.stop_idle_subagent(child_session_id.to_owned(), Some(cause.to_owned()))
-                .await?;
-        }
-        Ok(())
     }
 
     /// The park lifecycle: stop an idle child's worker and record it

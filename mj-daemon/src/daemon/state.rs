@@ -1406,29 +1406,6 @@ impl RuntimeState {
                     {
                         let reason = format!("{error:#}");
                         let group_id = step.group_id.as_deref().expect("grouped startup");
-                        if self.is_reviewer_child(session_id) {
-                            let id = session_id.to_owned();
-                            let group = group_id.to_owned();
-                            let persisted = reason.clone();
-                            match blocking(move || {
-                                mj_controller::database::fail_startup_group(&id, &group, &persisted)
-                            })
-                            .await
-                            {
-                                // Re-read the durable rejection so the same
-                                // path settles it after daemon replacement.
-                                Ok(()) => continue,
-                                Err(persistence) => {
-                                    tracing::error!(session_id, %persistence, "could not persist startup rejection");
-                                    self.fail_startup_queue(
-                                        session_id,
-                                        &format!("{persistence:#}"),
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            }
-                        }
                         match self.reject_startup(session_id, group_id, &reason).await {
                             Ok(true) => continue,
                             // Proceed to observing the seeded brief without resubmitting it.
@@ -1496,9 +1473,8 @@ impl RuntimeState {
             if step.phase == "rejecting"
                 && step.group_id.is_some()
                 && let Some(reason) = &step.error
-                && self.is_reviewer_child(session_id)
             {
-                self.reject_reviewer_startup(session_id, reason).await;
+                self.report_reviewer_startup_rejection(session_id, reason);
             }
             let settled_id = command_id;
             let final_phase = match step.phase.as_str() {
@@ -2039,19 +2015,6 @@ impl RuntimeState {
                 .unwrap_or_else(|| "delivery kept failing".to_owned())
         );
         if let Some(group_id) = step.group_id {
-            if self.is_reviewer_child(session_id) {
-                let id = session_id.to_owned();
-                let persisted = reason.clone();
-                if let Err(error) = blocking(move || {
-                    mj_controller::database::fail_startup_group(&id, &group_id, &persisted)
-                })
-                .await
-                {
-                    tracing::error!(session_id, %error, "could not fail an abandoned startup group");
-                }
-                self.reject_reviewer_startup(session_id, &reason).await;
-                return;
-            }
             if let Err(error) = self.reject_startup(session_id, &group_id, &reason).await {
                 tracing::error!(session_id, %error, "could not fail an abandoned startup group");
             }
@@ -2130,34 +2093,6 @@ impl RuntimeState {
             .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
     }
 
-    async fn reject_reviewer_startup(self: &Arc<Self>, session_id: &str, reason: &str) {
-        tracing::warn!(session_id, reason, "session startup failed");
-        self.push_notice(session_id, format!("Session startup failed: {reason}"));
-        let create = self
-            .owner()
-            .lifecycle
-            .get(session_id)
-            .filter(|active| active.kind == LifecycleKind::Create && active.is_running())
-            .map(|active| active.result.clone());
-        if let Some(create) = create
-            && Self::wait_lifecycle_result(create).await.is_err()
-        {
-            // Create owns startup teardown and records the failure.
-            return;
-        }
-        if let Err(error) = self
-            .stop_failed_subagent_best_effort(session_id, reason)
-            .await
-        {
-            tracing::warn!(
-                session_id,
-                error = format!("{error:#}"),
-                "could not stop rejected reviewer worker"
-            );
-        }
-        self.report_reviewer_startup_rejection(session_id, reason);
-    }
-
     pub(super) async fn reject_startup(
         self: &Arc<Self>,
         session_id: &str,
@@ -2171,8 +2106,11 @@ impl RuntimeState {
             .subagents
             .get(session_id)
             .is_some_and(|child| {
-                group_id
-                    == mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key)
+                child.kind == mj_core::subagent::SubagentKind::Reviewer
+                    || group_id
+                        == mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                            &child.request_key,
+                        )
             });
         if is_initial_child_startup {
             let create = self
