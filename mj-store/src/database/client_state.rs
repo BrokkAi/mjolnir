@@ -363,7 +363,7 @@ pub(super) fn save_terminal_draft_in(
                 saved_at,
                 draft.text,
                 revision,
-                !draft.retired_draft_ids.is_empty(),
+                !draft.retired_drafts.is_empty(),
             ],
         )?;
         draft_id
@@ -386,24 +386,27 @@ pub(super) fn save_terminal_draft_in(
         )?;
         id
     };
-    // The destination and all source retirements commit together. A revisioned
-    // source keeps its watermark so late saves cannot resurrect it.
-    for retired_id in &draft.retired_draft_ids {
-        if retired_id == &target_draft_id {
+    // Match the source snapshot so a newer edit stays visible. Keep its
+    // revision watermark even when the matching source is retired.
+    for retired in &draft.retired_drafts {
+        if retired.draft_id == target_draft_id {
             continue;
         }
-        transaction.execute(
-            "UPDATE detached_drafts SET recovered_at = ?2
-              WHERE draft_id = ?1 AND session_id = ?3
-                AND recovered_at IS NULL AND revision IS NOT NULL",
-            params![retired_id, saved_at, session_id],
-        )?;
-        transaction.execute(
-            "DELETE FROM detached_drafts
-              WHERE draft_id = ?1 AND session_id = ?2
-                AND recovered_at IS NULL AND revision IS NULL",
-            params![retired_id, session_id],
-        )?;
+        if let Some(expected_revision) = retired.revision {
+            transaction.execute(
+                "UPDATE detached_drafts SET recovered_at = ?2
+                  WHERE draft_id = ?1 AND session_id = ?3
+                    AND recovered_at IS NULL AND revision = ?4",
+                params![retired.draft_id, saved_at, session_id, expected_revision],
+            )?;
+        } else {
+            transaction.execute(
+                "DELETE FROM detached_drafts
+                  WHERE draft_id = ?1 AND session_id = ?2
+                    AND recovered_at IS NULL AND revision IS NULL",
+                params![retired.draft_id, session_id],
+            )?;
+        }
     }
     transaction.commit()?;
     Ok(())
@@ -469,6 +472,7 @@ pub(super) fn list_detached_drafts_at(
 pub struct RecoveredDraft {
     pub session_id: String,
     pub text: String,
+    pub revision: Option<i64>,
 }
 
 /// Read the recoverable draft. Its source stays visible until a terminal
@@ -479,19 +483,24 @@ pub fn read_detached_draft(draft_id: &str) -> Result<RecoveredDraft> {
 
 pub(super) fn read_detached_draft_at(path: &Path, draft_id: &str) -> Result<RecoveredDraft> {
     let connection = open_reader(path)?;
-    let (session_id, text, session_exists): (Option<String>, String, bool) = connection
-        .query_row(
-            "SELECT draft.session_id, draft.text,
+    let (session_id, text, revision, session_exists): (Option<String>, String, Option<i64>, bool) =
+        connection
+            .query_row(
+                "SELECT draft.session_id, draft.text, draft.revision,
                     EXISTS(SELECT 1 FROM sessions WHERE session_id = draft.session_id)
                FROM detached_drafts AS draft
               WHERE draft.draft_id = ?1 AND recovered_at IS NULL AND text <> ''",
-            [draft_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .with_context(|| format!("find recoverable draft {draft_id:?}"))?;
+                [draft_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .with_context(|| format!("find recoverable draft {draft_id:?}"))?;
     let session_id = session_id.context("draft is not associated with a session")?;
     ensure!(session_exists, "draft session no longer exists");
-    Ok(RecoveredDraft { session_id, text })
+    Ok(RecoveredDraft {
+        session_id,
+        text,
+        revision,
+    })
 }
 
 pub fn discard_detached_drafts(workspace_id: &str, draft_id: Option<&str>) -> Result<usize> {

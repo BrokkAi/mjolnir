@@ -1573,6 +1573,7 @@ pub enum DaemonReply {
     RecoveredDraft {
         session_id: String,
         text: String,
+        revision: Option<i64>,
     },
     Count(usize),
     HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
@@ -3836,12 +3837,19 @@ impl DaemonClient {
     }
 
     /// Fetch a detached draft. The destination terminal save retires the source.
-    pub async fn recover_draft(&mut self, draft_id: String) -> Result<(String, String)> {
+    pub async fn recover_draft(
+        &mut self,
+        draft_id: String,
+    ) -> Result<(String, String, Option<i64>)> {
         match self
             .request(DaemonAction::RecoverDraft { draft_id })
             .await?
         {
-            DaemonReply::RecoveredDraft { session_id, text } => Ok((session_id, text)),
+            DaemonReply::RecoveredDraft {
+                session_id,
+                text,
+                revision,
+            } => Ok((session_id, text, revision)),
             reply => bail!("unexpected recover-draft reply {reply:?}"),
         }
     }

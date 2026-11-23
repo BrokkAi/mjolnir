@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::storage::RetiredDetachedDraft;
 
 /// Transfer the latest local draft into both sides of an asynchronous attach:
 /// the chat being prepared and the composer the person can edit meanwhile.
@@ -206,7 +207,7 @@ impl DashboardContext {
     pub(super) fn apply_workspace_draft_recovery(
         &mut self,
         generation: u64,
-        draft_id: String,
+        source: RetiredDetachedDraft,
         session_id: String,
         text: String,
     ) {
@@ -223,7 +224,7 @@ impl DashboardContext {
             &text,
         ) {
             Ok(()) => {
-                let revision = self.composer_drafts.retire_draft(&session_id, draft_id);
+                let revision = self.composer_drafts.retire_draft(&session_id, source);
                 self.pending_draft_recoveries
                     .entry(session_id.clone())
                     .or_default()

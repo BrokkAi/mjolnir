@@ -17751,12 +17751,15 @@ async fn workspace_draft_rpc_lists_previews_recovers_and_discards() {
         r#"mjolnir-chat-draft-v1:{{"text":"some\n   readable {}"}}"#,
         "界".repeat(210)
     );
-    seed_legacy_detached_draft(
-        &workspace.id,
-        Some(&session.id),
+    mj_controller::database::save_terminal_draft(
+        &session.id,
         "other terminal",
-        None,
-        &text,
+        std::process::id(),
+        7,
+        mj_core::storage::DetachedSessionDraft {
+            text: text.clone(),
+            ..Default::default()
+        },
     )
     .unwrap();
     let state = test_runtime_state_loading_the_store();
@@ -17780,7 +17783,7 @@ async fn workspace_draft_rpc_lists_previews_recovers_and_discards() {
     assert_eq!(snapshot.drafts[0].preview, draft.preview);
 
     let recovered = client.recover_draft(draft.id.clone()).await.unwrap();
-    assert_eq!(recovered, (session.id.clone(), text.clone()));
+    assert_eq!(recovered, (session.id.clone(), text.clone(), Some(7)));
     assert_eq!(
         client.recover_draft(draft.id.clone()).await.unwrap(),
         recovered
@@ -17798,7 +17801,10 @@ async fn workspace_draft_rpc_lists_previews_recovers_and_discards() {
             1,
             mj_core::storage::DetachedSessionDraft {
                 text,
-                retired_draft_ids: vec![draft.id.clone()],
+                retired_drafts: vec![mj_core::storage::RetiredDetachedDraft {
+                    draft_id: draft.id.clone(),
+                    revision: recovered.2,
+                }],
                 ..Default::default()
             },
         )

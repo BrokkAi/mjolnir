@@ -376,9 +376,13 @@ pub(crate) fn spawn_workspace_draft_recovery(
         Some(tracker),
         async move {
             let mut daemon = daemon::connect_or_start().await?;
-            let (session_id, text) = daemon.recover_draft(draft_id.clone()).await?;
+            let (session_id, text, revision) = daemon.recover_draft(draft_id.clone()).await?;
             Ok(WorkspaceManagementResult {
-                recovered_draft: Some((draft_id, session_id, text)),
+                recovered_draft: Some((
+                    RetiredDetachedDraft { draft_id, revision },
+                    session_id,
+                    text,
+                )),
                 ..Default::default()
             })
         },

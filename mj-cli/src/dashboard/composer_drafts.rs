@@ -1,5 +1,5 @@
 //! Process-local composer ownership and ordered, coalescing durability.
-use mj_controller::database::DetachedSessionDraft;
+use mj_core::storage::{DetachedSessionDraft, RetiredDetachedDraft};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -14,7 +14,7 @@ struct DraftPersistence {
     desired: u64,
     saved: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pending_retirements: Vec<(u64, String)>,
+    pending_retirements: Vec<(u64, RetiredDetachedDraft)>,
     #[serde(skip)]
     in_flight: Option<u64>,
     #[serde(skip)]
@@ -56,7 +56,7 @@ impl ComposerDraftCache {
             .or_insert_with(|| DetachedSessionDraft {
                 text: inherited_input.to_owned(),
                 inherited_input: Some(inherited_input.to_owned()),
-                retired_draft_ids: Vec::new(),
+                retired_drafts: Vec::new(),
             });
         self.remember(session_id);
         self.drafts[session_id].clone()
@@ -78,13 +78,13 @@ impl ComposerDraftCache {
         entry.clone()
     }
 
-    pub(crate) fn retire_draft(&mut self, session_id: &str, draft_id: String) -> u64 {
+    pub(crate) fn retire_draft(&mut self, session_id: &str, source: RetiredDetachedDraft) -> u64 {
         let state = self
             .persistence
             .get_mut(session_id)
             .expect("capture the recovered draft first");
         state.schedule_save();
-        state.pending_retirements.push((state.desired, draft_id));
+        state.pending_retirements.push((state.desired, source));
         state.desired
     }
 
@@ -125,11 +125,11 @@ impl ComposerDraftCache {
         state.failed = false;
         state.in_flight = Some(state.desired);
         let mut draft = self.drafts[session_id].clone();
-        draft.retired_draft_ids = state
+        draft.retired_drafts = state
             .pending_retirements
             .iter()
             .filter(|(added_revision, _)| *added_revision <= state.desired)
-            .map(|(_, id)| id.clone())
+            .map(|(_, source)| source.clone())
             .collect();
         Some((state.desired, draft))
     }
@@ -310,11 +310,20 @@ mod tests {
         cache.complete("session", initial, true);
         assert!(cache.start("session", false).is_none());
 
-        let first = cache.retire_draft("session", "first".into());
+        let first_source = RetiredDetachedDraft {
+            draft_id: "first".into(),
+            revision: Some(3),
+        };
+        let first = cache.retire_draft("session", first_source.clone());
         assert!(first > initial);
         assert_eq!(
-            cache.start("session", false).unwrap().1.retired_draft_ids,
-            ["first"]
+            cache
+                .start("session", false)
+                .unwrap()
+                .1
+                .retired_drafts
+                .as_slice(),
+            std::slice::from_ref(&first_source)
         );
         cache.complete("session", first, false);
         assert!(cache.start("session", false).is_none());
@@ -323,14 +332,18 @@ mod tests {
         let mut cache: ComposerDraftCache = serde_json::from_str(&handoff).unwrap();
         let (retry, draft) = cache.start("session", true).unwrap();
         assert_eq!(retry, first);
-        assert_eq!(draft.retired_draft_ids, ["first"]);
-        let second = cache.retire_draft("session", "second".into());
+        assert_eq!(draft.retired_drafts, [first_source]);
+        let second_source = RetiredDetachedDraft {
+            draft_id: "second".into(),
+            revision: None,
+        };
+        let second = cache.retire_draft("session", second_source.clone());
         assert!(second > retry);
         assert!(cache.start("session", false).is_none());
         cache.complete("session", retry, true);
         let (revision, draft) = cache.start("session", false).unwrap();
         assert_eq!(revision, second);
-        assert_eq!(draft.retired_draft_ids, ["second"]);
+        assert_eq!(draft.retired_drafts, [second_source]);
         cache.complete("session", revision, true);
         assert!(cache.start("session", true).is_none());
     }

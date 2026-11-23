@@ -1284,6 +1284,7 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::RecoveredDraft {
                 session_id: draft.session_id,
                 text: draft.text,
+                revision: draft.revision,
             })
         }
         DaemonAction::DiscardDrafts {

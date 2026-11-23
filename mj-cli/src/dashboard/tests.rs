@@ -8,6 +8,7 @@ fn detaching_hidden_chat_preserves_unread_background_events() {
 use super::*;
 use mj_chat::chat::{ActiveChat, Notices, SessionHeaderIdentity};
 use mj_core::state::State;
+use mj_core::storage::RetiredDetachedDraft;
 use mj_tui::render_combined;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1977,7 +1978,11 @@ fn workspace_draft_recovery_refreshes_only_after_save_acknowledgement() {
     };
     let mut cache = ComposerDraftCache::default();
     cache.capture("session", "recovered".into(), "");
-    let revision = cache.retire_draft("session", "source".into());
+    let source = RetiredDetachedDraft {
+        draft_id: "source".into(),
+        revision: Some(2),
+    };
+    let revision = cache.retire_draft("session", source.clone());
     let recovery = || drafts::PendingDraftRecovery {
         generation,
         revision,
@@ -1985,14 +1990,17 @@ fn workspace_draft_recovery_refreshes_only_after_save_acknowledgement() {
     };
     let (saving, draft) = cache.start("session", false).unwrap();
     assert_eq!(saving, revision);
-    assert_eq!(draft.retired_draft_ids, ["source"]);
+    assert_eq!(
+        draft.retired_drafts.as_slice(),
+        std::slice::from_ref(&source)
+    );
     assert_eq!(dashboard.notice(), None);
 
     cache.complete("session", revision, false);
     assert_eq!(recovery().finish(&mut dashboard, Err("disk full")), None);
     let (retry, draft) = cache.start("session", true).unwrap();
     assert_eq!(retry, revision);
-    assert_eq!(draft.retired_draft_ids, ["source"]);
+    assert_eq!(draft.retired_drafts, [source]);
     cache.complete("session", revision, true);
     assert_eq!(recovery().finish(&mut dashboard, Ok(())), Some(generation));
 

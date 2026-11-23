@@ -142,7 +142,15 @@ pub struct DetachedSessionDraft {
     pub text: String,
     pub inherited_input: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub retired_draft_ids: Vec<String>,
+    pub retired_drafts: Vec<RetiredDetachedDraft>,
+}
+
+/// The source snapshot read before a terminal saves its recovered copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetiredDetachedDraft {
+    pub draft_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
 }
 
 /// What one turn produced, without loading the transcript around it.

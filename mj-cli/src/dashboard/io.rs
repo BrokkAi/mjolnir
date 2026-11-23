@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::{Config, ProjectBundle};
 use mj_core::state::{
     MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord, SessionState, State,
 };
+use mj_core::storage::{DetachedSessionDraft, RetiredDetachedDraft};
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
@@ -480,7 +480,7 @@ pub(crate) struct ActiveLifecycleOperation {
 #[derive(Default)]
 pub(crate) struct WorkspaceManagementResult {
     pub(crate) entries: Option<Vec<WorkspaceManagementEntry>>,
-    pub(crate) recovered_draft: Option<(String, String, String)>,
+    pub(crate) recovered_draft: Option<(RetiredDetachedDraft, String, String)>,
     pub(crate) draft_notice: Option<String>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
@@ -762,8 +762,8 @@ impl DashboardContext {
                         recovered_draft,
                         draft_notice,
                     } = result;
-                    if let Some((draft_id, session_id, text)) = recovered_draft {
-                        self.apply_workspace_draft_recovery(generation, draft_id, session_id, text);
+                    if let Some((source, session_id, text)) = recovered_draft {
+                        self.apply_workspace_draft_recovery(generation, source, session_id, text);
                     }
                     if let Some(message) = draft_notice {
                         self.dashboard.workspace_draft_notice(generation, message);
