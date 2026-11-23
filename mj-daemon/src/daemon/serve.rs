@@ -208,23 +208,6 @@ pub(super) async fn serve_client(
                 "incompatible daemon protocol {}; expected {}",
                 request.protocol_version, PROTOCOL_VERSION
             ))
-        } else if matches!(&request.action, DaemonAction::WikiSyncWatch { .. }) {
-            // A read-only watch owns no admission. Closing the transport
-            // on handoff makes the client reconnect and retain its target.
-            let mut byte = [0];
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Ok(()),
-                result = handle_action(request.action, &metadata, &state, &cancellation) =>
-                    result.map_err(|error| format!("{error:#}")),
-                closed = stream.peek(&mut byte) => {
-                    match closed {
-                        Ok(0) => return Ok(()),
-                        Ok(_) => return Err(anyhow::anyhow!("unexpected input during SessionWiki watch")),
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-            }
         } else if cancellation.is_cancelled() && !is_management {
             // A daemon in its epilogue still holds a snapshot in memory and
             // would happily serve it, from a store it has stopped reading and
@@ -474,26 +457,7 @@ pub(super) async fn serve_client(
             }
             // Lifecycle actions contain large checkpoint/restore futures. Keep
             // them off the connection task's stack, including in debug builds.
-            if let DaemonAction::InstallAttachment {
-                session_id,
-                reference,
-                blob,
-            } = request.action
-            {
-                match blobs.remove(&blob) {
-                    Some(path) => blocking(move || {
-                        let bytes = std::fs::read(&path)?;
-                        let result = mj_core::attachment::AttachmentStore::controller(&session_id)?
-                            .install(&reference, &bytes);
-                        drop(path);
-                        result?;
-                        Ok(DaemonReply::AttachmentInstalled(reference))
-                    })
-                    .await
-                    .map_err(|error| format!("{error:#}")),
-                    None => Err("unknown upload blob".into()),
-                }
-            } else if let DaemonAction::ImportSession {
+            if let DaemonAction::ImportSession {
                 blob,
                 mut session,
                 bundle,
@@ -811,75 +775,5 @@ struct CancelImportPreparation(Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelImportPreparation {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-mod bridge_admission_tests {
-    use super::*;
-
-    // Hard-won: c6ac3b7aa: ordinary client admission accepted sync requests during drain.
-    #[test]
-    fn wiki_sync_admission_is_named_and_deferrable() {
-        const CHILD: &str = "MJ_TEST_WIKI_SYNC_ADMISSION";
-        if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            mj_controller::controller::test_support::IsolatedTest::new(
-                mj_controller::controller::test_support::test_name(
-                    module_path!(),
-                    "wiki_sync_admission_is_named_and_deferrable",
-                ),
-            )
-            .isolated_store(root.path())
-            .env(CHILD, "1")
-            .run();
-            return;
-        }
-        let work = upgrade_request_activity(&DaemonAction::WikiSyncRequest).unwrap();
-        assert!(
-            mj_controller::upgrade::gate()
-                .blockers()
-                .iter()
-                .any(|label| label.label.starts_with("wiki sync request"))
-        );
-        drop(work);
-        mj_controller::upgrade::gate().begin_draining();
-        assert!(upgrade_request_activity(&DaemonAction::WikiSyncRequest).is_err());
-    }
-
-    // Hard-won: eb0fbd8: a watch sent between handoff polls received a terminal refusal.
-    #[tokio::test]
-    async fn wiki_sync_watch_closes_transport_when_handoff_begins_between_polls() {
-        let mut state = super::super::tests::test_runtime_state();
-        Arc::get_mut(&mut state).unwrap().wiki = mj_controller::sessionwiki::WikiIndexer::inert();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = super::super::tests::test_metadata(listener.local_addr().unwrap());
-        let server_metadata = metadata.clone();
-        let cancellation = CancellationToken::new();
-        let server_cancellation = cancellation.clone();
-        let server = mj_core::runtime::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            serve_client(stream, server_metadata, state, server_cancellation).await
-        });
-        let mut client = mj_client::daemon::DaemonClient::connect(metadata)
-            .await
-            .unwrap();
-        let first = client
-            .wiki_sync_watch("another-epoch".into(), 0)
-            .await
-            .unwrap();
-        // The first reply is delivered; handoff starts before the next poll.
-        cancellation.cancel();
-        let error = client
-            .wiki_sync_watch(first.epoch, first.version)
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .downcast_ref::<mj_client::daemon::DaemonTransportLost>()
-                .is_some(),
-            "{error:#}"
-        );
-        server.await.unwrap().unwrap();
     }
 }

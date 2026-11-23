@@ -3054,6 +3054,61 @@ async fn browser_attachment_upload_returns_a_stored_reference_without_inline_byt
     }
 }
 
+#[tokio::test]
+async fn terminal_upload_can_stage_before_image_capability_is_published() {
+    if !in_isolated_store("terminal_upload_can_stage_before_image_capability_is_published") {
+        return;
+    }
+    let mut options =
+        detached_options().with_test_credentials("123456", b"01234567890123456789012345678901");
+    options.set_loopback_token("test-direct-token".into());
+    let app = router(options);
+    let cookie = login_cookie(&app).await;
+    let image = sample_valid_image();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data_base64)
+        .unwrap();
+    for (id, header, value, expected) in [
+        ("session-1", COOKIE, cookie, StatusCode::BAD_REQUEST),
+        (
+            "session-1",
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-direct-token".into(),
+            StatusCode::OK,
+        ),
+        (
+            "starting-session",
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-direct-token".into(),
+            StatusCode::OK,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/v1/sessions/{id}/attachments"))
+                    .header(header, value)
+                    .header(CONTENT_TYPE, "image/png")
+                    .body(Body::from(bytes.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let image: ViewerPromptImage = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                AttachmentStore::controller(id)
+                    .unwrap()
+                    .read(&image.attachment.unwrap())
+                    .unwrap(),
+                bytes
+            );
+        }
+    }
+}
+
 /// Base64 inflates an upload by a third, so two ordinary photographs pass
 /// the general body limit even when each one fits it. The action route
 /// carries prompts, so it is the route that gets the larger bound.

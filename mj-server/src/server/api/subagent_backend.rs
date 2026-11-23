@@ -612,12 +612,26 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("SessionWiki lookups are unavailable") })
     }
 
-    /// Start a session from an archived transcript, answering with its id, or
+    fn session_working_context(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_client::http::SessionWorkingContext>>> {
+        Box::pin(async { anyhow::bail!("working context probes are unavailable") })
+    }
+
+    fn session_git_status(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::local_git::SessionGitStatus>>> {
+        Box::pin(async { anyhow::bail!("git status probes are unavailable") })
+    }
+
+    /// Start a session from an archived transcript, answering with its registration, or
     /// `None` when the index holds no session with that id.
     fn wiki_restore(
         &self,
         _request: mj_client::daemon::WikiRestoreRequest,
-    ) -> BoxFuture<'_, AnyResult<Option<String>>> {
+    ) -> BoxFuture<'_, AnyResult<Option<mj_client::daemon::RegisteredSession>>> {
         Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
     }
 }

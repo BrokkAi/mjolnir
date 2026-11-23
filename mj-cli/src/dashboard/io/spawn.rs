@@ -49,6 +49,19 @@ where
     })
 }
 
+pub(crate) fn spawn_async_io<T: Send + 'static>(
+    operation: &'static str,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+) {
+    mj_core::runtime::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work));
+        let result = blocking_result(operation, task.await);
+        report(operation, &updates, to_update(result));
+    });
+}
+
 /// Runs a user-authored mutation off the event loop and keeps dashboard exit
 /// pending until the mutation has reached its durable boundary.
 pub(crate) fn spawn_critical_io<T>(
@@ -1740,7 +1753,9 @@ pub(crate) fn spawn_wiki_search(
                         supervised_wiki_task("searching the session archive", async move {
                             daemon::connect_or_start()
                                 .await?
-                                .wiki_search(query, WIKI_SEARCH_LIMIT)
+                                .http()
+                                .await?
+                                .wiki_search(&query, WIKI_SEARCH_LIMIT)
                                 .await
                         })
                         .await;
@@ -1786,8 +1801,8 @@ pub(crate) fn spawn_wiki_sync(
         let follow = async {
             let answers = updates.clone();
             let result = supervised_wiki_task("syncing the session index", async move {
-                let daemon = daemon::connect_or_start().await?;
-                follow_wiki_sync(daemon, |status| {
+                let client = daemon::connect_or_start().await?.http().await?;
+                follow_wiki_sync(client, |status| {
                     report(
                         "syncing the session index",
                         &answers,
@@ -1820,10 +1835,10 @@ pub(crate) fn spawn_wiki_sync(
 
 /// One episode belongs to the daemon that accepted its request.
 async fn follow_wiki_sync(
-    mut daemon: mj_client::daemon::DaemonClient,
+    client: mj_client::http::HttpDaemonClient,
     mut answer: impl FnMut(mj_client::daemon::WikiSyncStatus),
 ) -> Result<()> {
-    let mut status = daemon.wiki_sync_request().await?;
+    let mut status = client.wiki_sync_request().await?;
     let target = status.target.context("sync request returned no target")?;
     loop {
         status.target = Some(target);
@@ -1831,8 +1846,8 @@ async fn follow_wiki_sync(
         if status.finished >= target {
             return Ok(());
         }
-        let next = daemon
-            .wiki_sync_watch(status.epoch.clone(), status.version)
+        let next = client
+            .wiki_sync_watch(&status.epoch, status.version)
             .await?;
         anyhow::ensure!(
             next.epoch == status.epoch,
@@ -1891,8 +1906,11 @@ pub(crate) fn spawn_wiki_brief(wiki_id: String, updates: UnboundedSender<Dashboa
         let result = async {
             daemon::connect_or_start()
                 .await?
-                .wiki_brief(wiki_id.clone(), WIKI_BRIEF_CHARS)
-                .await
+                .http()
+                .await?
+                .wiki_brief(&wiki_id, WIKI_BRIEF_CHARS)
+                .await?
+                .with_context(|| format!("no indexed session {wiki_id}"))
         }
         .await
         .map_err(|error| format!("{error:#}"));
@@ -1920,12 +1938,9 @@ pub(crate) fn spawn_wiki_hits(
         let result = async {
             daemon::connect_or_start()
                 .await?
-                .wiki_hits(
-                    wiki_id.clone(),
-                    query.clone(),
-                    WIKI_HITS_CONTEXT,
-                    WIKI_HITS_CHARS,
-                )
+                .http()
+                .await?
+                .wiki_hits(&wiki_id, &query, WIKI_HITS_CONTEXT, WIKI_HITS_CHARS)
                 .await
         }
         .await
@@ -1956,6 +1971,8 @@ pub(crate) fn spawn_dashboard_restore_session(
     mj_core::runtime::spawn_blocking(move || {
         let registered = mj_core::runtime::block_on(async {
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .wiki_restore(request)
                 .await
@@ -2080,73 +2097,67 @@ mod wiki_search_tests {
     }
     #[tokio::test]
     async fn wiki_sync_episode_stops_on_watch_loss_refusal_or_epoch_change() {
-        if crate::test_support::rerun_in_isolated_child(
-            "MJ_TEST_WIKI_SYNC_EPISODE",
-            "dashboard::io::spawn::wiki_search_tests::wiki_sync_episode_stops_on_watch_loss_refusal_or_epoch_change",
-        ) {
-            return;
-        }
-        use mj_client::daemon::{
-            DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply,
-            PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, WikiSyncStatus, read_frame,
-            write_frame,
-        };
+        use mj_client::daemon::WikiSyncStatus;
+        use mj_client::http::HttpDaemonClient;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
         for failure in ["loss", "refusal", "epoch"] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let metadata = DaemonMetadata {
-                protocol_version: PROTOCOL_VERSION,
-                pid: std::process::id(),
-                address: listener.local_addr().unwrap(),
-                token: "wiki-sync-test".into(),
-                started_at: "test".into(),
-                build_version: env!("CARGO_PKG_VERSION").into(),
-                instance_id: "swsync".into(),
-                placement: DaemonPlacement::Host,
-            };
+            let client = HttpDaemonClient::new(
+                format!("http://{}", listener.local_addr().unwrap()),
+                "wiki-sync-test",
+            )
+            .unwrap();
             let server = mj_core::runtime::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
                 for step in 0..2 {
-                    let request: RequestEnvelope = read_frame(&mut socket).await.unwrap();
-                    if step == 0 {
-                        assert!(matches!(request.action, DaemonAction::WikiSyncRequest));
-                    } else {
-                        assert!(
-                            matches!(request.action, DaemonAction::WikiSyncWatch { ref epoch, after: 1 } if epoch == "original")
-                        );
-                        if failure == "loss" {
-                            return;
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = BufReader::new(socket);
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    assert_eq!(
+                        line.trim_end(),
+                        if step == 0 {
+                            "POST /api/v1/wiki/sync HTTP/1.1"
+                        } else {
+                            "GET /api/v1/wiki/sync/watch?epoch=original&after=1 HTTP/1.1"
+                        }
+                    );
+                    loop {
+                        line.clear();
+                        assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                        if line == "\r\n" {
+                            break;
                         }
                     }
-                    let reply = if step == 1 && failure == "refusal" {
-                        DaemonReply::UpgradePending
-                    } else {
-                        DaemonReply::WikiSyncStatus(WikiSyncStatus {
-                            epoch: if step == 1 { "replacement" } else { "original" }.into(),
-                            version: 1,
-                            started: 1,
-                            requested: 2,
-                            target: Some(2),
-                            ..Default::default()
-                        })
+                    let (status, body) = match (step, failure) {
+                        (1, "loss") => return,
+                        (1, "refusal") => (
+                            "503 Service Unavailable",
+                            r#"{"error":"restarting","code":"daemon_handoff"}"#.to_owned(),
+                        ),
+                        _ => (
+                            "200 OK",
+                            serde_json::to_string(&WikiSyncStatus {
+                                epoch: if step == 1 { "replacement" } else { "original" }.into(),
+                                version: 1,
+                                started: 1,
+                                requested: 2,
+                                target: Some(2),
+                                ..Default::default()
+                            })
+                            .unwrap(),
+                        ),
                     };
-                    write_frame(
-                        &mut socket,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: Ok(reply),
-                        },
-                    )
-                    .await
-                    .unwrap();
+                    socket.write_all(format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    ).as_bytes()).await.unwrap();
                 }
             });
             let mut states = Vec::new();
             let result = tokio::time::timeout(
                 Duration::from_secs(10),
-                follow_wiki_sync(DaemonClient::connect(metadata).await.unwrap(), |state| {
-                    states.push(state)
-                }),
+                follow_wiki_sync(client, |state| states.push(state)),
             )
             .await
             .expect("a failed episode must stop without reconnecting");

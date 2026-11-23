@@ -354,15 +354,17 @@ impl DashboardContext {
         self.go_context_in_flight = true;
         self.go_context_refresh = Some((session_id.clone(), std::time::Instant::now()));
         let report_id = session_id.clone();
-        let controller = self.live_controller_snapshot();
-        io::spawn_io(
+        io::spawn_async_io(
             "reading session working context",
             self.dashboard_io_tx.clone(),
-            move || {
-                let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
-                    Duration::from_secs(3),
-                );
-                controller.session_working_context(&session_id, &executor)
+            async move {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .http()
+                    .await?
+                    .session_working_context(&session_id)
+                    .await
+                    .map(|context| (context.cwd, context.branch))
             },
             move |result| io::DashboardIoUpdate::GoContext {
                 session_id: report_id,
@@ -390,31 +392,22 @@ impl DashboardContext {
             return;
         }
         let report_id = session_id.clone();
-        let controller = self.live_controller_snapshot();
-        io::spawn_io(
+        io::spawn_async_io(
             "reading session git status",
             self.dashboard_io_tx.clone(),
-            move || {
-                let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
-                    Duration::from_secs(8),
-                );
-                controller.session_git_status(&session_id, &executor)
+            async move {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .http()
+                    .await?
+                    .session_git_status(&session_id)
+                    .await
             },
             move |result| io::DashboardIoUpdate::GitStatus {
                 session_id: report_id,
                 result,
             },
         );
-    }
-
-    /// The sessions as the runtime feed last delivered them, for work that
-    /// runs off the event loop. The maps are persistent, so this is cheap, and
-    /// it never opens the store, which only the daemon may read.
-    fn live_controller_snapshot(&self) -> Controller {
-        Controller {
-            config: self.controller.config.clone(),
-            state: self.controller.state.clone(),
-        }
     }
 
     pub(crate) fn remember_go_selection(&mut self) {
