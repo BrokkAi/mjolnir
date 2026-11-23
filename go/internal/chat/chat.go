@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image/color"
 	"slices"
 	"strings"
 	"sync"
@@ -60,7 +59,7 @@ func (BackgroundTaskControlStop) isBackgroundTaskControl() {}
 
 func voiceForm() Form[VoiceControl] {
 	form := NewForm[VoiceControl]()
-	form.Declare(VoiceControlMicrophone, ControlKindButton)
+	form.Declare(VoiceControlMicrophone, ControlKindButton{})
 	form.EndFrame(VoiceControlMicrophone)
 	return form
 }
@@ -200,7 +199,7 @@ type ElicitationIdentity struct {
 
 func (d *ChatElicitationDraft) identity() ElicitationIdentity {
 	return ElicitationIdentity{
-		request:      d.request(),
+		request:      *d.request(),
 		reviewer:     d.reviewer,
 		reviewerRole: d.reviewerRole,
 	}
@@ -213,7 +212,7 @@ func (d *ChatElicitationDraft) Matches(request *core.ElicitationRequest) bool {
 
 // request stays crate-private; hosts only need Matches while ChatState uses
 // it to reconcile delayed reviewer streams.
-func (d *ChatElicitationDraft) request() core.ElicitationRequest {
+func (d *ChatElicitationDraft) request() *core.ElicitationRequest {
 	return d.form.request()
 }
 
@@ -717,8 +716,8 @@ type ChatState struct {
 	// sent while no session is live, and no command completion is offered
 	// because no session can answer commands.
 	standby         bool
-	composerForward *core.Unbounded[ComposerIoUpdate]
-	composerRuntime ComposerRuntime
+	composerForward *core.Unbounded[composerIoUpdate]
+	composerRuntime composerRuntime
 	input           string
 	inputCursor     int
 	// inputImages: image bytes belong to tracked marker ranges in the
@@ -754,9 +753,9 @@ type ChatState struct {
 	// replacing.
 	chainKill                   bool
 	preferredColumn             *int
-	historySearch               *HistorySearch
+	historySearch               *historySearch
 	nextHistorySearchGeneration uint64
-	composerRequests            []ComposerRequest
+	composerRequests            []composerRequest
 	queuedPrompts               []QueuedPrompt
 	pendingSubmissions          []PendingSubmission
 	submissionRenders           []submissionRender
@@ -772,7 +771,7 @@ type ChatState struct {
 	activeUserShells      []string
 	activeAgentTerminals  []core.ActiveAgentTerminal
 	claimedAgentTerminals map[string]int64
-	elicitation           *ElicitationDialog
+	elicitation           *elicitationDialog
 	// pendingElicitations is the latest primary pending forms, retained while
 	// a reviewer form owns the display so the primary can surface immediately
 	// when that review request is answered or withdrawn.
@@ -804,17 +803,17 @@ type ChatState struct {
 	goalPromptActive   bool
 	acpSurface         core.AcpSessionSurface
 	planCommandPending bool
-	commandChoices     []CommandChoice
+	commandChoices     []commandChoice
 	modelValues        []core.SessionConfigChoice
 	effortValues       []core.SessionConfigChoice
 	// policyConfigKeys is the config keys owned by this session's execution
 	// policy.
 	policyConfigKeys []string
-	autocomplete     *Autocomplete
+	autocomplete     *autocomplete
 	// configPicker is the `/model` / `/effort` value selector, when one is
 	// open. It owns the keyboard while it is up, though an arriving
 	// elicitation still wins.
-	configPicker *ConfigPicker
+	configPicker *configPicker
 	anchor       TranscriptAnchor
 	// revealLatestAgentOnDraw: on entry, reveal the response advertised by
 	// the session list when later tool activity would otherwise push it above
@@ -847,8 +846,8 @@ type ChatState struct {
 	feedback            Notices
 	connectionFeedback  *string
 	operationFeedback   map[string]string
-	deferredFormResults []ChatRemoteResult
-	conversationNotices []ConversationNotice
+	deferredFormResults []chatRemoteResult
+	conversationNotices []conversationNotice
 	// voiceAvailable is whether Codex OAuth credentials and the voice helper
 	// are available. The runtime owns discovering this asynchronously; the
 	// chat starts disabled until the host reports a successful probe.
@@ -1097,7 +1096,7 @@ func (s *ChatState) elicitationIdentity() *ElicitationIdentity {
 		return nil
 	}
 	return &ElicitationIdentity{
-		request:      s.elicitation.request(),
+		request:      *s.elicitation.request(),
 		reviewer:     s.elicitationIsReviewers,
 		reviewerRole: s.elicitationRole,
 	}
@@ -1396,7 +1395,7 @@ func (n Notices) lock() (*NoticeSlot, func()) {
 
 // TurnBandColor: active work and ready sessions share the terminal's
 // semantic palette.
-func TurnBandColor(turnInFlight bool) color.Color {
+func TurnBandColor(turnInFlight bool) Color {
 	if turnInFlight {
 		return ThemePalette().Accent
 	}

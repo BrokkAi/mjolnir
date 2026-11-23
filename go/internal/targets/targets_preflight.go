@@ -219,7 +219,7 @@ func VerifySSHDocker(ssh *core.SshTarget, executor core.CommandExecutor) (Docker
 // The remote commands the Apple container check runs on an SSH host, in
 // order. The machine probe sends the same command lines in its one batch.
 var (
-	PlatformProbe              = [2]string{"uname", "-sm"}
+	PreflightPlatformProbe     = [2]string{"uname", "-sm"}
 	AppleContainerMacosProbe   = [2]string{"sw_vers", "-productVersion"}
 	AppleContainerVersionProbe = [2]string{"container", "--version"}
 	AppleContainerStatusProbe  = [3]string{"container", "system", "status"}

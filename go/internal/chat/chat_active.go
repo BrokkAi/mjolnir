@@ -218,7 +218,7 @@ type ActiveChat struct {
 	session        client.SessionHandle
 	sessionManager client.SessionControl
 	context        *ChatSessionContext
-	remote         *ChatRemoteSupervisor
+	remote         *chatRemoteSupervisor
 	// chatIo is held so the receiver never reports the feed closed, and so
 	// spawned clipboard and history tasks have somewhere to report.
 	chatIo            *core.Unbounded[ChatIoUpdate]
@@ -346,7 +346,7 @@ func activeChatFromPrepared(prepared PreparedChat, composer *LiveComposer) *Acti
 // AdoptLiveComposer reconciles transferred local state with this
 // attachment's authoritative view.
 func (c *ActiveChat) AdoptLiveComposer(composer LiveComposer) {
-	c.ChatState.AdoptLiveComposer(composer)
+	c.ChatState.AdoptLiveComposer(&composer)
 	// A standby composer never asked for this session's history. One a chat
 	// parked carries its loaded history or its in-flight read, which a new
 	// request would abort.

@@ -7,7 +7,6 @@ package chat
 
 import (
 	"context"
-	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -200,13 +199,6 @@ func (p *StartupPrompt) Equal(other *StartupPrompt) bool {
 	return *p.MoveOperationID == *other.MoveOperationID
 }
 
-// submissionRender is one pending submission's first render: its command id
-// and when the submit started (Rust's `(String, Instant)`).
-type submissionRender struct {
-	commandID string
-	started   time.Time
-}
-
 // LiveComposer is an in-memory handoff only: pending jobs and their
 // destination travel with the draft.
 type LiveComposer struct {
@@ -225,7 +217,7 @@ type LiveComposer struct {
 	killImages                  []PromptImage
 	chainKill                   bool
 	preferredColumn             *int
-	queuedPrompts               []queuedPrompt
+	queuedPrompts               []QueuedPrompt
 	pendingQueueRemovals        map[string]struct{}
 	pendingQueueImages          map[string][]PromptImage
 	historySearch               *historySearch
@@ -234,7 +226,7 @@ type LiveComposer struct {
 	sessionHistory              []string
 	sessionHistoryError         *string
 	sessionHistoryGeneration    uint64
-	pendingSubmissions          []pendingSubmission
+	pendingSubmissions          []PendingSubmission
 	submissionRenders           []submissionRender
 	planCommandPending          bool
 	operationFeedback           map[string]string

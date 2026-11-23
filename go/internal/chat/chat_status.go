@@ -80,7 +80,7 @@ func (c *ChatState) currentEffort() (string, bool) {
 	return c.acpSurface.CurrentEffort()
 }
 
-func (c *ChatState) planReviewFollowup(request *core.ElicitationRequest, response *core.ElicitationResponse) *planReviewFollowup {
+func (c *ChatState) planReviewFollowup(request *core.ElicitationRequest, response *core.ElicitationResponse) *PlanReviewFollowup {
 	panic("unported: mj-chat/src/chat/status.rs planReviewFollowup")
 }
 
@@ -148,7 +148,7 @@ func (c *ChatState) turnControlPending() bool {
 	return c.turnControlSubmitting || c.turnControlAwaitingState != nil || c.cancellingPromptID != nil
 }
 
-func (c *ChatState) turnControlIntent() turnControlIntent {
+func (c *ChatState) turnControlIntent() TurnControlIntent {
 	panic("unported: mj-chat/src/chat/status.rs turnControlIntent")
 }
 
@@ -194,26 +194,26 @@ func (c *ChatState) SetSubagentCount(count int) {
 }
 
 func (c *ChatState) subagentControlFocused() bool {
-	return c.promptControlFocus != nil && *c.promptControlFocus == promptControlSubagents
+	return c.promptControlFocus != nil && *c.promptControlFocus == PromptControlSubagents
 }
 
 func (c *ChatState) focusSubagentControl() {
 	if c.subagentCount > 0 && !c.subagentControlFocused() {
-		focus := promptControlSubagents
+		focus := PromptControlSubagents
 		c.promptControlFocus = &focus
 	}
 }
 
 func (c *ChatState) SetReviewerCounts(counts ReviewerCounts) {
 	c.reviewers = counts
-	if counts.Total == 0 && c.promptControlFocus != nil && *c.promptControlFocus == promptControlReviewers {
+	if counts.Total == 0 && c.promptControlFocus != nil && *c.promptControlFocus == PromptControlReviewers {
 		c.promptControlFocus = nil
 	}
 }
 
 func (c *ChatState) focusReviewerControl() {
 	if c.reviewers.Total > 0 {
-		focus := promptControlReviewers
+		focus := PromptControlReviewers
 		c.promptControlFocus = &focus
 	}
 }
@@ -242,7 +242,7 @@ func (c *ChatState) failAllBackgroundStops() bool {
 }
 
 func (c *ChatState) taskControlFocused() bool {
-	return c.promptControlFocus != nil && *c.promptControlFocus == promptControlTasks
+	return c.promptControlFocus != nil && *c.promptControlFocus == PromptControlTasks
 }
 
 // TaskDialogOpen is Rust's crate-private `task_dialog_open()`, exported
@@ -257,7 +257,7 @@ func (c *ChatState) closeTaskDialog() {
 
 func (c *ChatState) focusTaskControl() {
 	if c.backgroundTaskCount() > 0 && !c.taskControlFocused() {
-		focus := promptControlTasks
+		focus := PromptControlTasks
 		c.promptControlFocus = &focus
 	}
 }
@@ -278,7 +278,7 @@ func (c *ChatState) setTaskDialogScroll(scroll int) {
 	}
 }
 
-func (c *ChatState) activateBackgroundTaskControl(control backgroundTaskControl) ChatAction {
+func (c *ChatState) activateBackgroundTaskControl(control BackgroundTaskControl) ChatAction {
 	panic("unported: mj-chat/src/chat/status.rs activateBackgroundTaskControl")
 }
 

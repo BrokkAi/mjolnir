@@ -126,7 +126,7 @@ type chatRemoteOperationPlanCommand struct {
 
 type chatRemoteOperationCancel struct {
 	CommandID   string
-	Intent      turnControlIntent
+	Intent      TurnControlIntent
 	CancelAgent bool
 	// Command is nil for the default CancelTurn.
 	Command         core.RelayCommand
@@ -143,7 +143,7 @@ type chatRemoteOperationReviewerAnswer struct {
 type chatRemoteOperationRespondElicitation struct {
 	Request      core.ElicitationRequest
 	Response     core.ElicitationResponse
-	PlanFollowup *planReviewFollowup
+	PlanFollowup *PlanReviewFollowup
 }
 
 func (chatRemoteOperationSync) isChatRemoteOperation()               {}
@@ -226,7 +226,7 @@ type chatRemoteResultPlanCommand struct {
 }
 
 type chatRemoteResultCancel struct {
-	Intent turnControlIntent
+	Intent TurnControlIntent
 	Err    error
 }
 
@@ -526,7 +526,7 @@ func restoreUnsentPrompt(chat *ChatState, text string, images []PromptImage) {
 // notice in the conversation. The composer already holds the text for a
 // retry; the notice names it for someone who was away when it failed, since
 // its echoed row is gone.
-func reportRefusedSubmission(chat *ChatState, kind submissionKind, text, err string) {
+func reportRefusedSubmission(chat *ChatState, kind SubmissionKind, text, err string) {
 	notice := kind.notSentHeadline() + ": " + err
 	if preview := queuedPromptPreview(text); preview != "" {
 		notice += "\n" + preview

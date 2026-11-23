@@ -69,7 +69,7 @@ type clipboardTarget interface {
 type clipboardTargetComposer struct{}
 type clipboardTargetSearch struct{}
 type clipboardTargetAnswer struct {
-	identity *elicitationIdentity
+	identity *ElicitationIdentity
 }
 type clipboardTargetUnavailable struct{}
 

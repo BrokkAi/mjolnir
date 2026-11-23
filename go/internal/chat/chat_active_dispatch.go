@@ -18,7 +18,7 @@ func (c *ActiveChat) HandleEvent(event tea.Msg) ChatEventOutcome {
 	if result.Action == nil {
 		return ChatEventOutcomeNone{}
 	}
-	return *result.Action
+	return result.Action
 }
 
 // HandleEventResult applies one terminal event, reporting whether the
@@ -53,8 +53,8 @@ func (c *ActiveChat) RemoveWorkerQueuedPrompt(id string, text string, kind core.
 		return
 	}
 	queueChatRemoteOperation(
-		c.remote.Operations(),
-		ChatRemoteOperationRemoveQueuedPrompt{CommandID: commandID, ID: id, Text: text, Kind: kind},
+		c.remote.operations(),
+		chatRemoteOperationRemoveQueuedPrompt{CommandID: commandID, ID: id, Text: text, Kind: kind},
 		c.ChatState,
 	)
 }

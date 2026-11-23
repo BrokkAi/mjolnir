@@ -15,7 +15,6 @@
 package chat
 
 import (
-	"image/color"
 	"sync"
 	"time"
 
@@ -205,7 +204,7 @@ func CompactSpan(style SpinnerStyle, elapsedMs uint64) Span {
 	panic("unported: mj-chat/src/spinner.rs CompactSpan")
 }
 
-func inkColor(ink SpinnerInk) color.Color {
+func inkColor(ink SpinnerInk) Color {
 	panic("unported: mj-chat/src/spinner.rs inkColor")
 }
 

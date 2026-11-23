@@ -239,7 +239,7 @@ func (s *ChatState) finishReceiptPreparation(id string, payload PromptPayload, e
 
 // resendSubmission is the operation that sends a resendable receipt again,
 // or nil.
-func (s *ChatState) resendSubmission(id string) ChatRemoteOperation {
+func (s *ChatState) resendSubmission(id string) chatRemoteOperation {
 	panic("unported: mj-chat/src/chat/submissions.rs ChatState::resend_submission")
 }
 

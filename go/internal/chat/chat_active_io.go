@@ -52,7 +52,7 @@ func (c *ActiveChat) runTurnReview(intent TurnReviewRequest) {
 // sendDaemonRequest hands one request to the daemon bridge, or reports that
 // this chat has none: a chat without a bridge cannot reach the daemon at all.
 func (c *ActiveChat) sendDaemonRequest(request ChatDaemonRequest) {
-	c.composerRequests = append(c.composerRequests, ComposerRequestDaemon{Request: request})
+	c.composerRequests = append(c.composerRequests, composerRequestDaemon{request})
 	c.dispatchComposerRequests()
 }
 
@@ -121,7 +121,7 @@ func (c *ActiveChat) applySessionView(view client.ManagedSessionView, err error)
 	panic("unported: mj-chat/src/chat/active/io.rs applySessionView")
 }
 
-func (c *ActiveChat) applyRemoteResult(result ChatRemoteResult) {
+func (c *ActiveChat) applyRemoteResult(result chatRemoteResult) {
 	panic("unported: mj-chat/src/chat/active/io.rs applyRemoteResult")
 }
 
