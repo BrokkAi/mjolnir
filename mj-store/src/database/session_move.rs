@@ -4,7 +4,8 @@ use std::borrow::Cow;
 
 use super::*;
 use mj_core::state::{
-    LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation,
+    GrantedMoveKey, LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection,
+    StoredMoveOperation,
 };
 
 pub fn retained_move_sources(
@@ -224,6 +225,26 @@ pub fn load_move_operation(session_id: &str) -> Result<Option<MoveOperation>> {
     }
     let connection = open_reader(&database_path())?;
     load_move_operation_with(&connection, session_id)
+}
+
+/// Explicit destroy can still remove local credentials when an old Move's
+/// recovery snapshot names an unsupported harness. Legacy rows without grants
+/// have no local credential files.
+pub fn load_move_granted_keys(session_id: &str) -> Result<Vec<GrantedMoveKey>> {
+    let connection = open_reader(&database_path())?;
+    let grants: Option<Option<String>> = connection
+        .query_row(
+            "SELECT json_extract(operation_json, '$.granted_keys') FROM session_moves WHERE session_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(grants
+        .flatten()
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default())
 }
 
 /// Whether a durable in-place Move currently owns sub-agent admission closed.

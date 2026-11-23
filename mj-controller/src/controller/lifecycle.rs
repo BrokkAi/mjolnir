@@ -3036,6 +3036,13 @@ impl Controller {
                                 }
                             }
                             super::environment::stop_borrower(&id, &self.config, executor)?;
+                            let granted_keys = if let Some(mut operation) = crate::database::load_move_operation(&id)? {
+                                self.cleanup_prepared_move_destination(&mut operation, executor)?;
+                                operation.granted_keys
+                            } else {
+                                crate::database::load_move_granted_keys(&id)?
+                            };
+                            super::move_session::recovery::cleanup_local_move_key_files(&granted_keys);
                             let checkpoint = crate::database::load_session_checkpoint(&id)?;
                             super::checkpoint::remove_session_checkpoint_archives(
                                 &mj_core::config::sessions_dir(),

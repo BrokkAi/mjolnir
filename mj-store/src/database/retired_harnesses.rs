@@ -131,28 +131,13 @@ fn destroy_order_with(connection: &Connection, session_id: &str) -> Result<Vec<S
 }
 
 pub fn delete_retired_harness_session(session_id: &str) -> Result<bool> {
-    remove_retired_session(session_id, true)
-}
-
-/// Orphan recovery cleans up one environment at a time. Leave the session
-/// addressable if it has more environments or children to settle.
-pub fn delete_reclaimed_retired_harness_session(session_id: &str) -> Result<bool> {
-    remove_retired_session(session_id, false)
-}
-
-fn remove_retired_session(session_id: &str, strict: bool) -> Result<bool> {
     let session_id = session_id.to_owned();
     submit_database_write("delete retired-harness session", move |connection| {
-        remove_session_with(connection, &database_path(), &session_id, strict)
+        remove_session_with(connection, &database_path(), &session_id)
     })
 }
 
-fn remove_session_with(
-    connection: &mut Connection,
-    path: &Path,
-    id: &str,
-    strict: bool,
-) -> Result<bool> {
+fn remove_session_with(connection: &mut Connection, path: &Path, id: &str) -> Result<bool> {
     mj_core::config::validate_id("session", id)?;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -160,26 +145,20 @@ fn remove_session_with(
         return Ok(false);
     }
     let children = children(&transaction, id)?;
-    if !children.is_empty() {
-        ensure!(
-            !strict,
-            "cannot delete retired-harness session {id} while it has child sessions: {}",
-            children.join(", ")
-        );
-        return Ok(false);
-    }
+    ensure!(
+        children.is_empty(),
+        "cannot delete retired-harness session {id} while it has child sessions: {}",
+        children.join(", ")
+    );
     let owns_environment: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM environments WHERE owner_session_id=?1 AND phase<>'reclaimed')",
         [id],
         |row| row.get(0),
     )?;
-    if owns_environment {
-        ensure!(
-            !strict,
-            "retired-harness session {id} still owns an unreclaimed environment"
-        );
-        return Ok(false);
-    }
+    ensure!(
+        !owns_environment,
+        "retired-harness session {id} still owns an unreclaimed environment"
+    );
     transaction.execute("DELETE FROM sessions WHERE session_id=?1", [id])?;
     transaction.commit()?;
     sessions::remove_deleted_session_tool_details(path, id);
@@ -258,7 +237,7 @@ mod tests {
         let (parent, child) = super::super::tests::subagent_pair(&path);
         let mut connection = open(&path).unwrap();
 
-        assert!(!remove_session_with(&mut connection, &path, &child.id, true).unwrap());
+        assert!(!remove_session_with(&mut connection, &path, &child.id).unwrap());
         assert!(read_sessions(&connection, None).unwrap().is_empty());
         connection
             .execute(
@@ -288,12 +267,11 @@ mod tests {
         assert_eq!(retired[1].session_id, child.id);
         assert!(retired[1].owned_environment.is_none());
 
-        let error = remove_session_with(&mut connection, &path, &parent.id, true).unwrap_err();
+        let error = remove_session_with(&mut connection, &path, &parent.id).unwrap_err();
         assert!(error.to_string().contains(&child.id), "{error:#}");
-        assert!(!remove_session_with(&mut connection, &path, &parent.id, false).unwrap());
-        assert!(remove_session_with(&mut connection, &path, &child.id, true).unwrap());
+        assert!(remove_session_with(&mut connection, &path, &child.id).unwrap());
         assert!(
-            remove_session_with(&mut connection, &path, &parent.id, true)
+            remove_session_with(&mut connection, &path, &parent.id)
                 .unwrap_err()
                 .to_string()
                 .contains("unreclaimed environment")
@@ -304,7 +282,7 @@ mod tests {
                 [&environment.id],
             )
             .unwrap();
-        assert!(remove_session_with(&mut connection, &path, &parent.id, true).unwrap());
+        assert!(remove_session_with(&mut connection, &path, &parent.id).unwrap());
         assert!(read_sessions(&connection, None).unwrap().is_empty());
     }
 }

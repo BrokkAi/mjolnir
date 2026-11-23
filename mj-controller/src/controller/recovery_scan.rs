@@ -770,9 +770,6 @@ impl Controller {
                     executor.notify_notice("Worker stopped. Files were retained because complete shared-environment ownership is unavailable.");
                     return Ok(());
                 }
-                if crate::database::load_retired_harness_session(session_id)?.is_some() {
-                    crate::database::retired_harness_destroy_order(session_id)?;
-                }
                 for environment in owned {
                     super::environment::retire_owned_environment(
                         environment,
@@ -782,7 +779,6 @@ impl Controller {
                         super::CheckoutDisposition::Remove,
                     )?;
                 }
-                crate::database::delete_reclaimed_retired_harness_session(session_id)?;
                 Ok(())
             },
         )
@@ -2163,8 +2159,9 @@ mod tests {
     }
 
     #[test]
-    fn retired_harness_destroy_retries_teardown_and_recovery_settles_its_row() {
-        const TEST: &str = "retired_harness_destroy_retries_teardown_and_recovery_settles_its_row";
+    fn retired_harness_destroy_retries_and_orphan_recovery_keeps_the_checkpoint() {
+        const TEST: &str =
+            "retired_harness_destroy_retries_and_orphan_recovery_keeps_the_checkpoint";
         if !isolated_scan(TEST) {
             return;
         }
@@ -2177,11 +2174,47 @@ mod tests {
             workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
             borrowed_from: None,
         }));
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoint = mj_core::state::CheckpointMetadata {
+            archive_path: directory.path().join("checkpoint.hel.zip"),
+            sha256: "a".repeat(64),
+            created_at: session.created_at.clone(),
+            event_frontier: 0,
+        };
+        session.checkpoint = Some(Box::new(checkpoint.clone()));
+        let key_path = directory.path().join("move-key");
+        let known_hosts_path = directory.path().join("move-known-hosts");
+        let operation: mj_core::state::MoveOperation = serde_json::from_value(serde_json::json!({
+            "operation_id": "retired-move",
+            "selection": { "session_id": session_id },
+            "source_profile_id": session.last_profile,
+            "source_target_template_id": session.target_template_id,
+            "source_additional_mounts": [],
+            "configuration_fingerprint": "",
+            "queue": "discard",
+            "phase": "failed",
+            "queue_admission_started": false,
+            "queue_admission_finished": false,
+            "cancellation_requested": false,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "granted_keys": [{
+                "host": "test-host",
+                "comment": "mj-move",
+                "private_key_path": key_path,
+                "known_hosts_path": known_hosts_path,
+            }],
+        }))
+        .unwrap();
         let (mut controller, mut executor) = podman_scan_controller(session.clone());
         controller.state.sessions.remove(session_id);
 
         for orphan in [false, true] {
+            std::fs::write(&checkpoint.archive_path, b"checkpoint").unwrap();
+            std::fs::write(&key_path, b"ephemeral key fixture").unwrap();
+            std::fs::write(&known_hosts_path, b"known hosts fixture").unwrap();
             database::save_session(&session).unwrap();
+            database::save_move_operation(&operation).unwrap();
             database::test_fixtures::retire_test_harness(session_id).unwrap();
             executor.teardown = Some(ContainerTeardown::default());
             let destroy = |controller: &mut Controller, executor: &ListingExecutor| {
@@ -2212,6 +2245,13 @@ mod tests {
                 retained.owned_environment.unwrap().phase,
                 EnvironmentPhase::Retiring
             );
+            assert_eq!(
+                database::load_session_checkpoint(session_id)
+                    .unwrap()
+                    .as_ref(),
+                Some(&checkpoint)
+            );
+            assert!(key_path.is_file());
             executor.teardown.as_mut().unwrap().allow_remove = true;
             destroy(&mut controller, &executor).unwrap();
             assert!(
@@ -2222,16 +2262,27 @@ mod tests {
                     .removed
                     .load(std::sync::atomic::Ordering::Relaxed)
             );
-            assert!(
-                database::load_retired_harness_session(session_id)
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(
-                database::worker_environments(session_id)
-                    .unwrap()
-                    .is_empty()
-            );
+            let row = database::load_retired_harness_session(session_id).unwrap();
+            let stored_checkpoint = database::load_session_checkpoint(session_id).unwrap();
+            if orphan {
+                assert_eq!(
+                    row.unwrap().owned_environment.unwrap().phase,
+                    EnvironmentPhase::Reclaimed
+                );
+                assert_eq!(stored_checkpoint.as_ref(), Some(&checkpoint));
+                assert!(checkpoint.archive_path.is_file());
+                assert!(key_path.is_file() && known_hosts_path.is_file());
+            } else {
+                assert!(row.is_none());
+                assert!(stored_checkpoint.is_none());
+                assert!(
+                    database::worker_environments(session_id)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(!checkpoint.archive_path.exists());
+                assert!(!key_path.exists() && !known_hosts_path.exists());
+            }
         }
     }
 

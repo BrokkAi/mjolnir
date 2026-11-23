@@ -528,14 +528,9 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        self.stop_subagents(
-            children,
-            LifecycleKind::StopSubagent,
-            None,
-            super::resume::DestroyRequest::Accepted,
-        )
-        .await
-        .context("stop sub-agents before suspending their parent")?;
+        self.stop_subagents(children, LifecycleKind::StopSubagent, None)
+            .await
+            .context("stop sub-agents before suspending their parent")?;
         Ok(())
     }
 

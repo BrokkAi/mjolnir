@@ -675,13 +675,8 @@ impl RuntimeState {
             }
         })
         .await?;
-        self.stop_subagents(
-            children,
-            LifecycleKind::StopSubagent,
-            None,
-            DestroyRequest::Accepted,
-        )
-        .await?;
+        self.stop_subagents(children, LifecycleKind::StopSubagent, None)
+            .await?;
         let exists = blocking({
             let session_id = session_id.clone();
             move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
@@ -860,13 +855,8 @@ impl RuntimeState {
     /// review is over and retries this with backoff; a child already gone is
     /// the caller's business, not an error here.
     pub(crate) async fn destroy_reviewer_child(self: &Arc<Self>, child: String) -> Result<()> {
-        self.stop_subagents(
-            vec![child],
-            LifecycleKind::StopSubagent,
-            None,
-            DestroyRequest::Accepted,
-        )
-        .await
+        self.stop_subagents(vec![child], LifecycleKind::StopSubagent, None)
+            .await
     }
 
     /// Destroy a parent's sub-agents, each with its own subtree, all at once.
@@ -881,7 +871,6 @@ impl RuntimeState {
         children: Vec<String>,
         kind: LifecycleKind,
         requested_session_id: Option<&str>,
-        request: DestroyRequest,
     ) -> Result<()> {
         use futures::stream::StreamExt as _;
 
@@ -903,7 +892,6 @@ impl RuntimeState {
                         BranchDisposition::Keep,
                         kind,
                         requested,
-                        request,
                     )
                     .await
                     .with_context(|| format!("stop sub-agent {child_id}"))
@@ -929,7 +917,6 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
         requested_session_id: String,
-        request: DestroyRequest,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             let started = self
@@ -939,7 +926,8 @@ impl RuntimeState {
                     kind,
                     requested_session_id,
                     false,
-                    request,
+                    // This child continues its parent's accepted teardown.
+                    DestroyRequest::Accepted,
                 )
                 .await?;
             Self::wait_lifecycle_result(started.result).await?;
@@ -1021,16 +1009,7 @@ impl RuntimeState {
                             state.index_before_destroy(&session_id).await;
                         }
                         state
-                            .stop_subagents(
-                                children,
-                                kind,
-                                Some(&requested_session_id),
-                                if matches!(request, DestroyRequest::Recovery) {
-                                    request
-                                } else {
-                                    DestroyRequest::Accepted
-                                },
-                            )
+                            .stop_subagents(children, kind, Some(&requested_session_id))
                             .await?;
                         let exists = blocking({
                             let session_id = session_id.clone();
