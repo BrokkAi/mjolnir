@@ -8,6 +8,7 @@ fn detaching_hidden_chat_preserves_unread_background_events() {
 use super::*;
 use mj_chat::chat::{ActiveChat, Notices, SessionHeaderIdentity};
 use mj_core::state::State;
+use mj_core::storage::RetiredDetachedDraft;
 use mj_tui::render_combined;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1886,58 +1887,157 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
     assert!(!attachments.get_mut("session").unwrap().select("session"));
 }
 
-/// The runtime feed carries only live sessions, so a chat can still be
-/// detaching after its suspended session's record has left. Its last record
-/// says where the draft and read position belong; nothing reports the
-/// session as unknown.
 #[tokio::test]
-async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft() {
-    let controller = Controller {
-        config: Config::default(),
-        state: State::default(),
+async fn workspace_draft_recovery_updates_warm_standby_and_cached_composers_after_dismissal() {
+    let mut dashboard = populated_dashboard();
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("expected workspace manager load");
     };
-    let mut dashboard = DashboardState::new(Config::default(), State::default(), BTreeMap::new());
-    let departed = live_session("session-1", "2026-09-19T00:00:00Z");
-    let (updates, _received) = tokio::sync::mpsc::unbounded_channel();
-    let (tracker, _changed) = CriticalOperationTracker::new();
-    let detached = || TerminalDraftState {
-        client_id: "client",
-        session_id: "session-1",
-        revision: 1,
-        draft: DetachedSessionDraft {
-            text: "unsent".into(),
-            inherited_input: None,
-        },
-    };
+    assert!(dashboard.workspace_management_is_current(generation));
+    dashboard.cancel_modal();
+    assert!(!dashboard.workspace_management_is_current(generation));
+    let mut chats = BTreeMap::from([
+        ("warm".into(), open_test_chat("warm")),
+        ("standby".into(), open_test_chat("standby")),
+    ]);
+    chats
+        .get_mut("standby")
+        .unwrap()
+        .set_draft("stale warm copy".into());
+    dashboard.set_standby_move_origin("standby", None);
+    let mut cache = ComposerDraftCache::default();
+    cache.capture("cached", String::new(), "stale legacy seed");
 
-    let saved = record_terminal_draft_state(
-        &controller,
-        Some(&departed),
+    for id in ["warm", "standby", "cached"] {
+        assert!(
+            drafts::local_composer_draft(&cache, &dashboard, &chats, id, "stale legacy seed",)
+                .is_empty()
+        );
+        let recovered = format!("recovered for {id}");
+        drafts::install_workspace_draft(
+            &mut cache,
+            &mut dashboard,
+            &mut chats,
+            id,
+            "stale legacy seed",
+            &recovered,
+        )
+        .unwrap();
+        assert_eq!(cache.start(id, true).unwrap().1.text, recovered);
+        if let Some(chat) = chats.get(id) {
+            assert_eq!(chat.draft(), recovered);
+        }
+        if let Some(standby) = dashboard.standby_prompt_draft(id) {
+            assert_eq!(standby, recovered);
+        }
+    }
+}
+
+#[tokio::test]
+async fn workspace_draft_recovery_merges_typing_that_arrived_in_flight() {
+    let mut dashboard = populated_dashboard();
+    let mut chats = BTreeMap::from([("session".into(), open_test_chat("session"))]);
+    let mut cache = ComposerDraftCache::default();
+    let inherited = "old inherited text";
+    dashboard.set_standby_move_origin("session", None);
+    assert!(
+        drafts::local_composer_draft(&cache, &dashboard, &chats, "session", inherited).is_empty()
+    );
+
+    dashboard.seed_standby_prompt("session", "typed during recovery".into());
+    let recovered = mj_chat::chat::PromptPayload::text("recovered prompt").encode_draft();
+    drafts::install_workspace_draft(
+        &mut cache,
         &mut dashboard,
-        detached(),
-        &updates,
-        tracker.clone(),
+        &mut chats,
+        "session",
+        inherited,
+        &recovered,
     )
-    .expect("the draft is saved");
-    // The current-thread runtime has not polled the save; it never reaches a
-    // daemon.
-    saved.abort();
+    .unwrap();
+    let expected = "typed during recovery\n\nrecovered prompt";
+    // This is the authoritative nonempty value the action checks before
+    // dispatching another recovery request.
+    assert_eq!(
+        drafts::local_composer_draft(&cache, &dashboard, &chats, "session", inherited),
+        expected,
+    );
+    assert_eq!(chats["session"].draft(), expected);
+    assert_eq!(cache.start("session", true).unwrap().1.text, expected);
+}
+
+#[test]
+fn workspace_draft_recovery_refreshes_only_after_save_acknowledgement() {
+    let mut dashboard = populated_dashboard();
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("expected workspace manager load");
+    };
+    let mut cache = ComposerDraftCache::default();
+    cache.capture("session", "recovered".into(), "");
+    let source = RetiredDetachedDraft {
+        draft_id: "source".into(),
+        revision: Some(2),
+    };
+    let revision = cache.retire_draft("session", source.clone());
+    let recovery = || drafts::PendingDraftRecovery {
+        generation,
+        revision,
+        name: "Example".into(),
+    };
+    let (saving, draft) = cache.start("session", false).unwrap();
+    assert_eq!(saving, revision);
+    assert_eq!(
+        draft.retired_drafts.as_slice(),
+        std::slice::from_ref(&source)
+    );
     assert_eq!(dashboard.notice(), None);
 
+    cache.complete("session", revision, false);
+    assert_eq!(recovery().finish(&mut dashboard, Err("disk full")), None);
+    let (retry, draft) = cache.start("session", true).unwrap();
+    assert_eq!(retry, revision);
+    assert_eq!(draft.retired_drafts, [source]);
+    cache.complete("session", revision, true);
+    assert_eq!(recovery().finish(&mut dashboard, Ok(())), Some(generation));
+
+    dashboard.cancel_modal();
+    assert_eq!(recovery().finish(&mut dashboard, Ok(())), None);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Recovered draft into Example.")
+    );
+    assert_eq!(recovery().finish(&mut dashboard, Err("disk full")), None);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Could not save recovered draft for Example: disk full")
+    );
+}
+
+#[tokio::test]
+async fn workspace_draft_recovery_rejects_unmergeable_input_before_staging_retirement() {
+    let mut dashboard = populated_dashboard();
+    let mut chats = BTreeMap::new();
+    let mut cache = ComposerDraftCache::default();
+    dashboard.seed_standby_prompt("session", "typing during recovery".into());
+    let source = "mjolnir-chat-draft-v1:malformed";
     assert!(
-        record_terminal_draft_state(
-            &controller,
-            None,
+        drafts::install_workspace_draft(
+            &mut cache,
             &mut dashboard,
-            detached(),
-            &updates,
-            tracker,
+            &mut chats,
+            "session",
+            "",
+            source
         )
-        .is_none()
+        .is_err()
     );
-    assert!(
-        dashboard
-            .notice()
-            .is_some_and(|notice| notice.contains("unknown session"))
+    assert_eq!(
+        dashboard.standby_prompt_draft("session").as_deref(),
+        Some("typing during recovery")
     );
+    assert!(cache.start("session", true).is_none());
 }

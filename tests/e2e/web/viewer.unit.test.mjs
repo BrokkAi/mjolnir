@@ -536,7 +536,6 @@ function review() {
     roles: [],
     verdict: {
       text: '[P1] a concrete finding',
-      allowed: ['forward', 'dismiss', 'cancel'],
     },
   };
 }

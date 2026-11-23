@@ -766,6 +766,12 @@ pub enum DashboardAction {
     RecoverWorkspaceDraft {
         generation: u64,
         draft_id: String,
+        session_id: Option<String>,
+    },
+    DiscardWorkspaceDrafts {
+        generation: u64,
+        workspace_id: String,
+        draft_id: Option<String>,
     },
     /// Switch the visible conversation between rendered Markdown and raw text.
     ToggleTranscriptRendering,

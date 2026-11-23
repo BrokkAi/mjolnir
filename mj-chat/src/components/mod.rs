@@ -18,7 +18,7 @@ pub use controls::{
 };
 pub use layout::{
     AutocompletePopup, FormViewport, PopupSide, dialog_content, dialog_rect, form_area,
-    form_columns, form_rows,
+    form_columns,
 };
 pub use scope::{
     ControlKind, DOUBLE_CLICK_INTERVAL, EventResult, FieldEdit, Form, Interaction, ListActivation,

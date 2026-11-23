@@ -4822,7 +4822,9 @@ impl SubagentBackend for ApiBackend {
                 .session(session_id.clone())
                 .await
                 .with_context(|| format!("session {session_id} is not running"))?;
-            let turn = submit_prompt_with_id(&handle, text, command_id).await?;
+            let turn = submit_prompt_with_id(&handle, text, command_id)
+                .await
+                .map_err(super::prompt_submission_error)?;
             self.exports
                 .dismiss_startup_status(session_id, group_id)
                 .await?;
