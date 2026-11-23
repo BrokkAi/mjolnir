@@ -1099,6 +1099,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         title: "parent".into(),
         harness_kind: HarnessKind::Codex,
         last_profile: profile.to_owned(),
+        staged_aws_profile: None,
         bundle_id: "hel".into(),
         project_directory: None,
         managed_worktree: None,
@@ -1770,6 +1771,22 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
         "no push remote configured"
     );
     assert_eq!(refused("", ""), "branch export was refused by the target");
+}
+
+#[test]
+fn session_diff_reports_an_older_workers_usage_error_as_an_upgrade_refusal() {
+    let output = CommandOutput {
+        status: CLAP_USAGE_EXIT_CODE,
+        stdout: Vec::new(),
+        stderr: b"error: unexpected argument '--path=-literal' found".to_vec(),
+    };
+    match worker_output(output, "session diff") {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("session diff"));
+            assert!(reason.contains("resume the session to upgrade"));
+        }
+        other => panic!("expected an upgrade refusal, got {other:?}"),
+    }
 }
 
 fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {
@@ -7994,6 +8011,67 @@ async fn reviewer_children_are_private_to_the_review_host() {
             .is_empty(),
         "reviewers never notify their parent through SubagentFinished"
     );
+}
+
+#[tokio::test]
+async fn send_message_cannot_queue_input_for_a_review_child_during_startup() {
+    if !isolated_parked_test("send_message_cannot_queue_input_for_a_review_child_during_startup") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    store_parent_and_child("review-child");
+    let mut state = mj_controller::database::load_state().unwrap();
+    state.subagents.get_mut("review-child").unwrap().kind =
+        mj_core::subagent::SubagentKind::Reviewer;
+    state.sessions.get_mut("review-child").unwrap().state = SessionState::Provisioning;
+    mj_controller::database::save_state(&state).unwrap();
+    mj_controller::database::save_session(&parent_record("peer-1", "peer")).unwrap();
+    let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
+    manager
+        .control
+        .restore_starting("review-child".into())
+        .await
+        .unwrap();
+    let backend = Arc::new(ApiBackend::new(
+        manager.control.client(),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    ));
+    for sender in ["parent-1", "peer-1"] {
+        let result = backend
+            .execute_subagent_tool(
+                sender.into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: format!("{sender}-send"),
+                    created_at_ms: 1,
+                    action: mj_core::subagent::SubagentToolAction::SendMessage {
+                        child_session_id: "review-child".into(),
+                        message: "unexpected input".into(),
+                    },
+                },
+            )
+            .await;
+        assert!(result.is_error, "{}", result.message);
+        assert!(
+            result
+                .message
+                .contains("target session review-child does not exist or was destroyed"),
+            "{}",
+            result.message
+        );
+    }
+    assert!(
+        mj_controller::database::next_startup_delivery("review-child")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        mj_controller::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    manager.shutdown.shutdown().await.unwrap();
 }
 
 // Hard-won: #1442: delegation announced a provider failure while its worker had a retry armed.

@@ -140,6 +140,18 @@ var UiThemeAll = [17]UiTheme{
 // DefaultUiTheme is UiTheme's Default.
 func DefaultUiTheme() UiTheme { return UiThemeMidnight }
 
+// GoString is Rust's derived Debug: the variant name, `HighContrastLight`
+// for `high-contrast-light`.
+func (t UiTheme) GoString() string {
+	var name strings.Builder
+	for _, word := range strings.Split(string(t), "-") {
+		if word != "" {
+			name.WriteString(strings.ToUpper(word[:1]) + word[1:])
+		}
+	}
+	return name.String()
+}
+
 func (t UiTheme) Label() string {
 	switch t {
 	case UiThemeMidnight:

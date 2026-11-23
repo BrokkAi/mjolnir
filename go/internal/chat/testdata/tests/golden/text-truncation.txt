@@ -1,0 +1,18 @@
+=== summary cuts dangling comma (7x1) ===
+source: "alpha, beta"
+alpha…
+=== summary cuts dangling dash (8x1) ===
+source: "alpha - beta"
+alpha…
+=== summary keeps full phrase (20x1) ===
+source: "alpha beta"
+alpha beta
+=== summary folds newlines (20x1) ===
+source: "alpha\n beta"
+alpha beta
+=== plain keeps cut punctuation (7x1) ===
+source: "alpha, beta"
+alpha,…
+=== plain preserves repeated spaces (20x1) ===
+source: "alpha  beta"
+alpha  beta

@@ -14,20 +14,11 @@ Install Apple's official signed package by following the
 [container project installation instructions](https://github.com/apple/container#initial-install).
 Mjolnir does not download or install it for you.
 
-After installing the package, start the service once. This is also where Apple
-prompts for its recommended default kernel:
-
-```console
-container system start
-container system status
-```
-
-Once installed, Mjolnir starts the container service automatically when its
-daemon starts and at least one Apple container target is configured. It first
-runs `container system status`; if the service is stopped, it runs
-`container system start --disable-kernel-install` in the background. The flag
-keeps unattended startup from prompting for a kernel download. If the manual
-start above was skipped, run it once to install the recommended kernel.
+Mjolnir starts the service when a session needs it. If it finds a stopped
+service, it runs `container system start --enable-kernel-install`, which
+installs the default kernel if needed. The Mjolnir daemon also starts the
+local service in the background at startup when a local Apple container
+target is configured.
 
 On an Intel Mac or an older macOS release, use a [remote SSH target](/ssh/) or
 an [EC2 target](/aws/) instead.
@@ -96,21 +87,20 @@ machine = "mac"
 ```
 
 Install the runtime on the remote Mac by following the [installation
-instructions](https://github.com/apple/container#initial-install), then start
-its service there. The remote Mac needs the same runtime and macOS release as a
-local one. Mjolnir runs `container` there with the Mac's system `PATH` from
-`/etc/paths`, which includes `/usr/local/bin` where the package installs it, so
-the SSH account needs no shell configuration. Check the setup before adding the
-machine:
+instructions](https://github.com/apple/container#initial-install). Mjolnir
+starts the service on the remote Mac when a session needs it and runs
+`container` with the Mac's system `PATH`, which includes `/usr/local/bin`.
+Check the setup before adding the machine:
 
 ```console
 ssh mac.example.com /usr/local/bin/container --version
-ssh mac.example.com /usr/local/bin/container system status
+ssh mac.example.com /usr/local/bin/container system status --format json
 ```
 
 When you save that machine, Mjolnir probes it over SSH — `uname -sm`,
-`sw_vers -productVersion`, `container --version`, and `container system status`
-— and offers the runtime in **Settings → Runtimes** when all four answer.
+`sw_vers -productVersion`, `container --version`, and
+`container system status --format json`. Both running and stopped services
+are eligible in **Settings → Runtimes**.
 `mj doctor` checks it the same way. Every command for the session runs on that
 Mac; the controller needs `ssh` but no local container runtime. The Mac and its
 container service stay running when sessions stop.
@@ -126,10 +116,9 @@ mj doctor --json --smoke
 
 The smoke test uses the configured target image, creates a disposable
 container, runs `true`, and removes it. If no `apple-container` runtime exists,
-doctor uses a small stock image for the runtime check. The target is ready only
-when the smoke result is no longer `fixable`.
+doctor uses a small stock image. The smoke test starts a stopped service.
 
-At launch Mjolnir checks `container system status`, prepares the image, creates
+At launch Mjolnir checks the service, prepares the image, creates
 the labeled container, installs or discovers Git and the selected ACP bridge,
 and clones the configured [bundle](/workspaces-bundles/) under `/workspace`.
 The same [verified checkpoint and fresh-target resume](/durability/) rules as

@@ -25,6 +25,14 @@ pub(crate) fn git_line(repository: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
+/// Record a one-file edit as a fixture tree and restore the clean fixture index.
+pub(crate) fn fixture_tree_with_edit(repository: &Path, path: &str) -> String {
+    git(repository, &["add", "--", path]);
+    let tree = git_line(repository, &["write-tree"]);
+    git(repository, &["read-tree", "HEAD"]);
+    tree
+}
+
 /// Git 2.31 does not support NUL-delimited worktree lists.
 pub(crate) struct Git231;
 

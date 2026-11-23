@@ -93,7 +93,7 @@ def run(lab, args):
         # The viewer accepts the action before the relay receives it. Wait
         # for the reply to appear before asking whether the turn has ended.
         def original_reply_visible(_snapshot):
-            status, body = lab.request("GET", f"/api/conversations/{session}")
+            status, body = lab.request("GET", f"/api/v1/conversations/{session}")
             return status == 200 and any(reply in entry["lines"] for entry in body["entries"])
 
         lab.wait_snapshot(original_reply_visible, "the original worker's reply")

@@ -2143,6 +2143,7 @@ fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
         .collect::<String>();
     assert!(rendered.contains("rw · writes reach the host directory"));
     assert!(rendered.contains("ro · read-only"));
+    assert!(rendered.contains("nfs (network filesystem)"));
     assert!(!rendered.contains("cow ·"));
 
     // Escape closes only the list; the changed mode is an unsaved edit, so

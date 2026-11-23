@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::ClientStateRequest;
 
 #[derive(Default, Deserialize)]
 pub(super) struct NativeHistoryQuery {
@@ -847,14 +848,24 @@ pub(super) async fn clear_queue(
     Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
 }
 
+/// Engine inspection runs in the controller's supervised background work.
 pub(super) async fn container_upgrade_preview(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<mj_core::state::ContainerUpgradePreview>, ApiFailure> {
+    crate::server::validate_public_id(&session_id)?;
     require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
-    Ok(Json(
-        crate::server::handlers::ask_container_upgrade_preview(&state, session_id).await?,
-    ))
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    state
+        .client_state_tx
+        .send(ClientStateRequest::ContainerUpgradePreview { session_id, reply })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    answer
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map(Json)
+        .map_err(ApiFailure::conflict)
 }
 
 pub(super) async fn upgrade_container(

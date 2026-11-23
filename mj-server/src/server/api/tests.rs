@@ -5921,6 +5921,57 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
 }
 
 #[tokio::test]
+async fn diff_route_preserves_repeated_paths_and_export_selects_the_full_patch() {
+    let backend = Arc::new(FakeBackend {
+        diff: Some(r#"{"diff":"+new\n","base":"aaaa","head":"bbbb","tracked_files":[{"path":"tracked","insertions":1,"deletions":0,"binary":false}],"untracked_files":["new.txt"],"untracked_total":1}"#.into()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app.clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true&path=-literal&path=src%2Ffile+%26+notes&path="))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["tracked_files"][0]["path"], "tracked");
+    assert_eq!(body["untracked_files"][0], "new.txt");
+    assert_eq!(body["untracked_total"], 1);
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"patch"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/x-diff; charset=utf-8"
+    );
+    assert_eq!(
+        backend.diff_options.lock().unwrap().as_slice(),
+        [
+            DiffOptions {
+                base: Some("HEAD^".into()),
+                json: true,
+                paths: vec!["-literal".into(), "src/file & notes".into(), String::new()],
+                full_patch: false,
+            },
+            DiffOptions {
+                full_patch: true,
+                ..DiffOptions::default()
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
@@ -7165,6 +7216,27 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
             reason: "Docker is not installed on this host".into(),
         };
         snapshot.targets.push(docker);
+        for (id, kind, availability) in [
+            ("apple", "apple-container", AvailabilityVerdict::Available),
+            (
+                "remote-apple",
+                "ssh-apple-container",
+                AvailabilityVerdict::Available,
+            ),
+            (
+                "broken-apple",
+                "ssh-apple-container",
+                AvailabilityVerdict::Missing {
+                    reason: "Apple container check exited with status 64.".into(),
+                },
+            ),
+        ] {
+            let mut apple = snapshot.targets[0].clone();
+            apple.id = id.into();
+            apple.kind = kind.into();
+            apple.availability = availability;
+            snapshot.targets.push(apple);
+        }
         snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
             id: "local".into(),
             label: "local".into(),
@@ -7208,6 +7280,15 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
         "Start Podman and try again."
     );
     assert!(target("podman").get("runtime_missing").is_none());
+    for id in ["apple", "remote-apple"] {
+        assert_eq!(target(id)["availability"], "ready");
+        assert!(target(id)["unavailable_reason"].is_null());
+    }
+    assert_eq!(target("broken-apple")["availability"], "unavailable");
+    assert_eq!(
+        target("broken-apple")["unavailable_reason"],
+        "Apple container check exited with status 64."
+    );
     assert_eq!(target("raw")["availability"], "unknown");
     // The previous CLI strictly decodes each profile in the stable options
     // response, even when a daemon has probed its availability.
@@ -8907,13 +8988,13 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
     );
     let cookie = login_cookie(&app).await;
 
-    for (route, cookie_only) in [
+    for (route, use_cookie) in [
         ("/api/v1/sessions/session-1/items", false),
         (
             "/api/v1/sessions/session-1/native-agents/child/items",
             false,
         ),
-        ("/api/sessions/session-1/items", true),
+        ("/api/v1/sessions/session-1/items", true),
     ] {
         let edit = format!("{route}/tool%3Aedit/detail");
         let request = |builder: axum::http::request::Builder| {
@@ -8921,14 +9002,8 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
         };
         let response = request(Request::get(&edit)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
-        if cookie_only {
-            assert_eq!(
-                request(bearer(Request::get(&edit))).await.unwrap().status(),
-                StatusCode::UNAUTHORIZED
-            );
-        }
         let authenticated = |path: &str| {
-            if cookie_only {
+            if use_cookie {
                 Request::get(path).header(COOKIE, &cookie)
             } else {
                 bearer(Request::get(path))

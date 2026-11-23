@@ -165,29 +165,29 @@ async function mount(page, taskCount = 1, options = {}) {
       contentType: 'application/json',
       body: JSON.stringify(value),
     });
-    if (pathname === '/api/snapshot') {
+    if (pathname === '/api/v1/snapshot') {
       state.snapshots += 1;
       return json(viewerWireSnapshot(state.snapshot));
     }
-    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    const detailPath = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/row$/);
     if (detailPath) {
       const detail = viewerDetailResponse(state.snapshot, decodeURIComponent(detailPath[1]));
       return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
-    if (pathname === '/api/events') {
+    if (pathname === '/api/v1/viewer/events') {
       return route.fulfill({
         status: 200,
         headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
         body: ': fixture\n\n',
       });
     }
-    if (pathname === '/api/actions') {
+    if (pathname === '/api/v1/actions') {
       const action = route.request().postDataJSON();
       state.actions.push(action);
       if (action.action === 'set-operator-away') state.snapshot.operator_away = action.away;
       return route.fulfill({ status: 202, body: '' });
     }
-    if (pathname.startsWith('/api/conversations/')) {
+    if (pathname.startsWith('/api/v1/conversations/')) {
       if (pathname.endsWith('/read')) state.receipts.push(route.request().postDataJSON().through);
       if (route.request().method() === 'GET') return json(state.conversation);
       return route.fulfill({ status: 204, body: '' });
@@ -236,7 +236,7 @@ test('phone AFK action shows its pending state and reports a failure', async ({ 
   let actionReached;
   const blockedAction = new Promise(resolve => { releaseAction = resolve; });
   const reachedAction = new Promise(resolve => { actionReached = resolve; });
-  await page.route('**/api/actions', async route => {
+  await page.route('**/api/v1/actions', async route => {
     actionReached();
     await blockedAction;
     await route.fulfill({
@@ -282,7 +282,7 @@ test('trusted global input signals activity immediately and coalesces while a re
   let signalReached;
   const blockedSignal = new Promise(resolve => { releaseFirst = resolve; });
   const reachedSignal = new Promise(resolve => { signalReached = resolve; });
-  await page.route('**/api/actions', async route => {
+  await page.route('**/api/v1/actions', async route => {
     const action = route.request().postDataJSON();
     state.actions.push(action);
     if (action.action === 'record-operator-activity' && state.actions.filter(item => item.action === action.action).length === 1) {

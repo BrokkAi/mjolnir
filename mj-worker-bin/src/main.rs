@@ -277,7 +277,7 @@ enum WorkerCommand {
         #[arg(long)]
         review_server: bool,
     },
-    /// Print a unified diff of the session's work in one repository.
+    /// Summarize changes or print a patch for selected paths in a session checkout.
     Diff {
         #[arg(long)]
         repository: PathBuf,
@@ -287,6 +287,12 @@ enum WorkerCommand {
         /// The session branch, whose reflog names the commit it was created at.
         #[arg(long)]
         branch: Option<String>,
+        /// Tracked checkout-relative paths to diff.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Export the unified patch of all tracked changes.
+        #[arg(long, conflicts_with_all = ["paths", "json"])]
+        patch: bool,
         /// Include the resolved base and HEAD commit in JSON output.
         #[arg(long)]
         json: bool,
@@ -951,13 +957,26 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             repository,
             base,
             branch,
+            paths,
+            patch,
             json,
         } => {
+            if patch {
+                let patch = mj_checkpoint::archive::session_diff_patch(
+                    &mj_checkpoint::archive::SystemGit,
+                    &repository,
+                    base.as_deref(),
+                    branch.as_deref(),
+                )
+                .map_err(export_error)?;
+                return write_stdout(patch.as_bytes());
+            }
             let result = mj_checkpoint::archive::session_diff_details(
                 &mj_checkpoint::archive::SystemGit,
                 &repository,
                 base.as_deref(),
                 branch.as_deref(),
+                &paths,
             )
             .map_err(export_error)?;
             if json {

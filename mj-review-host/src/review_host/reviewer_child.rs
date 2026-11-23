@@ -247,7 +247,7 @@ impl HostState {
         }
         // Startup owns the relay command ID; driver role keys only identify
         // logical review work and are not the prompt the child answered.
-        let command_id = mj_store::database::startup_step_id(&registration.request_key, "prompt");
+        let request_key = registration.request_key.clone();
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
@@ -268,7 +268,7 @@ impl HostState {
                                 format!(
                                     "the reviewer's session ended before the review was restored ({state})"
                                 ),
-                                standing.answer_to(&command_id),
+                                standing.answer_to_startup(&request_key),
                             );
                             return;
                         }
@@ -522,19 +522,17 @@ impl HostState {
     /// like every other reviewer outcome, so the group resolves like any other
     /// reviewer failure.
     pub fn child_ended(&mut self, child: &str, reason: String) {
-        let Some((key, epoch, role, command_id)) = self.reviews.iter().find_map(|(key, slot)| {
+        let Some((key, epoch, role, request_key)) = self.reviews.iter().find_map(|(key, slot)| {
             let group = slot.open.active_group.as_ref()?;
             let registration = group
                 .registrations
                 .iter()
                 .find(|item| item.child_session_id.as_deref() == Some(child))?;
-            let command_id =
-                mj_store::database::startup_step_id(&registration.request_key, "prompt");
             Some((
                 key.clone(),
                 slot.epoch,
                 registration.role.clone(),
-                command_id,
+                registration.request_key.clone(),
             ))
         }) else {
             return;
@@ -558,7 +556,7 @@ impl HostState {
         mj_core::runtime::spawn(async move {
             // A handback the child recorded before it ended is its outcome.
             let handback = match reviewer_standing(&environment, &child).await {
-                Ok(standing) => standing.answer_to(&command_id),
+                Ok(standing) => standing.answer_to_startup(&request_key),
                 // Failing the role now could discard a handback the child
                 // saved, so the role stays pending and the read is repeated.
                 Err(error) => {

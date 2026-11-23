@@ -440,7 +440,7 @@ fn push_unique(paths: &mut Vec<String>, more: impl IntoIterator<Item = String>) 
 
 /// Check a target before a launch, resume, or move uses it.
 ///
-/// An SSH host's container runtime is verified by first-run setup, `mj doctor`,
+/// An SSH host's Podman or Docker runtime is verified by first-run setup, `mj doctor`,
 /// and the Targets pane's Test action; here it is assumed to still be as
 /// they left it, and only the host's reachability is checked. That probe
 /// joins an open shared connection, so it usually costs one SSH channel.
@@ -452,54 +452,11 @@ pub(super) fn preflight_target(
     match template {
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
-        | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => {
+        | TargetTemplate::SshDocker { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor).map(|()| None)
         }
         _ => verify_target(template, executor, check),
     }
-}
-
-/// Whether a local container engine can run sessions, as the launch
-/// preflight and the dashboard's Targets pane judge it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalEngineReadiness {
-    Ready,
-    /// The engine's command is not on this host.
-    NotInstalled,
-    /// The command is there, but the engine did not answer its check.
-    NotReady,
-}
-
-/// Run the launch preflight's engine check for a local container target
-/// kind (`local-podman`, `local-docker`, or `apple-container`).
-///
-/// Answers `None` for any other kind: their readiness is not a local engine's.
-pub fn local_engine_readiness(
-    kind: &str,
-    executor: &impl CommandExecutor,
-) -> Option<LocalEngineReadiness> {
-    let result = match kind {
-        "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
-        "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
-        // Observe only: opening the launch options must not start a service
-        // the user may have stopped. Starting stays with daemon startup and
-        // the launch preflight.
-        "apple-container" => {
-            targets::apple_container_runtime_status(executor).and_then(|status| match status {
-                targets::AppleContainerStatus::Running => Ok(()),
-                targets::AppleContainerStatus::Stopped { status, detail } => {
-                    anyhow::bail!("container system status exited with status {status}: {detail}")
-                }
-            })
-        }
-        _ => return None,
-    };
-    Some(match result {
-        Ok(()) => LocalEngineReadiness::Ready,
-        Err(error) if is_missing_command(&error) => LocalEngineReadiness::NotInstalled,
-        Err(_) => LocalEngineReadiness::NotReady,
-    })
 }
 
 pub use mj_targets::command_checks::is_missing_command;
@@ -570,7 +527,7 @@ pub(super) fn verify_target(
                 })
         }
         TargetTemplate::AppleContainer { .. } => {
-            targets::ensure_apple_container_runtime(executor)
+            targets::ensure_apple_container_runtime(None, executor)
                 .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
@@ -580,7 +537,9 @@ pub(super) fn verify_target(
         }
         TargetTemplate::SshAppleContainer { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
-            targets::verify_ssh_apple_container(&ssh, executor)
+            targets::validate_ssh(&ssh)
+                .and_then(|()| verify_ssh_connectivity(&ssh, executor))
+                .and_then(|()| targets::ensure_apple_container_runtime(Some(&ssh), executor))
                 .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(

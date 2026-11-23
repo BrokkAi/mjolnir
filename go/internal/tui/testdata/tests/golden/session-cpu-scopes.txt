@@ -1,0 +1,56 @@
+Machine CPU share · hourly
+podman  32%+ hourly
+  ACP pretty name  [codex-1]  32%+ hourly (tree of 3; process tree 2.0%, 2 of 3 measured)
+    kid-a  [codex-1]  30% hourly (process tree)
+    kid-b  [codex-1]  no CPU data yet
+
+Shared container and independent child
+Machine CPU share · hourly
+podman  12% hourly
+  ACP pretty name  [codex-1]  12% hourly (tree of 3; container 2.0%)
+    kid-b  [codex-1]  10% hourly (process tree)
+    kid-a  [codex-1]  included in parent (ACP pretty name)
+
+Owner moved; source child sampled independently
+Machine CPU share · hourly
+podman  42% hourly
+  ACP pretty name  [codex-1]  42% hourly (tree of 3; container 2.0%)
+    kid-a  [codex-1]  30% hourly (container)
+    kid-b  [codex-1]  10% hourly (process tree)
+
+Independent child on another machine
+Machine CPU share · hourly
+other-machine  10% hourly
+  kid-b  [codex-1]  10% hourly (process tree)
+
+podman  32% hourly
+  ACP pretty name  [codex-1]  42% hourly (tree of 3; container 2.0%)
+    kid-a  [codex-1]  30% hourly (container)
+
+Borrower supplies shared container sample
+Machine CPU share · hourly
+podman  40% hourly
+  ACP pretty name  [codex-1]  40% hourly (tree of 3; container 30%)
+    kid-a  [codex-1]  included in parent (ACP pretty name)
+    kid-b  [codex-1]  10% hourly (process tree)
+
+Owner parked; borrower still sampled
+Machine CPU share · hourly
+podman  40% hourly
+  kid-a  [codex-1]  30% hourly (container)
+
+  kid-b  [codex-1]  10% hourly (process tree)
+
+Legacy owner does not cover borrowed child
+Machine CPU share · hourly
+podman  12%+ hourly
+  ACP pretty name  [codex-1]  12%+ hourly (tree of 3; process tree 2.0%, 2 of 3 measured)
+    kid-b  [codex-1]  10% hourly (process tree)
+    kid-a  [codex-1]  no CPU data yet
+
+Unknown measurements
+Machine CPU share · hourly
+podman  0.0%+ hourly
+  ACP pretty name  [codex-1]  no CPU data yet
+    kid-a  [codex-1]  no CPU data yet
+    kid-b  [codex-1]  no CPU data yet

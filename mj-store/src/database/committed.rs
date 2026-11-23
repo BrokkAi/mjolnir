@@ -1050,7 +1050,8 @@ mod tests {
         let path = directory.path().join("controller.sqlite");
         let owner = start_database_writer_at(&path, false).unwrap();
         let before = owner.writer.committed_state().unwrap();
-        let record = super::super::tests::session("created", "project");
+        let mut record = super::super::tests::session("created", "project");
+        record.staged_aws_profile = Some("team".into());
         let saved = record.clone();
         owner
             .writer

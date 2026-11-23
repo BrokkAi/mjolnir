@@ -1,10 +1,4 @@
-//! Scoped, short-lived AWS credentials for one session, minted with STS
-//! `AssumeRole` and cached like the GitHub App installation tokens.
-//!
-//! The controller uses the host's own AWS login (the same `AwsCredentialSource`
-//! the unscoped export uses) to assume the role the profile names. The
-//! session receives only the resulting temporary credentials, which are
-//! limited to that role and to the session policy passed with the request.
+//! Cache host AWS exports and session-scoped STS credentials.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -18,12 +12,10 @@ use mj_core::targets::{CommandExecutor, CommandSpec};
 
 type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
-/// One process shares this cache between session launch, resume and the
-/// periodic credential sync. Entries are rebuildable: a daemon restart empties
-/// the cache and each live session then mints once.
-pub struct ScopedAwsCredentials {
+/// Single-flight cache of AWS credentials shared by launch and periodic sync.
+pub struct AwsCredentialCache {
     now: Clock,
-    entries: Mutex<BTreeMap<ScopedKey, Arc<Mutex<Option<ScopedEntry>>>>>,
+    entries: Mutex<BTreeMap<CacheKey, Arc<Mutex<Option<CacheEntry>>>>>,
 }
 
 /// What makes two requests the same credentials: the session (it is the role
@@ -32,43 +24,31 @@ pub struct ScopedAwsCredentials {
 /// profile, but also `AWS_CONFIG_FILE`, `HOME` and the like). No `Debug`:
 /// the environment is not for logs.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ScopedKey {
-    session_id: String,
-    role: AwsRoleConfig,
+struct CacheKey {
+    session_id: Option<String>,
+    role: Option<AwsRoleConfig>,
     environment: BTreeMap<String, String>,
 }
 
-struct ScopedEntry {
+impl CacheKey {
+    fn new(session_id: &str, source: &AwsCredentialSource) -> Self {
+        Self {
+            session_id: source.role.as_ref().map(|_| session_id.to_owned()),
+            role: source.role.clone(),
+            environment: source.environment.clone(),
+        }
+    }
+}
+
+struct CacheEntry {
     credentials: AwsCredentials,
-    minted_at: SystemTime,
-    expires_at: SystemTime,
+    expires_at: Option<SystemTime>,
+    refresh_at: SystemTime,
 }
 
-impl ScopedEntry {
-    /// When to refresh: once half of the granted lifetime has elapsed. That is
-    /// derived from the lifetime AWS granted, so it scales with
-    /// `duration_seconds`, and it leaves at least half of the shortest STS
-    /// lifetime (15 minutes) for retries. The one place the half-life is
-    /// computed: reuse and renewal scheduling both ask it.
-    fn refresh_at(&self) -> SystemTime {
-        let lifetime = self
-            .expires_at
-            .duration_since(self.minted_at)
-            .unwrap_or_default();
-        self.minted_at + lifetime / 2
-    }
-
-    fn fresh_at(&self, now: SystemTime) -> bool {
-        now < self.refresh_at()
-    }
-}
-
-impl ScopedAwsCredentials {
-    /// Drop expired credentials. Called once per periodic credential sync pass
-    /// and not on each call, which would make a pass quadratic in its sessions:
-    /// the daemon holds a session's credentials for at most their own lifetime
-    /// after the session stops being synced, and no expired secret survives a
-    /// pass.
+impl AwsCredentialCache {
+    /// Drop expired credentials and static exports due for refresh. Run once
+    /// per periodic pass to keep the scan linear in the number of entries.
     pub fn sweep_expired(&self) {
         let now = (self.now)();
         sweep(
@@ -86,19 +66,14 @@ impl ScopedAwsCredentials {
         &self,
         session_id: &str,
         source: &AwsCredentialSource,
-        read: impl FnOnce(&ScopedEntry, SystemTime) -> Option<T>,
+        read: impl FnOnce(&CacheEntry, SystemTime) -> Option<T>,
     ) -> Option<T> {
-        let role = source.role.as_ref()?;
         let now = (self.now)();
         let cell = Arc::clone(
             self.entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&ScopedKey {
-                    session_id: session_id.to_owned(),
-                    role: role.clone(),
-                    environment: source.environment.clone(),
-                })?,
+                .get(&CacheKey::new(session_id, source))?,
         );
         let entry = cell.try_lock().ok()?;
         read(entry.as_ref()?, now)
@@ -111,7 +86,7 @@ impl ScopedAwsCredentials {
     pub fn renew_in(&self, session_id: &str, source: &AwsCredentialSource) -> Option<Duration> {
         self.peek(session_id, source, |entry, now| {
             entry
-                .refresh_at()
+                .refresh_at
                 .duration_since(now)
                 .ok()
                 .filter(|wait| !wait.is_zero())
@@ -119,7 +94,7 @@ impl ScopedAwsCredentials {
     }
 
     /// How long the cached credentials stay valid; `None` when none are cached
-    /// or they have expired.
+    /// or they have expired or have no expiration.
     pub fn remaining_validity(
         &self,
         session_id: &str,
@@ -127,7 +102,7 @@ impl ScopedAwsCredentials {
     ) -> Option<Duration> {
         self.peek(session_id, source, |entry, now| {
             entry
-                .expires_at
+                .expires_at?
                 .duration_since(now)
                 .ok()
                 .filter(|left| !left.is_zero())
@@ -139,18 +114,11 @@ impl ScopedAwsCredentials {
     /// refused, or lost from the worker. Blocking, like `credentials_for`: it
     /// waits for a mint in progress for the key.
     pub fn forget(&self, session_id: &str, source: &AwsCredentialSource) {
-        let Some(role) = source.role.as_ref() else {
-            return;
-        };
         let cell = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&ScopedKey {
-                session_id: session_id.to_owned(),
-                role: role.clone(),
-                environment: source.environment.clone(),
-            })
+            .get(&CacheKey::new(session_id, source))
             .map(Arc::clone);
         if let Some(cell) = cell {
             *cell
@@ -167,11 +135,11 @@ impl ScopedAwsCredentials {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .keys()
-            .any(|key| key.session_id == session_id)
+            .any(|key| key.session_id.as_deref() == Some(session_id))
     }
 
     pub fn shared() -> Arc<Self> {
-        static SHARED: OnceLock<Arc<ScopedAwsCredentials>> = OnceLock::new();
+        static SHARED: OnceLock<Arc<AwsCredentialCache>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::with_clock(Arc::new(SystemTime::now)))))
     }
 
@@ -182,26 +150,19 @@ impl ScopedAwsCredentials {
         }
     }
 
-    /// Credentials for one session, from the cache while enough of their
-    /// lifetime remains and otherwise from a new `AssumeRole` call. Blocking:
-    /// run it on a blocking thread. Callers for one key wait for the first
-    /// caller's mint instead of minting again.
+    /// Get fresh credentials, exporting once per unscoped environment or
+    /// assuming the role once per session and environment. Blocking: callers
+    /// for the same key wait for the first caller's refresh.
     ///
-    /// A failed mint is an error even when the previous credentials have not
-    /// yet expired. The session keeps what it has installed, and the caller
-    /// reports the failure; nothing widens the scope.
+    /// A failed refresh leaves the credentials already installed on the worker
+    /// until they expire or are withdrawn by sync.
     pub fn credentials_for(
         &self,
         session_id: &str,
         source: &AwsCredentialSource,
         executor: &impl CommandExecutor,
+        static_refresh_interval: Duration,
     ) -> Result<AwsCredentials> {
-        let role = source
-            .role
-            .as_ref()
-            .context("no AWS role is configured for this profile")?;
-        let host_profile = selected_profile(source);
-        let now = (self.now)();
         let cell = {
             let mut entries = self
                 .entries
@@ -209,11 +170,7 @@ impl ScopedAwsCredentials {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(
                 entries
-                    .entry(ScopedKey {
-                        session_id: session_id.to_owned(),
-                        role: role.clone(),
-                        environment: source.environment.clone(),
-                    })
+                    .entry(CacheKey::new(session_id, source))
                     .or_default(),
             )
         };
@@ -221,68 +178,85 @@ impl ScopedAwsCredentials {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = cached.as_ref()
-            && entry.fresh_at(now)
+            && (self.now)() < entry.refresh_at
         {
             return Ok(entry.credentials.clone());
         }
-        let command = assume_role_command(
-            role,
-            host_profile,
-            &session_name(session_id),
-            &source.environment,
-        );
-        let name = session_name(session_id);
-        // Only the call to AWS (and reading its answer) is the role's to
-        // explain: its advice, including the unscoped fallback, does not
-        // apply to a failure of the controller's own signing key.
-        let issued = mint(&command, host_profile, executor)
-            .and_then(|credentials| {
-                // Recorded beside the secret on the worker, so what Mjolnir
-                // issued for this session's role is recognisable later.
-                credentials.issued_for(
-                    &role.role_arn,
-                    &name,
-                    &role.session_policy_fingerprint(),
-                    role.source_identity.then_some(name.as_str()),
-                )
-            })
-            .with_context(|| {
-                format!(
-                    "Could not assume AWS role {} for this session. The controller's AWS login (profile {host_profile}) must be allowed to assume it: give that login sts:AssumeRole on the role, and name it in the role's trust policy",
-                    role.role_arn
-                )
-            })?;
-        // ...and authenticated with a key the session cannot compute.
-        let minted = issued.sign_scope(sign_scope).context(
-            "could not sign the session's AWS scope record with the controller's signing key",
-        )?;
+        let minted = if let Some(role) = &source.role {
+            mint_scoped(session_id, source, role, executor)?
+        } else {
+            crate::aws_credentials::export(source, executor)?
+        };
         let minted_at = (self.now)();
         let expires_at = minted
             .expires_at_epoch_millis()
             .and_then(|millis| u64::try_from(millis).ok())
-            .map(|millis| UNIX_EPOCH + Duration::from_millis(millis))
-            .context("AWS returned credentials without an expiration")?;
-        *cached = Some(ScopedEntry {
+            .map(|millis| UNIX_EPOCH + Duration::from_millis(millis));
+        ensure!(
+            source.role.is_none() || expires_at.is_some(),
+            "AWS returned credentials without an expiration"
+        );
+        let refresh_after = expires_at.map_or(static_refresh_interval, |expiration| {
+            expiration.duration_since(minted_at).unwrap_or_default() / 2
+        });
+        *cached = Some(CacheEntry {
             credentials: minted.clone(),
-            minted_at,
             expires_at,
+            refresh_at: minted_at + refresh_after,
         });
         Ok(minted)
     }
 }
 
-/// Drop entries whose credentials have expired, and empty cells nobody holds.
+fn mint_scoped(
+    session_id: &str,
+    source: &AwsCredentialSource,
+    role: &AwsRoleConfig,
+    executor: &impl CommandExecutor,
+) -> Result<AwsCredentials> {
+    let host_profile = selected_profile(source);
+    let name = session_name(session_id);
+    let command = assume_role_command(role, host_profile, &name, &source.environment);
+    // Only the call to AWS (and reading its answer) is the role's to
+    // explain: its advice, including the unscoped fallback, does not
+    // apply to a failure of the controller's own signing key.
+    let issued = mint(&command, host_profile, executor)
+        .and_then(|credentials| {
+            // Recorded beside the secret on the worker, so what Mjolnir
+            // issued for this session's role is recognisable later.
+            credentials.issued_for(
+                &role.role_arn,
+                &name,
+                &role.session_policy_fingerprint(),
+                role.source_identity.then_some(name.as_str()),
+            )
+        })
+        .with_context(|| {
+            format!(
+                "Could not assume AWS role {} for this session. The controller's AWS login (profile {host_profile}) must be allowed to assume it: give that login sts:AssumeRole on the role, and name it in the role's trust policy",
+                role.role_arn
+            )
+        })?;
+    // ...and authenticated with a key the session cannot compute.
+    issued
+        .sign_scope(sign_scope)
+        .context("could not sign the session's AWS scope record with the controller's signing key")
+}
+
+/// Drop expired credentials, static credentials due for refresh, and empty cells.
 /// A cell another caller holds (it is minting into it, or waiting to) is left
 /// alone, expired or not: removing it would let that caller mint into a cell
 /// the map no longer knows. The map lock is held, so nobody can newly clone a
 /// cell while this counts them.
-fn sweep(entries: &mut BTreeMap<ScopedKey, Arc<Mutex<Option<ScopedEntry>>>>, now: SystemTime) {
+fn sweep(entries: &mut BTreeMap<CacheKey, Arc<Mutex<Option<CacheEntry>>>>, now: SystemTime) {
     entries.retain(|_, cell| {
         if Arc::strong_count(cell) > 1 {
             return true;
         }
         match cell.try_lock() {
-            Ok(entry) => entry.as_ref().is_some_and(|entry| entry.expires_at > now),
+            Ok(entry) => entry
+                .as_ref()
+                .is_some_and(|entry| entry.expires_at.unwrap_or(entry.refresh_at) > now),
             Err(_) => true,
         }
     });
@@ -412,7 +386,7 @@ pub async fn scope_is_authentic(
 const STS_DEFAULT_DURATION: Duration = Duration::from_secs(3600);
 
 /// Half the lifetime a role's credentials are granted, which is when they are
-/// renewed (`ScopedEntry::refresh_at`). A renewal that keeps failing is retried
+/// renewed by the cache. A renewal that keeps failing is retried
 /// no more slowly than this, because slower than this the credentials would
 /// run out between attempts.
 pub fn credential_half_life(role: &AwsRoleConfig) -> Duration {
@@ -421,19 +395,6 @@ pub fn credential_half_life(role: &AwsRoleConfig) -> Duration {
             Duration::from_secs(u64::from(seconds))
         })
         / 2
-}
-
-/// Role-scoped credentials installed under the profile name the worker's
-/// configuration already has, which can differ from the host profile the mint
-/// ran as. The name is part of the secret, so the scope is signed again.
-pub fn for_worker_profile(credentials: AwsCredentials, profile: &str) -> Result<AwsCredentials> {
-    if credentials.profile() == profile {
-        return Ok(credentials);
-    }
-    credentials
-        .with_profile(profile)?
-        .sign_scope(sign_scope)
-        .context("could not sign the session's AWS scope record with the controller's signing key")
 }
 
 /// The role session name: it appears in the assumed-role ARN of every
@@ -569,15 +530,14 @@ pub fn probe(
 }
 
 /// The unscoped export for a profile without a role, the scoped mint for one
-/// with a role. Launch calls this; the credential sync calls the same two
-/// functions, because it exports once per profile and mints once per session.
+/// with a role. Launch always resolves unscoped credentials immediately.
 pub fn obtain(
     session_id: &str,
     source: &AwsCredentialSource,
     executor: &impl CommandExecutor,
 ) -> Result<AwsCredentials> {
     if source.role.is_some() {
-        ScopedAwsCredentials::shared().credentials_for(session_id, source, executor)
+        AwsCredentialCache::shared().credentials_for(session_id, source, executor, Duration::ZERO)
     } else {
         crate::aws_credentials::export(source, executor)
     }
@@ -615,7 +575,6 @@ mod tests {
             environment: BTreeMap::from([("AWS_PROFILE".into(), "work".into())]),
             role: Some(role),
             mints: true,
-            selection: None,
         }
     }
 
@@ -661,6 +620,7 @@ mod tests {
     struct FakeAws {
         clock: TestClock,
         lifetime: Duration,
+        static_export: bool,
         calls: AtomicUsize,
         commands: Mutex<Vec<CommandSpec>>,
         stderr: Mutex<Option<String>>,
@@ -671,6 +631,7 @@ mod tests {
             Self {
                 clock: clock.clone(),
                 lifetime,
+                static_export: false,
                 calls: AtomicUsize::new(0),
                 commands: Mutex::new(Vec::new()),
                 stderr: Mutex::new(None),
@@ -703,7 +664,10 @@ mod tests {
         }
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(&command.args[..2], ["sts", "assume-role"]);
+            let export = command.args[..2] == ["configure", "export-credentials"];
+            if !export {
+                assert_eq!(&command.args[..2], ["sts", "assume-role"]);
+            }
             assert!(command.sensitive_output);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.commands.lock().unwrap().push(command.clone());
@@ -714,16 +678,99 @@ mod tests {
                     stderr: stderr.into_bytes(),
                 });
             }
+            let mut stdout = recorded_output(self.clock.now(), self.lifetime);
+            if export {
+                let mut reply: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+                let mut credentials = reply["Credentials"].take();
+                credentials["Version"] = 1.into();
+                if self.static_export {
+                    credentials.as_object_mut().unwrap().remove("Expiration");
+                    credentials.as_object_mut().unwrap().remove("SessionToken");
+                }
+                stdout = serde_json::to_vec(&credentials).unwrap();
+            }
             Ok(CommandOutput {
                 status: 0,
-                stdout: recorded_output(self.clock.now(), self.lifetime),
+                stdout,
                 stderr: Vec::new(),
             })
         }
     }
 
-    fn cache(clock: &TestClock) -> ScopedAwsCredentials {
-        ScopedAwsCredentials::with_clock(clock.clock())
+    fn cache(clock: &TestClock) -> AwsCredentialCache {
+        AwsCredentialCache::with_clock(clock.clock())
+    }
+
+    #[test]
+    fn expiring_exports_share_the_cache_until_half_life() {
+        let clock = TestClock::new();
+        let aws = FakeAws::new(&clock, Duration::from_secs(900));
+        let cache = cache(&clock);
+        let mut source = source(role());
+        source.role = None;
+        let interval = Duration::from_secs(3600);
+        let first = cache
+            .credentials_for(SESSION, &source, &aws, interval)
+            .unwrap();
+        assert!(first.scope().is_none());
+        let renew_in = cache.renew_in("peer", &source).unwrap();
+        assert!(renew_in <= Duration::from_secs(450) && renew_in > Duration::from_secs(449));
+        cache
+            .credentials_for("peer", &source, &aws, interval)
+            .unwrap();
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
+        clock.advance(renew_in);
+        cache
+            .credentials_for("peer", &source, &aws, interval)
+            .unwrap();
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn static_exports_are_shared_and_forget_invalidates_the_shared_entry() {
+        let clock = TestClock::new();
+        let mut aws = FakeAws::new(&clock, Duration::ZERO);
+        aws.static_export = true;
+        let cache = cache(&clock);
+        let mut source = source(role());
+        source.role = None;
+        let interval = Duration::from_secs(60);
+        cache
+            .credentials_for(SESSION, &source, &aws, interval)
+            .unwrap();
+        cache
+            .credentials_for("peer", &source, &aws, interval)
+            .unwrap();
+        assert_eq!(cache.renew_in("peer", &source), Some(interval));
+        assert_eq!(cache.remaining_validity("peer", &source), None);
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
+        cache.forget("peer", &source);
+        cache
+            .credentials_for(SESSION, &source, &aws, interval)
+            .unwrap();
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn sweep_retains_static_exports_until_they_are_due_and_unheld() {
+        let clock = TestClock::new();
+        let mut aws = FakeAws::new(&clock, Duration::ZERO);
+        aws.static_export = true;
+        let cache = cache(&clock);
+        let mut source = source(role());
+        source.role = None;
+        let interval = Duration::from_secs(60);
+        cache
+            .credentials_for(SESSION, &source, &aws, interval)
+            .unwrap();
+        cache.sweep_expired();
+        let held = Arc::clone(cache.entries.lock().unwrap().values().next().unwrap());
+        clock.advance(interval);
+        cache.sweep_expired();
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+        drop(held);
+        cache.sweep_expired();
+        assert!(cache.entries.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -733,7 +780,11 @@ mod tests {
             let aws = FakeAws::new(&clock, lifetime);
             let cache = cache(&clock);
             let source = source(role());
-            let mint = || cache.credentials_for(SESSION, &source, &aws).unwrap();
+            let mint = || {
+                cache
+                    .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+                    .unwrap()
+            };
             let first = mint();
             // AWS reports whole seconds, so the granted lifetime can be a
             // fraction of a second short.
@@ -770,7 +821,7 @@ mod tests {
         let cache = cache(&clock);
         SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(true));
         let error = cache
-            .credentials_for(SESSION, &source(role()), &aws)
+            .credentials_for(SESSION, &source(role()), &aws, Duration::ZERO)
             .map(|_| ())
             .unwrap_err();
         SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(false));
@@ -787,7 +838,7 @@ mod tests {
         let clock = TestClock::new();
         let aws = FakeAws::new(&clock, Duration::from_secs(3600));
         let issued = cache(&clock)
-            .credentials_for(SESSION, &source(role()), &aws)
+            .credentials_for(SESSION, &source(role()), &aws, Duration::ZERO)
             .unwrap();
         let scope = issued.scope().unwrap().clone();
         let fingerprint = mj_core::aws_credentials::snapshot(&issued.encode().unwrap()).fingerprint;
@@ -805,9 +856,15 @@ mod tests {
         let cache = cache(&clock);
         let source = source(role());
         let other = "fedcba9876543210fedcba9876543210";
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
-        cache.credentials_for(other, &source, &aws).unwrap();
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
+        cache
+            .credentials_for(other, &source, &aws, Duration::ZERO)
+            .unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         let commands = aws.commands.lock().unwrap();
         let names = commands
             .iter()
@@ -829,13 +886,15 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
         let source = source(role());
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         clock.advance(Duration::from_secs(450));
         *aws.stderr.lock().unwrap() = Some(
             include_str!("../tests/fixtures/aws-sts-assume-role-access-denied.txt").to_owned(),
         );
         let error = cache
-            .credentials_for(SESSION, &source, &aws)
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
             .map(|_| ())
             .unwrap_err();
         let reported = format!("{error:#}");
@@ -854,7 +913,9 @@ mod tests {
         assert!(!reported.contains("private-key-material"), "{reported}");
         // AWS recovered: the next pass renews without needing the old entry.
         *aws.stderr.lock().unwrap() = None;
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         assert_eq!(aws.calls.load(Ordering::SeqCst), 3);
     }
 
@@ -864,11 +925,18 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
         let source = source(role());
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         assert_eq!(cache.entries.lock().unwrap().len(), 1);
         clock.advance(Duration::from_secs(901));
         cache
-            .credentials_for("fedcba9876543210fedcba9876543210", &source, &aws)
+            .credentials_for(
+                "fedcba9876543210fedcba9876543210",
+                &source,
+                &aws,
+                Duration::ZERO,
+            )
             .unwrap();
         // A call scans nothing but its own key...
         assert_eq!(cache.entries.lock().unwrap().len(), 2);
@@ -876,7 +944,11 @@ mod tests {
         cache.sweep_expired();
         let entries = cache.entries.lock().unwrap();
         assert_eq!(entries.len(), 1);
-        assert!(entries.keys().all(|key| key.session_id != SESSION));
+        assert!(
+            entries
+                .keys()
+                .all(|key| key.session_id.as_deref() != Some(SESSION))
+        );
     }
 
     #[test]
@@ -888,7 +960,9 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    cache.credentials_for(SESSION, &source, &aws).unwrap();
+                    cache
+                        .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+                        .unwrap();
                 });
             }
         });
@@ -901,14 +975,20 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(3600));
         let cache = cache(&clock);
         let mut source = source(role());
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
         // The same AWS profile name now resolves through another config file.
         source
             .environment
             .insert("AWS_CONFIG_FILE".into(), "/elsewhere/config".into());
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
         let commands = aws.commands.lock().unwrap();
         assert_eq!(
@@ -923,7 +1003,9 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
         let source = source(role());
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         // A racing caller has cloned the cell and waits for its lock.
         let held = Arc::clone(cache.entries.lock().unwrap().values().next().unwrap());
         clock.advance(Duration::from_secs(901));
@@ -932,7 +1014,9 @@ mod tests {
         // That caller finds the expired entry in its own cell and mints again,
         // into the cell the cache still holds.
         drop(held);
-        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache
+            .credentials_for(SESSION, &source, &aws, Duration::ZERO)
+            .unwrap();
         assert_eq!(cache.entries.lock().unwrap().len(), 1);
         assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
         // Once nobody holds it and it has expired, a pass removes it with no

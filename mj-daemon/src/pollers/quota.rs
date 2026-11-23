@@ -924,10 +924,16 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
 /// when a session needs it.
 pub(super) fn host_is_running(host: &ImageHost, executor: &impl CommandExecutor) -> Result<bool> {
     match host {
-        ImageHost::AppleContainer => Ok(matches!(
-            mj_controller::targets::apple_container_runtime_status(executor)?,
-            mj_controller::targets::AppleContainerStatus::Running
-        )),
+        ImageHost::AppleContainer => {
+            use mj_controller::targets::{AppleContainerStatus, apple_container_runtime_status};
+            match apple_container_runtime_status(None, executor)? {
+                AppleContainerStatus::Running => Ok(true),
+                AppleContainerStatus::Stopped { .. } => Ok(false),
+                AppleContainerStatus::Broken { status, detail } => {
+                    anyhow::bail!("Apple container status failed with status {status}: {detail}")
+                }
+            }
+        }
         _ => Ok(true),
     }
 }

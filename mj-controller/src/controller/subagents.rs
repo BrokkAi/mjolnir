@@ -478,6 +478,7 @@ impl Controller {
             title: request.task_name.clone(),
             harness_kind: profile.kind,
             last_profile: request.profile_id.clone(),
+            staged_aws_profile: None,
             bundle_id: parent.bundle_id.clone(),
             project_directory: parent.project_directory.clone(),
             managed_worktree: None,
@@ -645,12 +646,13 @@ pub fn recover_registered_subagent_startup(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<()> {
-    if relation.kind != mj_core::subagent::SubagentKind::Reviewer
-        && crate::database::load_startup_group(
-            &relation.child_session_id,
-            &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key),
-        )?
-        .is_empty()
+    if crate::database::load_startup_group(
+        &relation.child_session_id,
+        &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key),
+    )?
+    .is_empty()
+        && crate::database::load_startup_group(&relation.child_session_id, &relation.request_key)?
+            .is_empty()
     {
         crate::database::enqueue_startup_deliveries(initial_startup_deliveries(
             relation, fast_mode,
@@ -663,9 +665,6 @@ fn initial_startup_deliveries(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<Vec<crate::database::StartupDelivery>> {
-    if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
-        return Ok(Vec::new());
-    }
     let group_id = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
     crate::database::api_followup_steps(
         &group_id,
@@ -1385,6 +1384,146 @@ mod tests {
             controller
                 .ensure_subagent_slot_available("root", None)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn reviewer_registration_preloads_initial_input_and_preserves_legacy_groups() {
+        use super::super::worker_binary::LaunchHistory;
+        use mj_worker_launch::worker_launch::{session_launch_config, worker_placement};
+        const TEST: &str =
+            "reviewer_registration_preloads_initial_input_and_preserves_legacy_groups";
+        const MARKER: &str = "MJ_TEST_REVIEWER_INITIAL_INPUT";
+        let root = tempfile::tempdir().unwrap();
+        if std::env::var_os(MARKER).is_none() {
+            super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
+                module_path!(),
+                TEST,
+            ))
+            .env(MARKER, "1")
+            .env("MJ_INSTANCE", "slice-b-reviewer-registration")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut config = mj_core::config::Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile::new(HarnessKind::Codex, root.path()),
+        );
+        config.targets.insert(
+            "localhost".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let mut parent =
+            super::super::test_support::checkpoint_test_session("11111111111111111111111111111111");
+        parent.state = SessionState::Running;
+        parent.target_template_id = "localhost".into();
+        parent.project_directory = Some(root.path().to_owned());
+        parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join(&parent.id),
+        }));
+        crate::database::save_session(&parent).unwrap();
+        let mut controller = Controller {
+            config,
+            state: crate::database::load_state().unwrap(),
+        };
+        let relation = controller
+            .register_subagent(RegisterSubagentRequest {
+                no_github_credentials: false,
+                kind: mj_core::subagent::SubagentKind::Reviewer,
+                orchestrator: false,
+                reviewer_launch: None,
+                parent_session_id: parent.id,
+                task_name: "Review".into(),
+                profile_id: "codex".into(),
+                model: Some("test-model".into()),
+                effort: Some("high".into()),
+                fast_mode: true,
+                working_directory: root.path().to_owned(),
+                initial_prompt: "Review the change".into(),
+                request_key: "review-request".into(),
+                report_root: None,
+                category: "reviewer".into(),
+            })
+            .unwrap();
+        let id = &relation.child_session_id;
+        let group =
+            mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
+        let steps = crate::database::load_startup_group(id, &group).unwrap();
+        assert_eq!(steps.len(), 4);
+        let state = crate::database::load_state().unwrap();
+        let (backend, _) = worker_placement(&controller.config, &state, id).unwrap();
+        let (launch, _, _) = session_launch_config(
+            &controller.config,
+            &state,
+            id,
+            &backend,
+            LaunchHistory::Stored,
+        )
+        .unwrap();
+        assert_eq!(
+            launch
+                .initial_commands
+                .iter()
+                .map(|step| &step.command_id)
+                .collect::<Vec<_>>(),
+            steps
+                .iter()
+                .map(|step| &step.command_id)
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            launch.initial_commands.last().unwrap().command,
+            mj_core::relay::RelayCommand::Prompt { .. }
+        ));
+
+        let mut legacy_child = state.sessions[id].clone();
+        legacy_child.id = "22222222222222222222222222222222".into();
+        legacy_child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join(&legacy_child.id),
+        }));
+        let mut legacy_relation = relation;
+        legacy_relation
+            .child_session_id
+            .clone_from(&legacy_child.id);
+        legacy_relation.request_key = "legacy-review-request".into();
+        let legacy_prompt = crate::database::StartupDelivery {
+            session_id: legacy_child.id.clone(),
+            command_id: crate::database::startup_step_id(&legacy_relation.request_key, "prompt"),
+            step_json: serde_json::to_string(&crate::database::StartupStep::ApiPrompt {
+                text: legacy_relation.initial_prompt.clone(),
+            })
+            .unwrap(),
+            phase: "pending".into(),
+            group_id: Some(legacy_relation.request_key.clone()),
+            accepted_ordinal: None,
+            error: None,
+        };
+        crate::database::register_subagent_with_startup(
+            &legacy_child,
+            &legacy_relation,
+            vec![legacy_prompt.clone()],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        recover_registered_subagent_startup(&legacy_relation, true).unwrap();
+        let modern =
+            mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&legacy_relation.request_key);
+        assert!(
+            crate::database::load_startup_group(&legacy_child.id, &modern)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::database::next_startup_delivery(&legacy_child.id)
+                .unwrap()
+                .unwrap()
+                .command_id,
+            legacy_prompt.command_id,
         );
     }
 

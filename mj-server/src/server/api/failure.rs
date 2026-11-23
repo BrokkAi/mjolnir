@@ -91,20 +91,13 @@ impl From<anyhow::Error> for ApiFailure {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub(super) struct FailureBody {
-    pub(super) error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) code: Option<&'static str>,
-}
-
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let handoff = self.code == Some(DAEMON_HANDOFF_CODE);
         let mut response = (
             self.status,
-            Json(FailureBody {
-                error: self.message,
+            Json(crate::server::ErrorBody {
+                error: &self.message,
                 code: self.code,
             }),
         )
