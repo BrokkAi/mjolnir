@@ -1888,7 +1888,21 @@ fn new_session_profile_step_reconciles_when_provider_discovery_completes() {
     // instead of leaving Next disabled or swallowing Enter.
     if let Mode::New(wizard) = &mut dashboard.mode {
         wizard.focused_provider = Some(resolving);
+        wizard.expanded_providers.clear();
     }
+    let rendered = drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(rendered.contains("▸ OPENAI"), "{rendered}");
+    assert!(
+        new_wizard(&dashboard)
+            .effective_expanded_providers(&dashboard)
+            .is_empty()
+    );
+    assert_eq!(
+        new_wizard(&dashboard)
+            .selected_profile_id(&dashboard)
+            .as_deref(),
+        Some("codex-1")
+    );
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
@@ -4020,10 +4034,11 @@ fn ready_open_new_wizard(dashboard: &mut DashboardState) -> DashboardAction {
     let action = open_new_session_wizard(dashboard);
     // These scenarios exercise a concrete profile's later steps. Select it
     // explicitly now that opening the picker leaves provider groups collapsed.
-    if matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile && wizard.focused_provider.is_some())
-    {
+    if matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile) {
         ready_key(dashboard, key(KeyCode::Right));
-        ready_key(dashboard, key(KeyCode::Right));
+        if new_wizard(dashboard).focused_provider.is_some() {
+            ready_key(dashboard, key(KeyCode::Right));
+        }
     }
     action
 }
@@ -6021,6 +6036,12 @@ fn new_session_remembers_provider_expansion() {
     let mut dashboard = dashboard_with_session(running_session());
     open_new_session_wizard(&mut dashboard);
     assert!(new_wizard(&dashboard).expanded_providers.is_empty());
+    assert_eq!(
+        new_wizard(&dashboard)
+            .selected_profile_id(&dashboard)
+            .as_deref(),
+        Some("codex-1")
+    );
     captured_drawn(&mut dashboard, 120, 30);
     // Expand a different provider from the recent launch's OPENAI selection.
     ready_key(&mut dashboard, key(KeyCode::Up));

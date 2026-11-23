@@ -302,17 +302,21 @@ impl NewWizard {
         }
     }
 
-    /// Expanded provider groups for rendering and event handling. Whenever
-    /// focus is on a concrete profile rather than a provider header, its
-    /// current provider is expanded so the selected profile is never hidden
-    /// after asynchronous provider resolution.
+    /// Move an explicitly expanded resolving group to the selected profile's
+    /// resolved provider. A collapsed group stays collapsed during discovery.
     pub(crate) fn effective_expanded_providers(
         &self,
         dashboard: &DashboardState,
     ) -> BTreeSet<QuotaProvider> {
         let mut expanded = self.expanded_providers.clone();
-        if self.effective_focused_provider(dashboard).is_none()
+        if let Some(profile) = dashboard
+            .new_wizard_profile_id(self.profile)
+            .and_then(|id| dashboard.config.profiles.get(&id))
             && let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+            && expanded.remove(&QuotaProvider::Other(format!(
+                "{} (resolving)",
+                profile.kind.display_name()
+            )))
         {
             expanded.insert(provider);
         }

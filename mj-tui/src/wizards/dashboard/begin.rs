@@ -130,8 +130,6 @@ impl DashboardState {
             self.state.last_oracle_choice_for(profile_id),
         );
         let expanded_providers = self.new_wizard_expanded_providers.clone();
-        let focused_provider = NewWizard::provider_for_profile(self, profile)
-            .filter(|provider| !expanded_providers.contains(provider));
         self.mode = Mode::New(NewWizard {
             subagents: Box::new(delegation),
             worktree_options: None,
@@ -141,7 +139,7 @@ impl DashboardState {
 
             profile,
             expanded_providers,
-            focused_provider,
+            focused_provider: None,
             bundle,
             target,
             target_step_skipped: false,

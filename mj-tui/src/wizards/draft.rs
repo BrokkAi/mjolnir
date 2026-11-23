@@ -520,7 +520,10 @@ impl WizardDraft for NewWizard {
         }
         match interaction {
             Interaction::Toggle(WizardControl::ProfileList) => {
-                if let Some(provider) = self.focused_provider.clone() {
+                if let Some(provider) = self.focused_provider.clone().or_else(|| {
+                    Self::provider_for_profile(dashboard, self.profile)
+                        .filter(|provider| !self.expanded_providers.contains(provider))
+                }) {
                     self.toggle_provider(provider);
                     dashboard.record_event_handled();
                 }
@@ -581,7 +584,10 @@ impl WizardDraft for NewWizard {
         }
         match key.code {
             KeyCode::Right | KeyCode::Char('l') => {
-                if let Some(provider) = self.focused_provider.clone() {
+                if let Some(provider) = self.focused_provider.clone().or_else(|| {
+                    Self::provider_for_profile(dashboard, self.profile)
+                        .filter(|provider| !self.expanded_providers.contains(provider))
+                }) {
                     if !self.expanded_providers.contains(&provider) {
                         self.expanded_providers.insert(provider);
                     } else {
@@ -647,6 +653,13 @@ impl WizardDraft for NewWizard {
         } else if let Some(pos) = items.iter().position(|item| {
             matches!(item, ProfilePickerItem::Profile { profile_index, .. } if *profile_index == self.profile)
         }) {
+            return pos;
+        }
+        if let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+            && let Some(pos) = items
+                .iter()
+                .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider))
+        {
             return pos;
         }
         0
