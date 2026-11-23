@@ -35,7 +35,11 @@ func (d *DashboardState) SetPaneSession(pane PaneId, sessionID *string) {
 // changed, in milliseconds since the epoch. ok is false while nothing has
 // been projected for it yet.
 func (d *DashboardState) SessionActivityAtMs(sessionID string) (at uint64, ok bool) {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::session_activity_at_ms")
+	detail, found := (*d.sessionDetails.Get())[sessionID]
+	if !found || detail == nil || detail.lastActivityAtMs == nil {
+		return 0, false
+	}
+	return *detail.lastActivityAtMs, true
 }
 
 // CurrentSessionID is the session the focused pane shows, if it is not
@@ -49,6 +53,9 @@ func (d *DashboardState) CurrentSessionID() (string, bool) {
 func (d *DashboardState) SetOpeningSession(sessionID *string) {
 	if sessionID == nil {
 		d.openingSession = nil
+		return
+	}
+	if d.openingSession != nil && *d.openingSession == *sessionID {
 		return
 	}
 	session := *sessionID
@@ -76,21 +83,38 @@ func (d *DashboardState) ChatInputAvailable(sessionID string) bool {
 	return d.TransitionKind(sessionID) == nil && d.TransitionFailureKind(sessionID) == nil
 }
 
+// dashboardVerdictEqual is SessionVerdict's PartialEq for snapshot maps.
+func dashboardVerdictEqual(a, b *client.SessionVerdict) bool { return a.Equal(*b) }
+
 func (d *DashboardState) SetSessionVerdicts(verdicts core.SnapshotMap[string, client.SessionVerdict]) {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::set_session_verdicts")
+	if !d.sessionVerdicts.Get().Equal(verdicts, dashboardVerdictEqual) {
+		d.sessionVerdicts.Set(verdicts)
+	}
 }
 
 // setSessionVerdict is a test helper (Rust #[cfg(test)]).
 func (d *DashboardState) setSessionVerdict(sessionID string, verdict client.SessionVerdict) {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::set_session_verdict")
+	if current, ok := d.sessionVerdicts.Get().Get(sessionID); !ok || !current.Equal(verdict) {
+		d.sessionVerdicts.Mut().Insert(sessionID, verdict)
+	}
 }
 
 func (d *DashboardState) verdict(sessionID string) client.SessionVerdict {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::verdict")
+	if verdict, ok := d.sessionVerdicts.Get().Get(sessionID); ok {
+		return verdict
+	}
+	if cached := d.stoppedRecords.GetShared(sessionID); cached != nil {
+		return cached.Verdict
+	}
+	return client.SessionVerdict{}
 }
 
 func (d *DashboardState) pendingLocalSessionOperation(sessionID string) (SessionOperationKind, bool) {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::pending_local_session_operation")
+	operation, ok := (*d.sessionOperations.Get())[sessionID]
+	if !ok || operation == nil || operation.operationID != nil {
+		return 0, false
+	}
+	return operation.kind, true
 }
 
 // TransitionKind is the session's lifecycle transition, nil when none. A
@@ -111,31 +135,58 @@ func (d *DashboardState) TransitionKind(sessionID string) *core.SessionTransitio
 // recover it), which is why the automatic startup pick and the selection
 // follow leave it alone and the band explains instead.
 func (d *DashboardState) SessionFailed(sessionID string) bool {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::session_failed")
+	session := d.state.Get().Sessions.GetShared(sessionID)
+	return session != nil && session.State == core.SessionStateError
 }
 
 // sessionFailureText is what to show for a failed session: its recorded
 // error, or a plain sentence when the daemon recorded none.
 func (d *DashboardState) sessionFailureText(sessionID string) string {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::session_failure_text")
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil && session.LastError != nil {
+		return *session.LastError
+	}
+	return "The session's worker is no longer running."
 }
 
 func (d *DashboardState) stoppedNotificationRow(sessionID string) bool {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::stopped_notification_row")
+	session := d.state.Get().Sessions.GetShared(sessionID)
+	return session != nil && !session.State.IsActive() &&
+		d.isListedTopLevelSession(session, session.WorkspaceID)
 }
 
 // stoppedFailureGuidance is what a person can do with a stopped row: resume
 // it with Enter when the record can be resumed, and dismiss or destroy it
 // from its actions menu.
 func (d *DashboardState) stoppedFailureGuidance(sessionID string) string {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::stopped_failure_guidance")
+	actions := "its actions menu has"
+	if keys := d.keyLabels(CommandIdSessionActions); len(keys) > 0 {
+		actions = keys[0] + " opens its actions"
+	}
+	actions += ": Dismiss notification or Destroy session"
+	unresumable := false
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil {
+		_, unresumable = unresumableReason(session.State)
+	}
+	enter := d.keyLabels(CommandIdOpenSession)
+	if unresumable || len(enter) == 0 {
+		return "In Sessions, " + actions + "."
+	}
+	return "In Sessions, " + enter[0] + " resumes it; " + actions + "."
 }
 
 // NoticeNamingWorkspace makes a daemon notice about a session in another
 // workspace name that workspace first, so a footer that cuts the tail still
 // says where to look.
 func (d *DashboardState) NoticeNamingWorkspace(sessionID string, text string) string {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::notice_naming_workspace")
+	session := d.state.Get().Sessions.GetShared(sessionID)
+	if session == nil {
+		return text
+	}
+	if active := *d.activeWorkspaceID.Get(); active != nil && *active == session.WorkspaceID {
+		return text
+	}
+	name := d.workspaceDisplayName(session.WorkspaceID)
+	return "In workspace " + name + ": " + text
 }
 
 // TransitionFailureKind is the durable transition that failed before it
@@ -187,13 +238,32 @@ func (d *DashboardState) standbyPromptMut(sessionID string) *chat.ChatState {
 }
 
 func (d *DashboardState) buildStandbyPrompt(sessionID string) *chat.ChatState {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::build_standby_prompt")
+	header := d.standbyPromptHeader(sessionID)
+	return chat.ChatStateStandby(sessionID, d.config.Get(), header, d.notices)
 }
 
 // standbyPromptHeader is the session-list columns a standby composer shows
 // in its header.
 func (d *DashboardState) standbyPromptHeader(sessionID string) chat.SessionHeaderIdentity {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::standby_prompt_header")
+	header := chat.SessionHeaderIdentity{
+		SubagentCount: d.SubagentCountFor(sessionID),
+		Reviewers:     d.ReviewerCountsFor(sessionID),
+	}
+	session := d.state.Get().Sessions.GetShared(sessionID)
+	if session == nil {
+		return header
+	}
+	header.Target = d.state.Get().ProjectIdentitySession(session).
+		ProjectTarget(d.config.Get(), session.TargetTemplateID)
+	header.Profile = session.LastProfile
+	if d.goMode != nil {
+		header.Title = d.GoConversationTitle(session.ID)
+	} else {
+		header.Title = session.ListedTitle()
+	}
+	harness := session.HarnessKind
+	header.HarnessKind = &harness
+	return header
 }
 
 // SeedStandbyPrompt seeds the standby composer from a warm chat's input, so a
@@ -312,7 +382,18 @@ func (d *DashboardState) StandbyStartupPrompts(sessionID string) []chat.StartupP
 // DrainStandbyComposers drains every composer, including those hidden by
 // navigation. A result belongs to its original owner.
 func (d *DashboardState) DrainStandbyComposers() (changed bool, actions []DashboardAction) {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::drain_standby_composers")
+	for _, sessionID := range slices.Sorted(maps.Keys(d.standbyPrompts)) {
+		standby := d.standbyPrompts[sessionID]
+		changed = standby.HasComposerUpdates() || changed
+		for _, prompt := range standby.TakePreparedStartupPrompts() {
+			actions = append(actions, DashboardActionQueueStartupPrompt{SessionID: sessionID, Prompt: prompt})
+			changed = true
+		}
+		if prompt, ok := standby.DrainComposer(); ok {
+			actions = append(actions, DashboardActionQueueStartupPrompt{SessionID: sessionID, Prompt: prompt})
+		}
+	}
+	return changed, actions
 }
 
 // handleStandbyPromptKey handles keys for the standby composer shown while a
@@ -325,5 +406,43 @@ func (d *DashboardState) DrainStandbyComposers() (changed bool, actions []Dashbo
 // keeps the draft and explains. A non-nil result means the key was consumed,
 // including as a no-op.
 func (d *DashboardState) handleStandbyPromptKey(key tea.KeyMsg) DashboardAction {
-	panic("unported: mj-tui/src/dashboard_standby.rs DashboardState::handle_standby_prompt_key")
+	if d.focus != FocusPrompt {
+		return nil
+	}
+	sessionID, ok := d.standbyPromptSession()
+	if !ok {
+		return nil
+	}
+	// Pane keys still belong to the dashboard; the prefix router has
+	// already taken everything a user can rebind.
+	if _, pane := paneCommandForKey(tea.KeyPressMsg(key.Key()), d.focus); pane {
+		return nil
+	}
+	// On macOS the dashboard's primary accelerator is represented by
+	// SUPER, while the chat composer implements readline controls as
+	// CONTROL. Once the dashboard has declined the chord, keep that
+	// platform convention from turning Ctrl-A/K/Y into inserted text.
+	key = standbyPromptKey(key)
+	switch action := d.standbyPromptMut(sessionID).HandleKey(key).(type) {
+	case chat.ChatActionCycleFocus:
+		d.CycleFocus(action.Reverse)
+	case chat.ChatActionPrompt:
+		d.recordEventHandled()
+		prompt, ok := d.standbyPromptMut(sessionID).LatestStartupPrompt()
+		if !ok {
+			panic("submitted standby prompt has a preview")
+		}
+		return DashboardActionQueueStartupPrompt{SessionID: sessionID, Prompt: prompt}
+	case chat.ChatActionRemoveQueuedPrompt:
+		// Up recalled the newest queued prompt into the composer. The
+		// preview is gone here already; the daemon must drop its copy
+		// too, or it would send the original when the session is ready.
+		d.recordEventHandled()
+		prompt := d.standbyPromptMut(sessionID).RecalledStartupPrompt(action.ID, action.Text)
+		return DashboardActionWithdrawStartupPrompt{SessionID: sessionID, Prompt: prompt}
+	case chat.ChatActionPasteFromClipboard, chat.ChatActionAttachPaste:
+		d.standbyPromptMut(sessionID).DispatchComposerAction(action)
+	}
+	d.recordEventHandled()
+	return DashboardActionNone{}
 }

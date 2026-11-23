@@ -38,6 +38,7 @@
 package tui
 
 import (
+	"maps"
 	"reflect"
 	"runtime"
 	"slices"
@@ -1719,7 +1720,23 @@ type WorkspaceViewState struct {
 }
 
 func workspaceViewStateFromDashboard(dashboard *DashboardState) WorkspaceViewState {
-	panic("unported: mj-tui/src/lib.rs WorkspaceViewState::from_dashboard")
+	var wheelScrolledFrom *string
+	if dashboard.sessionsWheelScrolledFrom != nil {
+		from := *dashboard.sessionsWheelScrolledFrom
+		wheelScrolledFrom = &from
+	}
+	return WorkspaceViewState{
+		sessionsScroll:            dashboard.sessionsScroll,
+		sessionsWheelScrolledFrom: wheelScrolledFrom,
+		targetsScroll:             dashboard.targetsScroll,
+		quotaScroll:               dashboard.quotaScroll,
+		capacityIndex:             dashboard.capacityIndex,
+		quotaSelection:            dashboard.quotaSelection,
+		paneSizes:                 dashboard.paneSizes,
+		conversationLayout:        dashboard.ExportConversationLayout(),
+		collapsedProjectKeys:      maps.Clone(*dashboard.collapsedProjectKeys.Get()),
+		focus:                     dashboard.focus,
+	}
 }
 
 func (d *DashboardState) FinishSpinnerStyleSave() {
@@ -1728,7 +1745,99 @@ func (d *DashboardState) FinishSpinnerStyleSave() {
 
 // NewDashboardState is Rust's DashboardState::new.
 func NewDashboardState(config core.Config, state core.StateState, quotas map[string]client.ProfileQuota) *DashboardState {
-	panic("unported: mj-tui/src/lib.rs DashboardState::new")
+	operatorPresence := state.OperatorPresence
+	launchRecency := client.LaunchRecencyOf(state.Sessions)
+	sidebarSize := config.SidebarSize
+	versionLabel := "v" + core.PackageVersion
+	if testing.Testing() {
+		versionLabel = testVersionLabel
+	}
+	if quotas == nil {
+		quotas = map[string]client.ProfileQuota{}
+	}
+	paneSizes := core.NewPaneSizes()
+	paneSizes.Sessions = sidebarSize
+	defaultWorkspace := core.DefaultWorkspaceID
+	var paneMaximizeEnabled [dashboardPaneCount]bool
+	for index := range paneMaximizeEnabled {
+		paneMaximizeEnabled[index] = true
+	}
+	dashboard := &DashboardState{
+		presentedRecords:           state.Sessions,
+		durableRecords:             state.Sessions,
+		nativeRunningByParent:      map[string]map[string]struct{}{},
+		nativeByParent:             NewTracked(map[string]map[string]struct{}{}),
+		nativeByOwner:              map[string]map[string]struct{}{},
+		keybinds:                   config.Keybinds(),
+		profileLoginStatuses:       map[string]core.LoginStatus{},
+		profileHydrationRequests:   map[string]map[string]struct{}{},
+		profileHydrationErrors:     map[string]string{},
+		quotaProviders:             providerDiscoveryStart(&config),
+		config:                     NewTracked(config),
+		state:                      NewTracked(state),
+		quotas:                     quotas,
+		quotaRefreshing:            map[string]struct{}{},
+		sessionDetails:             NewTracked(map[string]*SessionDetail{}),
+		unreachableSessions:        NewTracked(map[string]struct{}{}),
+		sessionReviewsField:        NewTracked(map[string][]client.RuntimeReviewView{}),
+		projectSources:             NewTracked(map[string]core.ProjectSourceIdentity{}),
+		checkpointArchiveSizes:     map[string]*uint64{},
+		notificationDismissals:     NewTracked(core.NewSnapshotMap[string, core.NotificationDismissal]()),
+		sessionVerdicts:            NewTracked(core.NewSnapshotMap[string, client.SessionVerdict]()),
+		servedAttention:            NewTracked(core.NewSnapshotMap[string, core.SessionAttention]()),
+		launchRecency:              launchRecency,
+		containerUpgradeSessions:   map[string]struct{}{},
+		failedLaunchRetries:        map[string]struct{}{},
+		goWorkspaces:               map[string]GoMode{},
+		goContexts:                 map[string]client.DaemonResult[client.DaemonPair[string, string]]{},
+		gitStatus:                  map[string]client.DaemonResult[core.SessionGitStatus]{},
+		gitProbeAt:                 map[string]time.Time{},
+		unreachableNotices:         map[string]string{},
+		sessionOperations:          NewTracked(map[string]*SessionOperationDisplay{}),
+		standbyPrompts:             map[string]*chat.ChatState{},
+		capacityDetails:            map[string]client.RuntimeHostCapacity{},
+		containerCapacities:        map[string]client.RuntimeContainerCapacity{},
+		versionLabel:               versionLabel,
+		availability:               newAvailabilityAvailability(),
+		projectDirectoryChecks:     map[string]ProjectDirectoryCheck{},
+		focus:                      FocusSessions,
+		paneSizes:                  paneSizes,
+		notifications:              newNotificationsPane(),
+		navigation:                 newConversationNavigation(),
+		pinIDs:                     map[string]uint32{},
+		frameSurfaces:              chat.NewFrameSurfaces(),
+		surfaceForm:                chat.NewForm[SurfaceControl](),
+		sessionsFilter:             NewTracked[*SessionsFilter](nil),
+		sessionsFiltersByScope:     map[ChildWorkspace]*SessionsFilter{},
+		sessionsText:               NewTracked(SessionsTextSearch{}),
+		resumeHitCounts:            make([]int, resumeTabCount),
+		paneMaximizeEnabledField:   paneMaximizeEnabled,
+		collapsedProjectKeys:       NewTracked(map[string]struct{}{}),
+		renderedFailureDismissals:  map[string]struct{}{},
+		mode:                       ModeDashboard{},
+		operatorPresence:           defaultOperatorPresence(),
+		archiveRestoresInFlight:    map[string]struct{}{},
+		notices:                    chat.NewNotices(),
+		workspaceNames:             map[string]string{},
+		workspaceOrder:             []string{core.DefaultWorkspaceID},
+		activeWorkspaceID:          NewTracked(&defaultWorkspace),
+		childWorkspace:             NewTracked[*ChildWorkspace](nil),
+		nativeAgents:               NewTracked(map[string]*NativeAgentPane{}),
+		sessionCPU:                 NewTracked(core.NewSnapshotMap[string, client.SessionCpuView]()),
+		stoppedSubagents:           map[string]*StoppedSubagentPane{},
+		workspaceViews:             map[string]WorkspaceViewState{},
+		workspacePaneSizesModified: map[string]struct{}{},
+		workspaceLayoutsModified:   map[string]struct{}{},
+		workspaceControlFocus:      WorkspaceControlFocusTabs,
+		closingWorkspaces:          map[string]struct{}{},
+	}
+	details := dashboard.sessionDetails.Mut()
+	for id := range dashboard.state.Get().Sessions.Keys() {
+		(*details)[id] = &SessionDetail{}
+	}
+	dashboard.clampSelections()
+	dashboard.SetOperatorPresence(operatorPresence)
+	return dashboard
 }
 
 // dashboardVersionLabel is the build stamped on the workspace pane:
@@ -1744,13 +1853,19 @@ func rectContains(area uv.Rectangle, column, row int) bool {
 	return column >= area.Min.X && column < area.Max.X && row >= area.Min.Y && row < area.Max.Y
 }
 
-// moveIndex moves index by delta, saturating at 0 and len-1.
+// moveIndex moves index by delta: a move up saturates at 0, a move down at
+// len-1. A move up leaves an index already past the end where it lands, as
+// Rust's does.
 func moveIndex(index *int, length int, delta int) {
 	if length == 0 {
 		*index = 0
 		return
 	}
-	*index = min(max(*index+delta, 0), length-1)
+	if delta < 0 {
+		*index = max(*index+delta, 0)
+		return
+	}
+	*index = min(*index+delta, length-1)
 }
 
 // nthKey is the index-th key of map in sorted (BTreeMap) order.
