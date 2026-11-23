@@ -1952,7 +1952,7 @@ impl HostContainerCapacity {
     }
 
     /// Why [`Self::refuses`] refused, for the person.
-    pub fn refusal_message(&self, allocation: &SessionResourceAllocation) -> String {
+    pub fn refusal_message(&self, allocation: &SessionResourceAllocation, reason: &str) -> String {
         if !self.complete {
             return "a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
         }
@@ -1961,7 +1961,7 @@ impl HostContainerCapacity {
             _ => 0,
         };
         format!(
-            "this session asks for {} GiB of RAM, but this host has {} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically",
+            "this session asks for {} GiB of RAM, but this host has {} GiB left after its reserve and live containers. Mjolnir enforces this host's RAM budget because {reason}. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically",
             floor_gib_tenths(requested),
             floor_gib_tenths(self.remaining.memory_bytes),
         )

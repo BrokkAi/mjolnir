@@ -104,13 +104,13 @@ fn ssh() -> SshTarget {
     }
 }
 
-struct PodmanPreflightExecutor {
-    seen: RefCell<Vec<CommandSpec>>,
+pub(super) struct PodmanPreflightExecutor {
+    pub(super) seen: RefCell<Vec<CommandSpec>>,
     outputs: RefCell<Vec<CommandOutput>>,
 }
 
 impl PodmanPreflightExecutor {
-    fn with_outputs(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
+    pub(super) fn with_outputs(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
         Self {
             seen: RefCell::new(vec![]),
             outputs: RefCell::new(outputs.into_iter().collect()),
@@ -148,7 +148,7 @@ impl CommandExecutor for PodmanPreflightExecutor {
     }
 }
 
-fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
+pub(super) fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
     CommandOutput {
         status: 0,
         stdout: stdout.as_ref().to_vec(),
@@ -498,10 +498,15 @@ fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
 
     let stopped = PodmanPreflightExecutor::with_outputs([CommandOutput {
         status: 1,
-        stdout: vec![],
+        stdout: br#"{"ServerVersion":"","OSType":"","MemoryLimit":false}"#.to_vec(),
         stderr: b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n".to_vec(),
     }]);
-    let error = verify_local_docker(&stopped).unwrap_err().to_string();
+    let error = verify_local_docker(&stopped).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<DockerUnavailable>(),
+        Some(DockerUnavailable::NotRunning { .. })
+    ));
+    let error = error.to_string();
     assert!(
         error.starts_with("Docker is installed, but its daemon is not running."),
         "{error}"
@@ -510,16 +515,107 @@ fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
 
     let refused = PodmanPreflightExecutor::with_outputs([CommandOutput {
         status: 1,
-        stdout: vec![],
+        stdout: br#"{"ServerVersion":"","OSType":"","MemoryLimit":false}"#.to_vec(),
         stderr: b"permission denied while trying to connect to the Docker daemon socket\n".to_vec(),
     }]);
-    let error = verify_local_docker(&refused).unwrap_err().to_string();
+    let error = verify_local_docker(&refused).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<DockerUnavailable>(),
+        Some(DockerUnavailable::NotAnswering { status: 1, .. })
+    ));
+    let error = error.to_string();
     assert!(
         error.starts_with(
-            "Docker did not answer its check on this host: `docker version` exited with status 1: permission denied"
+            "Docker did not answer its check on this host: `docker info` exited with status 1: permission denied"
         ),
         "{error}"
     );
+}
+
+#[test]
+fn docker_preflight_distinguishes_unenforceable_limits_from_unknown_capabilities() {
+    use CgroupLimit::{Cpu, Memory};
+    for (driver, version, rootless, capabilities, expected) in [
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsQuota":false,"CpuCfsPeriod":true,"MemoryLimit":true}"#,
+            &[Cpu][..],
+        ),
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsQuota":true,"CpuCfsPeriod":true,"MemoryLimit":false}"#,
+            &[Memory],
+        ),
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsPeriod":false,"MemoryLimit":false}"#,
+            &[Cpu, Memory],
+        ),
+        (
+            "none",
+            "2",
+            false,
+            r#"{"CpuCfsQuota":false,"CpuCfsPeriod":false,"MemoryLimit":false}"#,
+            &[Cpu, Memory],
+        ),
+        (
+            "none",
+            "1",
+            false,
+            r#"{"CpuCfsQuota":false,"CpuCfsPeriod":false,"MemoryLimit":false}"#,
+            &[Cpu, Memory],
+        ),
+        ("none", "2", false, "{}", &[]),
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsQuota":"false","MemoryLimit":null}"#,
+            &[],
+        ),
+        (
+            "systemd",
+            "2",
+            false,
+            r#"{"CpuCfsQuota":false,"MemoryLimit":false}"#,
+            &[],
+        ),
+        (
+            "cgroupfs",
+            "1",
+            true,
+            r#"{"CpuCfsQuota":false,"MemoryLimit":false}"#,
+            &[],
+        ),
+    ] {
+        let mut info: serde_json::Value = serde_json::from_str(capabilities).unwrap();
+        info["ServerVersion"] = "27.5.1".into();
+        info["OSType"] = "linux".into();
+        info["CgroupDriver"] = driver.into();
+        info["CgroupVersion"] = version.into();
+        if rootless {
+            info["SecurityOptions"] =
+                serde_json::json!(["name=seccomp,profile=builtin", "name=rootless"]);
+        }
+        let executor = PodmanPreflightExecutor::with_outputs([podman_output(info.to_string())]);
+        let preflight = verify_local_docker(&executor).unwrap();
+        assert_eq!(preflight.cgroups.unenforceable_limits, expected, "{info}");
+        assert_eq!(preflight.warnings.is_empty(), expected.is_empty(), "{info}");
+        for warning in preflight.warnings {
+            assert!(warning.detail.starts_with("Rootless Docker"));
+            assert_eq!(
+                warning.remediation.contains("Enable cgroup v2"),
+                version == "1"
+            );
+            assert!(warning.remediation.contains("Delegate=pids memory cpu"));
+        }
+    }
 }
 
 #[test]

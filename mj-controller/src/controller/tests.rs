@@ -64,6 +64,7 @@ fn registration_config() -> Config {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "example.invalid/hel-test:latest".into(),
                 pull_policy: Default::default(),

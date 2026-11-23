@@ -191,6 +191,10 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
         ["review"] => key == "trigger",
         // Approvals are a remote-machine setting: a bare runtime here always
         // uses the configured approvals.
+        ["targets", _] if key == "memory_hard_limit" => value["kind"]
+            .as_str()
+            .and_then(schema::target_memory_hard_limit_default)
+            .is_none(),
         ["targets", _] => {
             key == "permissions"
                 && value["machine"]

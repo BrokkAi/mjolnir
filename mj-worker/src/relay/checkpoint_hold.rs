@@ -38,8 +38,10 @@ use super::*;
 
 /// One write that waits for the checkpoint barrier to end.
 pub(super) enum HeldWrite {
-    SessionUpdate(SessionUpdate),
-    Observation(RelayObservation),
+    // The schema `SessionUpdate` is several hundred bytes. Keep the queue
+    // node small so a hold does not copy that payload on every push.
+    SessionUpdate(Box<SessionUpdate>),
+    Observation(Box<RelayObservation>),
 }
 
 /// Whether an observation can wait behind a checkpoint cut. Everything not
@@ -278,7 +280,7 @@ impl DurableRelay {
             return Ok(Some(observation));
         }
         self.held_writes
-            .push_back(HeldWrite::Observation(observation));
+            .push_back(HeldWrite::Observation(Box::new(observation)));
         Ok(None)
     }
 
@@ -296,7 +298,8 @@ impl DurableRelay {
             self.end_checkpoint_hold()?;
             return Ok(Some(update));
         }
-        self.held_writes.push_back(HeldWrite::SessionUpdate(update));
+        self.held_writes
+            .push_back(HeldWrite::SessionUpdate(Box::new(update)));
         Ok(None)
     }
 
@@ -320,10 +323,10 @@ impl DurableRelay {
         for write in std::mem::take(&mut self.held_writes) {
             match write {
                 HeldWrite::SessionUpdate(update) => {
-                    self.record_session_update(update)?;
+                    self.record_session_update(*update)?;
                 }
                 HeldWrite::Observation(observation) => {
-                    self.record_observation(observation)?;
+                    self.record_observation(*observation)?;
                 }
             }
         }

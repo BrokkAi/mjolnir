@@ -81,6 +81,7 @@ fn podman_controller(state: SessionState) -> Controller {
         "podman".into(),
         mj_core::config::TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
@@ -601,17 +602,9 @@ async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
     let mut with_extra = batch(1, false, &["a"]);
     with_extra.extra = vec![probeless_request("extra")];
     profiles.send_replace(with_extra);
-    // The batch cycle runs first, then the extra's one-shot probe.
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "a");
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Finished { generation: 1 }
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "extra");
+    // The extra's one-shot probe runs beside the batch cycle and is no part
+    // of it.
+    cycle_and_extra(&mut updates, 1).await;
     assert_quiet(&mut updates).await;
 
     // A batch change does not re-probe an extra it already answered.
@@ -624,16 +617,7 @@ async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
     let mut forced = batch(3, true, &["a"]);
     forced.extra = vec![probeless_request("extra")];
     profiles.send_replace(forced);
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "a");
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Finished { generation: 3 }
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "extra");
+    cycle_and_extra(&mut updates, 3).await;
 
     let mut changed = probeless_request("extra");
     changed.codex_source = mj_controller::quota::CodexQuotaSource::Provider(
@@ -648,6 +632,197 @@ async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
     profiles.send_replace(next);
     assert_eq!(next_update_report(&mut updates).await, "extra");
     assert_quiet(&mut updates).await;
+}
+
+/// A Codex profile whose check hangs in its app-server until the test
+/// creates `release` in `directory`, and a count of the checks started.
+#[cfg(unix)]
+fn hanging_codex_profile(
+    directory: &std::path::Path,
+    profile_id: &str,
+) -> (QuotaRefreshRequest, impl Fn() -> usize) {
+    let release = directory.join("release");
+    let starts = directory.join("starts");
+    mj_core::test_hooks::install_fake_command(
+        directory,
+        "codex",
+        &format!(
+            "#!/bin/sh\necho started >> '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nexit 1\n",
+            starts.display(),
+            release.display()
+        ),
+    );
+    let mut request = probeless_request(profile_id);
+    request.auth_scheme = mj_core::config::AuthScheme::NativeLogin;
+    request.codex_source = mj_controller::quota::CodexQuotaSource::ChatGptLogin;
+    request.source_home = directory.to_path_buf();
+    request.cwd = directory.to_path_buf();
+    request.environment = [(
+        "PATH".to_owned(),
+        format!("{}:/usr/bin:/bin", directory.display()),
+    )]
+    .into();
+    let started = move || {
+        std::fs::read_to_string(&starts)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    (request, started)
+}
+
+#[cfg(unix)]
+async fn wait_for_starts(started: &impl Fn() -> usize, count: usize) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while started() < count {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the hanging check reaches its app-server");
+}
+
+// Hard-won: #1595: one slow quota check held up every other profile's checks, including forced ones.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slow_quota_check_holds_up_no_other_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let release = directory.path().join("release");
+    let (slow, started) = hanging_codex_profile(directory.path(), "slow");
+    let (profiles, mut updates) = poller_with_store(vec![]);
+    let mut first = batch(1, false, &["fast"]);
+    first.profiles.insert(0, slow.clone());
+    profiles.send_replace(first.clone());
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["slow", "fast"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "fast");
+    wait_for_starts(&started, 1).await;
+
+    // A named refresh of both: the fast profile answers while the slow check
+    // still hangs, which is not started a second time. Its cycle opened after
+    // the first one, so it reports finished after it.
+    let mut named = first;
+    named.generation = 2;
+    named.forced_probes = [("fast".to_owned(), 1), ("slow".to_owned(), 1)]
+        .into_iter()
+        .collect();
+    profiles.send_replace(named.clone());
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["fast"]
+    ));
+    assert_eq!(next_update_report(&mut updates).await, "fast");
+    assert_quiet(&mut updates).await;
+
+    // Each refresh-all re-reads the fast profile now and owes the slow one a
+    // check after the hanging one, which may predate the request.
+    for generation in [3, 4] {
+        let mut all = named.clone();
+        all.generation = generation;
+        all.refresh = true;
+        profiles.send_replace(all);
+        assert!(matches!(
+            next_update(&mut updates).await,
+            QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["fast"]
+        ));
+        assert_eq!(next_update_report(&mut updates).await, "fast");
+        assert_quiet(&mut updates).await;
+    }
+    assert_eq!(started(), 1);
+
+    // Released, the slow check reports and ends the first two cycles; one
+    // more check answers both refresh-alls and the named request.
+    std::fs::write(&release, b"").unwrap();
+    assert_eq!(next_update_report(&mut updates).await, "slow");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["slow"]
+    ));
+    for generation in [1, 2] {
+        assert!(matches!(
+            next_update(&mut updates).await,
+            QuotaUpdate::Finished { generation: finished } if finished == generation
+        ));
+    }
+    assert_eq!(next_update_report(&mut updates).await, "slow");
+    for generation in [3, 4] {
+        assert!(matches!(
+            next_update(&mut updates).await,
+            QuotaUpdate::Finished { generation: finished } if finished == generation
+        ));
+    }
+    assert_quiet(&mut updates).await;
+    assert_eq!(started(), 2);
+}
+
+/// A refresh-all re-reads a one-shot extra, and one already being checked
+/// may have started before the request: it is checked again once it ends.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refresh_all_rechecks_a_one_shot_probe_that_was_running() {
+    let directory = tempfile::tempdir().unwrap();
+    let (extra, started) = hanging_codex_profile(directory.path(), "extra");
+    let (profiles, mut updates) = poller_with_store(vec![]);
+    let mut first = batch(1, false, &["a"]);
+    first.extra = vec![extra];
+    profiles.send_replace(first.clone());
+    for expected in [1, 2] {
+        if expected == 2 {
+            let mut all = first.clone();
+            all.generation = 2;
+            all.refresh = true;
+            profiles.send_replace(all);
+        }
+        assert!(matches!(
+            next_update(&mut updates).await,
+            QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+        ));
+        assert_eq!(next_update_report(&mut updates).await, "a");
+        assert!(matches!(
+            next_update(&mut updates).await,
+            QuotaUpdate::Finished { generation } if generation == expected
+        ));
+        wait_for_starts(&started, 1).await;
+        assert_quiet(&mut updates).await;
+    }
+    assert_eq!(started(), 1);
+
+    std::fs::write(directory.path().join("release"), b"").unwrap();
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_eq!(next_update_report(&mut updates).await, "extra");
+    assert_quiet(&mut updates).await;
+    assert_eq!(started(), 2);
+}
+
+/// A cycle over profile "a" and a one-shot probe of "extra", which run
+/// concurrently (#1595): the cycle reports "a" before it finishes, and the
+/// extra reports whenever its own check ends.
+async fn cycle_and_extra(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>, generation: u64) {
+    assert!(matches!(
+        next_update(updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        seen.push(match next_update(updates).await {
+            QuotaUpdate::Report(outcome) => outcome.report.profile_id,
+            QuotaUpdate::Finished {
+                generation: finished,
+            } => {
+                assert_eq!(finished, generation);
+                "finished".to_owned()
+            }
+            other => panic!("unexpected quota update {other:?}"),
+        });
+    }
+    let position = |name: &str| {
+        seen.iter()
+            .position(|seen| seen == name)
+            .unwrap_or_else(|| panic!("{name} is missing from {seen:?}"))
+    };
+    assert!(position("a") < position("finished"), "{seen:?}");
+    position("extra");
 }
 
 async fn next_update_report(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) -> String {
@@ -701,16 +876,7 @@ async fn a_forced_profile_probe_answers_now_and_only_once() {
     forced.extra = vec![probeless_request("extra")];
     forced.forced_probes = forced_map.clone();
     profiles.send_replace(forced);
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "a");
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Finished { generation: 2 }
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "extra");
+    cycle_and_extra(&mut updates, 2).await;
     assert_quiet(&mut updates).await;
 
     // A batch carrying the same requests again — one a coalesced channel
@@ -728,16 +894,7 @@ async fn a_forced_profile_probe_answers_now_and_only_once() {
         .into_iter()
         .collect();
     profiles.send_replace(again);
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "a");
-    assert!(matches!(
-        next_update(&mut updates).await,
-        QuotaUpdate::Finished { generation: 4 }
-    ));
-    assert_eq!(next_update_report(&mut updates).await, "extra");
+    cycle_and_extra(&mut updates, 4).await;
     assert_quiet(&mut updates).await;
 }
 
@@ -2213,6 +2370,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
                 extra_args: Vec::new(),
             },
             container: mj_core::config::ContainerTemplate {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
                 pull_policy: Default::default(),

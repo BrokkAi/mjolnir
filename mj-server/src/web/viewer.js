@@ -3182,10 +3182,10 @@ function containerAllocationFromDraft(draft, target, savedAllocation = undefined
   }
   const allocation = { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes };
   let error = '';
-  if (!editing && target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
+  if (!editing && target?.container_memory_hard_limit_reason && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
     error = !capacity || !capacity.complete
       ? 'a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
-      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
+      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. Mjolnir enforces this host's RAM budget because ${target.container_memory_hard_limit_reason}. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
   }
   const remaining = capacity?.remaining ?? target?.container_host_limits;
   const overcommitsMemory = Boolean(remaining && BigInt(memoryBytes) > BigInt(remaining.memory_bytes));
@@ -3647,7 +3647,7 @@ function renderNewForm() {
     targetNotes: snapshot.target_availability_notes,
     targets: step.key === 'target' ? [
       launchableTargets(snapshot.targets).map(t => [t.id, t.kind, t.resource_allocation_kind,
-        t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit]),
+        t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit_reason]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
       newDraft.rememberContainerSize,
       newDraft.resourceLoading, newDraft.resourceError,

@@ -25,7 +25,7 @@ use crate::doctor::{
 };
 use crate::targets::{
     APPLE_CONTAINER_MACOS_PROBE, APPLE_CONTAINER_MINIMUM_MACOS, APPLE_CONTAINER_STATUS_PROBE,
-    APPLE_CONTAINER_VERSION_PROBE, CommandExecutor, DOCKER_SERVER_VERSION, PLATFORM_PROBE,
+    APPLE_CONTAINER_VERSION_PROBE, CommandExecutor, DOCKER_SERVER_INFO, PLATFORM_PROBE,
     ProbeFrames, SSH_PODMAN_PREFLIGHT_SCRIPT, SshTarget, TargetOs, TargetPlatform,
     parse_framed_probes, ssh_validation_command, verify_ssh_apple_container, verify_ssh_docker,
     verify_ssh_podman,
@@ -143,7 +143,7 @@ fn machine_probe_commands() -> Vec<(String, bool)> {
     vec![
         (line(&PLATFORM_PROBE), false),
         (line(&["sh", "-c", SSH_PODMAN_PREFLIGHT_SCRIPT]), false),
-        (line(&DOCKER_SERVER_VERSION), false),
+        (line(&DOCKER_SERVER_INFO), false),
         (line(&APPLE_CONTAINER_MACOS_PROBE), true),
         (line(&APPLE_CONTAINER_VERSION_PROBE), true),
         (line(&APPLE_CONTAINER_STATUS_PROBE), true),
@@ -496,6 +496,7 @@ fn machine_runtime(
     kind: RuntimeKind,
 ) -> Option<(String, TargetTemplate)> {
     let container = |machine: &Machine| ContainerTemplate {
+        memory_hard_limit: None,
         // In memory a container runtime carries its machine's cache settings.
         build_cache: machine.build_cache().cloned(),
         image: DEFAULT_IMAGE.to_owned(),

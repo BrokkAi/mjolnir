@@ -332,6 +332,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
@@ -1498,6 +1499,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         "apple".into(),
         TargetTemplate::AppleContainer {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
@@ -5558,6 +5560,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
         "local-podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "agent-dev:latest".into(),
                 pull_policy: Default::default(),
@@ -5718,6 +5721,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
         "local-podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "agent-dev:latest".into(),
                 pull_policy: Default::default(),
