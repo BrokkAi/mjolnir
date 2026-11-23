@@ -3755,12 +3755,13 @@ pub(super) fn resolve_move_keep_dir(
             "-C".into(),
             cwd.to_string_lossy().into_owned(),
             "rev-parse".into(),
+            "--show-prefix".into(),
             "--show-toplevel".into(),
         ],
         "resolve checkout top level for session keep directory",
     )?;
     let output = executor.execute(&command)?;
-    let (top_level, _) = mj_core::session_keep::interpret_checkout_top_level(
+    let (top_level, _) = mj_core::session_keep::interpret_checkout_top_level_as_given(
         cwd,
         Some(output.status),
         &output.stdout,
