@@ -110,7 +110,24 @@ func drawnTranscript(chat *ChatState, width, height int) []string {
 // selection engine still owns a transcript selection, which is what freezes
 // the transcript's row space.
 func drawnTranscriptSelecting(chat *ChatState, width, height int, transcriptSelected bool) []string {
-	panic("unported: mj-chat/src/chat/test_support.rs drawn_transcript_selecting")
+	buffer := uv.NewBuffer(width, height)
+	renderFullFrame(NewFrame(buffer), chat, transcriptSelected)
+	area := buffer.Bounds()
+	rows := make([]string, 0, area.Dy())
+	for y := area.Min.Y; y < area.Max.Y; y++ {
+		var row strings.Builder
+		for x := area.Min.X; x < area.Max.X; x++ {
+			// ratatui resets the cells a wide grapheme covers to a space;
+			// ultraviolet leaves them empty.
+			if cell := buffer.CellAt(x, y); cell != nil && cell.Content != "" {
+				row.WriteString(cell.Content)
+			} else {
+				row.WriteString(" ")
+			}
+		}
+		rows = append(rows, strings.TrimRightFunc(row.String(), unicode.IsSpace))
+	}
+	return rows
 }
 
 func agentTranscriptItem(stableID string, ordinal uint64) *core.TranscriptItem {
@@ -144,7 +161,10 @@ func grokChat() *ChatState {
 }
 
 func modeConfigOption(current string, values []string) schema.SessionConfigOption {
-	panic("unported: mj-chat/src/chat/test_support.rs mode_config_option")
+	option := selectConfigOption("interaction_mode", current, values)
+	category := schema.SessionConfigOptionCategoryMode
+	option.Category = &category
+	return option
 }
 
 func fastModeOption(current string) schema.SessionConfigOption {
@@ -154,7 +174,22 @@ func fastModeOption(current string) schema.SessionConfigOption {
 }
 
 func selectConfigOption(id, current string, values []string) schema.SessionConfigOption {
-	panic("unported: mj-chat/src/chat/test_support.rs select_config_option")
+	options := make([]schema.SessionConfigSelectOption, 0, len(values))
+	for _, value := range values {
+		options = append(options, schema.SessionConfigSelectOption{
+			Value: schema.SessionConfigValueId(value),
+			Name:  value,
+		})
+	}
+	return schema.SessionConfigOption{
+		Kind: schema.SessionConfigOptionKindSelect,
+		ID:   schema.SessionConfigId(id),
+		Name: "Mode",
+		Select: &schema.SessionConfigSelect{
+			CurrentValue: schema.SessionConfigValueId(current),
+			Options:      options,
+		},
+	}
 }
 
 func advertise(chat *ChatState, seq uint64, names []string) {

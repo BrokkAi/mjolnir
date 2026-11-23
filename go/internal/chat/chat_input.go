@@ -12,6 +12,7 @@
 package chat
 
 import (
+	"math"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -22,7 +23,25 @@ import (
 // submission belongs to the host. Vertical transcript navigation has no
 // meaning in this field.
 func (s *ChatState) HandleSingleLinePromptKey(key tea.KeyPressMsg) EventResult[ChatAction] {
-	panic("unported: mj-chat/src/chat/input.rs handle_single_line_prompt_key")
+	if s.historySearch != nil {
+		s.handleHistorySearchKey(key.Code, key.Mod)
+		return EventResultHandled[ChatAction]()
+	}
+	// tea.KeyEnter is the carriage return crossterm reports as Enter, and
+	// crossterm reports the keypad's Enter and page keys as the main ones.
+	switch key.Code {
+	case tea.KeyEnter, tea.KeyKpEnter, tea.KeyPgUp, tea.KeyKpPgUp, tea.KeyPgDown, tea.KeyKpPgDown, '\n':
+		return EventResultIgnored[ChatAction]()
+	case 'j', 'm':
+		if key.Mod.Contains(tea.ModCtrl) {
+			return EventResultIgnored[ChatAction]()
+		}
+	}
+	action := s.HandleKey(key)
+	return EventResult[ChatAction]{
+		Consumed: s.eventConsumed(key, action),
+		Action:   action,
+	}
 }
 
 // SingleLinePromptText is the plain editor text, without the
@@ -49,20 +68,82 @@ func (s *ChatState) SetSingleLinePromptText(text string) string {
 // and cursor. Every stored newline occupies a visible cell; submission stays
 // literal. (An associated function of ChatState in Rust.)
 func drawPromptSlice(frame *Frame, area uv.Rectangle, text string, cursor int, focused bool) {
-	panic("unported: mj-chat/src/chat/input.rs draw_prompt_slice")
+	if area.Dx() <= 0 || area.Dy() <= 0 {
+		return
+	}
+	display := func(value string) string {
+		return strings.NewReplacer("\n", "⏎", "\r", "⏎").Replace(sanitizeTerminalText(value))
+	}
+	column := displayWidth(display(text[:cursor]))
+	scroll := min(max(column+1-area.Dx(), 0), 0xFFFF)
+	frame.RenderWidget(
+		NewParagraph(RawText(display(text))).WithStyle(Raised()).WithScroll(0, scroll),
+		area,
+	)
+	if focused {
+		frame.SetCursorPosition(uv.Pos(area.Min.X+column-scroll, area.Min.Y))
+	}
 }
 
 // DrawSingleLinePrompt is the single-row presentation of the real Prompt.
 // Search retains both its selected match and the shared status/query instead
 // of hiding the match.
 func (s *ChatState) DrawSingleLinePrompt(frame *Frame, area uv.Rectangle, focused bool) {
-	panic("unported: mj-chat/src/chat/input.rs draw_single_line_prompt")
+	if area.Dx() <= 0 || area.Dy() <= 0 {
+		return
+	}
+	search := s.historySearch
+	if search == nil {
+		drawPromptSlice(frame, area, s.input, s.inputCursor, focused)
+		return
+	}
+	status, _ := historySearchStatus(search)
+	matchWidth := area.Dx() / 2
+	searchWidth := max(area.Dx()-(matchWidth+1), 0)
+	statusWidth := min(displayWidth(status), searchWidth/2)
+	queryWidth := max(searchWidth-(statusWidth+1), 0)
+	drawPromptSlice(frame, uv.Rect(area.Min.X, area.Min.Y, matchWidth, 1), s.input, 0, false)
+	frame.RenderWidget(
+		NewParagraph(RawText("│")),
+		uv.Rect(area.Min.X+matchWidth, area.Min.Y, 1, 1),
+	)
+	drawPromptSlice(
+		frame,
+		uv.Rect(area.Min.X+matchWidth+1, area.Min.Y, queryWidth, 1),
+		search.query.Value(),
+		search.query.Cursor(),
+		focused,
+	)
+	frame.RenderWidget(
+		NewParagraph(RawText(status)).WithStyle(Muted()),
+		uv.Rect(max(area.Max.X-statusWidth, 0), area.Min.Y, statusWidth, 1),
+	)
 }
 
 // replaceInputRange replaces the composer bytes in r with inserted
 // and returns what it removed.
 func (s *ChatState) replaceInputRange(r ByteRange, inserted *PromptPayload) PromptPayload {
-	panic("unported: mj-chat/src/chat/input.rs replace_input_range")
+	if r.Start >= r.End && inserted.Text == "" && len(inserted.Images) == 0 {
+		return PromptPayloadText("")
+	}
+	cursor, removed := replaceRange(&s.input, &s.inputImages, r, inserted)
+	s.inputCursor = cursor
+	s.inputGeneration++
+	s.composerRuntime.submitWhenReady = nil
+	s.feedback.Clear()
+	next := uint64(1)
+	for _, image := range s.inputImages {
+		following := image.Number
+		if following < math.MaxUint64 {
+			following++
+		}
+		next = max(next, following)
+	}
+	s.nextImageNumber = max(s.nextImageNumber, next)
+	s.historyIndex = nil
+	s.preferredColumn = nil
+	s.updateAutocomplete()
+	return removed
 }
 
 func (s *ChatState) insertCharacter(character rune) {
@@ -190,7 +271,50 @@ func (s *ChatState) moveToLineEnd(crossBoundary bool) {
 }
 
 func (s *ChatState) moveVertical(direction int) {
-	panic("unported: mj-chat/src/chat/input.rs move_vertical")
+	start := LineStart(s.input, s.inputCursor)
+	var column int
+	if s.preferredColumn != nil {
+		column = *s.preferredColumn
+	} else {
+		line := s.input[start:s.inputCursor]
+		for offset := 0; offset < len(line); offset = NextGrapheme(line, offset) {
+			column++
+		}
+	}
+	var targetStart int
+	if direction < 0 {
+		if start == 0 {
+			s.inputCursor = 0
+			s.preferredColumn = nil
+			s.updateAutocomplete()
+			return
+		}
+		targetStart = LineStart(s.input, start-1)
+	} else {
+		end := LineEnd(s.input, s.inputCursor)
+		if end == len(s.input) {
+			s.inputCursor = len(s.input)
+			s.preferredColumn = nil
+			s.updateAutocomplete()
+			return
+		}
+		targetStart = end + 1
+	}
+	targetEnd := LineEnd(s.input, targetStart)
+	// The column-th grapheme of the target line, or its end.
+	target := s.input[targetStart:targetEnd]
+	s.inputCursor = targetEnd
+	for offset, index := 0, 0; offset < len(target); offset, index = NextGrapheme(target, offset), index+1 {
+		if index == column {
+			s.inputCursor = targetStart + offset
+			break
+		}
+	}
+	// Only the composer needs this: a cursor that lands inside an `[image N]`
+	// marker is pushed to the near edge of the whole marker.
+	s.inputCursor = snapCursor(s.inputImages, s.inputCursor, direction)
+	s.preferredColumn = &column
+	s.updateAutocomplete()
 }
 
 func (s *ChatState) moveWord(direction int) {
@@ -227,7 +351,25 @@ func (s *ChatState) killToLineStart() {
 // killToLineEnd kills to the end of the line. A chained kill appends to the
 // kill buffer, in Emacs order, so a later yank restores the whole block.
 func (s *ChatState) killToLineEnd(chained bool) {
-	panic("unported: mj-chat/src/chat/input.rs kill_to_line_end")
+	end := LineEnd(s.input, s.inputCursor)
+	r := ByteRange{Start: s.inputCursor, End: end}
+	if end == s.inputCursor && end < len(s.input) {
+		r = ByteRange{Start: end, End: end + 1}
+	}
+	if r.Start >= r.End {
+		// Nothing was killed, so leave any chained buffer intact.
+		return
+	}
+	previous := PromptPayloadText("")
+	if chained {
+		previous = PromptPayload{Text: s.killBuffer, Images: s.killImages}
+		s.killBuffer = ""
+		s.killImages = nil
+	}
+	s.killRange(r)
+	if previous.Text != "" {
+		replaceRange(&s.killBuffer, &s.killImages, ByteRange{}, &previous)
+	}
 }
 
 func (s *ChatState) yank() {
