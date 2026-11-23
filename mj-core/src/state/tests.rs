@@ -299,6 +299,7 @@ fn sample_state() -> State {
         title: "Build Hel".into(),
         harness_kind: HarnessKind::Codex,
         last_profile: "codex-1".into(),
+        staged_aws_profile: None,
         bundle_id: "hel".into(),
         project_directory: None,
         managed_worktree: None,
@@ -410,6 +411,7 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         false,
         &["podman".into()],
         [&parent, &child, &provisioning],
+        [],
     );
     // A boot-time pool is already net of the host's own needs: the same
     // commitments leave exactly the reserve more.
@@ -421,6 +423,7 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         true,
         &["podman".into()],
         [&parent, &child, &provisioning],
+        [],
     );
     assert_eq!(pool.reserved.memory_bytes, 0);
     assert_eq!(
@@ -485,6 +488,7 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         false,
         &["podman".into()],
         [&defaults],
+        [],
     );
     assert!(!unknown.complete);
 }
@@ -500,6 +504,7 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
         false,
         &["podman".into()],
         state.sessions.values(),
+        [],
     );
 
     assert!(!capacity.complete);

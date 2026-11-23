@@ -15,9 +15,7 @@ pub(crate) use mj_accounts::{claude_login, harness_auth, opencode_logins, profil
 pub(crate) use mj_import::utility_llm;
 pub(crate) use mj_sessionwiki::sessionwiki;
 pub(crate) use mj_store::{database, mailbox_outbox, recovery_gate, upgrade, worker_lifecycle};
-pub(crate) use mj_targets::{
-    aws_assume_role, aws_credentials, streamed_child, target_storage, targets,
-};
+pub(crate) use mj_targets::{aws_assume_role, streamed_child, target_storage, targets};
 // Only tests that need Unix use these.
 #[cfg(test)]
 #[cfg_attr(not(unix), allow(unused_imports))]

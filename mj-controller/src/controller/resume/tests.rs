@@ -1448,6 +1448,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         title: "imported session".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
         last_profile: "codex-old".into(),
+        staged_aws_profile: None,
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,

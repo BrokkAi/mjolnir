@@ -413,6 +413,26 @@ pub fn start_worker_durably(
     worker_root: &str,
     github: &mj_core::config::GithubConfig,
 ) -> Result<()> {
+    start_worker_durably_with_aws_profile(
+        owner,
+        target,
+        executor,
+        locator,
+        worker_root,
+        github,
+        None,
+    )
+}
+
+pub fn start_worker_durably_with_aws_profile(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    target: &mj_core::state::TargetLocator,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    github: &mj_core::config::GithubConfig,
+    staged_aws_profile: Option<Option<&str>>,
+) -> Result<()> {
     owner.verify_target(target)?;
     let id = owner.session_id();
     if let Some(intent) = crate::database::load_worker_restart(id)?
@@ -448,6 +468,9 @@ pub fn start_worker_durably(
             == Some(crate::database::WorkerRestartPhase::Swapping),
         "worker replacement has already launched"
     );
+    if let Some(profile) = staged_aws_profile {
+        crate::database::record_worker_restart_aws_profile(id, owner.operation_id(), profile)?;
+    }
     start_worker(owner, executor, locator, worker_root, github)?;
     crate::database::advance_worker_restart(
         id,

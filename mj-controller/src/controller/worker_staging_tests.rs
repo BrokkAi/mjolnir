@@ -854,3 +854,68 @@ fn launching_where_the_role_cannot_apply_announces_why() {
     // Nothing is minted or synced for a session the role cannot apply to.
     assert!(controller.aws_credential_source(id).unwrap().is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn worker_staging_aws_profile_is_published_only_on_activation() {
+    const TEST: &str = "worker_staging_aws_profile_is_published_only_on_activation";
+    const MARKER: &str = "MJ_TEST_AWS_ACTIVATION";
+    if std::env::var_os(MARKER).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(MARKER, "1")
+            .isolated_store(dir.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let id = "44444444444444444444444444444444";
+    let mut record = crate::database::test_fixtures::checkpoint_test_session(id);
+    let target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(id),
+    };
+    record.target = Some(Box::new(target.clone()));
+    record.staged_aws_profile = Some("source".into());
+    crate::database::save_session(&record).unwrap();
+    let read_pin = || {
+        crate::database::load_session_record(id)
+            .unwrap()
+            .unwrap()
+            .staged_aws_profile
+    };
+    for success in [false, true] {
+        let mut controller = Controller {
+            config: Config::default(),
+            state: crate::database::load_state().unwrap(),
+        };
+        super::test_support::worker_test_scope(id, || -> Result<()> {
+            let owner = crate::worker_lifecycle::require(id)?;
+            owner.begin_restart(&target, String::new())?;
+            crate::database::advance_worker_restart(
+                id,
+                owner.operation_id(),
+                crate::database::WorkerRestartPhase::Swapping,
+            )?;
+            crate::database::record_worker_restart_aws_profile(
+                id,
+                owner.operation_id(),
+                Some("destination"),
+            )?;
+            assert_eq!(read_pin().as_deref(), Some("source"));
+            if success {
+                controller.mark_worker_connected(id, Some("new-native".into()))?;
+                assert_eq!(
+                    controller.state.sessions[id].staged_aws_profile.as_deref(),
+                    Some("destination")
+                );
+            }
+            crate::database::finish_worker_restart(id, owner.operation_id())
+        })
+        .unwrap();
+        assert_eq!(
+            read_pin().as_deref(),
+            Some(if success { "destination" } else { "source" })
+        );
+    }
+}

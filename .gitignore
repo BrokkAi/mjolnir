@@ -5,6 +5,7 @@ target*/
 # A source module may be named `targets`: only build directories are ignored.
 !**/src/**/targets/
 !**/src/targets/
+!go/internal/targets/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html

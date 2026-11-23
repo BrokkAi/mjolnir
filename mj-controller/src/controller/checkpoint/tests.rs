@@ -212,18 +212,16 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     ] {
         std::fs::write(directory.path().join(name), b"test").unwrap();
     }
-    let mut state = State::default();
-    let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(Box::new(CheckpointMetadata {
+    let checkpoint = CheckpointMetadata {
         archive_path: directory.path().join(&referenced_name),
         sha256: "c".repeat(64),
         created_at: "2026-08-12T00:00:00Z".into(),
         event_frontier: 7,
-    }));
-    state.sessions.insert(session_id.into(), session);
+    };
 
     assert_eq!(
-        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[], &[], &[]).unwrap(),
+        reconcile_managed_checkpoint_archives_in(directory.path(), [&checkpoint], &[], &[], &[])
+            .unwrap(),
         1
     );
     assert!(directory.path().join(referenced_name).exists());
@@ -1268,6 +1266,7 @@ async fn live_resume_discards_queue_before_native_readiness() {
                     launch: None,
                     prepared: true,
                     discard_queued_prompts: Some("discard-before-ready".into()),
+                    staged_aws_profile: None,
                     swap_admission: None,
                     messages: &super::super::worker_restart::RESTART_FOR_CHECKPOINT,
                 },
@@ -3848,6 +3847,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await;
     channels.shutdown.shutdown().await.unwrap();
@@ -4307,6 +4307,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await;
 
@@ -4725,6 +4726,7 @@ async fn suspended_archive_serializes_compact_tool_and_terminal_bodies() {
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await;
     channels.shutdown.shutdown().await.unwrap();

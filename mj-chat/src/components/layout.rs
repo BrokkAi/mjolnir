@@ -90,21 +90,6 @@ pub fn form_area(area: Rect) -> Rect {
     modal_area(area)
 }
 
-/// Splits a region into horizontal form rows.
-#[must_use]
-pub fn form_rows(area: Rect, rows: &[u16]) -> Vec<Rect> {
-    let constraints = rows
-        .iter()
-        .copied()
-        .map(Constraint::Length)
-        .collect::<Vec<_>>();
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area)
-        .to_vec()
-}
-
 /// Splits a region into equal-width columns.
 #[must_use]
 pub fn form_columns(area: Rect, count: usize) -> Vec<Rect> {

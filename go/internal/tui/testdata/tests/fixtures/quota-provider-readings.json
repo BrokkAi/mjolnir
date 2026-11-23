@@ -1,0 +1,599 @@
+{
+  "claude": {
+    "monthly_price_usd": 200,
+    "banked_resets": 0,
+    "profile_id": "claude",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "02:59 Nov 20",
+        "resets_at_epoch_seconds": 1795165199
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 77,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "02:59 Nov 20",
+        "resets_at_epoch_seconds": 1795165199
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude-aws": {
+    "profile_id": "claude-aws",
+    "harness": "claude",
+    "windows": [],
+    "extra": "API",
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude2": {
+    "monthly_price_usd": 200,
+    "banked_resets": 1,
+    "profile_id": "claude2",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "16:59 Nov 18",
+        "resets_at_epoch_seconds": 1795042799
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 74,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "16:59 Nov 18",
+        "resets_at_epoch_seconds": 1795042799
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude3": {
+    "monthly_price_usd": 200,
+    "banked_resets": 0,
+    "profile_id": "claude3",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "12:59 Nov 19",
+        "resets_at_epoch_seconds": 1795114799
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 69,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "12:59 Nov 19",
+        "resets_at_epoch_seconds": 1795114799
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude4": {
+    "monthly_price_usd": 200,
+    "banked_resets": 0,
+    "profile_id": "claude4",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "01:59 Nov 23",
+        "resets_at_epoch_seconds": 1795420799
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 98,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "01:59 Nov 23",
+        "resets_at_epoch_seconds": 1795420799
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude5": {
+    "monthly_price_usd": 100,
+    "banked_resets": 1,
+    "profile_id": "claude5",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "5H",
+        "remaining_percent": 94,
+        "duration_seconds": 18000,
+        "used": null,
+        "limit": null,
+        "resets": "17:10 Nov 18",
+        "resets_at_epoch_seconds": 1795043400
+      },
+      {
+        "label": "Week",
+        "remaining_percent": 60,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "07:00 Nov 19",
+        "resets_at_epoch_seconds": 1795093200
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 91,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "06:59 Nov 19",
+        "resets_at_epoch_seconds": 1795093199
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude6": {
+    "monthly_price_usd": 200,
+    "banked_resets": 1,
+    "profile_id": "claude6",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "08:59 Nov 19",
+        "resets_at_epoch_seconds": 1795100399
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 99,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "08:59 Nov 19",
+        "resets_at_epoch_seconds": 1795100399
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "claude7": {
+    "monthly_price_usd": 200,
+    "banked_resets": 1,
+    "profile_id": "claude7",
+    "harness": "claude",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 41,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "13:00 Nov 24",
+        "resets_at_epoch_seconds": 1795546800
+      },
+      {
+        "label": "Week (Fable)",
+        "remaining_percent": 100,
+        "duration_seconds": 604800,
+        "model_scope": "fable",
+        "used": null,
+        "limit": null,
+        "resets": "13:00 Nov 24",
+        "resets_at_epoch_seconds": 1795546800
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "codex": {
+    "paid_credits": {
+      "kind": "limited",
+      "balance": 3446.285389
+    },
+    "banked_resets": 1,
+    "profile_id": "codex",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 60,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "23:14 Nov 24",
+        "resets_at_epoch_seconds": 1795583651
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026385,
+    "monthly_price_usd": null
+  },
+  "codex2": {
+    "paid_credits": {
+      "kind": "limited",
+      "balance": 0.0
+    },
+    "banked_resets": 0,
+    "profile_id": "codex2",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "16:31 Nov 19",
+        "resets_at_epoch_seconds": 1795127510
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369,
+    "monthly_price_usd": null
+  },
+  "codex3": {
+    "paid_credits": {
+      "kind": "limited",
+      "balance": 0.0
+    },
+    "banked_resets": 0,
+    "profile_id": "codex3",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "08:12 Nov 22",
+        "resets_at_epoch_seconds": 1795356741
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369,
+    "monthly_price_usd": null
+  },
+  "codex4": {
+    "paid_credits": {
+      "kind": "limited",
+      "balance": 0.0
+    },
+    "banked_resets": 0,
+    "profile_id": "codex4",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 0,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "08:44 Nov 24",
+        "resets_at_epoch_seconds": 1795531462
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369,
+    "monthly_price_usd": null
+  },
+  "dsh": {
+    "profile_id": "dsh",
+    "harness": "dsh",
+    "windows": [],
+    "extra": "API",
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "gemini": {
+    "profile_id": "gemini",
+    "harness": "antigravity",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 91,
+        "duration_seconds": 604800,
+        "model_scope": "gemini",
+        "used": null,
+        "limit": null,
+        "resets": "18:41 Nov 24",
+        "resets_at_epoch_seconds": 1795567280
+      },
+      {
+        "label": "5H",
+        "remaining_percent": 97,
+        "duration_seconds": 18000,
+        "model_scope": "gemini",
+        "used": null,
+        "limit": null,
+        "resets": "13:24 Nov 18",
+        "resets_at_epoch_seconds": 1795029892
+      },
+      {
+        "label": "Week",
+        "remaining_percent": 47,
+        "duration_seconds": 604800,
+        "model_scope": "claude,gpt",
+        "used": null,
+        "limit": null,
+        "resets": "18:40 Nov 24",
+        "resets_at_epoch_seconds": 1795567208
+      },
+      {
+        "label": "5H",
+        "remaining_percent": 100,
+        "duration_seconds": 18000,
+        "model_scope": "claude,gpt",
+        "used": null,
+        "limit": null,
+        "resets": "17:26 Nov 18",
+        "resets_at_epoch_seconds": 1795044371
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "gemini2": {
+    "profile_id": "gemini2",
+    "harness": "antigravity",
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 89,
+        "duration_seconds": 604800,
+        "model_scope": "gemini",
+        "used": null,
+        "limit": null,
+        "resets": "18:21 Nov 24",
+        "resets_at_epoch_seconds": 1795566084
+      },
+      {
+        "label": "5H",
+        "remaining_percent": 100,
+        "duration_seconds": 18000,
+        "model_scope": "gemini",
+        "used": null,
+        "limit": null,
+        "resets": "17:26 Nov 18",
+        "resets_at_epoch_seconds": 1795044372
+      },
+      {
+        "label": "Week",
+        "remaining_percent": 50,
+        "duration_seconds": 604800,
+        "model_scope": "claude,gpt",
+        "used": null,
+        "limit": null,
+        "resets": "17:34 Nov 24",
+        "resets_at_epoch_seconds": 1795563259
+      },
+      {
+        "label": "5H",
+        "remaining_percent": 100,
+        "duration_seconds": 18000,
+        "model_scope": "claude,gpt",
+        "used": null,
+        "limit": null,
+        "resets": "17:26 Nov 18",
+        "resets_at_epoch_seconds": 1795044372
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "grok": {
+    "profile_id": "grok",
+    "harness": "grok",
+    "windows": [
+      {
+        "label": "Period",
+        "remaining_percent": 96,
+        "used": null,
+        "limit": null,
+        "resets": "23:22 Nov 23",
+        "resets_at_epoch_seconds": 1795497727
+      }
+    ],
+    "extra": null,
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "kimi": {
+    "profile_id": "kimi",
+    "harness": "kimi",
+    "windows": [
+      {
+        "label": "Month",
+        "remaining_percent": 40,
+        "used": 100,
+        "limit": 100,
+        "resets": "19:17 Nov 20",
+        "resets_at_epoch_seconds": 1795223824
+      },
+      {
+        "label": "5H",
+        "remaining_percent": 100,
+        "used": 0,
+        "limit": 100,
+        "resets": "15:17 Nov 18",
+        "resets_at_epoch_seconds": 1795036624
+      }
+    ],
+    "extra": "Booster balance: 123 credits",
+    "error": null,
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse": {
+    "profile_id": "muse",
+    "harness": "muse",
+    "windows": [],
+    "extra": "Cached login notice",
+    "error": "login expired",
+    "refreshed_at_epoch_seconds": 1795026369
+  },
+  "codex-short-full": {
+    "profile_id": "codex-short-full",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "5H",
+        "remaining_percent": 100,
+        "duration_seconds": 18000,
+        "used": null,
+        "limit": null,
+        "resets_at_epoch_seconds": 1795043365
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385,
+    "monthly_price_usd": null
+  },
+  "codex-short-spent": {
+    "profile_id": "codex-short-spent",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "5H",
+        "remaining_percent": 0,
+        "duration_seconds": 18000,
+        "used": null,
+        "limit": null,
+        "resets_at_epoch_seconds": 1795043365
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385,
+    "monthly_price_usd": null
+  },
+  "muse1": {
+    "profile_id": "muse1",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 0,
+        "resets_at_epoch_seconds": 1795028185
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse2": {
+    "profile_id": "muse2",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795029985
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385,
+    "extra": "Cached usage; next refresh pending"
+  },
+  "muse3": {
+    "profile_id": "muse3",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795031785
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse4": {
+    "profile_id": "muse4",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795033585
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse5": {
+    "profile_id": "muse5",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795035385
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse6": {
+    "profile_id": "muse6",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795037185
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "claude-login": {
+    "profile_id": "claude-login",
+    "harness": "claude",
+    "error": "login refused; sign in again",
+    "windows": [],
+    "refreshed_at_epoch_seconds": 1795026385
+  }
+}

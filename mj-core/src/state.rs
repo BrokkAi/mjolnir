@@ -1637,6 +1637,9 @@ pub struct SessionRecord {
     pub title: String,
     pub harness_kind: HarnessKind,
     pub last_profile: String,
+    /// AWS profile selected when this worker's AWS configuration was staged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_aws_profile: Option<String>,
     pub bundle_id: String,
     /// Accepted bundle for every target, including a raw directory's bundle of one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1881,12 +1884,14 @@ pub fn counted_container_allocation(session: &SessionRecord) -> Option<&SessionR
 /// A new or resuming owner has no target locator while provisioning, so those
 /// states reserve their requested size. Once a target exists, a container
 /// child whose locator names a parent is skipped because it already consumes
-/// the parent's allocation.
+/// the parent's allocation. Retained allocations account for physical
+/// owners that have no typed session record.
 pub fn host_container_capacity<'a>(
     total: HostContainerSize,
     memory_is_pool: bool,
     target_ids: &[String],
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
+    retained: impl IntoIterator<Item = (&'a str, Option<&'a SessionResourceAllocation>)>,
 ) -> HostContainerCapacity {
     // A pool set aside at boot is already net of the host's own needs.
     let reserved = if memory_is_pool {
@@ -1906,13 +1911,20 @@ pub fn host_container_capacity<'a>(
         memory_bytes: 0,
     };
     let mut complete = true;
-    for session in sessions {
-        if !target_ids.contains(&session.target_template_id) || !session_owns_container(session) {
+    let active = sessions
+        .into_iter()
+        .filter(|session| session_owns_container(session))
+        .map(|session| {
+            (
+                session.target_template_id.as_str(),
+                counted_container_allocation(session),
+            )
+        });
+    for (target_id, allocation) in active.chain(retained) {
+        if !target_ids.iter().any(|id| id == target_id) {
             continue;
         }
-        let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-            counted_container_allocation(session)
-        else {
+        let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) = allocation else {
             complete = false;
             continue;
         };

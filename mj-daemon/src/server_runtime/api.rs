@@ -4822,7 +4822,9 @@ impl SubagentBackend for ApiBackend {
                 .session(session_id.clone())
                 .await
                 .with_context(|| format!("session {session_id} is not running"))?;
-            let turn = submit_prompt_with_id(&handle, text, command_id).await?;
+            let turn = submit_prompt_with_id(&handle, text, command_id)
+                .await
+                .map_err(super::prompt_submission_error)?;
             self.exports
                 .dismiss_startup_status(session_id, group_id)
                 .await?;
@@ -4877,16 +4879,20 @@ impl SubagentBackend for ApiBackend {
                         execution,
                         active_turn,
                         last_turn_outcome,
+                        queued_command_ids: turn.queued_command_ids.clone(),
                     }
                 }));
             }
             blocking("load turn outcome", move || {
                 Ok(
-                    mj_controller::database::load_materialized_turn_outcome(&session_id)?.map(
-                        |(execution, active_turn, last_turn_outcome)| TurnState {
-                            execution,
-                            active_turn,
-                            last_turn_outcome,
+                    mj_controller::database::load_materialized_turn_with_queue(&session_id)?.map(
+                        |((execution, active_turn, last_turn_outcome), queued_command_ids)| {
+                            TurnState {
+                                execution,
+                                active_turn,
+                                last_turn_outcome,
+                                queued_command_ids,
+                            }
                         },
                     ),
                 )
@@ -4977,6 +4983,15 @@ impl SubagentBackend for ApiBackend {
             }
             if options.json {
                 arguments.push("--json".to_owned());
+            }
+            arguments.extend(
+                options
+                    .paths
+                    .into_iter()
+                    .map(|path| format!("--path={path}")),
+            );
+            if options.full_patch {
+                arguments.push("--patch".to_owned());
             }
             let stdout = worker_command(layout, session_id, arguments, "session diff").await?;
             String::from_utf8(stdout).map_err(|error| {

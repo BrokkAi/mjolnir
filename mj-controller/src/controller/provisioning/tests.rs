@@ -1165,6 +1165,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         title: "new session".into(),
         harness_kind: mj_core::config::HarnessKind::Kimi,
         last_profile: "kimi".into(),
+        staged_aws_profile: None,
         bundle_id: "raw-project".into(),
         project_directory: Some("/srv/project".into()),
         managed_worktree: None,

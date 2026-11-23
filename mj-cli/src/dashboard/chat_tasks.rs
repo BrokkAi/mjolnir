@@ -255,26 +255,19 @@ impl DashboardContext {
         let Some((revision, draft)) = self.composer_drafts.start(session_id, retry) else {
             return;
         };
-        let queued = record_terminal_draft_state(
-            &self.controller,
-            self.departed_records.get(session_id),
-            &mut self.dashboard,
-            TerminalDraftState {
-                client_id: &self.client_id,
-                session_id,
-                revision,
-                draft,
+        // Recovery can target a saved session outside the live feed. The
+        // daemon resolves its workspace and checks that it still exists.
+        io::spawn_terminal_draft_persist(
+            self.client_id.clone(),
+            io::NamedSession {
+                id: session_id.to_owned(),
+                name: self.session_notice_name(session_id),
             },
-            &self.dashboard_io_tx,
+            revision,
+            draft,
+            self.dashboard_io_tx.clone(),
             self.critical_operations.clone(),
         );
-        if queued.is_none() {
-            self.composer_drafts.complete(session_id, revision, false);
-            self.draft_save_failures.insert(
-                session_id.to_owned(),
-                format!("Could not save draft for {session_id}: unknown session"),
-            );
-        }
     }
 
     /// Every loop source can mutate an editor, including asynchronous paste

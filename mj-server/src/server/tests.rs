@@ -165,6 +165,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 title: "Build Hel".into(),
                 harness_kind: HarnessKind::Codex,
                 last_profile: "codex-1".into(),
+                staged_aws_profile: None,
                 bundle_id: "hel".into(),
                 project_directory: None,
                 managed_worktree: None,
@@ -2964,6 +2965,64 @@ async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
     let action = actions.recv().await.unwrap();
     action.reply.send(ActionOutcome::accepted()).unwrap();
     assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn oversized_normalized_inline_image_prompt_writes_no_blobs() {
+    if !in_isolated_store("oversized_normalized_inline_image_prompt_writes_no_blobs") {
+        return;
+    }
+    let (app, _, _, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    let empty = mj_core::relay::RelayCommand::Prompt {
+        prompt: vec!["".into()],
+    };
+    let text = "x".repeat(
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET - serde_json::to_vec(&empty).unwrap().len(),
+    );
+    let body = serde_json::to_string(&ControllerAction::Prompt {
+        command_id: Some("oversized-inline-image".into()),
+        session_id: "session-1".into(),
+        text,
+        images: vec![sample_valid_image()],
+    })
+    .unwrap();
+    let response = post_action(app, cookie, body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("prompt is too large"),
+        "{error}"
+    );
+    let store = AttachmentStore::controller("session-1").unwrap();
+    assert!(
+        !store.root().exists(),
+        "size refusal created an attachment store"
+    );
+}
+
+#[tokio::test]
+async fn viewer_prompt_returns_the_worker_queue_refusal_as_conflict() {
+    let (app, mut actions, _, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    let response = mj_core::runtime::spawn(post_action(app, cookie, r#"{"action":"prompt","session_id":"session-1","command_id":"viewer-full-queue","text":"do the work","images":[]}"#.to_owned()));
+    let action = actions.recv().await.unwrap();
+    let message = "The session queue is full. Wait for queued prompts to run or remove queued input, then try again.";
+    action
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::precondition(message),
+        ))
+        .unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["error"], message);
 }
 
 #[tokio::test]

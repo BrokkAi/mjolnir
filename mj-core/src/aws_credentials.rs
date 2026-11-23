@@ -87,20 +87,6 @@ pub struct AwsCredentialSource {
     /// do not match the role's scope are still withdrawn; role-scoped
     /// credentials it already holds stay until they expire.
     pub mints: bool,
-    /// Where the harness's own configuration may name the AWS profile the
-    /// role-scoped mint runs as (Codex's provider table). Only the pointer is
-    /// part of the source and of the sync target's identity; the file is read
-    /// each time a credential is minted, because an edit to it does not
-    /// rebuild the target.
-    pub selection: Option<AwsProfileSelection>,
-}
-
-/// The configuration file that may select the AWS profile.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct AwsProfileSelection {
-    pub home: std::path::PathBuf,
-    /// The Codex profile overlay the profile runs with, if any.
-    pub overlay: Option<String>,
 }
 
 impl std::fmt::Debug for AwsCredentialSource {

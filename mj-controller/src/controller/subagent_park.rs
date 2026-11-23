@@ -434,7 +434,7 @@ impl Controller {
     /// liveness leaves the active record and boot intent for recovery.
     /// It never stops a worker that may have resumed accepted work.
     pub async fn unpark_subagent_worker(
-        &self,
+        &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         profile_change: Option<(&str, &str)>,
@@ -497,16 +497,12 @@ impl Controller {
                 );
             }
             let destination_profile = profile_change.map(|(_, destination)| destination);
-            let staged = destination_profile.map(|profile| {
-                let mut state = self.state.clone();
-                state.sessions.get_mut(session_id).unwrap().last_profile = profile.to_owned();
-                Controller { config: self.config.clone(), state }
-            });
-            let staging = staged.as_ref().unwrap_or(self);
-            // The parked home holds the login the child had when it parked; a
-            // renewal since then revoked it. Stage the profile again so the
-            // worker starts with the current login (#1547).
-            let staged_login = staging.prepare_worker_files_for(
+            let mut staging = Controller { config: self.config.clone(), state: self.state.clone() };
+            if let Some(profile) = destination_profile {
+                staging.state.sessions.get_mut(session_id).unwrap().last_profile = profile.to_owned();
+            }
+            // Stage the current login even when the parked child kept its profile.
+            let staged = staging.prepare_worker_files_for(
                 session_id,
                 &backend,
                 &worker_root,
@@ -515,6 +511,7 @@ impl Controller {
                 super::worker_binary::LaunchHistory::Stored,
             )
             .context("stage the current profile login for the parked sub-agent")?;
+            staging.state.sessions.get_mut(session_id).unwrap().staged_aws_profile.clone_from(&staged.aws_profile);
             let launch = staging.current_worker_launch_config(session_id, &backend)?;
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
@@ -554,6 +551,7 @@ impl Controller {
                     desired_build: String::new(),
                 },
                 profile_change,
+                Some(staged.aws_profile.as_deref()),
             )?;
             let observed = async {
                 start_worker_durably(&owner, target, executor, &backend, &worker_root, &self.config.github)
@@ -572,6 +570,7 @@ impl Controller {
                         launch: Some(&launch),
                         prepared: true,
                         discard_queued_prompts: None,
+                        staged_aws_profile: Some(staged.aws_profile.as_deref()),
                         swap_admission: None,
                         messages: &RESTART_FROM_PARKED,
                     },
@@ -613,7 +612,7 @@ impl Controller {
                 }
                 if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                     let detail = format!("{error:#}");
-                    let evidence = staged_login
+                    let evidence = staged.login
                         .filter(|_| mj_core::credentials::text_reports_auth_failure(&detail))
                         .map(|staged_login| mj_core::subagent::WakeFailure::Authentication {
                             profile_id: destination_profile.unwrap_or(&session.last_profile).to_owned(),
@@ -631,6 +630,10 @@ impl Controller {
                 }
                 return Err(error);
             }
+            crate::database::activate_worker_restart(session_id, owner.operation_id())?;
+            let active = crate::database::load_session_record(session_id)?
+                .context("activated sub-agent disappeared")?;
+            self.state.sessions.insert(session_id.to_owned(), active);
             Ok(())
         })
         .await
@@ -840,7 +843,10 @@ mod tests {
                     Some(SessionState::Running)
                 );
                 assert!(crate::database::load_worker_restart(LATCH_RELAY_SESSION)?.is_some());
-                crate::database::set_session_draft_input(LATCH_RELAY_SESSION, "newer draft")?;
+                crate::database::test_fixtures::seed_session_draft_input(
+                    LATCH_RELAY_SESSION,
+                    "newer draft",
+                )?;
             }
             let stdout = if command.purpose == "detect target platform" {
                 format!(
@@ -971,7 +977,8 @@ mod tests {
                     target: *target,
                     desired_build: String::new(),
                 };
-                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None).unwrap();
+                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None, None)
+                    .unwrap();
                 let detail = "workspace routing discovery unauthorized (401)";
                 let evidence = mj_core::subagent::WakeFailure::Authentication {
                     profile_id: "codex".into(),
@@ -1018,7 +1025,8 @@ mod tests {
                         .is_none()
                 );
                 // The same child can accept a later wake after login repair.
-                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None).unwrap();
+                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent, None, None)
+                    .unwrap();
                 assert_eq!(
                     crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
                     Some(SessionState::Running)
@@ -1035,7 +1043,7 @@ mod tests {
         }
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
-        let controller = waking_controller(root.path(), 0);
+        let mut controller = waking_controller(root.path(), 0);
         let executor = WakeTarget::new();
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -1086,7 +1094,7 @@ mod tests {
         }
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
-        let controller = waking_controller(root.path(), 0);
+        let mut controller = waking_controller(root.path(), 0);
         let profile = controller.config.profiles["codex"].clone();
         let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
         let staged = std::path::PathBuf::from(crate::targets::target_profile_home(
@@ -1125,7 +1133,7 @@ mod tests {
         }
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
-        let controller = waking_controller(root.path(), 60_000);
+        let mut controller = waking_controller(root.path(), 60_000);
         let executor = Arc::new(WakeTarget::new());
         let waking = mj_core::runtime::spawn({
             let executor = executor.clone();
@@ -1295,6 +1303,7 @@ mod tests {
                             .unwrap(),
                         desired_build: String::new(),
                     },
+                    None,
                     None,
                 )
             })

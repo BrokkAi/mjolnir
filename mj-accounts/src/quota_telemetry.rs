@@ -5,6 +5,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
+use mj_core::usage::pricing::normalize_model;
+
+use crate::database::{CellCostKey, CellCostObservation, canonical_observed_category};
+use crate::profile_scheduler::{
+    benchmark_task_usd, calibrated_prior_scale, cell_prior_usd, shrink_cell_cost_usd,
+};
 
 /// Tolerance for reset-deadline jitter before an interval is treated as a
 /// shifted deadline (Codex / Antigravity) and dropped from velocity.
@@ -17,6 +23,12 @@ const VELOCITY_WINDOW_SECONDS: i64 = 60 * 60;
 /// before the 60-minute boundary is included.
 pub const HISTORY_LOOKBACK_SECONDS: u64 = 90 * 60;
 
+/// Ratio history spans seven days. Re-logins that change the cache identity
+/// isolate immediately. Plan-tier changes with the same identity blend until
+/// the older readings age out.
+pub const RATIO_LOOKBACK_SECONDS: u64 = 7 * 24 * 60 * 60;
+const RATIO_REHYDRATE_INTERVAL_SECONDS: i64 = 60 * 60;
+
 /// Default reservation lookback when only a single clean reading exists.
 const SINGLE_READING_RESERVATION_LOOKBACK_SECONDS: i64 = 10 * 60;
 
@@ -27,6 +39,9 @@ pub const LOCAL_CATEGORY_SWITCHOVER_MIN_SAMPLES: usize = 200;
 /// Maximum recent completed sessions inspected per category during the hourly
 /// background refresh.
 pub const LOCAL_CATEGORY_MAX_SAMPLES: usize = 1000;
+
+/// Maximum priced terminal sessions retained per category, model and effort.
+pub const LOCAL_CELL_MAX_SAMPLES: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WindowKind {
@@ -62,6 +77,8 @@ pub struct WindowTelemetry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentPlacement {
     pub category: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub created_at_epoch_seconds: i64,
 }
 
@@ -112,27 +129,34 @@ pub fn default_category_burn_stats(category: &str) -> CategoryBurnStats {
     }
 }
 
-/// Convert `mean_api_usd` into weekly percentage points using
-/// `weekly_budget_usd` from `PowerRankingSnapshot` scaled by
-/// `p_eff / plan_usd_per_month`.
+/// Scale the benchmark weekly budget to the profile's monthly plan price.
+pub fn effective_weekly_budget_usd(
+    weekly_budget_usd: Option<f64>,
+    p_eff: f64,
+    plan_usd_per_month: Option<f64>,
+) -> Option<f64> {
+    let weekly_budget = weekly_budget_usd.filter(|v| v.is_finite() && *v > 0.0)?;
+    let plan_price = plan_usd_per_month
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(200.0);
+    let scale = if p_eff.is_finite() && p_eff > 0.0 {
+        p_eff / plan_price
+    } else {
+        1.0
+    };
+    let effective_budget = weekly_budget * scale;
+    (effective_budget.is_finite() && effective_budget > 0.0).then_some(effective_budget)
+}
+
+/// Convert a task's USD cost into weekly quota percentage points.
 pub fn mean_burn_weekly_pct(
     mean_api_usd: f64,
     weekly_budget_usd: Option<f64>,
     p_eff: f64,
     plan_usd_per_month: Option<f64>,
 ) -> f64 {
-    let Some(weekly_budget) = weekly_budget_usd.filter(|v| v.is_finite() && *v > 0.0) else {
-        return 0.0;
-    };
-    let scale = match plan_usd_per_month.filter(|v| v.is_finite() && *v > 0.0) {
-        Some(plan_price) if p_eff.is_finite() && p_eff > 0.0 => p_eff / plan_price,
-        _ => 1.0,
-    };
-    let effective_budget = weekly_budget * scale;
-    if !effective_budget.is_finite() || effective_budget <= 0.0 {
-        return 0.0;
-    }
-    (100.0 * mean_api_usd / effective_budget).max(0.0)
+    effective_weekly_budget_usd(weekly_budget_usd, p_eff, plan_usd_per_month)
+        .map_or(0.0, |budget| (100.0 * mean_api_usd / budget).max(0.0))
 }
 
 /// Convert a weekly percentage burn into a 5-hour percentage burn when the
@@ -165,6 +189,7 @@ pub struct QuotaTelemetrySnapshot {
     pub windows: BTreeMap<WindowKey, WindowTelemetry>,
     pub recent_placements: BTreeMap<String, Vec<RecentPlacement>>,
     pub category_stats: BTreeMap<String, CategoryBurnStats>,
+    pub cell_costs: BTreeMap<CellCostKey, CellCostObservation>,
 }
 
 impl QuotaTelemetrySnapshot {
@@ -173,6 +198,47 @@ impl QuotaTelemetrySnapshot {
             .get(category)
             .cloned()
             .unwrap_or_else(|| default_category_burn_stats(category))
+    }
+
+    pub fn cell_cost_observation(
+        &self,
+        category: &str,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Option<CellCostObservation> {
+        let mut key = CellCostKey {
+            category: canonical_observed_category(category)
+                .unwrap_or(category)
+                .to_owned(),
+            model: normalize_model(model.trim()),
+            effort: None,
+        };
+        let mut total = CellCostObservation {
+            total_api_usd: 0.0,
+            sample_count: 0,
+        };
+        let mut add = |obs: &CellCostObservation| {
+            total.total_api_usd += obs.total_api_usd;
+            total.sample_count += obs.sample_count;
+        };
+        if let Some(effort) = normalized_cell_effort(effort) {
+            if let Some(obs) = self.cell_costs.get(&key) {
+                add(obs);
+            }
+            key.effort = Some(effort);
+            if let Some(obs) = self.cell_costs.get(&key) {
+                add(obs);
+            }
+        } else {
+            for (_, obs) in self
+                .cell_costs
+                .range(key.clone()..)
+                .take_while(|(cell, _)| cell.category == key.category && cell.model == key.model)
+            {
+                add(obs);
+            }
+        }
+        (total.sample_count > 0).then_some(total)
     }
 
     pub fn window_telemetry(
@@ -203,6 +269,21 @@ impl QuotaTelemetrySnapshot {
         })
     }
 
+    pub fn qualifying_placements(
+        &self,
+        profile_id: &str,
+        second_to_last_clean_ts: Option<i64>,
+    ) -> impl Iterator<Item = &RecentPlacement> + use<'_> {
+        self.recent_placements
+            .get(profile_id)
+            .into_iter()
+            .flatten()
+            .filter(move |placement| {
+                second_to_last_clean_ts
+                    .is_none_or(|cutoff| placement.created_at_epoch_seconds > cutoff)
+            })
+    }
+
     /// Sum `mean_burn_pct(placement.category, window_kind)` over placements on
     /// `profile_id` created strictly after `second_to_last_clean_ts` (or all
     /// recent placements if `second_to_last_clean_ts` is `None`).
@@ -217,15 +298,7 @@ impl QuotaTelemetrySnapshot {
         plan_usd_per_month: Option<f64>,
         five_hour_to_weekly_ratio: Option<f64>,
     ) -> f64 {
-        let Some(placements) = self.recent_placements.get(profile_id) else {
-            return 0.0;
-        };
-        placements
-            .iter()
-            .filter(|placement| {
-                second_to_last_clean_ts
-                    .is_none_or(|cutoff| placement.created_at_epoch_seconds > cutoff)
-            })
+        self.qualifying_placements(profile_id, second_to_last_clean_ts)
             .map(|placement| {
                 let stats = self.category_stats(&placement.category);
                 mean_burn_for_window_pct(
@@ -239,6 +312,13 @@ impl QuotaTelemetrySnapshot {
             })
             .sum()
     }
+}
+
+pub(crate) fn normalized_cell_effort(effort: Option<&str>) -> Option<String> {
+    effort
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// Extract usage percentage in `[0.0, 100.0]` from a `QuotaWindow`:
@@ -270,11 +350,7 @@ pub fn compute_window_telemetry(
     history: &[ProfileQuota],
     now_seconds: i64,
 ) -> BTreeMap<WindowKey, WindowTelemetry> {
-    let mut clean: Vec<&ProfileQuota> = history
-        .iter()
-        .filter(|row| row.error.is_none() && !row.windows.is_empty())
-        .collect();
-    clean.sort_by_key(|row| row.refreshed_at_epoch_seconds);
+    let clean = clean_history(history);
 
     let cutoff = now_seconds.saturating_sub(VELOCITY_WINDOW_SECONDS);
 
@@ -296,66 +372,8 @@ pub fn compute_window_telemetry(
         }
     }
 
-    // Compute paired 5h-to-weekly ratio per model_scope (and unscoped fallback)
-    // across consecutive clean rows that carry both a valid 5h and Long delta.
-    let mut ratio_num_by_scope: BTreeMap<Option<String>, (f64, f64)> = BTreeMap::new();
-    for pair in clean.windows(2) {
-        let (prev, cur) = (pair[0], pair[1]);
-        let prev_ts = i64::try_from(prev.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
-        let cur_ts = i64::try_from(cur.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
-        if cur_ts <= prev_ts {
-            continue;
-        }
-        // Match windows by (kind, model_scope) between prev and cur.
-        let mut short_deltas: BTreeMap<Option<String>, f64> = BTreeMap::new();
-        let mut long_deltas: BTreeMap<Option<String>, f64> = BTreeMap::new();
-        for cur_w in &cur.windows {
-            let Some(cur_used) = window_used_pct(cur_w) else {
-                continue;
-            };
-            let kind = WindowKind::from_window(cur_w);
-            let Some(prev_w) = prev.windows.iter().find(|pw| {
-                WindowKind::from_window(pw) == kind && pw.model_scope == cur_w.model_scope
-            }) else {
-                continue;
-            };
-            let Some(prev_used) = window_used_pct(prev_w) else {
-                continue;
-            };
-            if is_corrupted_interval(
-                prev_ts,
-                cur_ts,
-                prev_used,
-                cur_used,
-                prev_w.resets_at_epoch_seconds,
-                cur_w.resets_at_epoch_seconds,
-            ) {
-                continue;
-            }
-            let delta = cur_used - prev_used;
-            if delta > 0.0 {
-                match kind {
-                    WindowKind::Short5h => {
-                        short_deltas.insert(cur_w.model_scope.clone(), delta);
-                    }
-                    WindowKind::Long => {
-                        long_deltas.insert(cur_w.model_scope.clone(), delta);
-                    }
-                }
-            }
-        }
-        for (scope, d_5h) in &short_deltas {
-            if let Some(d_long) = long_deltas.get(scope).or_else(|| long_deltas.get(&None))
-                && *d_long > 0.0
-            {
-                let entry = ratio_num_by_scope
-                    .entry(scope.clone())
-                    .or_insert((0.0, 0.0));
-                entry.0 += *d_5h;
-                entry.1 += *d_long;
-            }
-        }
-    }
+    let mut sums_by_scope = BTreeMap::new();
+    accumulate_ratio_deltas(&clean, None, &mut sums_by_scope);
 
     let mut out = BTreeMap::new();
     for ((window_kind, model_scope), points) in series {
@@ -396,10 +414,7 @@ pub fn compute_window_telemetry(
             0.0
         };
 
-        let five_hour_to_weekly_ratio = ratio_num_by_scope
-            .get(&model_scope)
-            .or_else(|| ratio_num_by_scope.get(&None))
-            .and_then(|(num, den)| (*den > 0.0 && *num > 0.0).then_some(*num / *den));
+        let five_hour_to_weekly_ratio = ratio_for_scope(&sums_by_scope, &model_scope);
 
         out.insert(
             WindowKey {
@@ -416,6 +431,85 @@ pub fn compute_window_telemetry(
         );
     }
     out
+}
+
+fn clean_history(history: &[ProfileQuota]) -> Vec<&ProfileQuota> {
+    let mut clean: Vec<&ProfileQuota> = history
+        .iter()
+        .filter(|row| row.error.is_none() && !row.windows.is_empty())
+        .collect();
+    clean.sort_by_key(|row| row.refreshed_at_epoch_seconds);
+    clean
+}
+
+fn accumulate_ratio_deltas(
+    clean: &[&ProfileQuota],
+    min_cur_ts_exclusive: Option<i64>,
+    sums_by_scope: &mut BTreeMap<Option<String>, (f64, f64)>,
+) -> Option<i64> {
+    for pair in clean.windows(2) {
+        let (prev, cur) = (pair[0], pair[1]);
+        let prev_ts = i64::try_from(prev.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
+        let cur_ts = i64::try_from(cur.refreshed_at_epoch_seconds).unwrap_or(i64::MAX);
+        if cur_ts <= prev_ts || min_cur_ts_exclusive.is_some_and(|min| cur_ts <= min) {
+            continue;
+        }
+        // Match windows by (kind, model_scope) between prev and cur.
+        let mut short_deltas: BTreeMap<Option<String>, f64> = BTreeMap::new();
+        let mut long_deltas: BTreeMap<Option<String>, f64> = BTreeMap::new();
+        for cur_w in &cur.windows {
+            let Some(cur_used) = window_used_pct(cur_w) else {
+                continue;
+            };
+            let kind = WindowKind::from_window(cur_w);
+            let Some(prev_w) = prev.windows.iter().find(|pw| {
+                WindowKind::from_window(pw) == kind && pw.model_scope == cur_w.model_scope
+            }) else {
+                continue;
+            };
+            let Some(prev_used) = window_used_pct(prev_w) else {
+                continue;
+            };
+            if is_corrupted_interval(
+                prev_ts,
+                cur_ts,
+                prev_used,
+                cur_used,
+                prev_w.resets_at_epoch_seconds,
+                cur_w.resets_at_epoch_seconds,
+            ) {
+                continue;
+            }
+            let delta = cur_used - prev_used;
+            let deltas = match kind {
+                WindowKind::Short5h => &mut short_deltas,
+                WindowKind::Long => &mut long_deltas,
+            };
+            deltas.insert(cur_w.model_scope.clone(), delta);
+        }
+        for (scope, d_5h) in &short_deltas {
+            if let Some(d_long) = long_deltas.get(scope).or_else(|| long_deltas.get(&None))
+                && (*d_5h > 0.0 || *d_long > 0.0)
+            {
+                let entry = sums_by_scope.entry(scope.clone()).or_default();
+                entry.0 += *d_5h;
+                entry.1 += *d_long;
+            }
+        }
+    }
+    clean
+        .last()
+        .map(|row| i64::try_from(row.refreshed_at_epoch_seconds).unwrap_or(i64::MAX))
+}
+
+fn ratio_for_scope(
+    sums_by_scope: &BTreeMap<Option<String>, (f64, f64)>,
+    scope: &Option<String>,
+) -> Option<f64> {
+    sums_by_scope
+        .get(scope)
+        .or_else(|| sums_by_scope.get(&None))
+        .and_then(|(num, den)| (*den > 0.0 && *num > 0.0).then_some(*num / *den))
 }
 
 fn is_corrupted_interval(
@@ -440,11 +534,35 @@ fn is_corrupted_interval(
     false
 }
 
+#[derive(Debug, Clone, Default)]
+struct RatioLedger {
+    sums_by_scope: BTreeMap<Option<String>, (f64, f64)>,
+    last_clean_ts: Option<i64>,
+    hydrated_at: i64,
+}
+
+impl RatioLedger {
+    fn accumulate(&mut self, history: &[ProfileQuota]) {
+        let observed_max_ts = accumulate_ratio_deltas(
+            &clean_history(history),
+            self.last_clean_ts,
+            &mut self.sums_by_scope,
+        );
+        self.last_clean_ts = self.last_clean_ts.max(observed_max_ts);
+    }
+
+    fn ratio_for_scope(&self, scope: &Option<String>) -> Option<f64> {
+        ratio_for_scope(&self.sums_by_scope, scope)
+    }
+}
+
 #[derive(Default)]
 struct QuotaTelemetryStoreInner {
     windows: BTreeMap<WindowKey, WindowTelemetry>,
+    ratio_ledgers: BTreeMap<(String, String), RatioLedger>,
     durable_placements: BTreeMap<String, Vec<RecentPlacement>>,
     category_stats: BTreeMap<String, CategoryBurnStats>,
+    cell_costs: BTreeMap<CellCostKey, CellCostObservation>,
     next_reservation_id: u64,
     in_flight: BTreeMap<u64, (String, RecentPlacement)>,
     committed_pending: BTreeMap<(String, String), (String, RecentPlacement)>,
@@ -469,6 +587,7 @@ impl QuotaTelemetryStoreInner {
             windows: self.windows.clone(),
             recent_placements,
             category_stats: self.category_stats.clone(),
+            cell_costs: self.cell_costs.clone(),
         }
     }
 }
@@ -590,6 +709,8 @@ impl QuotaTelemetryStore {
                 first.as_ref().profile_id.clone(),
                 RecentPlacement {
                     category: category.unwrap_or("primary").to_owned(),
+                    model: Some(first.as_ref().model.clone()),
+                    effort: first.as_ref().effort.clone(),
                     created_at_epoch_seconds: now_seconds,
                 },
             ),
@@ -635,6 +756,8 @@ impl QuotaTelemetryStore {
                 profile_id.to_owned(),
                 RecentPlacement {
                     category: category.to_owned(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds,
                 },
             ),
@@ -658,10 +781,20 @@ impl QuotaTelemetryStore {
                 profile_id.to_owned(),
                 RecentPlacement {
                     category: category.to_owned(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds,
                 },
             ),
         );
+    }
+
+    pub fn replace_cell_costs(&self, cell_costs: BTreeMap<CellCostKey, CellCostObservation>) {
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.cell_costs = cell_costs;
     }
 
     pub fn replace_category_stats(&self, stats: BTreeMap<String, CategoryBurnStats>) {
@@ -684,20 +817,85 @@ impl QuotaTelemetryStore {
         profiles: &[(String, String)],
         now_seconds: i64,
     ) -> anyhow::Result<()> {
-        let since = u64::try_from(now_seconds)
-            .unwrap_or(0)
-            .saturating_sub(HISTORY_LOOKBACK_SECONDS);
+        self.refresh_from_store_with_loaders(
+            profiles,
+            now_seconds,
+            crate::database::load_quota_history_since,
+            crate::database::load_recent_placements_since,
+        )
+    }
+
+    fn refresh_from_store_with_loaders(
+        &self,
+        profiles: &[(String, String)],
+        now_seconds: i64,
+        mut load_history: impl FnMut(&str, &str, u64) -> anyhow::Result<Vec<ProfileQuota>>,
+        load_placements: impl FnOnce(i64) -> anyhow::Result<Vec<crate::database::RecentPlacementRow>>,
+    ) -> anyhow::Result<()> {
+        let refresh_plan: BTreeMap<_, _> = {
+            let guard = self
+                .inner
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            profiles
+                .iter()
+                .map(|key| {
+                    let incremental = guard.ratio_ledgers.get(key).filter(|ledger| {
+                        now_seconds >= ledger.hydrated_at
+                            && now_seconds.saturating_sub(ledger.hydrated_at)
+                                < RATIO_REHYDRATE_INTERVAL_SECONDS
+                    });
+                    (key.clone(), incremental.cloned())
+                })
+                .collect()
+        };
+
+        let now = u64::try_from(now_seconds).unwrap_or(0);
+        let since_90m = now.saturating_sub(HISTORY_LOOKBACK_SECONDS);
+        let since_7d = now.saturating_sub(RATIO_LOOKBACK_SECONDS);
         let mut all_windows = BTreeMap::new();
-        for (profile_id, cache_identity) in profiles {
-            let history =
-                crate::database::load_quota_history_since(cache_identity, profile_id, since)?;
-            let computed =
-                compute_window_telemetry(profile_id, cache_identity, &history, now_seconds);
+        let mut ratio_ledgers = BTreeMap::new();
+        for ((profile_id, cache_identity), incremental) in refresh_plan {
+            let (ledger, history_90m) = if let Some(mut ledger) = incremental {
+                let history = load_history(&cache_identity, &profile_id, since_90m)?;
+                ledger.accumulate(&history);
+                (ledger, history)
+            } else {
+                let mut history = load_history(&cache_identity, &profile_id, since_7d)?;
+                let mut ledger = RatioLedger {
+                    hydrated_at: now_seconds,
+                    ..RatioLedger::default()
+                };
+                ledger.accumulate(&history);
+                history.retain(|row| row.refreshed_at_epoch_seconds >= since_90m);
+                (ledger, history)
+            };
+            let mut computed =
+                compute_window_telemetry(&profile_id, &cache_identity, &history_90m, now_seconds);
+            for (key, telemetry) in &mut computed {
+                telemetry.five_hour_to_weekly_ratio = ledger.ratio_for_scope(&key.model_scope);
+            }
+            for scope in ledger.sums_by_scope.keys() {
+                if let Some(ratio) = ledger.ratio_for_scope(scope) {
+                    computed
+                        .entry(WindowKey {
+                            profile_id: profile_id.clone(),
+                            cache_identity: cache_identity.clone(),
+                            window_kind: WindowKind::Short5h,
+                            model_scope: scope.clone(),
+                        })
+                        .or_insert(WindowTelemetry {
+                            five_hour_to_weekly_ratio: Some(ratio),
+                            ..WindowTelemetry::default()
+                        });
+                }
+            }
             all_windows.extend(computed);
+            ratio_ledgers.insert((profile_id, cache_identity), ledger);
         }
         let placements_since = now_seconds.saturating_sub(HISTORY_LOOKBACK_SECONDS as i64);
-        let rows = crate::database::load_recent_placements_since(placements_since)?;
-        self.apply_store_refresh(all_windows, rows, placements_since);
+        let rows = load_placements(placements_since)?;
+        self.publish_store_refresh(all_windows, rows, placements_since, Some(ratio_ledgers));
         Ok(())
     }
 
@@ -706,6 +904,16 @@ impl QuotaTelemetryStore {
         all_windows: BTreeMap<WindowKey, WindowTelemetry>,
         rows: Vec<crate::database::RecentPlacementRow>,
         placements_since: i64,
+    ) {
+        self.publish_store_refresh(all_windows, rows, placements_since, None);
+    }
+
+    fn publish_store_refresh(
+        &self,
+        all_windows: BTreeMap<WindowKey, WindowTelemetry>,
+        rows: Vec<crate::database::RecentPlacementRow>,
+        placements_since: i64,
+        ratio_ledgers: Option<BTreeMap<(String, String), RatioLedger>>,
     ) {
         let mut seen: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut durable_placements: BTreeMap<String, Vec<RecentPlacement>> = BTreeMap::new();
@@ -718,6 +926,8 @@ impl QuotaTelemetryStore {
                 .or_default()
                 .push(RecentPlacement {
                     category: row.category,
+                    model: row.model,
+                    effort: row.effort,
                     created_at_epoch_seconds: row.created_at_epoch_seconds,
                 });
         }
@@ -737,6 +947,9 @@ impl QuotaTelemetryStore {
             });
         guard.windows = all_windows;
         guard.durable_placements = durable_placements;
+        if let Some(ratio_ledgers) = ratio_ledgers {
+            guard.ratio_ledgers = ratio_ledgers;
+        }
     }
 
     /// Lazily refresh local category burn observations from SQLite (startup +
@@ -759,13 +972,113 @@ impl QuotaTelemetryStore {
                 )
             })
             .collect();
-        self.replace_category_stats(stats);
+        let cell_costs = crate::database::load_cell_cost_observations(LOCAL_CELL_MAX_SAMPLES)?;
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.category_stats = stats;
+        guard.cell_costs = cell_costs;
         Ok(())
+    }
+
+    pub fn log_cell_cost_estimates(
+        &self,
+        power_ranking: &crate::power_ranking::PowerRankingSnapshot,
+    ) {
+        let (cell_costs, category_stats) = {
+            let guard = self
+                .inner
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (guard.cell_costs.clone(), guard.category_stats.clone())
+        };
+        let mut categories = BTreeMap::<_, Vec<_>>::new();
+        for (key, obs) in &cell_costs {
+            if obs.sample_count == 0 {
+                continue;
+            }
+            // Stored cells have no harness. Find a benchmark through the normal
+            // lookup, including its fallback to untagged rows.
+            let bench = mj_core::config::HarnessKind::ALL
+                .into_iter()
+                .find_map(|harness| {
+                    power_ranking
+                        .lookup(&key.model, key.effort.as_deref(), harness)
+                        .as_ref()
+                        .and_then(benchmark_task_usd)
+                });
+            categories
+                .entry(key.category.as_str())
+                .or_default()
+                .push((key, obs, bench));
+        }
+        for (category, cells) in categories {
+            let default_usd = category_stats.get(category).map_or_else(
+                || default_category_burn_stats(category).mean_api_usd,
+                |stats| stats.mean_api_usd,
+            );
+            let prior_scale = calibrated_prior_scale(
+                default_usd,
+                cells
+                    .iter()
+                    .filter_map(|(_, obs, bench)| bench.map(|b| (b, Some(*obs)))),
+            );
+            for (key, obs, bench) in cells {
+                let prior_usd = cell_prior_usd(bench, prior_scale, default_usd);
+                tracing::debug!(
+                    category,
+                    model = %key.model,
+                    effort = ?key.effort,
+                    n = obs.sample_count,
+                    observed_mean_usd = obs.total_api_usd / obs.sample_count as f64,
+                    prior_usd,
+                    estimate_usd = shrink_cell_cost_usd(Some(obs), prior_usd),
+                    "local empirical cell cost"
+                );
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cell_cost_observation_matches_unknown_effort_and_aggregates_none_effort() {
+        let mut snapshot = QuotaTelemetrySnapshot::default();
+        for (effort, total_api_usd, sample_count) in [
+            (None, 2.0, 1),
+            (Some("high"), 6.0, 3),
+            (Some("low"), 10.0, 5),
+        ] {
+            snapshot.cell_costs.insert(
+                CellCostKey {
+                    category: "orchestrator".into(),
+                    model: "grok-4.7".into(),
+                    effort: effort.map(str::to_owned),
+                },
+                CellCostObservation {
+                    total_api_usd,
+                    sample_count,
+                },
+            );
+        }
+        assert_eq!(
+            snapshot.cell_cost_observation(" Supervisor ", " x-ai/grok-4.7 ", Some(" HIGH ")),
+            Some(CellCostObservation {
+                total_api_usd: 8.0,
+                sample_count: 4
+            }),
+        );
+        assert_eq!(
+            snapshot.cell_cost_observation("orchestrator", "grok-4.7", None),
+            Some(CellCostObservation {
+                total_api_usd: 18.0,
+                sample_count: 9
+            }),
+        );
+    }
+
     use super::*;
     use mj_core::config::HarnessKind;
 
@@ -850,6 +1163,130 @@ mod tests {
             wt.trailing_60m_pct_per_hour
         );
         assert_eq!(wt.second_to_last_clean_ts, Some(now - 600));
+    }
+
+    #[test]
+    fn five_hour_to_weekly_ratio_includes_zero_weekly_delta_pairs_and_excludes_resets() {
+        let start = 1_000_000;
+        let history = [
+            (100, 100),
+            (95, 100),
+            (90, 100),
+            (86, 99),
+            (100, 97),
+            (94, 100),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (short, week))| {
+            sample_report(
+                "p1",
+                start + i as u64 * 600,
+                Some((short, None)),
+                Some((week, None)),
+            )
+        })
+        .collect::<Vec<_>>();
+        let telemetry = compute_window_telemetry("p1", "id1", &history, start as i64 + 3000);
+        let key = WindowKey {
+            profile_id: "p1".into(),
+            cache_identity: "id1".into(),
+            window_kind: WindowKind::Short5h,
+            model_scope: None,
+        };
+        let ratio = telemetry[&key].five_hour_to_weekly_ratio.unwrap();
+        assert!((ratio - 14.0).abs() < 1e-6, "got {ratio}");
+    }
+
+    #[test]
+    fn ratio_ledger_persists_across_idle_window_avoids_double_counting_and_rehydrates_hourly() {
+        let store = QuotaTelemetryStore::new();
+        let t0 = 1_000_000u64;
+        let seven_days_ago = t0 - RATIO_LOOKBACK_SECONDS;
+        let two_days_ago = t0 - 2 * 86_400;
+        let key = WindowKey {
+            profile_id: "p1".into(),
+            cache_identity: "id1".into(),
+            window_kind: WindowKind::Short5h,
+            model_scope: None,
+        };
+        let profile = (key.profile_id.clone(), key.cache_identity.clone());
+        let report =
+            |ts, short, week| sample_report("p1", ts, Some((short, None)), Some((week, None)));
+        let history = [
+            report(seven_days_ago, 100, 100),
+            report(seven_days_ago + 600, 85, 99),
+            report(two_days_ago, 100, 100),
+            report(two_days_ago + 600, 95, 99),
+            report(t0 + 100, 100, 100),
+            report(t0 + 300, 95, 100),
+            report(t0 + 900, 90, 99),
+            report(t0 + 1500, 90, 98),
+        ];
+
+        let refresh = |elapsed, lookback, profiles: &[(String, String)]| {
+            let now = t0 + elapsed;
+            let mut loads = 0;
+            store
+                .refresh_from_store_with_loaders(
+                    profiles,
+                    now as i64,
+                    |identity, profile_id, since| {
+                        loads += 1;
+                        assert_eq!(
+                            (profile_id, identity),
+                            (profiles[0].0.as_str(), profiles[0].1.as_str())
+                        );
+                        assert_eq!(since, now - lookback);
+                        Ok(history
+                            .iter()
+                            .filter(|row| {
+                                let ts = row.refreshed_at_epoch_seconds;
+                                identity == "id1" && (since..=now).contains(&ts)
+                            })
+                            .cloned()
+                            .collect())
+                    },
+                    |_| Ok(Vec::new()),
+                )
+                .unwrap();
+            assert_eq!(loads, 1, "duplicate profiles must share a single refresh");
+            store.snapshot()
+        };
+
+        let profiles = std::slice::from_ref(&profile);
+        let snapshot = refresh(0, RATIO_LOOKBACK_SECONDS, profiles);
+        let short = &snapshot.windows[&key];
+        assert_eq!(short.five_hour_to_weekly_ratio, Some(10.0));
+        assert_eq!(short.trailing_60m_pct_per_hour, 0.0);
+        assert_eq!(short.second_to_last_clean_ts, None);
+
+        let snapshot = refresh(
+            600,
+            HISTORY_LOOKBACK_SECONDS,
+            &[profile.clone(), profile.clone()],
+        );
+        assert_eq!(snapshot.windows[&key].five_hour_to_weekly_ratio, Some(12.5));
+
+        let snapshot = refresh(1200, HISTORY_LOOKBACK_SECONDS, profiles);
+        assert_eq!(snapshot.windows[&key].five_hour_to_weekly_ratio, Some(10.0));
+
+        // The oldest pair has aged out. The latest step advanced only the week.
+        let snapshot = refresh(3600, RATIO_LOOKBACK_SECONDS, profiles);
+        assert_eq!(snapshot.windows[&key].five_hour_to_weekly_ratio, Some(5.0));
+
+        let new_profile = ("p1".into(), "id2".into());
+        let snapshot = refresh(
+            3610,
+            RATIO_LOOKBACK_SECONDS,
+            std::slice::from_ref(&new_profile),
+        );
+        assert!(snapshot.windows.is_empty());
+        let guard = store.inner.read().unwrap();
+        assert_eq!(
+            guard.ratio_ledgers.keys().collect::<Vec<_>>(),
+            vec![&new_profile]
+        );
     }
 
     #[test]
@@ -955,6 +1392,8 @@ mod tests {
                 session_id: "sess-dedup-1".into(),
                 profile_id: first_profile.clone(),
                 category: "subtle".into(),
+                model: None,
+                effort: None,
                 created_at_epoch_seconds: now,
             }],
             now - 3600,
@@ -992,6 +1431,8 @@ mod tests {
                     session_id: "moved-session".into(),
                     profile_id: profile_id.into(),
                     category: "primary".into(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds,
                 }],
                 now - 7200,
@@ -1008,6 +1449,8 @@ mod tests {
                 session_id: "moved-session".into(),
                 profile_id: "profile-b".into(),
                 category: "primary".into(),
+                model: None,
+                effort: None,
                 created_at_epoch_seconds: now,
             }],
             now - 7200,

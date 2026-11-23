@@ -763,6 +763,11 @@ pub(crate) struct DiffArgs {
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+    /// Without paths, print a diffstat and list untracked files. With paths, print
+    /// a unified diff of the selected tracked files relative to the checkout root.
+    /// Use `mj fetch` to read untracked files.
+    #[arg(value_name = "PATH")]
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2102,7 +2107,7 @@ pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     // The metadata form is always requested: the plain form prints only the
     // patch, but the divergence warning comes from the same answer.
     let body = client
-        .diff(&args.session, args.base.as_deref(), true)
+        .diff(&args.session, args.base.as_deref(), &args.paths, true)
         .await?;
     let details = serde_json::from_str::<mj_checkpoint::archive::SessionDiff>(&body)
         .context("decode session diff metadata")?;
@@ -5508,6 +5513,9 @@ mod tests {
             "--base",
             "HEAD~2",
             "--json",
+            "--",
+            "-name",
+            "docs/path with spaces.md",
         ])
         .unwrap();
         let Some(Command::Diff(args)) = cli.command else {
@@ -5515,6 +5523,7 @@ mod tests {
         };
         assert_eq!(args.base.as_deref(), Some("HEAD~2"));
         assert!(args.json);
+        assert_eq!(args.paths, ["-name", "docs/path with spaces.md"]);
 
         for (argv, matched) in [
             (vec!["mj", "diff", "--session", "s1"], "diff"),
