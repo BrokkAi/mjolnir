@@ -118,6 +118,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 "podman".into(),
                 TargetTemplate::LocalPodman {
                     container: ContainerTemplate {
+                        memory_hard_limit: None,
                         build_cache: None,
                         image: "secret.registry/image".into(),
                         pull_policy: Default::default(),
@@ -139,7 +140,9 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
-        environment_owners: Default::default(),
+        environment_owners: [("session-1".into(), "session-1".into())]
+            .into_iter()
+            .collect(),
         version: STATE_VERSION,
         sessions: [(
             "session-1".into(),
@@ -3437,8 +3440,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
         )
         .is_ok()
     );
-    // The same projected policy applies on the API boundary: only the Apple
-    // RAM flag changes aggregate admission; per-session physical limits stay.
+    // Opting into a hard RAM limit changes aggregate memory admission.
     let ram_overcommit = mj_core::state::SessionResourceAllocation::Container {
         cpus: 4,
         memory_bytes: 24 << 30,
@@ -3449,10 +3451,20 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
         .iter_mut()
         .find(|target| target.id == "podman")
         .unwrap()
-        .container_memory_hard_limit = true;
+        .container_memory_hard_limit_reason = Some(
+        mj_core::config::MemoryHardLimitReason::TargetSetting
+            .explanation()
+            .into(),
+    );
     let refusal = validate_action(&action("podman", Some(ram_overcommit)), &snapshot).unwrap_err();
     assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
     assert!(refusal.message.contains("20 GiB left"));
+    assert!(
+        refusal
+            .message
+            .contains("this target is configured to enforce RAM limits")
+    );
+    assert!(!refusal.message.contains("macOS"));
     let cpu_overcommit = mj_core::state::SessionResourceAllocation::Container {
         cpus: 5,
         memory_bytes: 8 << 30,

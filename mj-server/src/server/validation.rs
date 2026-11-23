@@ -629,11 +629,15 @@ fn validate_action_against(
                     .validate_minimum_useful_container()
                     .map_err(|error| ApiError::bad_request(error.to_string()))?;
             }
-            if let (Some(allocation), Some(capacity)) =
-                (resource_allocation.as_deref(), target.container_capacity)
-                && capacity.refuses(allocation, target.container_memory_hard_limit)
+            if let (Some(allocation), Some(capacity), Some(reason)) = (
+                resource_allocation.as_deref(),
+                target.container_capacity,
+                target.container_memory_hard_limit_reason.as_deref(),
+            ) && capacity.refuses(allocation, true)
             {
-                return Err(ApiError::bad_request(capacity.refusal_message(allocation)));
+                return Err(ApiError::bad_request(
+                    capacity.refusal_message(allocation, reason),
+                ));
             }
             if let (
                 Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }),

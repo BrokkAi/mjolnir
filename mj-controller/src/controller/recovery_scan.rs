@@ -1986,6 +1986,7 @@ mod tests {
     fn recovery_container_scan_requires_both_managed_and_session_labels() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
@@ -2070,6 +2071,7 @@ mod tests {
             "local".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ignored".into(),
                     pull_policy: Default::default(),
@@ -2264,6 +2266,7 @@ mod tests {
         let session = "0123456789abcdef0123456789abcdef";
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -2318,6 +2321,7 @@ mod tests {
     fn recovery_docker_scan_accepts_json_lines_and_builds_a_docker_locator() {
         let template = TargetTemplate::LocalDocker {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),

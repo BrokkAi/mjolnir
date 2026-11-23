@@ -81,6 +81,7 @@ fn podman_controller(state: SessionState) -> Controller {
         "podman".into(),
         mj_core::config::TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
@@ -2214,6 +2215,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
                 extra_args: Vec::new(),
             },
             container: mj_core::config::ContainerTemplate {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
                 pull_policy: Default::default(),

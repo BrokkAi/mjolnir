@@ -417,6 +417,7 @@ pub(crate) fn config() -> Config {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),

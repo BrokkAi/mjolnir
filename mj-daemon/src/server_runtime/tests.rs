@@ -562,6 +562,7 @@ fn golden_phone_new_session_preflight() {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "test-image".into(),
                 pull_policy: Default::default(),

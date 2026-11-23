@@ -515,9 +515,9 @@ impl ViewerSnapshot {
                     .copied(),
                 container_host_limits: None,
                 container_capacity: None,
-                container_memory_hard_limit: mj_core::config::container_memory_is_hard_limit(
-                    target,
-                ),
+                container_memory_hard_limit_reason:
+                    mj_core::config::container_memory_hard_limit_reason(target)
+                        .map(|reason| reason.explanation().to_owned()),
                 default_resource_allocation: if mj_core::config::is_container_target(target) {
                     let size = mj_core::state::resolve_default_container_size(
                         target
@@ -1264,10 +1264,9 @@ pub struct ViewerTarget {
     /// showing the RAM left. `container_host_limits` remains for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<mj_core::state::HostContainerCapacity>,
-    /// Whether RAM beyond `container_capacity.remaining` is refused rather
-    /// than warned about; see `mj_core::config::container_memory_is_hard_limit`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub container_memory_hard_limit: bool,
+    /// Why the target refuses to overcommit RAM, if it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_memory_hard_limit_reason: Option<String>,
     /// Shared default selected for this container target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_resource_allocation: Option<SessionResourceAllocation>,

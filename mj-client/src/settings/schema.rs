@@ -149,7 +149,18 @@ fn target_defaults(kind: &str) -> Value {
             "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"}
         }).as_object().unwrap().clone());
     }
+    if let Some(hard_limit) = target_memory_hard_limit_default(kind) {
+        fields["memory_hard_limit"] = json!(hard_limit);
+    }
     fields
+}
+
+pub(super) fn target_memory_hard_limit_default(kind: &str) -> Option<bool> {
+    match kind {
+        "podman" | "docker" => Some(false),
+        "apple-container" => Some(true),
+        _ => None,
+    }
 }
 
 /// Insert omitted optional fields, preserving all stored values.
@@ -339,6 +350,7 @@ pub fn label(key: &str) -> String {
         "cpus" => "CPU limit",
         "memory" => "Memory limit",
         "workspace_storage" => "Workspace storage",
+        "memory_hard_limit" => "Enforce host RAM budget",
         "host" => "SSH host",
         "user" | "ssh_user" => "SSH username",
         "identity_file" => "SSH key file",
@@ -934,6 +946,11 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["targets", _, "memory_hard_limit"] => {
+            return Some(
+                "Refuse container launches that ask for more RAM than the host has left or when the RAM left is unknown. Turn off to allow RAM overcommit.",
+            );
+        }
         ["github", "watch", "use_gpu"] => {
             return Some(
                 "Automatically use a GPU only when it runs faster than the CPU. Turn off for CPU-only GitHub relevance scoring. Device failures select CPU and report a notice.",

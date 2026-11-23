@@ -2318,6 +2318,7 @@ impl Config {
     #[allow(clippy::vec_init_then_push)]
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: DEFAULT_SESSION_IMAGE.into(),
             pull_policy: Default::default(),

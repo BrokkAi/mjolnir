@@ -575,6 +575,7 @@ fn sample_config() -> Config {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
@@ -1753,6 +1754,14 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         max_total_size: Some("20GB".into()),
         ..Default::default()
     });
+    state.validate_setup_update(&before, &after).unwrap();
+    let mut after = before.clone();
+    let crate::config::TargetTemplate::LocalPodman { container } =
+        after.targets.get_mut(&session.target_template_id).unwrap()
+    else {
+        panic!("sample session uses a podman target");
+    };
+    container.memory_hard_limit = Some(true);
     state.validate_setup_update(&before, &after).unwrap();
     // Any other container change is still refused.
     let mut after = before.clone();
