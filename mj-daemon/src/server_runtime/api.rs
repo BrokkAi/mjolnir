@@ -2191,16 +2191,11 @@ impl ApiBackend {
                 };
                 format!("profile {profile} {fault}: {}", diagnostic.message)
             });
+        let description = description.trim_end_matches('.');
         Ok(Some(if oracle {
-            format!(
-                "{}. Ask again with ask_oracle to start a fresh oracle.",
-                description.trim_end_matches('.')
-            )
+            format!("{description}. Ask again with ask_oracle to start a fresh oracle.")
         } else {
-            format!(
-                "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
-                description.trim_end_matches('.')
-            )
+            format!("{description}.")
         }))
     }
 

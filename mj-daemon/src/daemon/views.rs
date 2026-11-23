@@ -171,26 +171,21 @@ impl RuntimeState {
         Ok(true)
     }
 
-    /// Let storage cleanup drain briefly, then cancel or interrupt and join
-    /// every lifecycle owner before the daemon closes its session manager and
-    /// database writer.
-    /// One shared deadline bounds all cleanup tasks rather than granting eight
-    /// seconds to each session serially.
+    /// Interrupt and join lifecycle owners before closing the session manager
+    /// and database writer.
     pub(super) async fn cancel_and_wait_lifecycles(&self) -> Result<()> {
-        let mut pending = {
+        let pending = {
             let mut lifecycle_owner = self.owner();
-            let lifecycle = &mut lifecycle_owner.lifecycle;
-            lifecycle
+            lifecycle_owner
+                .lifecycle
                 .iter_mut()
                 .filter(|(_, active)| active.is_running())
                 .map(|(session_id, active)| {
-                    if active.kind != LifecycleKind::Cleanup {
-                        active.interrupt_for_shutdown();
-                    }
+                    active.interrupt_for_shutdown();
                     let stage = active
                         .stage_labels()
                         .pop()
-                        .unwrap_or_else(|| "container cleanup".to_owned());
+                        .unwrap_or_else(|| active.kind.label().to_owned());
                     (
                         session_id.clone(),
                         active.operation_id.clone(),
@@ -201,34 +196,6 @@ impl RuntimeState {
                 })
                 .collect::<Vec<_>>()
         };
-        let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-        for (session_id, operation_id, kind, stage, result) in &mut pending {
-            if *kind != LifecycleKind::Cleanup || result.borrow().is_some() {
-                continue;
-            }
-            tracing::info!(%session_id, %stage, "daemon shutdown is waiting for deferred cleanup");
-            self.set_lifecycle_notice(
-                session_id,
-                operation_id,
-                &format!("Daemon shutdown is waiting for {stage}"),
-            );
-            let finished = tokio::time::timeout_at(cleanup_deadline, async {
-                while result.borrow_and_update().is_none() {
-                    result.changed().await.with_context(|| {
-                        format!("cleanup owner stopped without a result for session {session_id}")
-                    })?;
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-            match finished {
-                Ok(result) => result?,
-                Err(_) => {
-                    tracing::warn!(%session_id, %stage, "deferred cleanup exceeded the daemon shutdown drain deadline");
-                    self.interrupt_operation(session_id, operation_id);
-                }
-            }
-        }
         let join_started = tokio::time::Instant::now();
         let join_deadline = join_started + Duration::from_secs(1);
         // Launch cancellation is followed by independent, bounded teardown.

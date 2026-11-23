@@ -229,7 +229,23 @@ pub async fn locate(
         }
         HarnessRuntimePolicy::Ambient => {
             if let Some(bridge) = bridge {
-                if let Some(selected) = compatible_bridge(harness, bridge, environment).await? {
+                let search = environment.clone();
+                let selected = mj_core::runtime::spawn_blocking(move || {
+                    find_command(Path::new(bridge.command), &search)
+                })
+                .await
+                .context("find target bridge task failed")?;
+                let selected = match selected {
+                    Err(error) if is_not_found(&error) => {
+                        tracing::info!(harness = harness.id(), error = %format_args!("{error:#}"),
+                            "target bridge disappeared during selection");
+                        None
+                    }
+                    result => result?,
+                };
+                if let Some(selected) = selected
+                    && compatible_bridge(harness, bridge, &selected, environment, policy).await?
+                {
                     return Ok(Located::unchosen(&selected, &[]));
                 }
                 tracing::info!(
@@ -334,13 +350,18 @@ async fn locate_in_image(
     let entrypoint = entrypoint.ok_or_else(|| missing(entry_name))?;
     let cli = cli.ok_or_else(|| missing(cli_name))?;
     if let Some(npm) = npm_bridge(harness)
-        && compatible_bridge(harness, npm, environment)
-            .await?
-            .is_none()
+        && !compatible_bridge(
+            harness,
+            npm,
+            &bridge,
+            environment,
+            HarnessRuntimePolicy::Image,
+        )
+        .await?
     {
         bail!(
-            "the daemon's image carries an incompatible {} for {}; it needs {} {}",
-            npm.command,
+            "the daemon's image carries an incompatible bridge {} for {}; it needs {} {}",
+            bridge.display(),
             harness.display_name(),
             npm.package,
             npm.version
@@ -419,40 +440,65 @@ async fn locate_in_image(
     })
 }
 
-/// The target's `bridge` on `PATH` when it is usable: present, and for Codex
-/// and Claude, the pinned version their worker-side protocol handling requires.
+/// Check the selected bridge version where worker-side protocol handling
+/// requires the exact pin.
 async fn compatible_bridge(
     harness: HarnessKind,
     bridge: mj_core::harness_runtime::NpmBridge,
+    selected: &Path,
     environment: &BTreeMap<String, String>,
-) -> Result<Option<PathBuf>> {
-    let search = environment.clone();
-    let selected =
-        mj_core::runtime::spawn_blocking(move || find_command(Path::new(bridge.command), &search))
-            .await
-            .context("find target bridge task failed")??;
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
+    policy: HarnessRuntimePolicy,
+) -> Result<bool> {
     if !matches!(harness, HarnessKind::Codex | HarnessKind::Claude) {
-        return Ok(Some(selected));
+        return Ok(true);
     }
-    let mut probe = tokio::process::Command::new(&selected);
-    probe.arg("--version").env_clear().envs(environment);
-    if let Some(home) = environment.get("HOME") {
-        probe.current_dir(home);
-    }
-    let output = mj_core::subprocess::run_bounded(&mut probe, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
-        .await
-        .with_context(|| format!("check installed {} bridge version", harness.display_name()))?;
+    // The version probe needs no session or home files. Use a stable cwd so
+    // a missing HOME cannot look like a missing executable or interpreter.
+    let cwd = Path::new("/");
+    let mut probe = tokio::process::Command::new(selected);
+    probe
+        .arg("--version")
+        .current_dir(cwd)
+        .env_clear()
+        .envs(environment);
+    let mut spawned = false;
+    let output = mj_core::subprocess::run_bounded_observed(
+        &mut probe,
+        64 * 1024,
+        HARNESS_COMMAND_TIMEOUT,
+        |_| spawned = true,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "check installed {} bridge version at {} in working directory {}",
+            harness.display_name(),
+            selected.display(),
+            cwd.display()
+        )
+    });
+    let output = match output {
+        Err(error)
+            if policy == HarnessRuntimePolicy::Ambient && !spawned && is_not_found(&error) =>
+        {
+            tracing::info!(error = %format_args!("{error:#}"), "target bridge could not start");
+            return Ok(false);
+        }
+        result => result?,
+    };
     let expected = if harness == HarnessKind::Claude {
         bridge.version.to_owned()
     } else {
         format!("{} {}", bridge.package, bridge.version)
     };
-    let compatible = output.status.success()
-        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n') == expected;
-    Ok(compatible.then_some(selected))
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n') == expected)
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Whether the target carries the native harness its built-in launch script
@@ -517,10 +563,12 @@ pub fn find_command(
     let Some(selected) = find_command_path(command, environment)? else {
         return Ok(None);
     };
+    let selected = std::path::absolute(&selected)
+        .with_context(|| format!("make runtime command {} absolute", selected.display()))?;
     selected
         .canonicalize()
         .map(Some)
-        .context("resolve selected runtime command")
+        .with_context(|| format!("resolve selected runtime command {}", selected.display()))
 }
 
 /// [`find_command`] without resolving symbolic links.
@@ -659,20 +707,17 @@ async fn resolve_at_async(
                 .into_owned(),
         );
     }
-    if harness == HarnessKind::Codex {
+    let cli_entrypoint = install.join(selected.cli_entrypoint);
+    // Point each bridge at the separately pinned CLI.
+    let cli_override = match harness {
+        HarnessKind::Codex => Some("CODEX_PATH"),
+        HarnessKind::Claude => Some("CLAUDE_CODE_EXECUTABLE"),
+        _ => None,
+    };
+    if let Some(variable) = cli_override {
         launch_environment.insert(
-            "CODEX_PATH".to_owned(),
-            install
-                .join("node_modules/@openai/codex/bin/codex.js")
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    // The bridge's SDK bundles an older CLI; select our separately pinned Code.
-    if let (HarnessKind::Claude, Some(entry)) = (harness, harness.extra_managed_entrypoint()) {
-        launch_environment.insert(
-            "CLAUDE_CODE_EXECUTABLE".into(),
-            install.join(entry).to_string_lossy().into_owned(),
+            variable.into(),
+            cli_entrypoint.to_string_lossy().into_owned(),
         );
     }
     // The pinned installation is not the release channel, so its downloader
@@ -720,7 +765,7 @@ async fn resolve_at_async(
         args,
         environment: launch_environment,
         entrypoint: install.join(selected.entrypoint),
-        cli_entrypoint: install.join(selected.cli_entrypoint),
+        cli_entrypoint,
         lease_path,
         cache_root: root.to_path_buf(),
         _lease: lease,
@@ -852,7 +897,27 @@ async fn install_into(
         }
     }
     relativize_internal_links(staging.path(), staging.path())?;
-    validate_entrypoint(staging.path(), selected, harness)?;
+    let installing = || format!("install managed {} package", harness.display_name());
+    validate_entrypoint(staging.path(), selected, harness).with_context(installing)?;
+    if matches!(harness, HarnessKind::Codex | HarnessKind::Claude) {
+        let cli = staging.path().join(selected.cli_entrypoint);
+        let mut probe = tokio::process::Command::new(&cli);
+        probe
+            .arg("--version")
+            .current_dir(staging.path())
+            .env_clear()
+            .envs(environment);
+        run_bounded_checked(
+            &mut probe,
+            &format!(
+                "verify pinned {} CLI {} after npm package installation",
+                harness.display_name(),
+                cli.display()
+            ),
+            HARNESS_COMMAND_TIMEOUT,
+        )
+        .await?;
+    }
     open_lock(&staging.path().join(LEASE_FILE))?;
     let manifest = ManagedHarnessManifest::for_install(harness, selected.install_id);
     let body = serde_json::to_vec_pretty(&manifest)?;
@@ -937,9 +1002,8 @@ async fn install_npm(
 
 /// npm 12 and later refuse dependency install scripts unless the package is
 /// listed in the root `allowScripts` field. A refused script is only a warning,
-/// so the install would otherwise publish a harness whose entrypoint is the
-/// package's "not installed" stub. Report that here, where the message can say
-/// which asset to edit, instead of letting the bridge fail to start later.
+/// so report it before probing the CLI, which may still be the package's
+/// "not installed" stub.
 async fn verify_install_scripts_ran(
     staging: &Path,
     harness: HarnessKind,
@@ -973,12 +1037,9 @@ async fn verify_install_scripts_ran(
         return Ok(());
     }
     bail!(
-        "managed {} harness install skipped install scripts for {}. npm gates dependency install \
-         scripts, so add each package to allowScripts in \
-         mj-harness-install/assets/harnesses/{}/package.json and reinstall.",
+        "managed {} npm package installation skipped install scripts for {} because the bundled allowScripts policy did not approve them",
         harness.display_name(),
         pending.join(", "),
-        harness.id()
     )
 }
 
@@ -2116,7 +2177,10 @@ fn complete_install(path: &Path, harness: HarnessKind, selected: HarnessPin) -> 
 }
 
 fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) -> Result<()> {
-    for entry in std::iter::once(selected.entrypoint).chain(harness.extra_managed_entrypoint()) {
+    let cli = (selected.cli_entrypoint != selected.entrypoint).then_some(selected.cli_entrypoint);
+    // Grok's launcher also needs the separate agent executable.
+    let agent = (harness == HarnessKind::Grok).then_some("bin/agent");
+    for entry in std::iter::once(selected.entrypoint).chain(cli).chain(agent) {
         let entrypoint = path.join(entry);
         if !entrypoint_is_executable(&entrypoint) {
             bail!(
@@ -2881,6 +2945,13 @@ mod tests {
         let install = root.join(install_id);
         std::fs::create_dir_all(&install).unwrap();
         executable(&install.join(entrypoint), "#!/bin/sh\nexit 0\n");
+        let selected = pin(harness);
+        if entrypoint == selected.entrypoint && selected.cli_entrypoint != entrypoint {
+            executable(
+                &install.join(selected.cli_entrypoint),
+                "#!/bin/sh\nexit 0\n",
+            );
+        }
         open_lock(&install.join(LEASE_FILE)).unwrap();
         let body =
             serde_json::to_vec_pretty(&ManagedHarnessManifest::for_install(harness, install_id))
@@ -2901,8 +2972,39 @@ mod tests {
         executable(
             &bin.join("npm"),
             &format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\nif [ \"$1\" = install-scripts ]; then printf '{{\"allowScripts\":[]}}'; exit 0; fi\nprintf x >> '{}'\nmkdir -p node_modules/.bin node_modules/@openai/codex/bin\nprintf '#!/bin/sh\\nexit 0\\n' > node_modules/.bin/codex-acp\nchmod 755 node_modules/.bin/codex-acp\nprintf '// managed codex' > node_modules/@openai/codex/bin/codex.js\n",
-                installs.display()
+                r#"#!/bin/sh
+set -eu
+if [ "$1" = --version ]; then echo 12.0.0; exit 0; fi
+if [ "$1" = install-scripts ]; then printf '{{"allowScripts":[]}}'; exit 0; fi
+printf x >> '{}'
+mkdir -p node_modules/.bin
+if grep -q 'mjolnir-managed-codex' package.json; then
+    bridge={codex_bridge}
+    cli={codex_cli}
+else
+    bridge={claude_bridge}
+    cli={claude_cli}
+fi
+printf '#!/bin/sh\nexit 0\n' > "$bridge.script"
+cat > "$cli.script" <<'CLI'
+#!/bin/sh
+if [ "$1" != --version ]; then exit 2; fi
+if [ -n "$MJ_TEST_CLI_PROBES" ]; then printf x >> "$MJ_TEST_CLI_PROBES"; fi
+if [ -n "$MJ_TEST_CLI_MISSING_NATIVE" ]; then
+    echo 'missing native platform package' >&2
+    exit 1
+fi
+echo 'installed CLI version'
+CLI
+ln -s '{dispatcher}' "$bridge"
+ln -s '{dispatcher}' "$cli"
+"#,
+                installs.display(),
+                dispatcher = mj_core::test_hooks::fake_command_dispatcher().display(),
+                codex_bridge = pin(HarnessKind::Codex).entrypoint,
+                codex_cli = pin(HarnessKind::Codex).cli_entrypoint,
+                claude_bridge = pin(HarnessKind::Claude).entrypoint,
+                claude_cli = pin(HarnessKind::Claude).cli_entrypoint,
             ),
         );
         BTreeMap::from([(
@@ -3115,10 +3217,6 @@ mod tests {
             selected.entrypoint,
         );
         let install = root.join(selected.install_id);
-        executable(
-            &install.join(HarnessKind::Claude.extra_managed_entrypoint().unwrap()),
-            "#!/bin/sh\nexit 0\n",
-        );
         let mut environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
         environment.insert(
             "XDG_CACHE_HOME".into(),
@@ -3166,6 +3264,67 @@ mod tests {
         .unwrap();
         assert!(located.managed.is_none());
         assert_eq!(located.command, image_bridge.canonicalize().unwrap());
+    }
+
+    // Hard-won: #1392: an ambient bridge selected from PATH could fail to spawn with ENOENT.
+    #[test]
+    fn an_unspawnable_ambient_bridge_selects_the_managed_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_home = temp.path().join("cache");
+        let cache = managed_harness_cache_root(Some(cache_home.as_os_str()), None).unwrap();
+        let installs = temp.path().join("installs");
+        let mut environment = fake_node_tools(temp.path(), &installs);
+        environment.insert("XDG_CACHE_HOME".into(), cache_home.display().to_string());
+        environment.insert(
+            "HOME".into(),
+            temp.path().join("absent-home").display().to_string(),
+        );
+        let harness = HarnessKind::Codex;
+        let bridge = npm_bridge(harness).unwrap();
+        environment.insert(
+            "MJ_TEST_BRIDGE_VERSION".into(),
+            format!("{} {}", bridge.package, bridge.version),
+        );
+        let approvals = ExecutionPolicy::ConfiguredApprovals;
+        let (command, args) = mj_core::harness_runtime::fallback_launch(harness, approvals);
+        let launcher = temp.path().join("bin/codex-acp");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let locate = |policy| {
+            run_async(locate(
+                policy,
+                harness,
+                approvals,
+                Path::new(&command),
+                &args,
+                &environment,
+            ))
+        };
+
+        std::os::unix::fs::symlink(fixtures.join("bridge-version.sh"), &launcher).unwrap();
+        executable(&temp.path().join("bin/codex"), "#!/bin/sh\nexit 0\n");
+        let located = locate(HarnessRuntimePolicy::Image).unwrap();
+        assert_eq!(located.command, launcher.canonicalize().unwrap());
+
+        std::fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink(fixtures.join("bridge-missing-interpreter.sh"), &launcher)
+            .unwrap();
+        let error = locate(HarnessRuntimePolicy::Image).unwrap_err();
+        let cause = error.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&launcher.canonicalize().unwrap().display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("working directory /:"), "{message}");
+        assert!(message.contains(&cause.to_string()), "{message}");
+        assert!(!cache.exists());
+
+        let located = locate(HarnessRuntimePolicy::Ambient).unwrap();
+        let install = managed_harness_install_dir(&cache, harness);
+        assert!(located.managed.is_some());
+        assert_eq!(located.command, install.join(pin(harness).entrypoint));
+        assert_eq!(std::fs::read(&installs).unwrap(), b"x");
     }
 
     /// The daemon container's only harness source is its image: a missing
@@ -3622,6 +3781,58 @@ mod tests {
         }
     }
 
+    // Hard-won: #1605: npm success could publish a receipt for a CLI missing its native package.
+    #[test]
+    fn npm_install_retries_after_the_pinned_cli_cannot_run() {
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache = temp.path().join("cache");
+            let installs = temp.path().join("installs");
+            let probes = temp.path().join("probes");
+            let mut environment = fake_node_tools(temp.path(), &installs);
+            environment.insert("MJ_TEST_CLI_MISSING_NATIVE".into(), "1".into());
+            environment.insert("MJ_TEST_CLI_PROBES".into(), probes.display().to_string());
+            let install = managed_harness_install_dir(&cache, harness);
+            let resolve = |environment: &BTreeMap<String, String>| {
+                resolve_at(
+                    &cache,
+                    harness,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    environment,
+                )
+            };
+
+            let error = resolve(&environment).unwrap_err();
+            let message = format!("{error:#}");
+            for detail in [
+                harness.display_name(),
+                pin(harness).cli_entrypoint,
+                "npm package installation",
+                "missing native platform package",
+            ] {
+                assert!(message.contains(detail), "{message}");
+            }
+            assert!(!install.exists());
+            assert_eq!(std::fs::read(&installs).unwrap(), b"x");
+            assert_eq!(std::fs::read(&probes).unwrap(), b"x");
+
+            environment.remove("MJ_TEST_CLI_MISSING_NATIVE");
+            let managed = resolve(&environment).unwrap();
+            assert!(install.join(MANIFEST_FILE).is_file());
+            assert_eq!(
+                managed.cli_entrypoint,
+                install.join(pin(harness).cli_entrypoint)
+            );
+            assert_eq!(std::fs::read(&installs).unwrap(), b"xx");
+            assert_eq!(std::fs::read(&probes).unwrap(), b"xx");
+
+            environment.insert("MJ_TEST_CLI_MISSING_NATIVE".into(), "1".into());
+            assert_eq!(resolve(&environment).unwrap().command, managed.command);
+            assert_eq!(std::fs::read(&installs).unwrap(), b"xx");
+            assert_eq!(std::fs::read(&probes).unwrap(), b"xx");
+        }
+    }
+
     #[test]
     fn concurrent_first_use_publishes_one_complete_install() {
         let temp = tempfile::tempdir().unwrap();
@@ -3916,6 +4127,10 @@ mod tests {
             selected.install_id,
             selected.entrypoint,
         );
+        executable(
+            &root.join(selected.install_id).join("bin/agent"),
+            "#!/bin/sh\nexit 0\n",
+        );
         let managed = resolve_at(
             &cache,
             HarnessKind::Grok,
@@ -4017,14 +4232,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         complete_fake(&root, harness, selected.install_id, selected.entrypoint);
         let install = root.join(selected.install_id);
-        if let Some(entry) = harness.extra_managed_entrypoint() {
-            executable(&install.join(entry), "#!/bin/sh\nexit 0\n");
-        }
         let marker = temp.path().join("executed");
-        executable(
-            &root.join(selected.install_id).join(selected.entrypoint),
-            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-        );
+        for entry in [selected.entrypoint, selected.cli_entrypoint] {
+            executable(
+                &install.join(entry),
+                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            );
+        }
         let environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
 
         let managed = resolve_at(
@@ -4036,25 +4250,21 @@ mod tests {
         .unwrap();
 
         assert!(!marker.exists());
-        let (provider_env, entry) = match harness {
-            HarnessKind::Codex => ("CODEX_PATH", "node_modules/@openai/codex/bin/codex.js"),
-            HarnessKind::Claude => (
-                "CLAUDE_CODE_EXECUTABLE",
-                harness.extra_managed_entrypoint().unwrap(),
-            ),
+        let provider_env = match harness {
+            HarnessKind::Codex => "CODEX_PATH",
+            HarnessKind::Claude => "CLAUDE_CODE_EXECUTABLE",
             _ => unreachable!(),
         };
-        let expected_provider = install.join(entry).to_string_lossy().into_owned();
+        let cli = install.join(selected.cli_entrypoint);
+        let expected_provider = cli.to_string_lossy().into_owned();
         assert_eq!(
             managed.environment.get(provider_env),
             Some(&expected_provider)
         );
-        if harness == HarnessKind::Claude {
-            std::fs::remove_file(install.join(entry)).unwrap();
-            assert!(
-                !complete_install(&install, harness, selected).unwrap(),
-                "a cache without the pinned Claude Code must not launch the SDK's bundled CLI"
-            );
-        }
+        std::fs::remove_file(cli).unwrap();
+        assert!(
+            !complete_install(&install, harness, selected).unwrap(),
+            "a complete cache must contain the pinned CLI"
+        );
     }
 }

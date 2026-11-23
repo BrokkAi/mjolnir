@@ -638,6 +638,9 @@ pub(super) fn viewer_snapshot_selected(
         }
         let view = sessions.get(&session.id);
         let live = view.and_then(|view| view.operational.as_deref());
+        session.relay_state = view
+            .filter(|view| !view.materialized_only)
+            .map(|view| crate::server::api::RelayState::of(view.connected, view.error.as_ref()));
         let materialized = view.and_then(|view| view.materialized.as_deref());
         session.last_activity_at_ms = materialized.and_then(|view| view.last_activity_at_ms);
         session.queued_prompts = materialized
@@ -718,25 +721,19 @@ pub(super) fn viewer_snapshot_selected(
         // known about it, never as idle: a turn that outlives a daemon
         // restart is still running, and calling it idle made automation treat
         // it as finished (#1025).
-        let activity_state = match live {
-            _ if session.verdict.idle && session.state == "parked" => {
-                mj_core::activity::ActivityState::Idle {
-                    since_ms: session.last_activity_at_ms,
-                }
+        let parked = session.verdict.idle && session.state == "parked";
+        let activity_state = if parked {
+            mj_core::activity::ActivityState::Idle {
+                since_ms: session.last_activity_at_ms,
             }
-            Some(state) => state.activity_state(),
-            None => mj_core::activity::while_disconnected(
-                materialized.map_or(Default::default(), |view| view.execution),
-                session.last_activity_at_ms,
-            ),
+        } else {
+            crate::daemon::verdicts::projected_activity(view)
         };
         // A session the daemon can see reports the phase its own flag names,
         // corrected for a turn that flag has not caught up with; one it cannot
         // see reports what was last known.
-        let chat_phase = match live {
-            _ if session.verdict.idle && session.state == "parked" => {
-                mj_core::relay::RelayExecutionState::Idle
-            }
+        let connected = live.filter(|_| view.is_some_and(|view| view.connected));
+        let chat_phase = match connected.filter(|_| !parked) {
             Some(state) => mj_core::activity::chat_phase(&state.facts()),
             None => activity_state.chat_phase(),
         };
@@ -815,6 +812,17 @@ pub(super) fn viewer_snapshot_selected(
                 session.execution_enforcement,
                 &state.config_options,
             );
+            session.capacity_retry = state.capacity_retry.clone().map(Box::new);
+            session.quota_recovery = state
+                .continuation
+                .quota_recovery
+                .clone()
+                .filter(|r| !r.submitted)
+                .map(Box::new);
+        }
+        let activity = live.map(mj_client::usage_format::SessionActivity::of);
+        session.retry_assessment_pending = activity.as_ref().is_some_and(|a| a.checking_response);
+        if let Some((state, activity)) = connected.zip(activity) {
             // Share activity classification with the terminal. The browser
             // retains its detailed turn/step/background clock presentation.
             let turn_started_at_ms = state
@@ -825,15 +833,6 @@ pub(super) fn viewer_snapshot_selected(
             let turn_started_at = turn_started_at_ms
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
-            session.capacity_retry = state.capacity_retry.clone().map(Box::new);
-            session.quota_recovery = state
-                .continuation
-                .quota_recovery
-                .clone()
-                .filter(|r| !r.submitted)
-                .map(Box::new);
-            let activity = mj_client::usage_format::SessionActivity::of(state);
-            session.retry_assessment_pending = activity.checking_response;
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
             session.activity_details = Some(viewer_activity_details(&activity_details));
