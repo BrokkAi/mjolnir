@@ -105,6 +105,25 @@ pub(crate) fn placement() -> DaemonPlacement {
     }
 }
 
+/// Parse `MJ_DAEMON_API_LISTEN` and refuse non-loopback plain HTTP outside a
+/// container daemon whose host port publication binds exclusively to loopback.
+fn parse_api_listen_address(
+    override_value: Option<&str>,
+    placement: &DaemonPlacement,
+) -> Result<SocketAddr> {
+    let address = match override_value {
+        Some(address) => address
+            .parse::<SocketAddr>()
+            .with_context(|| format!("MJ_DAEMON_API_LISTEN is not an address: {address:?}"))?,
+        None => return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+    };
+    anyhow::ensure!(
+        address.ip().is_loopback() || matches!(placement, DaemonPlacement::Container { .. }),
+        "MJ_DAEMON_API_LISTEN must use a loopback address outside a container daemon: {address}"
+    );
+    Ok(address)
+}
+
 pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
@@ -554,12 +573,10 @@ pub(super) async fn run_daemon_runtime(
         delegation_updates,
         cancellation.clone(),
     );
-    let listen = match mj_core::config::env_override("DAEMON_API_LISTEN") {
-        Some(address) => address
-            .parse::<SocketAddr>()
-            .with_context(|| format!("MJ_DAEMON_API_LISTEN is not an address: {address:?}"))?,
-        None => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-    };
+    let listen = parse_api_listen_address(
+        mj_core::config::env_override("DAEMON_API_LISTEN").as_deref(),
+        &metadata.placement,
+    )?;
     let api_listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind the Mjolnir HTTP API endpoint {listen}"))?;
@@ -1983,5 +2000,33 @@ mod tests {
             outcome.unwrap(),
         );
         assert!(format!("{:#}", daemon_outcome.unwrap_err()).contains("service cleanup failed"));
+    }
+
+    #[test]
+    fn api_listen_address_rejects_non_loopback_outside_container() {
+        let host = DaemonPlacement::Host;
+        assert_eq!(
+            parse_api_listen_address(None, &host).unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+        );
+        assert_eq!(
+            parse_api_listen_address(Some("127.0.0.1:4123"), &host).unwrap(),
+            "127.0.0.1:4123".parse().unwrap()
+        );
+        assert_eq!(
+            parse_api_listen_address(Some("[::1]:4123"), &host).unwrap(),
+            "[::1]:4123".parse().unwrap()
+        );
+        let error = parse_api_listen_address(Some("0.0.0.0:4123"), &host).unwrap_err();
+        assert!(error.to_string().contains("loopback address"));
+
+        let container = DaemonPlacement::Container {
+            name: "mjolnir-daemon".into(),
+            runtime: None,
+        };
+        assert_eq!(
+            parse_api_listen_address(Some("0.0.0.0:4123"), &container).unwrap(),
+            "0.0.0.0:4123".parse().unwrap()
+        );
     }
 }
