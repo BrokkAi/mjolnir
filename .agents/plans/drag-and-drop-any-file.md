@@ -13,9 +13,9 @@ After this plan is complete, users can drag, drop, paste, or `/attach` arbitrary
 ## Progress
 
 - [x] (2026-11-23 23:21Z) Completed codebase & ACP harness audit (`.mj/agents/cd116d9aa028ac43f4684438ca2a96f3/dnd-any-file-map.md`, `.mj/agents/8fee3292a4e04b7e370965f21fc9d486/harness-file-support.md`) and unified TUI + Web HTTP attachment transport in `#1044`.
-- [x] (2026-11-23 23:34Z) Slice 1: Core `FileAttachmentRef` & `AttachmentStore` file support, relay protocol 90 (`FileAttachmentPresent` / `InstallFileAttachment` / `ReadFileAttachment`), worker materialization & ACP resolution, session-runtime/resume sync, draft/queue validation, and transcript rendering.
+- [x] (2026-11-23 23:34Z) Slice 1: Core `FileAttachmentRef` & `AttachmentStore` file support, relay protocol 90 (`FileAttachmentPresent` / `InstallFileAttachment` / `ReadFileAttachment`), worker materialization & ACP resolution, session-runtime/resume sync, and transcript rendering.
 - [ ] Slice 2: Generalized `POST /api/v1/sessions/{id}/attachments`, `ControllerAction::Prompt` file attachments, `HttpDaemonClient::upload_file_attachment`, Web viewer (`viewer.js`) drag-drop/paste/chips/submission, and Playwright e2e coverage (`tests/e2e/web/attachments.spec.js`).
-- [ ] Slice 3: Generalized TUI (`mj-chat`) pasted-path detection, `/attach`, composer file chips & backward-compatible drafts, image-to-file fallback for non-image harnesses, and `TZ=UTC` `mj-chat` golden/unit coverage.
+- [ ] Slice 3: Generalized TUI (`mj-chat`) pasted-path detection, `/attach`, composer file chips & backward-compatible drafts (`PromptPayload` / `PromptPayloadWire`, `mj-core/src/draft.rs` `Envelope` + `merge_drafts` + `validate_reference_draft`, `terminal_queue_startup_prompt`), image-to-file fallback for non-image harnesses, and `TZ=UTC` `mj-chat` golden/unit coverage.
 
 ## Surprises & Discoveries
 
@@ -73,8 +73,7 @@ After this plan is complete, users can drag, drop, paste, or `/attach` arbitrary
 - **`mj-session-runtime/src/worker_client/relay.rs`, `mj-session-runtime/src/session_manager/standalone.rs`, `mj-controller/src/controller/resume/repair.rs`**:
   - Add `file_attachment_present`, `ensure_file_attachment`, `cache_file_attachment`, checking negotiated worker protocol `< RELAY_FILE_ATTACHMENT_PROTOCOL` and returning a clear `Refusal` if the worker predates file attachments.
   - Sync all `file_references(prompt)` alongside image `references(prompt)` in `submit` and `standalone.rs`, and verify/repair them in `resume/repair.rs`.
-- **`mj-core/src/draft.rs`, `mj-core/src/transcript.rs`, `mj-daemon/src/daemon/terminal_operations.rs`**:
-  - Allow validated `FileAttachmentRef` entries in `validate_reference_draft` and `terminal_queue_startup_prompt` (allowing `ContentBlock::ResourceLink` ONLY when `file_reference(link)?.is_some()`).
+- **`mj-core/src/transcript.rs`**:
   - Render `mj-file-attachment:` `ResourceLink` blocks cleanly in `mj-core/src/transcript.rs` (`[file: <filename>]` rather than leaking base64 URIs).
 
 ### Slice 2: Unified HTTP Upload, Prompt Submission, Web Viewer & Playwright E2E
@@ -98,10 +97,10 @@ After this plan is complete, users can drag, drop, paste, or `/attach` arbitrary
 
 - **`mj-chat/src/chat/pasted_paths.rs`**:
   - Generalize `image_paths` -> `pasted_file_paths` recognizing arbitrary absolute file paths (Unix `/...`, quoted, backslash-escaped, `file://`, Windows drive & UNC paths for WSL `wslpath -u`), rejecting bare `/` or prose/URLs (`http://`, `https://`), and flagging whether each path has an image extension.
-- **`mj-chat/src/chat/attachments.rs` & `mj-core/src/draft.rs`**:
-  - Extend `PromptPayload` with `#[serde(default, skip_serializing_if = "Vec::is_empty")] pub files: Vec<PromptFile>` (tracking inline byte range, number, filename, size, `Option<FileAttachmentRef>`, placeholder state, and marker text like `[file #1: report.pdf]`).
+- **`mj-chat/src/chat/attachments.rs`, `mj-core/src/draft.rs`, & `mj-daemon/src/daemon/terminal_operations.rs`**:
+  - Extend `PromptPayload` and `PromptPayloadWire` with `#[serde(default, skip_serializing_if = "Vec::is_empty")] pub files: Vec<PromptFile>` (tracking inline byte range, number, filename, size, `Option<FileAttachmentRef>`, placeholder state, and marker text like `[file #1: report.pdf]`).
   - Preserve 100% backward compatibility with existing plain-text and image-only drafts, and emit `ContentBlock::ResourceLink` for file ranges in `PromptPayload::content_blocks()`.
-  - Update `mj-core/src/draft.rs::validate_reference_draft` and `PromptPayload::trimmed` / range-shifting helpers to keep both `images` and `files` ranges synchronized cleanly.
+  - Update `mj-core/src/draft.rs` (`Envelope::decode`, `Envelope::encode`, `merge_drafts`, `validate_reference_draft`) and `PromptPayload::trimmed` / range-shifting helpers so tracked `files` entries receive the same range validation, renumbering, and range-shifting during draft recovery/merge as `images`, and allow installed `FileAttachmentRef` `ResourceLink` blocks in `terminal_queue_startup_prompt`.
 - **`mj-chat/src/chat/{composer.rs, input_state.rs, active.rs, remote.rs}`**:
   - Run `PastedPath::resolve()` + `fs::metadata(&path)` + file reading + HTTP upload (`HttpDaemonClient::upload_attachment` / `upload_file_attachment`) strictly off the event/render loop.
   - For pasted paths: if a path does not exist or is not a regular file (`!metadata.is_file()`), restore the exact original pasted text silently (so pasting `/api/v1/sessions` or a directory path never surprises the user with an error). If a real file exceeds `MAX_FILE_BYTES`, restore/report a clear size notice.
@@ -114,4 +113,4 @@ After this plan is complete, users can drag, drop, paste, or `/attach` arbitrary
 
 Slice 1 implements generic file references and relay protocol 90. The worker verifies file blobs before admitting a prompt and resolves its links to readable paths before ACP dispatch. Materialization uses atomic copies so edits to the path supplied to the harness leave the original blob intact. The remaining slices connect the upload and composer entry points.
 
-The focused attachment, draft, transcript, worker relay, resume, and startup prompt checks passed. The full session-runtime suite passed 237 tests, including the protocol 89 refusal, and reported two failures that reproduced on base revision `b3a1df58c`. The selected Clippy checks passed.
+The focused attachment, transcript, worker relay, and resume checks passed. The full session-runtime suite passed 237 tests, including the protocol 89 refusal, and reported two failures that reproduced on base revision `b3a1df58c`. Durable startup-draft and `merge_drafts` file support were deferred to Slice 3 so `mj-core/src/draft.rs`, `mj-daemon/src/daemon/terminal_operations.rs`, and `mj-chat/src/chat/attachments.rs` land together with one wire shape. The selected Clippy checks passed.

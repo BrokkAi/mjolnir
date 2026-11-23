@@ -1,7 +1,6 @@
 //! Shared persisted composer-envelope operations. Clipboard processing stays in
 //! the composer; storage merges envelopes without interpreting native images.
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 pub const CHAT_DRAFT_PREFIX: &str = "mjolnir-chat-draft-v1:";
@@ -205,8 +204,7 @@ pub fn merge_drafts(existing: &str, recovered: &str) -> Result<String> {
 
 /// Durable startup drafts must carry installed references, never inline bytes.
 pub fn validate_reference_draft(draft: &str) -> Result<()> {
-    let envelope = Envelope::decode(draft)?;
-    for image in envelope.images {
+    for image in Envelope::decode(draft)?.images {
         let image = &image["image"];
         ensure!(
             image
@@ -222,76 +220,5 @@ pub fn validate_reference_draft(draft: &str) -> Result<()> {
         )?;
         reference.validate()?;
     }
-    if let Some(files) = envelope.fields.get("files") {
-        let files = files
-            .as_array()
-            .context("composer draft has invalid files")?;
-        ensure!(
-            files.len() <= crate::attachment::MAX_FILES,
-            "a message can contain at most 10 files"
-        );
-        for file in files {
-            validate_draft_file(file)?;
-        }
-    }
     Ok(())
-}
-
-fn validate_draft_file(file: &Value) -> Result<()> {
-    let entry = file
-        .as_object()
-        .context("composer draft has invalid file metadata")?;
-    let reference = if let Some(reference) = entry.get("reference") {
-        for (key, value) in entry {
-            ensure!(
-                match key.as_str() {
-                    "reference" => true,
-                    "range" => value.as_object().is_some_and(|range| {
-                        range.len() == 2
-                            && range.get("start").is_some_and(Value::is_u64)
-                            && range.get("end").is_some_and(Value::is_u64)
-                    }),
-                    "number" | "size" => value.is_u64(),
-                    "filename" => value
-                        .as_str()
-                        .is_some_and(|name| { name == crate::attachment::sanitize_filename(name) }),
-                    "placeholder" => value.is_boolean(),
-                    _ => false,
-                },
-                "queued draft file has invalid or inline metadata"
-            );
-        }
-        reference
-    } else {
-        file
-    };
-    let reference = crate::attachment::FileAttachmentRef::deserialize(reference)?;
-    reference.validate()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reference_draft_accepts_file_metadata_and_rejects_inline_bytes() {
-        let reference =
-            crate::attachment::FileAttachmentRef::new(b"abc", "notes.txt", "text/plain".into())
-                .unwrap();
-        let mut draft = json!({
-            "text": "[file #1: notes.txt]",
-            "files": [{
-                "number": 1,
-                "range": {"start": 0, "end": 20},
-                "filename": reference.filename,
-                "reference": reference
-            }]
-        });
-        assert!(validate_reference_draft(&format!("{CHAT_DRAFT_PREFIX}{draft}")).is_ok());
-        draft["files"][0]["data"] = json!([1, 2, 3]);
-        assert!(validate_reference_draft(&format!("{CHAT_DRAFT_PREFIX}{draft}")).is_err());
-        draft["files"][0].as_object_mut().unwrap().remove("data");
-        draft["files"][0]["reference"]["filename"] = json!("../notes.txt");
-        assert!(validate_reference_draft(&format!("{CHAT_DRAFT_PREFIX}{draft}")).is_err());
-    }
 }
