@@ -2534,6 +2534,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         elicitation_id,
         action,
         reply,
+        answers,
     } = resolution
     else {
         unreachable!()
@@ -2558,6 +2559,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
             elicitation_id,
             action,
             reply,
+            answers,
         })
         .unwrap();
     let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");
@@ -3934,7 +3936,14 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
             if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("tool_call"))
     })
     .await;
-    tools.open("long-build", mj_core::clock::epoch_millis());
+    tools.observe_for_owner(
+        &SessionUpdate::ToolCall(
+            agent_client_protocol::v1::schema::ToolCall::new("long-build", "Long build")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::InProgress),
+        ),
+        mj_core::clock::epoch_millis(),
+        mj_core::activity::ForegroundOwner::Prompt("prompt-1".into()),
+    );
 
     // Well past the silence bound, and nothing has arrived since the tool call.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -3992,7 +4001,14 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
         .unwrap();
     let mut methods = Vec::new();
     wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
-    tools.open("long-build", mj_core::clock::epoch_millis());
+    tools.observe_for_owner(
+        &SessionUpdate::ToolCall(
+            agent_client_protocol::v1::schema::ToolCall::new("long-build", "Long build")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::InProgress),
+        ),
+        mj_core::clock::epoch_millis(),
+        mj_core::activity::ForegroundOwner::Prompt("prompt-1".into()),
+    );
 
     let warning = wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::Warning { .. })
@@ -8785,6 +8801,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                     elicitation_id,
                     action,
                     reply,
+                    ..
                 } => {
                     assert!(reply.is_none(), "harness withdrawal is not a user reply");
                     break (requested, (elicitation_id, action));
@@ -8795,8 +8812,9 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     })
     .await
     .expect("a withdrawn form resolves");
-    assert_eq!(requested.as_deref(), Some("elicitation-1"));
-    assert_eq!(resolved, ("elicitation-1".to_owned(), "cancel".to_owned()));
+    let requested = requested.expect("the runtime published the form");
+    assert!(requested.starts_with("elicitation-"));
+    assert_eq!(resolved, (requested, "cancel".to_owned()));
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
     bridge.abort();

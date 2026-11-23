@@ -1,10 +1,15 @@
 use super::*;
+use crate::project_memory_merge::{
+    CanonicalSync, ProjectMemoryWorker, WorkerInstallOutcome, install_merged_tree,
+};
 use mj_core::config::ConfigLoadError;
 use mj_core::guardian::{
     DaemonGuardianFailure, GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT,
     GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
     MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD,
 };
+use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+use mj_core::project_memory::ProjectMemorySnapshot;
 use mj_core::state::MaterializedExecutionState;
 use mj_core::transcript::TranscriptItem;
 use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
@@ -1306,24 +1311,83 @@ impl StandaloneSession {
                 "project memory conflict source text"
             );
         }
-        let install = tokio::select! {
-            biased;
-            () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
-            result = crate::project_memory_merge::install_merged_tree(
-                client,
-                &baseline,
-                &replica,
-                sync.tree,
-            ) => result?,
-        };
-        if install == Some(crate::project_memory_merge::WorkerInstallOutcome::ReplicaChanged) {
-            tracing::debug!(
-                session_id = self.materialized.session_id,
-                "worker project-memory replica changed after the snapshot; skipped installing the merged tree"
-            );
-        }
-        Ok(())
+        install_project_memory_and_notify(
+            client,
+            &self.materialized.session_id,
+            &baseline,
+            &replica,
+            sync,
+            &cancel,
+        )
+        .await
     }
+}
+
+pub(super) async fn install_project_memory_and_notify<W: ProjectMemoryWorker>(
+    worker: &mut W,
+    session_id: &str,
+    baseline: &ProjectMemorySnapshot,
+    replica: &ProjectMemorySnapshot,
+    sync: CanonicalSync,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let install = tokio::select! {
+        biased;
+        () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
+        result = install_merged_tree(worker, baseline, replica, sync.tree.clone()) => result?,
+    };
+    if install == Some(WorkerInstallOutcome::ReplicaChanged) {
+        tracing::debug!(
+            %session_id,
+            "worker project-memory replica changed after the snapshot; skipped installing the merged tree"
+        );
+    }
+    let Some(notice) = install.and_then(|install| sync.replica_change_notice(replica, install))
+    else {
+        return Ok(());
+    };
+
+    // Give each successful installation its own occurrence key so recurring
+    // A -> B -> A -> B transitions are never suppressed by prior accepted rows;
+    // mailbox delivery reuses this persisted key across all worker retries.
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| anyhow::anyhow!("generate project-memory notice nonce: {error}"))?;
+    let key = format!(
+        "project-memory:{session_id}:{}:{}:{}",
+        notice.before.0,
+        notice.after.0,
+        mj_core::hex::lower_hex(nonce),
+    );
+    let event = MailboxEvent {
+        key: key.clone(),
+        source: "project-memory".into(),
+        wake: false,
+        created_at_ms: chrono::Utc::now()
+            .timestamp_millis()
+            .try_into()
+            .unwrap_or_default(),
+        body: MailboxEventBody::PlainText { text: notice.text },
+    };
+    let target = session_id.to_owned();
+    let queued = mj_core::runtime::spawn_blocking(move || {
+        let json = serde_json::to_string(&event)?;
+        let outcome =
+            crate::database::enqueue_mailbox_event(&event.key, &target, &json, false, false)?;
+        ensure!(
+            outcome != crate::database::Enqueued::TargetGone,
+            "target session no longer exists"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("project-memory notice enqueue task failed")
+    .and_then(|result| result);
+    if let Err(error) = queued {
+        tracing::warn!(%session_id, event_key = %key, error = %format!("{error:#}"),
+            "could not enqueue project-memory change notice after installing the replica");
+    }
+    Ok(())
 }
 
 pub fn relay_desynchronized(error: &anyhow::Error) -> bool {

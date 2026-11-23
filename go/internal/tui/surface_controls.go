@@ -6,6 +6,8 @@ package tui
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -153,7 +155,26 @@ func adjacentEnabledSessionAction(dashboard *DashboardState, current CommandId, 
 }
 
 func (d *DashboardState) beginSurfaceFrame() {
-	panic("unported: mj-tui/src/surface_controls.rs DashboardState::begin_surface_frame")
+	sessions := []string{}
+	for _, session := range d.orderedSessions() {
+		sessions = append(sessions, session.ID)
+	}
+	if !slices.Equal(d.sessionMenuIDs, sessions) || d.ModalOpen() {
+		d.surfaceForm.CancelPointer()
+	}
+	d.sessionMenuIDs = sessions
+	if focus := d.sessionActionFocus; focus != nil && !sessionActionEnabled(d, *focus) {
+		d.sessionActionFocus = nil
+		if id, ok := firstEnabledSessionAction(d); ok {
+			d.sessionActionFocus = &id
+		}
+	}
+	if d.Focus() == FocusSessions && !d.ModalOpen() && len(d.visibleSessionIndices()) == 0 && d.sessionActionFocus == nil {
+		if id, ok := firstEnabledSessionAction(d); ok {
+			d.sessionActionFocus = &id
+		}
+	}
+	d.surfaceForm.BeginFrame()
 }
 
 func (d *DashboardState) endSurfaceFrame() {
@@ -175,7 +196,113 @@ func (d *DashboardState) runAvailableCommand(id CommandId) DashboardAction {
 }
 
 func (d *DashboardState) handleSurfaceMouse(mouse tea.MouseMsg) (DashboardAction, bool) {
-	panic("unported: mj-tui/src/surface_controls.rs DashboardState::handle_surface_mouse")
+	position := mouse.Mouse()
+	_, press := mouse.(tea.MouseClickMsg)
+	leftPress := press && position.Button == tea.MouseLeft
+	workspaceMenuHit := leftPress && d.workspaceHamburgerArea != nil &&
+		rectContains(*d.workspaceHamburgerArea, position.X, position.Y)
+	result := d.surfaceForm.Handle(mouse)
+	d.lastEventConsumed = result.Consumed
+	if leftPress {
+		d.notifications.gesture = nil
+		for _, gesture := range d.notifications.controls {
+			if d.surfaceForm.IsArmed(SurfaceControlNotification(gesture.command)) {
+				found := gesture
+				d.notifications.gesture = &found
+				break
+			}
+		}
+	}
+	if workspaceMenuHit && d.surfaceForm.IsFocused(SurfaceControlWorkspaceMenu{}) {
+		d.focus = FocusWorkspaces
+		d.workspaceControlFocus = WorkspaceControlFocusMenu
+		d.setSessionActionFocus(nil)
+	}
+	if activate, ok := result.Action.(chat.InteractionActivate[SurfaceControl]); ok {
+		d.lastRowClick = nil
+		return d.activateSurfaceControl(activate.ID), true
+	}
+	if result.Consumed {
+		return DashboardActionNone{}, true
+	}
+	return nil, false
+}
+
+// activateSurfaceControl runs the control a completed click landed on.
+func (d *DashboardState) activateSurfaceControl(control SurfaceControl) DashboardAction {
+	switch control := control.(type) {
+	case SurfaceControlNotification:
+		gesture := d.notifications.gesture
+		d.notifications.gesture = nil
+		if gesture == nil || gesture.command != CommandId(control) {
+			return DashboardActionNone{}
+		}
+		return d.activateNotification(*gesture)
+	case SurfaceControlCommand:
+		return d.runAvailableCommand(CommandId(control))
+	case SurfaceControlFooter:
+		return d.runAvailableCommand(CommandId(control))
+	case SurfaceControlSession:
+		index := int(control)
+		if index >= 0 && index < len(d.sessionMenuIDs) {
+			if id := d.sessionMenuIDs[index]; d.state.Get().Sessions.ContainsKey(id) {
+				d.beginSessionPaletteFor(id)
+			}
+		}
+		return DashboardActionNone{}
+	case SurfaceControlClosePane:
+		return DashboardActionClosePane{Pane: PaneId(control)}
+	case SurfaceControlPaneMenu:
+		d.beginPaneMenu(PaneId(control))
+		return DashboardActionNone{}
+	case SurfaceControlPaneTitleMenu:
+		d.beginSupportPaneMenu(SupportPane(control))
+		return DashboardActionNone{}
+	case SurfaceControlClearSessionsFilter:
+		d.clearSessionsFilter()
+		return DashboardActionNone{}
+	case SurfaceControlMoreWorkspaceMatches:
+		if d.sessionsOtherWorkspaceMatches() > 0 {
+			filter := *d.sessionsFilter.Get()
+			if filter == nil {
+				panic("active filter")
+			}
+			return DashboardActionOpenFilteredResumeDialog{Query: filter.Query.Value(), State: filter.State}
+		}
+		return DashboardActionNone{}
+	case SurfaceControlSessionsFilterInput:
+		d.beginSessionsFilter()
+		return DashboardActionNone{}
+	case SurfaceControlPanePin:
+		if id, ok := d.PaneSession(PaneId(control)); ok {
+			return d.toggleSessionPin(id)
+		}
+		d.beginPaneMenu(PaneId(control))
+		return DashboardActionNone{}
+	case SurfaceControlPinHere:
+		if sessionID, ok := d.SelectedSessionID(); ok {
+			return DashboardActionPinSession{SessionID: sessionID, Pane: PaneId(control)}
+		}
+		return DashboardActionNone{}
+	case SurfaceControlSessionPin:
+		index := int(control)
+		if index >= 0 && index < len(d.sessionMenuIDs) {
+			return d.toggleSessionPin(d.sessionMenuIDs[index])
+		}
+		return DashboardActionNone{}
+	case SurfaceControlWorkspaceMenu:
+		d.focus = FocusWorkspaces
+		d.workspaceControlFocus = WorkspaceControlFocusMenu
+		d.setSessionActionFocus(nil)
+		return d.runAvailableCommand(CommandIdWorkspaces)
+	case SurfaceControlCapacityDisks:
+		if index := int(control); index < len(d.capacityDetails) {
+			d.beginCapacityDisksMenu(index)
+		}
+		return DashboardActionNone{}
+	default:
+		return DashboardActionNone{}
+	}
 }
 
 // paneTitleLabel is the text of a support pane's title: its name, and the
@@ -232,7 +359,80 @@ func renderWorkspaceMenu(frame *chat.Frame, area uv.Rectangle, dashboard *Dashbo
 }
 
 func renderSessionButtons(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/surface_controls.rs render_session_buttons")
+	form := &dashboard.surfaceForm
+	if area.Dx() == 0 || area.Dy() == 0 {
+		return
+	}
+	count := dashboard.sessionsOtherWorkspaceMatches()
+	commands := sessionActionsOf(dashboard)
+	regularWidth := len(fmt.Sprintf(" %d more ", count))
+	for _, command := range commands {
+		regularWidth += len(command.label) + 3
+	}
+	if !dashboard.SessionsMinimized() {
+		regularWidth += len(filterLabel) + filterFieldMin + 2
+	}
+	compact := count > 0 && area.Dx() < regularWidth
+	padding := " "
+	if compact {
+		padding = ""
+	}
+	moreLabel := fmt.Sprintf("%s%d more%s", padding, count, padding)
+	moreWidth := chat.RawLine(moreLabel).Width()
+	var moreArea *uv.Rectangle
+	if count > 0 && area.Dx() >= moreWidth {
+		rect := uv.Rect(area.Max.X-moreWidth, area.Min.Y, moreWidth, 1)
+		moreArea = &rect
+	}
+	buttonsRight := area.Max.X
+	if moreArea != nil {
+		buttonsRight = max(moreArea.Min.X-1, 0)
+	}
+	x := area.Min.X
+	for _, command := range commands {
+		label := command.label
+		if compact && command.id == CommandIdNewSessionWizard {
+			label = "New"
+		}
+		label = padding + label + padding
+		width := chat.RawLine(label).Width()
+		if x+width > buttonsRight {
+			break
+		}
+		rect := uv.Rect(x, area.Min.Y, width, 1)
+		control := SurfaceControlCommand(command.id)
+		enabled := sessionActionEnabled(dashboard, command.id)
+		form.Register(control, chat.ControlKindButton{}, rect, enabled)
+		focused := dashboard.Focus() == FocusSessions && dashboard.sessionActionFocus != nil &&
+			*dashboard.sessionActionFocus == command.id && !dashboard.ModalOpen()
+		var style chat.Style
+		switch {
+		case enabled && (focused || form.IsArmed(control)):
+			style = chat.FocusControl()
+		case enabled && command.id == CommandIdNewSessionWizard && !chat.ReverseVideo():
+			// Without painted surfaces, bold reverse video is reserved for
+			// actual keyboard focus.
+			style = chat.ActiveControl()
+		case enabled:
+			style = chat.Actionable().Patch(chat.Raised())
+		default:
+			style = chat.Muted().Patch(chat.Raised())
+		}
+		frame.RenderWidget(chat.NewParagraph(chat.RawText(label)).WithStyle(style), rect)
+		x += width + 1
+	}
+	inputRow := area
+	if moreArea != nil {
+		control := SurfaceControlMoreWorkspaceMatches{}
+		form.Register(control, chat.ControlKindButton{}, *moreArea, true)
+		style := chat.Actionable().Patch(chat.Raised())
+		if form.IsArmed(control) {
+			style = chat.FocusControl()
+		}
+		frame.RenderWidget(chat.NewParagraph(chat.RawText(moreLabel)).WithStyle(style), *moreArea)
+		inputRow = uv.Rect(area.Min.X, area.Min.Y, max(moreArea.Min.X-(area.Min.X+1), 0), area.Dy())
+	}
+	renderSessionsFilterInput(frame, inputRow, x, dashboard)
 }
 
 // filterLabel is the label before the Sessions filter's text field.
@@ -270,11 +470,90 @@ func filterInputArea(dashboard *DashboardState, row uv.Rectangle, start int) (uv
 // readline caret drawn as a reversed cell while it is being edited. The
 // clear chip lives on the pane title, not here.
 func renderSessionsFilterInput(frame *chat.Frame, row uv.Rectangle, start int, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/surface_controls.rs render_sessions_filter_input")
+	area, ok := filterInputArea(dashboard, row, start)
+	if !ok {
+		return
+	}
+	form := &dashboard.surfaceForm
+	filter := *dashboard.sessionsFilter.Get()
+	editing := filter != nil && filter.Editing
+	room := max(area.Dx()-len(filterLabel), 0)
+	form.Register(SurfaceControlSessionsFilterInput{}, chat.ControlKindButton{}, area, true)
+	// The label stays put; the field scrolls to keep the cursor in view and
+	// pads with underscores so the box shows its extent. Outside editing the
+	// caret is not drawn and the end of the text shows, as before.
+	value, cursor := "", 0
+	if filter != nil {
+		value = filter.Query.Value()
+		cursor = len(value)
+		if editing {
+			cursor = filter.Query.Cursor()
+		}
+	}
+	window := room
+	if !editing {
+		window++
+	}
+	before, caret, after := chat.TextFieldCaretWindow(value, cursor, window)
+	if !editing {
+		caret, after = "", ""
+	}
+	used := chat.RawLine(before + caret + after).Width()
+	spans := []chat.Span{
+		chat.StyledSpan(filterLabel, chat.Muted()),
+		chat.StyledSpan(before, chat.Actionable()),
+	}
+	if editing {
+		spans = append(spans,
+			chat.StyledSpan(caret, chat.FocusControl()),
+			chat.StyledSpan(after, chat.Actionable()),
+		)
+	}
+	spans = append(spans, chat.StyledSpan(strings.Repeat("_", max(room-used, 0)), chat.Muted()))
+	frame.RenderWidget(chat.NewParagraph(chat.TextFrom(chat.LineFrom(spans...))), area)
 }
 
 func renderSessionRowActions(frame *chat.Frame, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/surface_controls.rs render_session_row_actions")
+	form := &dashboard.surfaceForm
+	for _, entry := range dashboard.sessionRowAreas {
+		index, row := entry.First, entry.Second
+		width := row.Dx()
+		if width < 5 || row.Dy() == 0 {
+			continue
+		}
+		if width >= 10 {
+			pinArea := uv.Rect(row.Max.X-5, row.Min.Y, 2, 1)
+			alignment := chat.AlignmentRight
+			if width < 24 {
+				pinArea = uv.Rect(row.Max.X-3, row.Min.Y, 3, 1)
+				// Beside the menu, the badge sits against the menu's leading
+				// space so one space separates the two whatever the badge's
+				// width.
+				alignment = chat.AlignmentLeft
+			}
+			control := SurfaceControlSessionPin(index)
+			form.Register(control, chat.ControlKindButton{}, pinArea, true)
+			var pin *uint32
+			if index >= 0 && index < len(dashboard.sessionMenuIDs) {
+				if id, ok := dashboard.PinID(dashboard.sessionMenuIDs[index]); ok {
+					pin = &id
+				}
+			}
+			text, style := sessionPinBadge(pin)
+			frame.RenderWidget(chat.NewParagraph(chat.RawText(text)).WithStyle(style).WithAlignment(alignment), pinArea)
+		}
+		if width < 24 {
+			continue
+		}
+		area := uv.Rect(max(row.Max.X-3, 0), row.Min.Y, min(3, width), 1)
+		id := SurfaceControlSession(index)
+		form.Register(id, chat.ControlKindButton{}, area, true)
+		style := chat.Actionable()
+		if form.IsArmed(id) {
+			style = chat.Selection(true)
+		}
+		frame.RenderWidget(chat.NewParagraph(chat.RawText(chat.ThemeGlyphs().RowMenu)).WithStyle(style), area)
+	}
 }
 
 // sessionPinBadge is the pin badge at a session row's right edge: the pin
@@ -311,7 +590,18 @@ const paneCloseControlReserve = 4
 // conversation pane's title row, in the same right-edge column the support
 // panes put their size controls in.
 func renderPaneCloseControl(frame *chat.Frame, dashboard *DashboardState, transcript uv.Rectangle, pane PaneId) {
-	panic("unported: mj-tui/src/surface_controls.rs render_pane_close_control")
+	if pane == dashboard.BrowsePane() || transcript.Dx() < paneCloseControlReserve+2 || transcript.Dy() == 0 {
+		return
+	}
+	area := uv.Rect(max(transcript.Max.X-paneCloseControlReserve, 0), transcript.Min.Y, 3, 1)
+	control := SurfaceControlClosePane(pane)
+	form := &dashboard.surfaceForm
+	form.Register(control, chat.ControlKindButton{}, area, pane != dashboard.BrowsePane())
+	style := chat.Actionable()
+	if form.IsArmed(control) {
+		style = chat.Selection(true)
+	}
+	frame.RenderWidget(chat.NewParagraph(chat.RawText(chat.ThemeGlyphs().Close)).WithStyle(style), area)
 }
 
 // paneZoomControlReserve is the width a pane title leaves clear for
@@ -322,7 +612,19 @@ const paneZoomControlReserve = 3
 // left of the close chip. Clicking it runs the same command the key does,
 // which unzooms.
 func renderPaneZoomControl(frame *chat.Frame, dashboard *DashboardState, transcript uv.Rectangle) {
-	panic("unported: mj-tui/src/surface_controls.rs render_pane_zoom_control")
+	reserve := paneCloseControlReserve + paneZoomControlReserve
+	if transcript.Dx() < reserve+2 || transcript.Dy() == 0 {
+		return
+	}
+	area := uv.Rect(max(transcript.Max.X-reserve, 0), transcript.Min.Y, 3, 1)
+	control := SurfaceControlCommand(CommandIdZoomPane)
+	form := &dashboard.surfaceForm
+	form.Register(control, chat.ControlKindButton{}, area, true)
+	style := chat.Actionable()
+	if form.IsArmed(control) {
+		style = chat.Selection(true)
+	}
+	frame.RenderWidget(chat.NewParagraph(chat.RawText(" Z ")).WithStyle(style), area)
 }
 
 func renderFooterCommand(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState, id CommandId, text string) {

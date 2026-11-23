@@ -14,6 +14,8 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
@@ -66,7 +68,40 @@ func (CreateEndFinished) isCreateEnd()   {}
 func (CreateEndFailed) isCreateEnd()     {}
 
 func SessionCreateEnd(sessionID string) (CreateEnd, error) {
-	panic("unported: mj-store/src/database/session_create.rs session_create_end")
+	connection, err := openReader(DatabasePath())
+	if err != nil {
+		return nil, err
+	}
+	var unfinished bool
+	err = connection.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
+		sessionID,
+	).Scan(&unfinished)
+	connection.Close()
+	if err != nil {
+		return nil, err
+	}
+	if unfinished {
+		return CreateEndUnfinished{}, nil
+	}
+	record, err := LoadSessionRecord(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		return CreateEndFailed{Message: fmt.Sprintf("session %s no longer exists", sessionID)}, nil
+	}
+	// A failed create passes through StartupCleanup (intent settled) on its
+	// way to Error; that is already its failure.
+	switch record.State {
+	case core.SessionStateError, core.SessionStateStartupCleanup:
+		message := "session creation failed"
+		if record.LastError != nil {
+			message = *record.LastError
+		}
+		return CreateEndFailed{Message: message}, nil
+	}
+	return CreateEndFinished{}, nil
 }
 
 // insertCreateIntent writes session's create intent and returns its
@@ -112,7 +147,26 @@ func settleCreateIntentForState(tx *Transaction, sessionID string, state core.Se
 }
 
 func LoadSessionCreateIntents() ([]SessionCreateIntent, error) {
-	panic("unported: mj-store/src/database/session_create.rs load_session_create_intents")
+	connection, err := openReader(DatabasePath())
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	rows, err := connection.Query(`SELECT session_id, operation_id, remember_launch_choices
+         FROM session_create_intents ORDER BY created_at, session_id`)
+	if err != nil {
+		return nil, err
+	}
+	intents := []SessionCreateIntent{}
+	for rows.Next() {
+		var intent SessionCreateIntent
+		if err := rows.Scan(&intent.SessionID, &intent.OperationID, &intent.RememberLaunchChoices); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		intents = append(intents, intent)
+	}
+	return intents, errors.Join(rows.Err(), rows.Close())
 }
 
 // DiscardSessionCreateIntent drops an intent whose session already finished
@@ -191,7 +245,44 @@ func ReadFailedLaunchRecord(id string) (*core.SessionRecord, error) {
 // create in the same transaction. It returns the create's operation ID, or
 // nil when the session is no longer the failed launch expected describes.
 func BeginFailedLaunchRetry(expected core.SessionRecord) (*string, error) {
-	panic("unported: mj-store/src/database/session_create.rs begin_failed_launch_retry")
+	return submitDatabaseWrite("begin failed launch retry", func(connection *Connection) (*string, error) {
+		tx, err := connection.BeginWith(TransactionImmediate)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
+		record, err := failedLaunchRecordWith(tx, expected.ID)
+		if err != nil || record == nil {
+			return nil, err
+		}
+		if record.WorkspaceID != expected.WorkspaceID ||
+			record.LastProfile != expected.LastProfile ||
+			record.TargetTemplateID != expected.TargetTemplateID ||
+			record.ResourceAllocation != expected.ResourceAllocation ||
+			!slices.Equal(record.AdditionalMounts, expected.AdditionalMounts) {
+			return nil, nil
+		}
+		record.State = core.SessionStateProvisioning
+		record.LastError = nil
+		record.UpdatedAt = core.FormatChronoRFC3339(time.Now())
+		if err := updateLifecycleFields(tx, record); err != nil {
+			return nil, err
+		}
+		operationID, err := insertCreateIntent(tx, record, false)
+		if err != nil {
+			return nil, err
+		}
+		if operationID == nil {
+			return nil, errors.New("failed session still has a create intent")
+		}
+		if err := dismissFailedStartupGroupsWith(tx, record.ID); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return operationID, nil
+	})
 }
 
 // ResetSessionForCreateRetry resets a session to its registered form so its

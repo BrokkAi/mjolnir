@@ -69,9 +69,9 @@ const TODO_LISTS: [&str; 4] = [
 const RERERE_CACHE: &str = "rr-cache";
 
 /// An unfinished operation read from a clone, ready to archive.
-pub(super) struct CollectedOperation {
+pub(super) struct CollectedOperation<T> {
     pub(super) metadata: SavedGitOperation,
-    pub(super) payloads: GitOperationPayloads,
+    pub(super) payloads: GitOperationPayloads<T>,
     /// The objects the operation names, by type, for the temporary refs that
     /// put them in the committed bundle.
     commits: Vec<String>,
@@ -79,7 +79,7 @@ pub(super) struct CollectedOperation {
     contents: Vec<(String, String)>,
 }
 
-impl CollectedOperation {
+impl<T> CollectedOperation<T> {
     /// The unmerged paths, each once, in index order. The staged and
     /// unstaged patches leave them out.
     pub(super) fn unmerged_paths(&self) -> Vec<PathBuf> {
@@ -185,10 +185,11 @@ fn unique_paths(entries: &[SavedUnmergedEntry]) -> Vec<PathBuf> {
 /// Reads the operation `repository` is in the middle of, or `None` when it
 /// has no unmerged entries and no operation in progress. `None` leaves the
 /// snapshot exactly as it was before operations were captured.
-pub(super) fn collect(
+pub(super) fn collect<P: CapturePayloads>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
-) -> Result<Option<CollectedOperation>> {
+    payloads: &P,
+) -> Result<Option<CollectedOperation<P::Body>>> {
     let listed = git_bytes(
         runner,
         repository,
@@ -236,11 +237,14 @@ pub(super) fn collect(
 
     let paths = unique_paths(&unmerged);
     refuse_index_entries_below(runner, repository, &paths)?;
-    let (conflicted_worktree_tar, missing_worktree_paths) =
-        build_conflicted_worktree_tar(repository, &paths)?;
+    let mut missing_worktree_paths = Vec::new();
+    let conflicted_worktree_tar = payloads.write(|output| {
+        missing_worktree_paths = build_conflicted_worktree_tar(repository, &paths, output)?;
+        Ok(())
+    })?;
     let state = read_state(&locations)?;
-    let state_tar = build_state_tar(&state)?;
-    let named = named_objects(runner, repository, &unmerged, &state)?;
+    let state_tar = payloads.write(|output| write_state_tar(&state, output))?;
+    let named = named_objects(runner, repository, &unmerged, state_tar.reader()?)?;
     let mut commits = Vec::new();
     let mut tags = Vec::new();
     let mut contents = Vec::new();
@@ -371,18 +375,8 @@ struct StateEntry {
     /// The name `git rev-parse --git-path` resolves, with `/` between parts.
     name: String,
     metadata: fs::Metadata,
-    /// The bytes of a file; `None` for a directory.
-    contents: Option<Vec<u8>>,
-}
-
-impl StateEntry {
-    fn is_named_by_todo_list(&self) -> bool {
-        TODO_LISTS.contains(&self.name.as_str())
-    }
-
-    fn holds_object_names(&self) -> bool {
-        self.name != RERERE_CACHE && !self.name.starts_with("rr-cache/")
-    }
+    /// The source of a file; `None` for a directory.
+    source: Option<PathBuf>,
 }
 
 fn read_state(locations: &[(&str, PathBuf)]) -> Result<Vec<StateEntry>> {
@@ -410,9 +404,7 @@ fn read_state(locations: &[(&str, PathBuf)]) -> Result<Vec<StateEntry>> {
             );
             entries.push(StateEntry {
                 name: (*name).to_owned(),
-                contents: Some(
-                    fs::read(location).with_context(|| format!("read {}", location.display()))?,
-                ),
+                source: Some(location.clone()),
                 metadata,
             });
         }
@@ -429,7 +421,7 @@ fn read_state_directory(
     entries.push(StateEntry {
         name: name.to_owned(),
         metadata,
-        contents: None,
+        source: None,
     });
     let mut children = fs::read_dir(location)
         .with_context(|| format!("list {}", location.display()))?
@@ -457,9 +449,7 @@ fn read_state_directory(
             );
             entries.push(StateEntry {
                 name: child_name,
-                contents: Some(
-                    fs::read(&path).with_context(|| format!("read {}", path.display()))?,
-                ),
+                source: Some(path),
                 metadata,
             });
         }
@@ -467,23 +457,32 @@ fn read_state_directory(
     Ok(())
 }
 
-fn build_state_tar(entries: &[StateEntry]) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut output);
-        for entry in entries {
-            let mut header = tar::Header::new_gnu();
-            header.set_metadata_in_mode(&entry.metadata, tar::HeaderMode::Deterministic);
-            let contents = entry.contents.as_deref().unwrap_or_default();
-            header.set_size(contents.len() as u64);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, &entry.name, contents)
-                .with_context(|| format!("archive Git operation state {}", entry.name))?;
-        }
-        builder.finish().context("finish Git operation state tar")?;
+fn write_state_tar(entries: &[StateEntry], output: &mut dyn Write) -> Result<()> {
+    let mut builder = tar::Builder::new(output);
+    for entry in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata_in_mode(&entry.metadata, tar::HeaderMode::Deterministic);
+        let mut source: Box<dyn Read> = match &entry.source {
+            Some(path) => Box::new(
+                NativeArtifactData::open_file(path)
+                    .with_context(|| format!("open Git operation state {}", path.display()))?,
+            ),
+            None => Box::new(std::io::empty()),
+        };
+        let size = entry.source.as_ref().map_or(0, |_| entry.metadata.len());
+        header.set_size(size);
+        header.set_cksum();
+        let mut body = source.by_ref().take(size);
+        builder
+            .append_data(&mut header, &entry.name, &mut body)
+            .with_context(|| format!("archive Git operation state {}", entry.name))?;
+        ensure!(
+            body.limit() == 0 && source.read(&mut [0])? == 0,
+            "Git operation state {} changed size during capture",
+            entry.name
+        );
     }
-    Ok(output)
+    builder.finish().context("finish Git operation state tar")
 }
 
 /// Every object the unmerged entries and the state files name, keyed by id,
@@ -496,7 +495,7 @@ fn named_objects(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     unmerged: &[SavedUnmergedEntry],
-    state: &[StateEntry],
+    state: impl Read,
 ) -> Result<BTreeMap<String, String>> {
     // Each request, and whether only a commit may answer it.
     let mut requests = BTreeMap::<String, bool>::new();
@@ -507,20 +506,14 @@ fn named_objects(
     for entry in unmerged.iter().filter(|entry| entry.mode != "160000") {
         request(entry.object.clone(), false);
     }
-    for entry in state {
-        let Some(contents) = &entry.contents else {
+    for entry in tar::Archive::new(state).entries()? {
+        let entry = entry?;
+        let path = entry.path()?;
+        if !entry.header().entry_type().is_file() || path.starts_with(RERERE_CACHE) {
             continue;
-        };
-        if entry.holds_object_names() {
-            for name in full_object_ids(contents) {
-                request(name, false);
-            }
         }
-        if entry.is_named_by_todo_list() {
-            for name in todo_commits(contents) {
-                request(name, true);
-            }
-        }
+        let is_todo = path.to_str().is_some_and(|name| TODO_LISTS.contains(&name));
+        scan_object_names(entry, is_todo, &mut request)?;
     }
     if requests.is_empty() {
         return Ok(BTreeMap::new());
@@ -561,65 +554,104 @@ fn named_objects(
     Ok(named)
 }
 
-/// Every full SHA-1 or SHA-256 id in `contents`, as a word on its own.
-fn full_object_ids(contents: &[u8]) -> impl Iterator<Item = String> + '_ {
-    contents
-        .split(|byte| !byte.is_ascii_alphanumeric())
-        .filter(|word| {
-            matches!(word.len(), 40 | 64)
+/// Look for full object IDs and, in todo lists, abbreviated commit arguments.
+fn scan_object_names(
+    reader: impl Read,
+    is_todo: bool,
+    request: &mut impl FnMut(String, bool),
+) -> Result<()> {
+    // SHA-256 is the longest object name Git can use. Keep one extra byte to
+    // distinguish a valid name from the prefix of a longer word.
+    let mut word = Vec::with_capacity(65);
+    let mut todo = Vec::with_capacity(3 * 66);
+    let mut todo_words = 0;
+    let mut in_todo_word = false;
+    let mut todo_word_len = 0;
+    for byte in std::io::BufReader::new(reader)
+        .bytes()
+        .chain(std::iter::once(Ok(b'\n')))
+    {
+        let byte = byte?;
+        if byte.is_ascii_alphanumeric() {
+            if word.len() < 65 {
+                word.push(byte);
+            }
+        } else {
+            if matches!(word.len(), 40 | 64)
                 && word
                     .iter()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-        })
-        .map(|word| String::from_utf8_lossy(word).into_owned())
-}
+            {
+                request(String::from_utf8_lossy(&word).into_owned(), false);
+            }
+            word.clear();
+        }
 
-/// The commits a todo list's instructions name, as written: `pick <commit>`
-/// and its kin, `fixup -C <commit>`, `merge -C <commit> <label>` and
-/// `reset <commit>`. Labels and comments are not commits.
-fn todo_commits(contents: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(contents);
-    let mut commits = Vec::new();
-    for line in text.lines() {
-        let mut words = line.split_ascii_whitespace();
-        let Some(command) = words.next() else {
-            continue;
-        };
-        let names_commit = matches!(
-            command,
-            "pick"
-                | "p"
-                | "reword"
-                | "r"
-                | "edit"
-                | "e"
-                | "squash"
-                | "s"
-                | "fixup"
-                | "f"
-                | "drop"
-                | "d"
-                | "revert"
-                | "merge"
-                | "m"
-                | "reset"
-                | "t"
-        );
-        if !names_commit {
+        if !is_todo {
             continue;
         }
-        let mut argument = words.next();
-        if matches!(argument, Some("-C" | "-c")) {
-            argument = words.next();
-        }
-        if let Some(argument) = argument
-            && (4..=64).contains(&argument.len())
-            && argument.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            commits.push(argument.to_ascii_lowercase());
+        if byte == b'\n' {
+            if let Some(commit) = todo_commit(&todo) {
+                request(commit, true);
+            }
+            todo.clear();
+            todo_words = 0;
+            in_todo_word = false;
+        } else if byte.is_ascii_whitespace() {
+            in_todo_word = false;
+        } else {
+            if !in_todo_word {
+                todo_words += 1;
+                todo_word_len = 0;
+                in_todo_word = true;
+                if todo_words <= 3 {
+                    todo.push(b' ');
+                }
+            }
+            if todo_words <= 3 && todo_word_len < 65 {
+                todo.push(byte);
+                todo_word_len += 1;
+            }
         }
     }
-    commits
+    Ok(())
+}
+
+/// The commits a todo list names via instructions such as `pick <commit>`,
+/// `fixup -C <commit>`, or `reset <commit>`.
+fn todo_commit(line: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(line);
+    let mut words = text.split_ascii_whitespace();
+    let command = words.next()?;
+    let names_commit = matches!(
+        command,
+        "pick"
+            | "p"
+            | "reword"
+            | "r"
+            | "edit"
+            | "e"
+            | "squash"
+            | "s"
+            | "fixup"
+            | "f"
+            | "drop"
+            | "d"
+            | "revert"
+            | "merge"
+            | "m"
+            | "reset"
+            | "t"
+    );
+    if !names_commit {
+        return None;
+    }
+    let mut argument = words.next()?;
+    if matches!(argument, "-C" | "-c") {
+        argument = words.next()?;
+    }
+    ((4..=64).contains(&argument.len()) && argument.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| argument.to_ascii_lowercase())
 }
 
 /// Preserves the working files of unmerged paths from a legacy archive as

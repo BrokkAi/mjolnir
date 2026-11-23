@@ -14,6 +14,9 @@
 package tui
 
 import (
+	"maps"
+	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/BrokkAi/mjolnir/go/internal/client"
@@ -89,7 +92,33 @@ type SessionFacts struct {
 
 // deriveSessionFacts is Rust's SessionFacts::derive.
 func deriveSessionFacts(dashboard *DashboardState, inputs [7]uint64) SessionFacts {
-	panic("unported: mj-tui/src/session_view.rs SessionFacts::derive")
+	dashboard.rowIndex.synchronize(dashboard.state.Get())
+	state := dashboard.state.Get()
+	own := make(map[string]AttentionLevel, state.Sessions.Len())
+	for id := range state.Sessions.Keys() {
+		own[id] = presentationAttention(dashboard, id)
+	}
+	listed := map[string]struct{}{}
+	for id, verdict := range dashboard.sessionVerdicts.Get().All() {
+		if verdict.LiveDashboard {
+			listed[id] = struct{}{}
+		}
+	}
+	for id, level := range own {
+		if dashboard.verdict(id).NeedsPerson && level.NeedsPerson() {
+			listed[id] = struct{}{}
+		}
+	}
+	for id := range *dashboard.sessionOperations.Get() {
+		listed[id] = struct{}{}
+	}
+	var listedIDs []string
+	for _, id := range slices.Sorted(maps.Keys(listed)) {
+		if state.Sessions.ContainsKey(id) {
+			listedIDs = append(listedIDs, id)
+		}
+	}
+	return SessionFacts{inputs: &inputs, own: own, listedIDs: listedIDs}
 }
 
 func (f *SessionFacts) attentionLevel(sessionID string) AttentionLevel {
@@ -164,11 +193,124 @@ type CpuRollups struct {
 
 // deriveCpuRollups is Rust's CpuRollups::derive.
 func deriveCpuRollups(dashboard *DashboardState, inputs [2]uint64) CpuRollups {
-	panic("unported: mj-tui/src/session_view.rs CpuRollups::derive")
+	index := dashboard.synchronizedRowIndex()
+	children := make(map[string][]string, len(index.activeChildren))
+	for parent, ids := range index.activeChildren {
+		children[parent] = rowIndexSortedKeys(ids)
+	}
+	samples := map[string]core.SessionCpuUsage{}
+	for id, view := range dashboard.sessionCPU.Get().All() {
+		if view.State == client.SessionCpuViewMeasured {
+			samples[id] = view.Usage
+		}
+	}
+	state := dashboard.state.Get()
+	// A physical container has one contribution even while workers upgrade
+	// or move.
+	type containerScope struct {
+		engine    string
+		host      string
+		hasHost   bool
+		container string
+	}
+	groups := map[containerScope][]string{}
+	for id, session := range state.Sessions.All() {
+		if !session.State.IsActive() ||
+			session.State == core.SessionStateParked || session.State == core.SessionStateError ||
+			session.Target == nil {
+			continue
+		}
+		engine, host, container, ok := session.Target.CpuContainerScope()
+		if !ok {
+			continue
+		}
+		scope := containerScope{engine: engine, container: container}
+		if host != nil {
+			scope.host, scope.hasHost = *host, true
+		}
+		groups[scope] = append(groups[scope], id)
+	}
+	owners := make(map[string]string, state.Sessions.Len())
+	for id := range state.Sessions.Keys() {
+		owners[id] = id
+	}
+	for _, ids := range groups {
+		ownsContainer := func(id string) bool {
+			session := state.Sessions.GetShared(id)
+			return session != nil && session.Target != nil && session.Target.OwnsContainer()
+		}
+		// Sorted by (does not own the container, id).
+		slices.SortFunc(ids, func(left, right string) int {
+			leftOwns, rightOwns := ownsContainer(left), ownsContainer(right)
+			if leftOwns != rightOwns {
+				if leftOwns {
+					return -1
+				}
+				return 1
+			}
+			return strings.Compare(left, right)
+		})
+		canonical := ids[0]
+		var sample *core.SessionCpuUsage
+		for _, id := range ids {
+			if usage, ok := samples[id]; ok && usage.Scope == core.CpuSampleScopeContainer {
+				sample = &usage
+				break
+			}
+		}
+		if sample != nil {
+			for _, id := range ids {
+				owners[id] = canonical
+			}
+			samples[canonical] = *sample
+		}
+	}
+	result := CpuRollups{
+		inputs:   &inputs,
+		samples:  samples,
+		owners:   owners,
+		children: children,
+	}
+	bySession := make(map[string]CpuRollup, state.Sessions.Len())
+	for id := range state.Sessions.Keys() {
+		var members []string
+		seen := map[string]struct{}{}
+		pending := []string{id}
+		for len(pending) > 0 {
+			member := pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
+			if _, visited := seen[member]; visited {
+				continue
+			}
+			seen[member] = struct{}{}
+			members = append(members, member)
+			pending = append(pending, result.children[member]...)
+		}
+		bySession[id] = result.total(members)
+	}
+	result.bySession = bySession
+	return result
 }
 
 func (r *CpuRollups) total(members []string) CpuRollup {
-	panic("unported: mj-tui/src/session_view.rs CpuRollups::total")
+	var rollup CpuRollup
+	scopes := map[string]struct{}{}
+	for _, member := range members {
+		rollup.members++
+		owner, ok := r.owners[member]
+		if !ok {
+			owner = member
+		}
+		if usage, ok := r.samples[owner]; ok {
+			rollup.measured++
+			if _, counted := scopes[owner]; !counted {
+				scopes[owner] = struct{}{}
+				rollup.recentPermille += uint32(usage.RecentPermille)
+				rollup.hourlyPermille += uint32(usage.HourlyPermille)
+			}
+		}
+	}
+	return rollup
 }
 
 // SessionOrder is what the Sessions pane shows, in order.
@@ -207,7 +349,36 @@ func (k OrderKey) equal(other OrderKey) bool {
 
 // deriveSessionOrder is Rust's SessionOrder::derive.
 func deriveSessionOrder(dashboard *DashboardState, key OrderKey) SessionOrder {
-	panic("unported: mj-tui/src/session_view.rs SessionOrder::derive")
+	sessions, hidden := dashboard.deriveOrderedSessions()
+	projects := make([]string, len(sessions))
+	for index, session := range sessions {
+		projects[index] = dashboard.ProjectSource(session).Key
+	}
+	var projectKeys []string
+	for _, project := range projects {
+		if len(projectKeys) == 0 || projectKeys[len(projectKeys)-1] != project {
+			projectKeys = append(projectKeys, project)
+		}
+	}
+	rows := dashboard.deriveSessionsRows(sessions, len(projectKeys) > 1)
+	targets := sessionDisplayTargets(dashboard, sessions, projects)
+	ids := make([]string, len(sessions))
+	positions := make(map[string]int, len(sessions))
+	for index, session := range sessions {
+		ids[index] = session.ID
+		positions[session.ID] = index
+	}
+	return SessionOrder{
+		key:                      &key,
+		orderedIDs:               ids,
+		positions:                positions,
+		projects:                 projects,
+		groupKeys:                projectKeys,
+		drawnRows:                rows,
+		hiddenCount:              hidden,
+		otherWorkspaceMatchCount: dashboard.deriveOtherWorkspaceMatches(),
+		targetLabels:             targets,
+	}
 }
 
 func (o *SessionOrder) ids() []string {
@@ -264,7 +435,13 @@ func (d *DashboardState) sessionFactsInputs() [7]uint64 {
 // DashboardState's own storage for them must not be named sessionFacts in
 // Go: the method has the name.
 func (d *DashboardState) sessionFacts() *SessionFacts {
-	panic("unported: mj-tui/src/session_view.rs DashboardState::session_facts")
+	inputs := d.sessionFactsInputs()
+	if d.sessionFactsField.inputs == nil || *d.sessionFactsField.inputs != inputs {
+		facts := deriveSessionFacts(d, inputs)
+		facts.derivations = d.sessionFactsField.derivations + 1
+		d.sessionFactsField = facts
+	}
+	return &d.sessionFactsField
 }
 
 func (d *DashboardState) cpuRollupsInputs() [2]uint64 {
@@ -274,7 +451,13 @@ func (d *DashboardState) cpuRollupsInputs() [2]uint64 {
 // cpuRollups derives the rollups again only when an input changed. The
 // storage field must not be named cpuRollups in Go.
 func (d *DashboardState) cpuRollups() *CpuRollups {
-	panic("unported: mj-tui/src/session_view.rs DashboardState::cpu_rollups")
+	inputs := d.cpuRollupsInputs()
+	if d.cpuRollupsField.inputs == nil || *d.cpuRollupsField.inputs != inputs {
+		rollups := deriveCpuRollups(d, inputs)
+		rollups.derivations = d.cpuRollupsField.derivations + 1
+		d.cpuRollupsField = rollups
+	}
+	return &d.cpuRollupsField
 }
 
 // cpuRollup is a session's CPU with its live sub-agents' included.
@@ -321,7 +504,31 @@ func (d *DashboardState) cpuChildren(sessionID string) []string {
 }
 
 func (d *DashboardState) sessionOrderKey() OrderKey {
-	panic("unported: mj-tui/src/session_view.rs DashboardState::session_order_key")
+	facts := d.sessionFactsInputs()
+	key := OrderKey{
+		inputs: [16]uint64{
+			facts[0],
+			facts[1],
+			facts[2],
+			facts[3],
+			facts[4],
+			facts[5],
+			facts[6],
+			d.config.Revision(),
+			d.projectSources.Revision(),
+			d.nativeAgents.Revision(),
+			d.nativeByParent.Revision(),
+			d.sessionsFilter.Revision(),
+			d.sessionsText.Revision(),
+			d.activeWorkspaceID.Revision(),
+			d.childWorkspace.Revision(),
+			d.collapsedProjectKeys.Revision(),
+		},
+	}
+	if selected, ok := d.SelectedSessionID(); ok {
+		key.selected = &selected
+	}
+	return key
 }
 
 // sessionOrder is the Sessions pane's order and rows for the dashboard's
@@ -329,5 +536,11 @@ func (d *DashboardState) sessionOrderKey() OrderKey {
 // since the last read. The storage field must not be named sessionOrder in
 // Go.
 func (d *DashboardState) sessionOrder() *SessionOrder {
-	panic("unported: mj-tui/src/session_view.rs DashboardState::session_order")
+	key := d.sessionOrderKey()
+	if d.sessionOrderField.key == nil || !d.sessionOrderField.key.equal(key) {
+		order := deriveSessionOrder(d, key)
+		order.derivations = d.sessionOrderField.derivations + 1
+		d.sessionOrderField = order
+	}
+	return &d.sessionOrderField
 }

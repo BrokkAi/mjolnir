@@ -3,6 +3,7 @@ mod chunk_bytes;
 pub mod connector;
 pub mod login_terminal;
 pub mod ssh;
+mod ssh_http_proxy;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -18,7 +19,7 @@ use mj_core::workspace::WorkspaceRecord;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -44,6 +45,80 @@ pub enum StartupPromptOutcome {
 
 pub fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ApiEndpointMetadata {
+    pub address: SocketAddr,
+    pub token: String,
+    pub pid: u32,
+    pub instance_id: String,
+    pub protocol_version: u32,
+}
+
+pub fn api_endpoint_path() -> PathBuf {
+    api_endpoint_path_in(&data_dir())
+}
+
+pub fn api_endpoint_path_in(dir: &Path) -> PathBuf {
+    dir.join("api-endpoint.json")
+}
+
+pub fn read_api_endpoint() -> Result<Option<ApiEndpointMetadata>> {
+    read_api_endpoint_from(&api_endpoint_path())
+}
+
+pub fn read_api_endpoint_from(path: &Path) -> Result<Option<ApiEndpointMetadata>> {
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    serde_json::from_slice(&body)
+        .map(Some)
+        .with_context(|| format!("parse {}", path.display()))
+}
+
+pub fn write_api_endpoint(metadata: &ApiEndpointMetadata) -> Result<()> {
+    write_api_endpoint_to(&api_endpoint_path(), metadata)
+}
+
+pub fn write_api_endpoint_to(path: &Path, metadata: &ApiEndpointMetadata) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    mj_core::config::create_owner_only_directory(parent)?;
+    // NamedTempFile creates the file with mode 0600 on Unix.
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(&serde_json::to_vec_pretty(metadata)?)?;
+    file.as_file().sync_all()?;
+    #[cfg(windows)]
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| format!("replace {}", path.display()));
+    }
+    file.persist(path)
+        .with_context(|| format!("publish {}", path.display()))?;
+    Ok(())
+}
+
+/// The caller serializes publication and cleanup with its ownership lock.
+pub fn remove_api_endpoint_if_matching(
+    matches: impl FnOnce(&ApiEndpointMetadata) -> bool,
+) -> Result<()> {
+    let path = api_endpoint_path();
+    if read_api_endpoint_from(&path)?.as_ref().is_some_and(matches) {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+    Ok(())
 }
 
 /// The environment variable naming the container a daemon was launched in.
@@ -86,6 +161,10 @@ pub struct ContainerDaemonRecord {
     pub address: SocketAddr,
     pub token: String,
     pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_address: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
 }
 
 fn default_container_owner_schema() -> u32 {
@@ -159,6 +238,10 @@ pub struct DaemonEndpoint {
     pub control_address: SocketAddr,
     pub token: String,
     pub instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_address: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
 }
 
 /// Where the daemon runs, as the daemon itself reports it.
@@ -2141,6 +2224,10 @@ impl DaemonClient {
         Ok(client)
     }
 
+    pub fn pid(&self) -> u32 {
+        self.metadata.pid
+    }
+
     /// Connector-owned SSH origin; never inferred from daemon-host placement.
     pub fn connector(&self) -> Option<&std::sync::Arc<connector::DaemonConnector>> {
         self.connector.as_ref()
@@ -2150,7 +2237,14 @@ impl DaemonClient {
     /// dialed (including a container's published loopback port).
     pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
         let identity = self.identity().await?;
+        let api = if self.connector().is_some_and(|connector| connector.is_ssh()) {
+            None
+        } else {
+            self.matching_local_api_endpoint(&identity)?
+        };
         Ok(DaemonEndpoint {
+            api_address: api.as_ref().map(|endpoint| endpoint.address),
+            api_token: api.map(|endpoint| endpoint.token),
             config_path: None,
             protocol_version: self.metadata.protocol_version,
             build_version: identity.build_version,
@@ -2158,6 +2252,41 @@ impl DaemonClient {
             token: self.metadata.token.clone(),
             instance_id: identity.instance_id,
         })
+    }
+
+    fn matching_local_api_endpoint(
+        &self,
+        identity: &DaemonIdentity,
+    ) -> Result<Option<ApiEndpointMetadata>> {
+        if identity.instance_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(read_api_endpoint()?.filter(|endpoint| {
+            endpoint.pid == self.metadata.pid
+                && endpoint.instance_id == identity.instance_id
+                && !endpoint.token.is_empty()
+        }))
+    }
+
+    pub fn direct_api_endpoint(
+        &self,
+        identity: &DaemonIdentity,
+    ) -> Result<Option<(String, String)>> {
+        if self.connector().is_some_and(|connector| connector.is_ssh()) {
+            return Ok(self
+                .ssh_lease
+                .as_deref()
+                .and_then(ssh::SshLease::api_endpoint));
+        }
+        Ok(self
+            .matching_local_api_endpoint(identity)?
+            .map(|endpoint| (format!("http://{}", endpoint.address), endpoint.token)))
+    }
+
+    /// Keep the process-private forward alive for an HTTP client that outlives
+    /// this control connection.
+    pub fn ssh_lease(&self) -> Option<std::sync::Arc<ssh::SshLease>> {
+        self.ssh_lease.clone()
     }
 
     /// Speak the daemon's advertised dialect, not this build's: management
@@ -4288,6 +4417,27 @@ mod tests {
         fs::write(&metadata, fixture.to_string()).unwrap();
         let error = read_metadata_at(&metadata).unwrap_err();
         assert!(format!("{error:#}").contains("unknown field `container_id`"));
+    }
+
+    #[test]
+    fn api_endpoint_discovery_tolerates_future_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = api_endpoint_path_in(directory.path());
+        fs::write(
+            &path,
+            serde_json::json!({
+                "address": "127.0.0.1:8787",
+                "token": "fixture-token",
+                "pid": 42,
+                "instance_id": "current-start",
+                "protocol_version": PROTOCOL_VERSION,
+                "future_field": {"extra": true}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let endpoint = read_api_endpoint_from(&path).unwrap().unwrap();
+        assert_eq!(endpoint.instance_id, "current-start");
     }
 
     // Hard-won: c672eb41a1bf: macOS startup hang waited forever for an exited but unreaped daemon

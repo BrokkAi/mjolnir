@@ -827,25 +827,6 @@ pub(super) fn apple_image_prepare_commands(template: &ContainerTemplate) -> Vec<
     vec![command.stage(ProvisionStage::Provisioning)]
 }
 
-/// Move a command to the remote host without losing its input or lifecycle metadata.
-pub(super) fn command_over_ssh(
-    class: SshTrafficClass,
-    mut command: CommandSpec,
-    ssh: &SshTarget,
-) -> CommandSpec {
-    let remote = std::iter::once(command.program)
-        .chain(command.args)
-        .collect();
-    let wrapped = ssh_command_owned(class, ssh, remote);
-    command.program = wrapped.program;
-    command.args = wrapped.args;
-    // The wrapped command now opens an SSH session, so it is admitted and
-    // placed on a shared connection like any other.
-    command.ssh_destination = wrapped.ssh_destination;
-    command.ssh_session = wrapped.ssh_session;
-    command
-}
-
 pub(super) fn at_boundary(
     class: SshTrafficClass,
     boundary: ExecutionBoundary<'_>,

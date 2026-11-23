@@ -2252,6 +2252,23 @@ fn api_app_with_client_state(
     mpsc::Receiver<super::super::BundleRequest>,
     mpsc::Receiver<super::super::ClientStateRequest>,
 ) {
+    let (options, actions, snapshots, bundles, client_state) =
+        api_options_with_client_state(backend, adjust, preferences_path, worker_check);
+    (router(options), actions, snapshots, bundles, client_state)
+}
+
+fn api_options_with_client_state(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    worker_check: Option<crate::server::WorkerSourceCheck>,
+) -> (
+    ServerOptions,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<super::super::ClientStateRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -2293,13 +2310,7 @@ fn api_app_with_client_state(
     if let Some(check) = worker_check {
         options.set_worker_source_check(check);
     }
-    (
-        router(options),
-        action_rx,
-        snapshot_tx,
-        bundle_rx,
-        client_state_rx,
-    )
+    (options, action_rx, snapshot_tx, bundle_rx, client_state_rx)
 }
 
 fn bearer(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -2333,6 +2344,68 @@ async fn login_cookie(app: &axum::Router) -> String {
 async fn json_body(response: Response) -> serde_json::Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn http_prove_uses_only_the_loopback_token_and_rejects_invalid_nonces() {
+    const TOKEN: &str = "loopback-only-token";
+    let nonce = "0123456789abcdef".repeat(4);
+    for loopback in [true, false] {
+        let (mut options, _actions, _snapshot, _bundles, _client_state) =
+            api_options_with_client_state(
+                Arc::new(FakeBackend::default()),
+                |_| {},
+                absent_preferences_path(),
+                None,
+            );
+        if loopback {
+            options.set_loopback_token(TOKEN.into());
+        }
+        let app = router(options);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/prove?nonce={nonce}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
+        if loopback {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = json_body(response).await;
+            assert!(mj_client::http::verify_http_api_proof(
+                TOKEN,
+                &nonce,
+                body["mac"].as_str().unwrap()
+            ));
+            for bad in ["", "123", "gggggggggggggggggggggggggggggggg"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::get(format!("/api/v1/prove?nonce={bad}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+        } else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let malformed = app
+                .oneshot(
+                    Request::get("/api/v1/prove?nonce=x&nonce=y")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
+        }
+    }
 }
 
 #[tokio::test]
@@ -2795,6 +2868,53 @@ async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt
         backend.prompts.lock().unwrap().is_empty(),
         "a withdrawn prompt is never submitted"
     );
+}
+
+#[tokio::test]
+async fn an_interrupt_on_either_listener_withdraws_the_other_listeners_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(FakeBackend {
+        record_gate: Some((started.clone(), release.clone())),
+        ..FakeBackend::default()
+    });
+    let (options, _actions, _snapshot_tx, _bundles, _client_state) = api_options_with_client_state(
+        backend.clone(),
+        |snapshot| {
+            snapshot.sessions[0].capabilities.prompt = true;
+            snapshot.sessions[0].capabilities.interrupt_turn = false;
+        },
+        absent_preferences_path(),
+        None,
+    );
+    let loopback = router(options.clone());
+    let phone = router(options);
+    for (sender, interrupter) in [(&loopback, &phone), (&phone, &loopback)] {
+        let prompt = sender.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"stop me"}"#))
+                .unwrap(),
+        );
+        tokio::pin!(prompt);
+        tokio::select! {
+            () = started.notified() => {}
+            result = &mut prompt => panic!("prompt finished before it was held: {result:?}"),
+        }
+        let interrupt = interrupter
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(interrupt.status(), StatusCode::ACCEPTED);
+        release.notify_one();
+        assert_eq!(prompt.await.unwrap().status(), StatusCode::CONFLICT);
+    }
+    assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

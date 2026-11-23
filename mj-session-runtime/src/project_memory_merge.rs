@@ -1,5 +1,6 @@
 //! Controller-owned three-way project-memory merge and conflict resolution.
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -400,6 +401,94 @@ pub async fn install_merged_tree<W: ProjectMemoryWorker>(
         ))
     } else {
         Ok(None)
+    }
+}
+
+pub(crate) struct ReplicaChangeNotice {
+    pub before: TreeVersion,
+    pub after: TreeVersion,
+    pub text: String,
+}
+
+impl CanonicalSync {
+    pub(crate) fn replica_change_notice(
+        self,
+        replica: &ProjectMemorySnapshot,
+        install: WorkerInstallOutcome,
+    ) -> Option<ReplicaChangeNotice> {
+        let Self {
+            mut tree,
+            resolutions,
+            ..
+        } = self;
+        match install {
+            WorkerInstallOutcome::ReplicaChanged => return None,
+            WorkerInstallOutcome::Replaced => {}
+            WorkerInstallOutcome::Additive => {
+                // The legacy ACK reports only success. Relative to the
+                // worker's snapshot, paths omitted by the upload stay put.
+                for (path, content) in &replica.files {
+                    if !tree.files.contains_key(path) {
+                        tree.files.insert(path.clone(), content.clone());
+                    }
+                }
+            }
+        }
+        if &tree == replica {
+            return None;
+        }
+
+        let mut added = Vec::new();
+        let mut updated = Vec::new();
+        let mut removed = Vec::new();
+        for (path, content) in &tree.files {
+            match replica.files.get(path) {
+                None => added.push(path),
+                Some(old) if old != content => updated.push(path),
+                Some(_) => {}
+            }
+        }
+        for path in replica.files.keys() {
+            if !tree.files.contains_key(path) {
+                removed.push(path);
+            }
+        }
+
+        const PATHS_PER_CATEGORY: usize = 10;
+        let mut text =
+            String::from("Project memory changed. Reread MEMORY.md and the affected notes.");
+        for (label, paths) in [("Added", added), ("Updated", updated), ("Removed", removed)] {
+            if paths.is_empty() {
+                continue;
+            }
+            write!(text, " {label} ").unwrap();
+            for (index, path) in paths.iter().take(PATHS_PER_CATEGORY).enumerate() {
+                if index != 0 {
+                    text.push_str(", ");
+                }
+                write!(text, "{}", path.trim_start_matches('/').escape_debug()).unwrap();
+                if let Some(resolution) = resolutions.iter().find(|r| r.conflict.path == **path) {
+                    let installed = tree.files.get(*path);
+                    let label = if installed == Some(&resolution.conflict.canonical) {
+                        "updated from canonical on conflict"
+                    } else if resolution.method == ConflictResolutionMethod::ReplicaWins {
+                        "kept local version on conflict"
+                    } else {
+                        "overlapping edits merged"
+                    };
+                    write!(text, " ({label})").unwrap();
+                }
+            }
+            if paths.len() > PATHS_PER_CATEGORY {
+                write!(text, " and {} more", paths.len() - PATHS_PER_CATEGORY).unwrap();
+            }
+            text.push('.');
+        }
+        Some(ReplicaChangeNotice {
+            before: replica.version(),
+            after: tree.version(),
+            text,
+        })
     }
 }
 

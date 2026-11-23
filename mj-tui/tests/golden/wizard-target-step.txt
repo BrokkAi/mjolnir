@@ -152,9 +152,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │                        │                                                                                  │                           │
 │                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
 │                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
-│                           │   ▾ OPENAI     codex-1   refreshing                                              │                           │
-│                           │                codex-1   refreshing                                              │                           │
-│                           │                codex-2   refreshing                                              │                           │
+│                           │   ▸ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -474,9 +474,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
   │                                                      │
   │   PROVIDER     PROFILE   WEEKLY      5H              │
   │   ▸ ANTHROPIC  claude-1  refreshing                  │
-  │   ▾ OPENAI     codex-1   refreshing                  │
-  │                codex-1   refreshing                  │
-  │                codex-2   refreshing                  │
+  │   ▸ OPENAI     codex-1   refreshing                  │
+  │                                                      │
+  │                                                      │
   │                                                      │
   │                                                      │
   │                                                      │
@@ -663,9 +663,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
-│                           │   ▾ ANTHROPIC  claude-1  refreshing                                              │                           │
-│                           │                claude-1  refreshing                                              │                           │
+│                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
 │                           │   ▸ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -746,9 +746,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                           │                                                                                  │                           │
 │                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
 │                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
-│                           │   ▾ OPENAI     codex-1   refreshing                                              │                           │
-│                           │                codex-1   refreshing                                              │                           │
-│                           │                codex-2   refreshing                                              │                           │
+│                           │   ▸ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -910,9 +910,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
-│                           │   ▾ ANTHROPIC  claude-1  refreshing                                              │                           │
-│                           │                claude-1  refreshing                                              │                           │
+│                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
 │                           │   ▸ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
@@ -992,9 +992,9 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                           ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
 │                           │                                                                                  │                           │
 │                           │   PROVIDER     PROFILE   WEEKLY      5H                                          │                           │
-│                           │   ▾ ANTHROPIC  claude-1  refreshing                                              │                           │
-│                           │                claude-1  refreshing                                              │                           │
+│                           │   ▸ ANTHROPIC  claude-1  refreshing                                              │                           │
 │                           │   ▸ OPENAI     codex-1   refreshing                                              │                           │
+│                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │
 │                           │                                                                                  │                           │

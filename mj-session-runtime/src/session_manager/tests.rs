@@ -1754,6 +1754,9 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
                 user_instructions: vec!["Run the tests.".into()],
                 user_instructions_omitted: false,
                 project_instructions: None,
+                trusted_user_inputs: Vec::new(),
+                prior_reviews: Vec::new(),
+                retry_reason: None,
                 transcript: String::new(),
             })
             .unwrap(),
@@ -1892,6 +1895,200 @@ async fn retirement_ends_a_connect_that_never_answers() {
         error.message.contains("session manager stopped"),
         "unexpected rejection: {error:?}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_memory_install_queues_only_replica_changes() {
+    use crate::project_memory_merge::{
+        CanonicalSyncOutcome, ConflictResolver, ProjectMemoryWorker, merge_and_swap_canonical,
+    };
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+    use mj_core::project_memory::{
+        ConflictedFile, ProjectMemorySnapshot, ProjectMemoryStore, ReplicaReplaceOutcome,
+        SwapOutcome, TreeVersion, swap_canonical,
+    };
+    use std::{future::Future, pin::Pin};
+    use tokio_util::sync::CancellationToken;
+
+    const CHILD: &str = "MJ_TEST_PROJECT_MEMORY_NOTICE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(CHILD, "project_memory_install_queues_only_replica_changes");
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+
+    struct Resolver;
+    impl ConflictResolver for Resolver {
+        fn resolve<'a>(
+            &'a self,
+            _conflict: &'a ConflictedFile,
+            _cancel: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            Box::pin(async { Ok("local and canonical\n".into()) })
+        }
+    }
+
+    struct Worker {
+        replica: ProjectMemoryStore,
+        baseline: ProjectMemoryStore,
+        replace: bool,
+    }
+    impl ProjectMemoryWorker for Worker {
+        fn supports_replace(&self) -> bool {
+            self.replace
+        }
+
+        fn replace_tree<'a>(
+            &'a mut self,
+            expected: TreeVersion,
+            tree: ProjectMemorySnapshot,
+        ) -> Pin<Box<dyn Future<Output = Result<ReplicaReplaceOutcome>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.replica.snapshot()?.version() != expected {
+                    return Ok(ReplicaReplaceOutcome::ReplicaChanged);
+                }
+                self.replica.replace_tree(&tree)?;
+                self.baseline.replace_tree(&tree)?;
+                Ok(ReplicaReplaceOutcome::Replaced)
+            })
+        }
+
+        fn install_additive<'a>(
+            &'a mut self,
+            tree: ProjectMemorySnapshot,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.replica.install_snapshot(&tree)?;
+                self.baseline.install_snapshot(&tree)?;
+                Ok(())
+            })
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let mut worker = Worker {
+        replica: ProjectMemoryStore::new(root.path().join("replica")),
+        baseline: ProjectMemoryStore::new(root.path().join("baseline")),
+        replace: true,
+    };
+    let canonical_root = root.path().join("canonical");
+    let snapshot = |files: &[(&str, &str)]| ProjectMemorySnapshot {
+        files: files
+            .iter()
+            .map(|(p, c)| ((*p).into(), (*c).into()))
+            .collect(),
+    };
+    let baseline = snapshot(&[("/bar.md", "base\n"), ("/old.md", "old\n")]);
+    let replica = snapshot(&[("/bar.md", "local\n"), ("/old.md", "old\n")]);
+    let canonical = snapshot(&[("/foo.md", "new\n"), ("/bar.md", "canonical\n")]);
+    assert_eq!(
+        swap_canonical(
+            &canonical_root,
+            &ProjectMemorySnapshot::default().version(),
+            &canonical
+        )
+        .unwrap(),
+        SwapOutcome::Swapped
+    );
+    let cancel = CancellationToken::new();
+    let CanonicalSyncOutcome::Swapped(sync) = merge_and_swap_canonical(
+        &canonical_root,
+        &baseline,
+        &replica,
+        &Resolver,
+        cancel.clone(),
+    )
+    .await
+    .unwrap() else {
+        panic!("canonical CAS failed");
+    };
+
+    async fn install(
+        worker: &mut Worker,
+        baseline: &ProjectMemorySnapshot,
+        replica: &ProjectMemorySnapshot,
+        sync: crate::project_memory_merge::CanonicalSync,
+    ) {
+        standalone::install_project_memory_and_notify(
+            worker,
+            LEASED_RELAY_SESSION,
+            baseline,
+            replica,
+            sync,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
+    let pending = || crate::database::pending_mailbox_events(10).unwrap();
+    worker.replica.replace_tree(&replica).unwrap();
+    let mut unchanged = sync.clone();
+    unchanged.tree = replica.clone();
+    install(&mut worker, &replica, &replica, unchanged.clone()).await;
+    install(&mut worker, &baseline, &replica, unchanged).await;
+    assert_eq!(worker.baseline.snapshot().unwrap(), replica);
+    let concurrent = snapshot(&[("/bar.md", "concurrent\n"), ("/old.md", "old\n")]);
+    worker.replica.replace_tree(&concurrent).unwrap();
+    install(&mut worker, &baseline, &replica, sync.clone()).await;
+    assert_eq!(worker.replica.snapshot().unwrap(), concurrent);
+    assert!(pending().is_empty());
+
+    for _ in 0..2 {
+        worker.replica.replace_tree(&replica).unwrap();
+        install(&mut worker, &baseline, &replica, sync.clone()).await;
+        assert_eq!(worker.replica.snapshot().unwrap(), sync.tree);
+    }
+    let replaced = sync.tree.clone();
+    worker.replace = false;
+    worker.replica.replace_tree(&replica).unwrap();
+    install(&mut worker, &baseline, &replica, sync).await;
+    let additive = worker.replica.snapshot().unwrap();
+    assert_eq!(additive.files["/old.md"], "old\n");
+
+    let entries = pending();
+    assert_eq!(entries.len(), 3);
+    let replaced_prefix = format!(
+        "project-memory:{LEASED_RELAY_SESSION}:{}:{}:",
+        replica.version().0,
+        replaced.version().0
+    );
+    let additive_prefix = format!(
+        "project-memory:{LEASED_RELAY_SESSION}:{}:{}:",
+        replica.version().0,
+        additive.version().0
+    );
+    let replaced_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event_key.starts_with(&replaced_prefix))
+        .collect();
+    assert_eq!(replaced_entries.len(), 2);
+    assert_ne!(replaced_entries[0].event_key, replaced_entries[1].event_key);
+    let additive_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event_key.starts_with(&additive_prefix))
+        .collect();
+    assert_eq!(additive_entries.len(), 1);
+    for (entry, removed) in [
+        (replaced_entries[0], " Removed old.md."),
+        (replaced_entries[1], " Removed old.md."),
+        (additive_entries[0], ""),
+    ] {
+        let event: MailboxEvent = serde_json::from_str(&entry.event_json).unwrap();
+        assert_eq!(entry.target_session_id, LEASED_RELAY_SESSION);
+        assert_eq!(event.key, entry.event_key);
+        assert_eq!(event.source, "project-memory");
+        assert!(!event.wake && !entry.unpark);
+        assert_eq!(
+            event.body,
+            MailboxEventBody::PlainText {
+                text: format!(
+                    "Project memory changed. Reread MEMORY.md and the affected notes. Added foo.md. Updated bar.md (overlapping edits merged).{removed}"
+                )
+            }
+        );
+    }
 }
 
 #[cfg(unix)]

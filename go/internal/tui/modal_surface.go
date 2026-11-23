@@ -288,7 +288,28 @@ func (e *ContainerEditor) textInputFocused() bool {
 func (w *NewWizard) dialog() *chat.Dialog[WizardControl] { return &w.form }
 
 func (w *NewWizard) textInputFocused() bool {
-	panic("unported: mj-tui/src/modal_surface.rs NewWizard::text_input_focused")
+	if id, ok := w.form.Focused(); ok {
+		switch w.step {
+		case WizardStepTarget:
+			return id == WizardControlResourceCpu || id == WizardControlResourceMemory
+		case WizardStepProjectDirectory:
+			return id == WizardControlProjectDirectory
+		case WizardStepNewBundle:
+			return id == WizardControlNewBundleSource && !w.bundleCreationInFlight
+		case WizardStepMounts:
+			return id == WizardControlMountSource || id == WizardControlMountDestination
+		default:
+			return false
+		}
+	}
+	// Nothing focused yet: a step that is all text field behaves as though
+	// its field were focused.
+	switch w.step {
+	case WizardStepProjectDirectory, WizardStepNewBundle, WizardStepMounts:
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *NewWizard) layerDetail() string {
@@ -324,13 +345,62 @@ func (w *ResumeWizard) layerDetail() string {
 // changes it makes stay in the mode. Every Mode variant that carries a modal
 // is listed here, so a new variant is added here and nowhere else.
 func modeSurface(mode *Mode) ModalSurface {
-	panic("unported: mj-tui/src/modal_surface.rs Mode::surface")
+	switch payload := (*mode).(type) {
+	case nil, ModeDashboard:
+		return nil
+	case ModeNew:
+		return asModalSurface[WizardControl](payload.NewWizard)
+	case ModeResume:
+		return asModalSurface[WizardControl](payload.ResumeWizard)
+	case ModeResumeDialog:
+		return asModalSurface[ResumeFocus](payload.ResumeDialog)
+	case ModeRepositoryOrigin:
+		return asModalSurface[DialogControl](payload.RepositoryOriginDialog)
+	case ModeConfigId:
+		return asModalSurface[DialogControl](payload.ConfigIdEditor)
+	case ModeTargetActions:
+		return asModalSurface[DialogControl](payload.TargetActionsDialog)
+	case ModeWeb:
+		return asModalSurface[DialogControl](payload.WebDialog)
+	case ModeWorkspaceManager:
+		return asModalSurface[WorkspaceControl](payload.WorkspaceManager)
+	case ModeRename:
+		return asModalSurface[DialogControl](payload.RenameEditor)
+	case ModeChangedFiles:
+		return asModalSurface[DialogControl](payload.ChangedFilesDialog)
+	case ModeNoticeLog:
+		return asModalSurface[DialogControl](payload.NoticeLogDialog)
+	case ModeSessionCpuReport:
+		return asModalSurface[DialogControl](payload.SessionCpuReportDialog)
+	case ModeSessionUsageReport:
+		return asModalSurface[UsageControl](payload.SessionUsageDialog)
+	case ModeEditContainer:
+		return asModalSurface[ContainerEditFocus](payload.ContainerEditor)
+	case ModeGitIdentity:
+		return asModalSurface[GitIdentityControl](payload.GitIdentityDialog)
+	case ModeImporting:
+		return asModalSurface[DialogControl](payload.ImportProgress)
+	case ModeConfirmImportBundle:
+		return asModalSurface[DialogControl](payload.ImportBundleConfirmation)
+	case ModeConfirm:
+		return asModalSurface[DialogControl](payload.ConfirmDialog)
+	case ModePalette:
+		return asModalSurface[PaletteControl](payload.CommandPalette)
+	case ModeSetup:
+		return payload.SetupDialog
+	case ModeWelcome:
+		return asModalSurface[WelcomeAction](payload.WelcomeDialog)
+	}
+	panic(fmt.Sprintf("modeSurface: unknown mode %T", *mode))
 }
 
 // activeModal is the modal the dashboard asks: the operator-away overlay
 // while it is up, else the open mode's modal; nil over the bare dashboard.
 func (d *DashboardState) activeModal() ModalSurface {
-	panic("unported: mj-tui/src/modal_surface.rs DashboardState::active_modal")
+	if dialog := d.awayDialog(); dialog != nil {
+		return asModalSurface[AwayControl](dialog)
+	}
+	return modeSurface(&d.mode)
 }
 
 // activeModalMut is activeModal for changes. Go's ModalSurface already

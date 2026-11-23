@@ -1519,6 +1519,7 @@ mod settled_task_tests {
                             elicitation_id: "human-form".into(),
                             action: "accept".into(),
                             reply: Some("Old format".into()),
+                            answers: None,
                         })
                         .unwrap();
                 } else {
@@ -1644,6 +1645,7 @@ mod settled_task_tests {
                 elicitation_id: "form".into(),
                 action: "accept".into(),
                 reply: Some("Yes".into()),
+                answers: None,
             })
             .unwrap();
     }
@@ -2023,6 +2025,7 @@ mod settled_task_tests {
                 elicitation_id: "form".into(),
                 action: "accept".into(),
                 reply: Some("Yes".into()),
+                answers: None,
             })
             .unwrap();
         reply(&mut relay, "Deployed.");

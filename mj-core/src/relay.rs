@@ -212,7 +212,9 @@ pub const RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL: u32 = 84;
 pub const RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL: u32 = 85;
 /// 86 adds exact targets for worker-published interruption.
 pub const RELAY_CANCEL_TURN_TARGET_PROTOCOL: u32 = 86;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CANCEL_TURN_TARGET_PROTOCOL;
+/// 87 includes trusted user inputs, prior reviews, and retry context in guardian requests.
+pub const RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL: u32 = 87;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GUARDIAN_CONTEXT_ALIGNMENT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

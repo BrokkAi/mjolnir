@@ -245,6 +245,7 @@ impl WizardDraft for NewWizard {
 
     fn set_profile(&mut self, index: usize) {
         self.profile = index;
+        self.focused_provider = None;
     }
 
     fn target(&self) -> usize {
@@ -519,7 +520,10 @@ impl WizardDraft for NewWizard {
         }
         match interaction {
             Interaction::Toggle(WizardControl::ProfileList) => {
-                if let Some(provider) = self.focused_provider.clone() {
+                if let Some(provider) = self.focused_provider.clone().or_else(|| {
+                    Self::provider_for_profile(dashboard, self.profile)
+                        .filter(|provider| !self.expanded_providers.contains(provider))
+                }) {
                     self.toggle_provider(provider);
                     dashboard.record_event_handled();
                 }
@@ -580,7 +584,10 @@ impl WizardDraft for NewWizard {
         }
         match key.code {
             KeyCode::Right | KeyCode::Char('l') => {
-                if let Some(provider) = self.focused_provider.clone() {
+                if let Some(provider) = self.focused_provider.clone().or_else(|| {
+                    Self::provider_for_profile(dashboard, self.profile)
+                        .filter(|provider| !self.expanded_providers.contains(provider))
+                }) {
                     if !self.expanded_providers.contains(&provider) {
                         self.expanded_providers.insert(provider);
                     } else {
@@ -646,6 +653,13 @@ impl WizardDraft for NewWizard {
         } else if let Some(pos) = items.iter().position(|item| {
             matches!(item, ProfilePickerItem::Profile { profile_index, .. } if *profile_index == self.profile)
         }) {
+            return pos;
+        }
+        if let Some(provider) = Self::provider_for_profile(dashboard, self.profile)
+            && let Some(pos) = items
+                .iter()
+                .position(|item| matches!(item, ProfilePickerItem::Provider(p) if p == &provider))
+        {
             return pos;
         }
         0
@@ -1114,6 +1128,9 @@ impl DashboardState {
     /// Puts a wizard draft back on screen unchanged.
     pub(crate) fn keep<W: WizardDraft>(&mut self, wizard: W) -> DashboardAction {
         self.mode = wizard.into_mode();
+        if let Mode::New(wizard) = &self.mode {
+            self.new_wizard_expanded_providers = wizard.expanded_providers.clone();
+        }
         DashboardAction::None
     }
 }
