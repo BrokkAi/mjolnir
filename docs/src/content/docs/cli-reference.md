@@ -409,9 +409,9 @@ mj new --workspace eval --bundle product --target builder \
   `--subagent-effort` flags fail with guidance to use the four per-type flags.
   `single-model` and `all-models` remain rejected.
   When both types are configured, each spawn selects `straightforward` or
-  `subtle`. With only straightforward, the spawn tool has no task type,
-  every child uses the straightforward choice, and the parent is told to
-  delegate straightforward work.
+  `subtle`. With only straightforward configured, the spawn tool omits the
+  task type field and every child uses the straightforward choice. See the
+  [sub-agent task types](/profiles/) for how parents route work.
   Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --oracle enabled|disabled` chooses whether the session may consult
   the oracle, a read-only advisor behind the `ask_oracle` tool. It works with

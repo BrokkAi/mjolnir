@@ -580,16 +580,18 @@ by that model when specified; omitted effort uses the harness default. Adaptive
 effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
-With both types configured, `spawn` takes `task_type`: `straightforward` for
-work with a clear method, such as locating code, running commands or tests, or
-implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
-design choices, or risk of subtle bugs. A subtle task gets a smarter, more
-expensive agent. Judge difficulty, not brief length. With only straightforward
-configured, `spawn` has no `task_type` and every child uses the straightforward
-choice. The parent is told to delegate straightforward work and to do work
-that needs judgment itself. Mjolnir chooses the enabled profile offering that
-task type's model and effort with the strongest quota headroom paced against
-its reset times. The agent cannot override the selection.
+With both types configured, set the `spawn` tool's `task_type` to
+`straightforward` for bounded work with a single clear path, such as locating
+and mapping code, running exact build, test, or gate commands, and small
+mechanical edits. Choose `subtle` for
+multi-file implementation, including settled designs, multi-stage operational
+runs or troubleshooting, ambiguous diagnosis, design choices, and work with a
+high risk of subtle bugs. Choose by scope and branching. With only
+straightforward configured, `spawn` omits `task_type` and every child uses that
+choice. The parent delegates bounded work and handles the more involved work
+itself. Mjolnir chooses the enabled profile offering that task type's model
+and effort with the strongest quota headroom paced against its reset times.
+The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
 a notice and uses `native` where supported or `none` on DSH and Antigravity.

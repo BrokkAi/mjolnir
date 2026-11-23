@@ -293,22 +293,25 @@ fn choice_list(label: &str, choices: &[crate::acp::SessionConfigChoice]) -> Stri
 /// How the delegation policy describes spawn choices when both task types are offered.
 const TWO_TASK_TYPES: &str = "Mjolnir supplies the configured
 child model and effort for each task type. Set `task_type` to `straightforward`
-for work with a clear method, including locating code, running commands or
-test suites, and implementing a settled design. Use `subtle` for ambiguous
-diagnosis, design choices, and work with a high risk of subtle bugs. A subtle
-task gets a smarter, more expensive agent. Judge difficulty, not brief length.
-When a `straightforward` child stalls or returns incomplete after one correction,
-escalate that slice to `subtle` rather than taking it over yourself.";
+for bounded work with a single clear path: locating and mapping code, running
+exact build, test, or gate commands, and small mechanical edits. Use `subtle`
+for multi-file implementation (even from a settled design), multi-stage
+operational runs or troubleshooting, ambiguous diagnosis, design choices, and
+work with a high risk of subtle bugs. A subtle task gets a smarter, more
+expensive agent. Judge by scope and branching, not brief length or command
+runtime. When a `straightforward` child stalls or returns incomplete after one
+correction, escalate that slice to `subtle` rather than taking it over yourself.";
 
 /// The same description when only the straightforward type is configured.
 /// There is no type to choose, so the parent delegates straightforward
 /// work and keeps work that needs judgment.
 const ONE_TASK_TYPE: &str = "Mjolnir supplies the configured
-child model and effort. Delegate straightforward work: work with a clear
-method, including locating code, running commands or test suites, and
-implementing a settled design. Do work that needs judgment yourself, including
-ambiguous diagnosis, design choices, and changes with a high risk of subtle
-bugs. Judge difficulty, not brief length.";
+child model and effort. Delegate straightforward work: bounded tasks with a
+single clear path, including locating and mapping code, running exact build,
+test, or gate commands, and small mechanical edits. Keep multi-file
+implementation, troubleshooting, ambiguous diagnosis, design choices, and
+changes with a high risk of subtle bugs yourself. Judge by scope and branching,
+not brief length or command runtime.";
 
 /// The parent's delegation policy. `offers_subtle` is false when only the
 /// straightforward task type is configured.
@@ -3448,10 +3451,15 @@ mod tests {
             both.contains("Set `task_type` to `straightforward`"),
             "{both}"
         );
-        assert!(both.contains("A subtle\ntask gets a smarter, more expensive agent."));
+        assert!(both.contains("for bounded work with a single clear path"));
+        assert!(
+            both.contains("for multi-file implementation (even from a settled design), multi-stage\noperational runs or troubleshooting"),
+            "{both}"
+        );
+        assert!(both.contains("A subtle task gets a smarter, more\nexpensive agent."));
         assert!(
             both.contains(
-                "When a `straightforward` child stalls or returns incomplete after one correction,\nescalate that slice to `subtle` rather than taking it over yourself."
+                "When a `straightforward` child stalls or returns incomplete after one\ncorrection, escalate that slice to `subtle` rather than taking it over yourself."
             ),
             "{both}"
         );
@@ -3463,11 +3471,11 @@ mod tests {
             "{one}"
         );
         assert!(
-            one.contains("Do work that needs judgment yourself"),
+            one.contains("Keep multi-file\nimplementation, troubleshooting, ambiguous diagnosis, design choices"),
             "{one}"
         );
         assert!(
-            one.contains("Judge difficulty, not brief length.\nUp to 4 children"),
+            one.contains("Judge by scope and branching,\nnot brief length or command runtime.\nUp to 4 children"),
             "{one}"
         );
         // Hard-won: e105bd9ce: the single-type judgment rule contradicted a
@@ -3479,6 +3487,10 @@ mod tests {
         );
         assert!(
             one.contains("Decide who builds and when, yourself included"),
+            "{one}"
+        );
+        assert!(
+            one.contains("delegate any resulting edits, test-fixture repairs, and merge conflicts that\nfit your configured children once they go beyond a few calls. Where a child\nalready owns that slice and matches its scope, prefer resuming it via\n`send_message`"),
             "{one}"
         );
         for text in ["task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"] {

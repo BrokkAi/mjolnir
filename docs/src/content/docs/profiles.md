@@ -16,10 +16,15 @@ Configure Mjolnir sub-agents in **Settings → Sub-agents**. Set a model and,
 when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
 you set it, choose a smarter model or higher effort than Straightforward. Subtle
 cannot be set without Straightforward. These choices apply to every target
-unless you split YOLO targets below. With both
-set, parents choose a task type each time they delegate work. With only
-Straightforward, parents delegate straightforward work and do work that
-needs judgment themselves.
+unless you split YOLO targets below.
+
+Parents use **Straightforward** for bounded tasks with a single clear path,
+such as locating and mapping code, running exact build, test, or gate commands,
+and small mechanical edits. They use **Subtle** for multi-file implementation
+even from a settled design, multi-stage operational runs or troubleshooting,
+ambiguous diagnosis, design choices, and work with a high risk of subtle bugs.
+With only **Straightforward** configured, parents delegate bounded work and
+handle the more involved work themselves.
 
 **Oracle** is also optional, and independent of the other two: a read-only
 advisor the agent can ask. Set a strong

@@ -28,6 +28,15 @@ grows: when a change you kept turns into repeated cycles, or spreads to more
 places than you expected, hand the rest to a child. By then you can state the
 spec.
 
+The same rule applies after diagnosis and after code review: keep the judgment
+calls yourself—deciding the fix strategy, which review findings to override,
+and whether a finding calls for a targeted edit or a design rethink—then
+delegate any resulting edits, test-fixture repairs, and merge conflicts that
+fit your configured children once they go beyond a few calls. Where a child
+already owns that slice and matches its scope, prefer resuming it via
+`send_message` with your decisions rather than applying the edits yourself and
+using a child only to rerun tests.
+
 Take enough initial orientation to ask a useful question. You do not need to
 know the cause or settle the design before assigning research. Match the
 assignment to the information or outcome you need:
