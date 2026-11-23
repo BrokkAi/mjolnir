@@ -9,14 +9,18 @@ Measure whether one GPT 6.2 Sol reviewer at medium effort improves on GPT 6.1 So
 ## Progress
 
 - [x] (2026-11-23 23:50Z) Located the original study and its persistent run directory; delegated runner/scoring mapping and baseline/model checks.
-- [ ] Confirm exact model identifiers, baseline coverage, and campaign commands.
-- [ ] Register and run one new Sol 6.2 medium review on each original diff, at concurrency 16.
+- [x] (2026-11-23 23:52Z) Confirmed the runner accepts `gpt-6.2-sol:medium`; reserved unused arm O. Baseline metadata has 140 E Sol/medium sessions and 221 A/B Terra/high sessions across 70 diffs. Independent availability/count checks remain in progress.
+- [ ] Register and run one new Sol 6.2 medium review on each original diff, at concurrency 16 (completed: arm O registration, exact jobs/readiness audit, first reviewer launched with actual model and effort confirmed; remaining: first handback audit and full campaign).
 - [ ] Audit completed runs, verify findings using the established blinded method, and score old and new configurations consistently.
 - [ ] Independently check the comparison, record results, commit, obtain review, and push to origin/master.
 
 ## Surprises & Discoveries
 
 The old Sol 6.1 medium arm used two reviewers per diff; the requested Sol 6.2 arm uses one. The analysis must preserve this difference and must not present repeated combinations as independent new reviews. Existing study scripts form reviewer combinations afterward from independently run sessions.
+
+The current comparison round is verify6, published in `results/stage4-hydrogen-medium/`. The established judge was changed after the original study: verify6 uses Neon/medium with the gemini and gemini2 profiles. Arm B exists for only 11 diffs, so readiness must enumerate the actual B jobs rather than assume 70. The persistent study now uses the installed default instance through its `mjx` wrapper, which clears inherited session environment; the retired private instance must not be started.
+
+The original discovery worker's read-only assignment caused automatic approval review to reject its later attempt to register the arm after mailbox reassignment. No edit or new review started. A fresh worker received the complete implementation and campaign authorization in its initial assignment.
 
 ## Decision Log
 
@@ -29,10 +33,13 @@ The old Sol 6.1 medium arm used two reviewers per diff; the requested Sol 6.2 ar
 - Decision: Keep concurrency at 16 for reviewer launches and use the existing blinded scoring method.
   Rationale: The user explicitly selected concurrency; a model comparison requires the same scoring standard on both sides.
   Date/Author: 2026-11-23, parent agent.
+- Decision: Use new arm O and a fresh verify7 round pooling A, B, E, and O, restricted to `gpt-6.1-terra:high`, `gpt-6.1-sol:medium`, and `gpt-6.2-sol:medium`.
+  Rationale: These are precisely the requested configurations. Joint blinded judging gives all four comparisons one verdict set; consistency against verify6 will reveal changes in adjudication. Preserve verify6 unchanged.
+  Date/Author: 2026-11-23, parent agent.
 
 ## Outcomes & Retrospective
 
-Pending. No new evaluation runs have started.
+The first review is running under installed Mjolnir 2.74.0. Its live configuration confirms `gpt-6.2-sol` at medium effort; historical context matches arm N byte for byte. The prompt clock and image digest were captured. Completion and the full comparison remain pending.
 
 ## Context and Orientation
 
@@ -40,7 +47,7 @@ Pending. No new evaluation runs have started.
 
 The repository holds scripts, corpus specifications, and published results under `.agents/evals/review-arms/`. Raw session metadata, the persistent evaluation instance, transcripts, and verdicts live under `/mnt/optane/review-arms-20261113`, selected by `REVIEW_ARMS_DIR`. A reviewer arm is one model/effort configuration, assigned a distinct identifier so its saved runs cannot collide with another configuration. A diff is the original code change under review. Blinded verification means a separate judge evaluates pooled findings without being told which model produced them.
 
-`driver.py` launches saved job definitions; `build_verify.py` and `verify_driver.py` prepare and judge pooled findings; `score.py`, `pareto.py`, and `compare.py` produce per-session and combined results. Their exact current interfaces and instance settings are being checked before execution. No Rust build or installation is required or authorized by this evaluation.
+`driver.py` launches saved job definitions; `build_verify.py` and `verify_driver.py` prepare and judge pooled findings; `score.py`, `pareto.py`, and `compare.py` produce per-session and combined results. The installed `mjx` 2.74.0 is the current runner executable. The new arm's job IDs come from the exact original 70 IDs in `arm-N-jobs.json`. `--same-image "$REVIEW_ARMS_DIR/arm-O-image.json"` fixes its image for the campaign. One validation run is retained as part of the 70. The detailed instance and scoring commands are being recorded by the campaign owner before execution. No Rust build or installation is required or authorized by this evaluation.
 
 ## Plan of Work
 
@@ -52,18 +59,38 @@ Compute the solo and two-Terra combinations with the established per-diff combin
 
 ## Concrete Steps
 
-All repository commands run from this checkout, with study scripts run from `.agents/evals/review-arms/` and `REVIEW_ARMS_DIR=/mnt/optane/review-arms-20261113`. The historical runner interface is:
+All repository commands run from this checkout, with study scripts run from `.agents/evals/review-arms/`. The environment and reviewer commands are:
 
-    python3 driver.py --jobs <new-arm-jobs.json> --concurrency 16
+    export REVIEW_ARMS_DIR=/mnt/optane/review-arms-20261113
+    export REVIEW_ARMS_INSTANCE=default
+    export REVIEW_ARMS_CORPUS="$REVIEW_ARMS_DIR/corpus/candidates-all.jsonl"
+    export REVIEW_ARMS_DIFFS="$REVIEW_ARMS_DIR/corpus/diffs.jsonl"
+    unset REVIEW_ARMS_MJ REVIEW_ARMS_MJ_WORKER REVIEW_ARMS_SCRIPTS REVIEW_ARMS_REPO REVIEW_ARMS_BUNDLE REVIEW_ARMS_REPO_DIR
+    R=$REVIEW_ARMS_DIR
+    jq 'map(.arm = "O")' "$R/arm-N-jobs.json" > "$R/arm-O-jobs.json"
+    jq '[.[] | select(.bug == "diff-05bc8c1e68")] | select(length == 1)' "$R/arm-O-jobs.json" > "$R/arm-O-canary.json"
+    jq -s '([.[0][] | select(.arm == "A" or .arm == "B" or .arm == "E")] + .[1])' "$R/stage6-ready-jobs.json" "$R/arm-O-jobs.json" > "$R/stage7-ready-jobs.json"
+    python3 -B driver.py --jobs "$R/arm-O-canary.json" --concurrency 1 --same-image "$R/arm-O-image.json"
 
-The historical scoring interfaces are:
+After the validation run passes, execute the full job list with durable detached logging; the successful first review is skipped by its saved completion record:
 
-    python3 build_verify.py <new-verification-round> --arms <selected-arms> --ready-jobs <selected-jobs.json>
-    python3 verify_driver.py <new-verification-round> --concurrency 16
-    python3 score.py <new-verification-round>
-    python3 compare.py <new-verification-round> <old-solo> <new-solo> <old-plus-two-terra> <new-plus-two-terra>
+    setsid nohup python3 -B driver.py --jobs "$R/arm-O-jobs.json" --concurrency 16 --same-image "$R/arm-O-image.json" > "$R/arm-O-driver.log" 2>&1 < /dev/null &
 
-Replace these placeholders with the confirmed exact commands in this plan before launching. Long-running drivers must persist beyond a tool call; use the study's documented detached execution and save logs in the raw campaign directory. Do not expose credentials or edit shared profiles unnecessarily.
+After 70 audited successful O records, joint verification and scoring use:
+
+    mkdir -p "$R/verify7"
+    cp "$R/verify6/SPEC.md" "$R/verify7/SPEC.md"
+    python3 -B build_verify.py verify7 --arms A,B,E,O --configs gpt-6.1-terra:high,gpt-6.1-sol:medium,gpt-6.2-sol:medium --ready-jobs "$R/stage7-ready-jobs.json" --bugs-from "$R/arm-O-jobs.json"
+    python3 -B verify_driver.py verify7 --kind verify --target localhost --model gemini-4-neon --effort medium --profiles gemini,gemini2 --quota-scope gemini --concurrency 16
+    python3 -B score.py verify7
+    python3 -B consistency.py verify6 verify7
+    python3 -B compare.py verify7 Sol/medium gpt-6.2-sol/medium --severities high,medium,low
+    python3 -B compare.py verify7 Sol/medium+Terra/high+Terra/high gpt-6.2-sol/medium+Terra/high+Terra/high Terra/high+Terra/high --severities high,medium,low
+    python3 -B compare.py verify7 Sol/medium gpt-6.2-sol/medium --severities high,medium
+    python3 -B compare.py verify7 Sol/medium+Terra/high+Terra/high gpt-6.2-sol/medium+Terra/high+Terra/high Terra/high+Terra/high --severities high,medium
+    python3 -B pareto.py verify7 --sessions Sol/medium=2,gpt-6.2-sol/medium=1
+
+Run long judge work with the same durable detached logging pattern. Record process IDs and inspect existing state before resuming so that a second driver cannot duplicate accepted work. Do not expose credentials or edit shared profiles unnecessarily.
 
 ## Validation and Acceptance
 
@@ -79,8 +106,10 @@ Use a new arm identifier, job file, verification round, and result directory. Ke
 
 Original study: `.agents/evals/review-arms/README.md`. Original frontier: `.agents/evals/review-arms/results/pareto.md`; expanded frontier: `.agents/evals/review-arms/results/stage4/pareto.md`. Raw data: `/mnt/optane/review-arms-20261113`.
 
+First-run evidence: `$REVIEW_ARMS_DIR/runs/diff-05bc8c1e68/O/`; driver PID 153560 at launch; log `$REVIEW_ARMS_DIR/arm-O-canary.log`. Captured image digest: `sha256:1f5469c1c7264c025668e465a852199bc165938f6e84e925303f4fb46ca5e0db`. The live model/effort was observed rather than inferred from arm configuration.
+
 ## Interfaces and Dependencies
 
 Use the installed `mj` CLI and the existing evaluation scripts. User credentials remain managed by Mjolnir. Do not change Rust target directories, run Cargo builds, or install a replacement build for this measurement. Model selection must be explicit and checked against the reviewer session's actual model and effort.
 
-Revision note (2026-11-23): Registered the requested model comparison before any new review outputs were collected. Exact run commands remain to be filled from the delegated inspection.
+Revision note (2026-11-23): Registered the requested model comparison before any new review outputs were collected. Added the reserved arm, baseline metadata counts, executable, joint verification decision, exact commands, and execution ownership after runner inspection. Recorded the rejected read-only-to-write reassignment and the fresh explicitly authorized execution worker.

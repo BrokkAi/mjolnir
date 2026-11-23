@@ -70,6 +70,7 @@ ARMS = {
     "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
     "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
     "N": ["gemini-4-hydrogen:medium"],  # Gemini 4 Hydrogen at medium effort, one session
+    "O": ["gpt-6.2-sol:medium"],
 }
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for path, setting in ((CORPUS_PATH, "REVIEW_ARMS_CORPUS"),
