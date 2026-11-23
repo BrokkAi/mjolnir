@@ -15,7 +15,7 @@ import brief_driver
 import driver
 
 from .bifrost_gold import BIFROST_MEMORY_CAP_GIB, BifrostRunner
-from .engine import CONFIG, RepairStalled, load_engine, locked, repair_answer
+from .engine import CONFIG, REPAIR_STALLED, RepairStalled, load_engine, locked, repair_answer
 from .engine.evidence import sync_directory
 from .engine.normalization import SourceEvidence, decode, normalize_answer, validate, validate_answer
 from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_prompt
@@ -112,6 +112,45 @@ class TerraEvidenceError(ValueError):
         super().__init__(f"{directory}: invalid Terra evidence: {'; '.join(errors)}")
         self.errors = errors
         self.stage = stage
+
+
+class FidelityAuditFailure(RuntimeError):
+    pass
+
+
+def _recorded_terra_double_stall(directory, stalled, expected_identity):
+    """Return a verified Terra double-stall receipt when both retired attempts stalled cleanly."""
+    if not stalled.is_dir() or not directory.is_dir():
+        return None
+    if (directory / "completed.json").exists() or (stalled / "completed.json").exists():
+        return None
+    required = ("destroy-receipt.json", "intent.json", "failed.json", "audit.json")
+    for candidate in (stalled, directory):
+        if any(not (candidate / name).is_file() for name in required):
+            return None
+    for candidate in (stalled, directory):
+        if json.loads((candidate / "intent.json").read_bytes()) != expected_identity:
+            raise ValueError(f"fidelity session inputs changed at {candidate}")
+    counts = []
+    for candidate in (stalled, directory):
+        audit = json.loads((candidate / "audit.json").read_bytes())
+        if not isinstance(audit, dict) or audit.get("passed") is not True:
+            return None
+        failed = json.loads((candidate / "failed.json").read_bytes())
+        repair_counts = failed.get("repair_error_counts") if isinstance(failed, dict) else None
+        if (not isinstance(failed, dict) or not isinstance(failed.get("session_id"), str)
+                or not isinstance(repair_counts, dict)
+                or type(repair_counts.get("previous")) is not int
+                or type(repair_counts.get("current")) is not int):
+            return None
+        counts.append({"session": failed["session_id"], **repair_counts})
+    return {
+        "rows": [],
+        "coverage": {"complete": False, "open": []},
+        "provenance": None,
+        "failure": REPAIR_STALLED,
+        "repair_error_counts": counts,
+    }
 
 
 def model_usage(usage, command, turn, model, claude_version, directory=None):
@@ -253,7 +292,7 @@ class LiveModels:
                 driver.save(completed, record)
             retiring = True
             if not retire():
-                raise RuntimeError("the stored transcript did not pass the audit")
+                raise FidelityAuditFailure("the stored transcript did not pass the audit")
             return checked, record
         except (Exception, KeyboardInterrupt) as error:
             failed = directory / "failed.json"
@@ -306,7 +345,7 @@ class LiveModels:
         if restricted:
             runner.clean_checkout(sid, snapshot["orphan"], clear=False)
         if not runner.audit_turn(sid, turn, directory):
-            raise RuntimeError("fidelity session failed the pilot audit")
+            raise FidelityAuditFailure("fidelity session failed the pilot audit")
         usage = driver.mj("usage", "--session", sid, "--after-seq", before["latest_seq"])
         driver.save(directory / "turn-usage.json", usage)
         if not restricted:
@@ -323,6 +362,13 @@ class LiveModels:
             )
         record = {"session": sid, "turn": turn, "model": model, "version": resolved, "effort": EFFORT}
         return output, record, fetch_errors
+
+    def _terra_identity(self, commit, files, prompt):
+        snapshot = prepared_snapshot(self.sources[commit], self.config["snapshot_repo"], commit)
+        return {
+            "model": TERRA, "effort": EFFORT, "profile": self.terra_profile, **snapshot,
+            "inputs_sha256": sha(canonical([files, prompt(".scratch")]).encode()),
+        }
 
     def enumerate_rows(self, repo, commit, text):
         key = text.split()[0][1:]
@@ -346,6 +392,15 @@ class LiveModels:
 
         assert_blind((*files.values(), prompt(".scratch")), self.manifest)
         stalled = directory.with_name("terra-stalled")
+        voided = directory.with_name("terra-voided")
+        # Documented queries with real Bifrost still retain an independent mechanical
+        # gold source if Terra double-stalls; record the stall visibly rather than
+        # deadlocking the gate on queries too large for manual enumeration.
+        can_record_double_stall = step == DOCUMENTED and getattr(self, "bifrost", None) is not None
+        if can_record_double_stall and stalled.is_dir() and directory.is_dir():
+            recorded = _recorded_terra_double_stall(directory, stalled, self._terra_identity(commit, files, prompt))
+            if recorded is not None:
+                return recorded
         while True:
             try:
                 (rows, coverage), record = self.sealed_task(
@@ -355,9 +410,27 @@ class LiveModels:
                 if not (directory / "destroy-receipt.json").is_file():
                     raise
                 if stalled.exists():
+                    if can_record_double_stall:
+                        recorded = _recorded_terra_double_stall(
+                            directory, stalled, self._terra_identity(commit, files, prompt)
+                        )
+                        if recorded is not None:
+                            return recorded
                     raise RuntimeError(f"Terra repair stalled in both sessions; see {stalled} and {directory}: "
                                        f"{error}") from error
+                if voided.exists():
+                    raise RuntimeError(f"Terra repair stalled after a voided session; see {voided} and {directory}: "
+                                       f"{error}") from error
                 directory.rename(stalled)
+                sync_directory(directory.parent)
+            except FidelityAuditFailure as error:
+                if not (directory / "destroy-receipt.json").is_file():
+                    raise
+                if stalled.exists() or voided.exists():
+                    prior = stalled if stalled.exists() else voided
+                    raise RuntimeError(f"Terra failed the pilot audit on retry; see {prior} and {directory}: "
+                                       f"{error}") from error
+                directory.rename(voided)
                 sync_directory(directory.parent)
 
     def adjudicate(self, query, candidates):
@@ -1136,8 +1209,11 @@ def _run_sample_concurrent(run, queries, fresh, engine, models, *, stop_request,
                         continue
                     slot = gathered[query.key]
                     assert "bifrost" not in slot
-                    slot["bifrost"] = future.result()
-                    print(f"[fidelity] bifrost done {query.key[:12]} ({repo}@{query.commit[:8]})",
+                    bifrost_result = future.result()
+                    slot["bifrost"] = bifrost_result
+                    status = ("timed_out" if bifrost_result.get("timed_out")
+                              else "query_error" if bifrost_result.get("query_error") else "done")
+                    print(f"[fidelity] bifrost {status} {query.key[:12]} ({repo}@{query.commit[:8]})",
                           file=sys.stderr, flush=True)
                     maybe_queue_adjudication(query.key)
                 else:
@@ -1160,7 +1236,8 @@ def _run_sample_concurrent(run, queries, fresh, engine, models, *, stop_request,
                         slot = gathered[query.key]
                         assert kind not in slot
                         slot[kind] = value
-                        print(f"[fidelity] {kind} done {query.key[:12]}", file=sys.stderr, flush=True)
+                        status = "stalled" if kind == "terra" and value.get("failure") == REPAIR_STALLED else "done"
+                        print(f"[fidelity] {kind} {status} {query.key[:12]}", file=sys.stderr, flush=True)
                         maybe_queue_adjudication(query.key)
 
     if first_error is not None:

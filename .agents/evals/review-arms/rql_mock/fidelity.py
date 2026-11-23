@@ -265,6 +265,15 @@ def is_repair_stall(answer):
             and answer.get("failure") == REPAIR_STALLED)
 
 
+def is_terra_repair_stall(answer):
+    return isinstance(answer, dict) and answer.get("failure") == REPAIR_STALLED
+
+
+def is_bifrost_unavailable(record):
+    answer = record.get("bifrost_answer") or {}
+    return bool(answer.get("timed_out") or answer.get("query_error"))
+
+
 def stratum_metrics(records, seed):
     metric = accuracy(records, seed)
     similarities = []
@@ -440,6 +449,8 @@ def gate_report(manifest_hash, served, queries, records, seed):
     groups = {}
     failures = []
     failure_counts = Counter()
+    terra_failures = []
+    terra_failure_counts = Counter()
     by_step = {}
     for query in queries:
         record = records[query.key]
@@ -455,16 +466,25 @@ def gate_report(manifest_hash, served, queries, records, seed):
                                  "fresh": fresh, "reason": answer["failure"],
                                  "repair_error_counts": answer["repair_error_counts"]})
                 failure_counts[query.step, step] += 1
+        terra = record.get("terra_answer")
+        if is_terra_repair_stall(terra):
+            terra_failures.append({"query_key": query.key, "step": step, "stratum": query.stratum,
+                                   "reason": terra["failure"],
+                                   "repair_error_counts": terra["repair_error_counts"]})
+            terra_failure_counts[query.step, step] += 1
     documented_entries = [(q, records[q.key]) for q in queries if q.step == DOCUMENTED and q.stratum == "random"]
     documented = [record for _, record in documented_entries]
     timeout_keys = [
         q.key for q, record in documented_entries
         if (record.get("bifrost_answer") or {}).get("timed_out")
     ]
-    scored_documented = [
-        record for record in documented
-        if not (record.get("bifrost_answer") or {}).get("timed_out")
+    error_entries = [
+        (q.key, record["bifrost_answer"]["query_error"])
+        for q, record in documented_entries
+        if (record.get("bifrost_answer") or {}).get("query_error")
     ]
+    error_keys = [key for key, _ in error_entries]
+    scored_documented = [record for record in documented if not is_bifrost_unavailable(record)]
     docs = stratum_metrics(scored_documented, f"{seed}/documented")
     decisive = {step: groups.get((step, "decisive"), []) for step in served}
     pooled = pooled_prescience([row for step in served for row in decisive[step]], f"{seed}/prescience",
@@ -473,33 +493,53 @@ def gate_report(manifest_hash, served, queries, records, seed):
                     "engine_failure_count": failure_counts[step, step]}
              for step in served}
     bifrost_records = [row for row in documented if row.get("bifrost_answer") is not None]
-    bifrost_completed = [row for row in bifrost_records if not row["bifrost_answer"].get("timed_out")]
+    bifrost_completed = [row for row in bifrost_records if not is_bifrost_unavailable(row)]
     doc_reasons = bar_failures("documented pooled random", docs)
     if timeout_keys:
         doc_reasons.append(
             f"real Bifrost timed out on {len(timeout_keys)}/{len(bifrost_records)} documented queries "
             f"(excluded from scored documented metrics)"
         )
+    if error_keys:
+        doc_reasons.append(
+            f"real Bifrost errored on {len(error_keys)}/{len(bifrost_records)} documented queries "
+            f"(excluded from scored documented metrics)"
+        )
+    documented_terra_failures = sum(terra_failure_counts[DOCUMENTED, step] for step in by_step)
+    if documented_terra_failures:
+        basis = "real Bifrost and engine" if bifrost_records else "engine only"
+        doc_reasons.append(
+            f"Terra enumerator stalled on {documented_terra_failures}/{len(documented)} documented queries "
+            f"(gold relied on {basis})"
+        )
     by_step_report = {}
     for step, rows in sorted(by_step.items()):
-        step_scored = [row for row in rows if not (row.get("bifrost_answer") or {}).get("timed_out")]
+        step_scored = [row for row in rows if not is_bifrost_unavailable(row)]
+        step_timeouts = sum(1 for row in rows if (row.get("bifrost_answer") or {}).get("timed_out"))
+        step_errors = sum(1 for row in rows if (row.get("bifrost_answer") or {}).get("query_error"))
         step_entry = {
             "random_n": len(rows),
             "engine_failure_count": failure_counts[DOCUMENTED, step],
             "metrics": stratum_metrics(step_scored, f"{seed}/{step}"),
         }
+        if terra_failure_counts[DOCUMENTED, step]:
+            step_entry["terra_failure_count"] = terra_failure_counts[DOCUMENTED, step]
         if len(step_scored) != len(rows):
             step_entry["scored_n"] = len(step_scored)
-            step_entry["bifrost_timeout_count"] = len(rows) - len(step_scored)
+        if step_timeouts:
+            step_entry["bifrost_timeout_count"] = step_timeouts
+        if step_errors:
+            step_entry["bifrost_error_count"] = step_errors
         by_step_report[step] = step_entry
     documented_report = {"reported_only": True, "random_n": len(documented), "metrics": docs,
                          "reasons": doc_reasons,
                          "prescience": "not_estimable",
                          "engine_failure_count": sum(failure_counts[DOCUMENTED, step] for step in by_step),
+                         "terra_failure_count": documented_terra_failures,
                          "by_step": by_step_report}
-    if timeout_keys:
+    if len(scored_documented) != len(documented):
         documented_report["scored_n"] = len(scored_documented)
-        documented_report["metrics_including_bifrost_timeouts"] = stratum_metrics(
+        documented_report["metrics_including_bifrost_unavailable"] = stratum_metrics(
             documented, f"{seed}/documented/all"
         )
     if bifrost_records:
@@ -516,6 +556,9 @@ def gate_report(manifest_hash, served, queries, records, seed):
             "truncated_queries": sum(1 for row in bifrost_completed if row["bifrost_answer"].get("truncated")),
             "timeout_queries": len(timeout_keys),
             "timeout_query_keys": timeout_keys,
+            "error_queries": len(error_keys),
+            "error_query_keys": error_keys,
+            "query_errors": dict(error_entries),
             "total_rows": sum(len(row["bifrost_answer"].get("rows", ())) for row in bifrost_completed),
             "gold_rows_found": b_tp,
             "gold_rows_outside_engine": b_outside_eng,
@@ -541,6 +584,7 @@ def gate_report(manifest_hash, served, queries, records, seed):
     return {"manifest_sha256": manifest_hash, "served_steps": served,
             "steps": steps, "prescience_pooled": pooled,
             "engine_failures": failures, "engine_failure_count": len(failures),
+            "terra_failures": terra_failures, "terra_failure_count": len(terra_failures),
             "documented": documented_report,
             "candidate_sources": candidate_sources,
             "candidate_sources_note": candidate_sources_note,

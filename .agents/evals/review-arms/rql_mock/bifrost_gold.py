@@ -505,13 +505,8 @@ class BifrostRunner:
                 pass
         wall_s = round(time.monotonic() - t0, 2)
         if timed_out:
-            return wall_s, True
-        if returncode != 0:
-            tail = stderr_path.read_text(errors="replace")[-500:]
-            raise RuntimeError(
-                f"bifrost query exited {returncode} on {repo}@{commit[:12]}: {tail}"
-            )
-        return wall_s, False
+            return wall_s, True, None
+        return wall_s, False, returncode
 
     def query(self, repo, commit, query_text):
         """Run or resume a checkpointed real Bifrost documented query."""
@@ -549,7 +544,7 @@ class BifrostRunner:
             checkout = self._checkout_commit(repo, commit)
             cache_env = self._cache_env(repo)
             index_wall_s = self._ensure_warm(repo, commit, checkout, cache_env)
-            wall_s, timed_out = self._run_query_file(
+            wall_s, timed_out, returncode = self._run_query_file(
                 repo, commit, checkout, cache_env, executed_query, raw_path, stderr_path
             )
             if timed_out:
@@ -573,13 +568,50 @@ class BifrostRunner:
                 }
                 driver.save(completed_path, record)
                 return record
-            try:
-                raw = json.loads(raw_path.read_bytes())
-            except ValueError as error:
+            raw_bytes = raw_path.read_bytes() if raw_path.exists() else b""
+            raw = None
+            json_error = None
+            if raw_bytes.strip():
+                try:
+                    raw = json.loads(raw_bytes)
+                except ValueError as error:
+                    json_error = error
+            if isinstance(raw, dict) and raw.get("isError") is True:
+                error_text = raw.get("error")
+                if isinstance(error_text, str) and error_text.strip():
+                    message = error_text.strip()
+                    record = {
+                        "rows": [],
+                        "raw_row_count": 0,
+                        "truncated": False,
+                        "timed_out": False,
+                        "query_error": message,
+                        "exit_code": returncode,
+                        "diagnostics": [{
+                            "impact": "incomplete",
+                            "message": message,
+                        }],
+                        "complete": False,
+                        "skipped_external": 0,
+                        "skipped_empty_file": 0,
+                        "wall_s": wall_s,
+                        "index_wall_s": index_wall_s,
+                        "bifrost_build_identity": self.build_identity,
+                        "bifrost_binary_sha256": self.binary_sha256,
+                    }
+                    driver.save(completed_path, record)
+                    return record
+            if returncode != 0:
                 tail = stderr_path.read_text(errors="replace")[-500:]
                 raise RuntimeError(
-                    f"bifrost produced invalid JSON on {repo}@{commit[:12]}: {error}; stderr: {tail}"
-                ) from error
+                    f"bifrost query exited {returncode} on {repo}@{commit[:12]}: {tail}"
+                )
+            if json_error is not None or raw is None:
+                tail = stderr_path.read_text(errors="replace")[-500:]
+                detail = json_error if json_error is not None else "empty stdout"
+                raise RuntimeError(
+                    f"bifrost produced invalid JSON on {repo}@{commit[:12]}: {detail}; stderr: {tail}"
+                )
             read = blob_reader(self.repos[repo], commit)
             rows, meta = normalize_bifrost_results(raw, read)
             record = {
