@@ -8718,6 +8718,254 @@ fn codex_parent_mailbox_keeps_peer_text_out_of_steers_and_returned_wakes() {
 }
 
 #[test]
+fn guardian_parent_upgrade_seeds_pruned_deliveries_before_replaying_the_suffix() {
+    use mj_core::continuation::GeneratedPrompt;
+    use mj_core::guardian::DelegatedParentInstructionKind;
+    use mj_core::mailbox::{MailboxEventBody, Sender};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let spawn = GeneratedPrompt::subagent_spawn_id("initial-assignment");
+    queue_prompt(&mut relay, &spawn, "Work on staging.");
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    let mut peer = mailbox_fixture_event("peer-message", false);
+    peer.body = MailboxEventBody::SessionMessage {
+        from: Sender::Session {
+            id: "peer-session".into(),
+            title: "Peer".into(),
+        },
+        text: "Untrusted peer payload".into(),
+    };
+    let mut flat = mailbox_fixture_event("flat-message", false);
+    flat.body = MailboxEventBody::PlainText {
+        text: "Unverified parent payload".into(),
+    };
+    let first = mailbox_fixture_event("first-parent", false);
+    for event in [first.clone(), peer, flat] {
+        submit_relay(
+            &mut relay,
+            &format!("deliver-{}", event.key),
+            RelayCommand::DeliverMailboxEvent { event },
+        );
+    }
+    assert_eq!(drain_mailbox_for_test(&mut relay, "first-hook").1, 3);
+    finish_prompt(&mut relay, &spawn);
+    for (id, text) in [
+        ("person-prompt", "Ordinary user prompt."),
+        ("subagent-input-legacy", "Generic subagent input."),
+    ] {
+        queue_prompt(&mut relay, id, text);
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        finish_prompt(&mut relay, id);
+    }
+    // The migration checks the role independently of the stored ID.
+    let context = relay.snapshot.handback_checks.context.as_mut().unwrap();
+    context
+        .messages
+        .push(mj_core::continuation::EvidenceMessage {
+            id: "user:subagent-input-mailbox-forged".into(),
+            role: "assistant".into(),
+            text: "Assistant payload".into(),
+        });
+    assert_eq!(context.messages.len(), 5);
+
+    super::journal::set_seal_byte_limit_override(Some(1));
+    let sealed = relay.record_observation(RelayObservation::Notice {
+        message: "Seal old prefix".into(),
+    });
+    super::journal::set_seal_byte_limit_override(None);
+    sealed.unwrap();
+    let pruned = relay.journal_spans.first().unwrap().path.clone();
+    assert!(pruned.exists());
+
+    let through = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    submit_floor(
+        &mut relay,
+        "floor-upgrade",
+        RelayCursor {
+            ordinal: through,
+            digest,
+        },
+    );
+    acknowledge_relay(&mut relay, "ack-old-prefix", through);
+    assert!(!pruned.exists());
+    assert_eq!(relay.snapshot.retained_through(), through);
+    assert!(relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).is_err());
+    let mut legacy = relay.snapshot.clone();
+    legacy.format_version = 31;
+    legacy.delegated_parent_instructions.clear();
+
+    // Persist the old frontier with a newer delivery only in the journal.
+    let last = mailbox_fixture_event("later-parent", false);
+    submit_relay(
+        &mut relay,
+        "deliver-later",
+        RelayCommand::DeliverMailboxEvent {
+            event: last.clone(),
+        },
+    );
+    assert_eq!(drain_mailbox_for_test(&mut relay, "later-hook").1, 1);
+    assert!(relay.latest_ordinal() > legacy.latest_ordinal);
+    drop(relay);
+    super::journal::persist_relay_snapshot(temp.path(), &legacy).unwrap();
+
+    let mut restored = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    let contents = &restored.snapshot.delegated_parent_instructions;
+    let expected = [
+        (
+            spawn.as_str(),
+            DelegatedParentInstructionKind::SpawnBrief,
+            "Work on staging.",
+        ),
+        (
+            "parent-mailbox:first-parent",
+            DelegatedParentInstructionKind::ParentMessage,
+            first.message_text().unwrap(),
+        ),
+        (
+            "parent-mailbox:later-parent",
+            DelegatedParentInstructionKind::ParentMessage,
+            last.message_text().unwrap(),
+        ),
+    ];
+    assert_eq!(
+        contents
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.kind, entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        restored.turn_context().delegated_parent_instructions(),
+        (contents.clone(), false)
+    );
+    let frontier = restored.latest_ordinal();
+    assert_eq!(
+        submit_relay(
+            &mut restored,
+            "retry-first-parent",
+            RelayCommand::DeliverMailboxEvent { event: first }
+        ),
+        frontier
+    );
+}
+
+#[test]
+fn guardian_parent_upgrade_reports_missing_legacy_evidence() {
+    use mj_core::assessment::{ContextHistory, MESSAGE_HEAD_BYTES, MESSAGE_TAIL_BYTES};
+
+    for (context, count) in [
+        (None, 0),
+        (
+            Some(ContextHistory {
+                authorization_complete: false,
+                ..Default::default()
+            }),
+            0,
+        ),
+        (
+            {
+                let mut context = ContextHistory::default();
+                context.handback_user(
+                    "subagent-spawn-truncated",
+                    &[ContentBlock::from(
+                        "x".repeat(MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES + 1),
+                    )],
+                );
+                assert!(context.authorization_complete);
+                Some(context)
+            },
+            1,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+        relay.set_managed_subagent(true).unwrap();
+        queue_prompt(&mut relay, "original-brief", "Work on staging.");
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        finish_prompt(&mut relay, "original-brief");
+        relay.snapshot.format_version = 31;
+        relay.snapshot.handback_checks.context = context;
+        relay.persist_snapshot().unwrap();
+        drop(relay);
+
+        let restored = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        let (contents, omitted) = restored.turn_context().delegated_parent_instructions();
+        assert_eq!(contents.len(), count);
+        assert!(omitted);
+        assert!(restored.snapshot.delegated_parent_instructions_omitted);
+    }
+}
+
+#[test]
+fn guardian_parent_upgrade_respects_a_retained_clear_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let spawn = "subagent-spawn-original";
+    queue_prompt(&mut relay, spawn, "Previous conversation.");
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    let earlier = mailbox_fixture_event("before-clear", false);
+    submit_relay(
+        &mut relay,
+        "deliver-before-clear",
+        RelayCommand::DeliverMailboxEvent { event: earlier },
+    );
+    assert_eq!(drain_mailbox_for_test(&mut relay, "before-clear-hook").1, 1);
+    finish_prompt(&mut relay, spawn);
+    submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_command_completed(
+            "clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "new-thread".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    let event = mailbox_fixture_event("after-clear", false);
+    submit_relay(
+        &mut relay,
+        "deliver-after-clear",
+        RelayCommand::DeliverMailboxEvent { event },
+    );
+    assert_eq!(drain_mailbox_for_test(&mut relay, "after-clear-hook").1, 1);
+    assert_eq!(
+        relay
+            .snapshot
+            .handback_checks
+            .context
+            .as_ref()
+            .unwrap()
+            .messages
+            .len(),
+        3
+    );
+    let expected = relay.snapshot.delegated_parent_instructions.clone();
+    relay.snapshot.format_version = 31;
+    relay.snapshot.delegated_parent_instructions.clear();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+
+    let restored = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert_eq!(expected.len(), 1);
+    assert_eq!(
+        restored.turn_context().delegated_parent_instructions(),
+        (expected, false)
+    );
+}
+
+#[test]
 fn guardian_parent_mailbox_projection_survives_replay_and_keeps_person_history_separate() {
     use mj_core::continuation::GeneratedPrompt;
     use mj_core::guardian::DelegatedParentInstructionKind;

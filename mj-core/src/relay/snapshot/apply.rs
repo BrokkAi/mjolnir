@@ -2376,6 +2376,83 @@ fn record_handback_mailbox_assignments(
     }
 }
 
+/// Restore delivered parent authorization from the handback window saved by
+/// workers that did not yet keep a dedicated Guardian projection.
+pub fn seed_legacy_delegated_parent_instructions(snapshot: &mut RelaySnapshot) {
+    use crate::continuation::GeneratedPrompt;
+    use crate::guardian::{DelegatedParentInstruction, DelegatedParentInstructionKind};
+    use crate::mailbox::HANDBACK_PARENT_MAILBOX_PREFIX;
+
+    if !snapshot.delegated_parent_instructions.is_empty() {
+        return;
+    }
+    let Some(context) = snapshot.handback_checks.context.clone() else {
+        if snapshot.managed_subagent && snapshot.latest_prompt_accepted_ordinal.is_some() {
+            snapshot.delegated_parent_instructions_omitted = true;
+        }
+        return;
+    };
+
+    // /clear reset the conversation, but kept lifetime handback assignments.
+    // Only a retained receipt can prove that a legacy snapshot had a clear.
+    let cleared_through = snapshot
+        .handled_commands
+        .values()
+        .filter_map(|receipt| match receipt.outcome {
+            Some(RelayCommandOutcome::ContextCleared { .. }) => receipt.terminal_ordinal,
+            _ => None,
+        })
+        .max();
+
+    snapshot.delegated_parent_instructions_omitted |= !context.authorization_complete;
+    for message in context.messages {
+        if message.role != "user" {
+            continue;
+        }
+        let Some(raw_id) = message.id.strip_prefix("user:") else {
+            continue;
+        };
+        let (id, kind) = if let Some(key) = raw_id.strip_prefix(HANDBACK_PARENT_MAILBOX_PREFIX) {
+            if let Some(cleared) = cleared_through {
+                match snapshot.delivered_mailbox_event_keys.get(key) {
+                    Some(ordinal) if *ordinal > cleared => {}
+                    Some(_) => continue,
+                    None => {
+                        snapshot.delegated_parent_instructions_omitted = true;
+                        continue;
+                    }
+                }
+            }
+            (
+                format!("parent-mailbox:{key}"),
+                DelegatedParentInstructionKind::ParentMessage,
+            )
+        } else if cleared_through.is_none()
+            && GeneratedPrompt::of(raw_id) == Some(GeneratedPrompt::SubagentSpawn)
+        {
+            (
+                raw_id.to_owned(),
+                DelegatedParentInstructionKind::SpawnBrief,
+            )
+        } else {
+            continue;
+        };
+        // A head/tail trim did not change the legacy completeness flag, and
+        // assistant eviction does not say whether a parent entry was lost.
+        snapshot.delegated_parent_instructions_omitted |= message
+            .text
+            .contains(crate::assessment::TRIM_MIDDLE_MARKER_SUFFIX);
+        record_delegated_parent_instruction(
+            snapshot,
+            DelegatedParentInstruction {
+                id,
+                kind,
+                text: message.text,
+            },
+        );
+    }
+}
+
 fn record_delegated_parent_instruction(
     snapshot: &mut RelaySnapshot,
     mut instruction: crate::guardian::DelegatedParentInstruction,
