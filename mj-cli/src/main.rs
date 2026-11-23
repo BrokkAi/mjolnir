@@ -191,7 +191,7 @@ enum Command {
     Elicitations(api_commands::ElicitationsArgs),
     /// Respond to a structured input request.
     Respond(api_commands::RespondArgs),
-    /// Print a unified diff of a session's work.
+    /// Summarize a session's changes or print the diff for selected paths.
     Diff(api_commands::DiffArgs),
     /// Get a session's work out as a patch, a pushed branch, or a git bundle.
     Export(api_commands::ExportArgs),

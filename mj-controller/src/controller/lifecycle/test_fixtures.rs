@@ -68,6 +68,7 @@ pub fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),

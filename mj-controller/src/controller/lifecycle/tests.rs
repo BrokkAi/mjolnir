@@ -332,6 +332,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
@@ -767,6 +768,8 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir_all(&worker_root).unwrap();
+    let profile = targets::local_nested_profile_root(session_id);
+    std::fs::create_dir_all(&profile).unwrap();
     let mut controller = failed_subagent_controller(&worker_root, session_id);
 
     let reports = seed_child_reports(&mut controller, session_id, directory.path());
@@ -779,16 +782,111 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     let closed = &controller.state.sessions[session_id];
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none());
-    assert!(
-        worker_root.exists(),
-        "the environment retains private files until all shared writers stop"
-    );
+    assert!(!worker_root.exists());
+    assert!(!profile.exists());
     // #1333: close keeps reports parents were told to cite.
     assert!(
         reports.join(session_id).is_dir(),
         "close keeps the child's report directory"
     );
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
+}
+
+#[cfg(unix)]
+struct RefusePrivateRootRemoval;
+
+#[cfg(unix)]
+impl CommandExecutor for RefusePrivateRootRemoval {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        false
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        ProcessExecutor.execute_with_stdin_without_deadline(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if command.purpose == "remove a stopped borrowed-target sub-agent's private worker state" {
+            anyhow::bail!("injected private root removal failure");
+        }
+        ProcessExecutor.execute(command)
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn borrowed_root_removal_failure_preserves_close_and_startup_cleanup_for_retry() {
+    const NAME: &str =
+        "borrowed_root_removal_failure_preserves_close_and_startup_cleanup_for_retry";
+    if !in_isolated_store(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let worker = root.path().join(id);
+    let profile = targets::local_nested_profile_root(id);
+    let mut controller = failed_subagent_controller(&worker, id);
+    let reports = seed_child_reports(&mut controller, id, root.path());
+    persist_controller_fixture(&mut controller);
+
+    for state in [SessionState::Destroying, SessionState::StartupCleanup] {
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let record = controller.state.sessions.get_mut(id).unwrap();
+        record.state = state;
+        // Historical borrowers can still have their lease after clearing placement.
+        record.target = None;
+        crate::database::save_lifecycle_session(record).unwrap();
+        crate::controller::test_support::worker_test_scope(id, || {
+            fn finish(
+                controller: &mut Controller,
+                id: &str,
+                state: SessionState,
+                executor: &(impl CommandExecutor + Sync),
+            ) -> Result<()> {
+                if state == SessionState::StartupCleanup {
+                    controller.cleanup_failed_startup_controlled(id, executor)
+                } else {
+                    let previous = controller.state.sessions[id].clone();
+                    controller
+                        .stop_target_and_settle(
+                            id,
+                            &previous,
+                            executor,
+                            super::super::worktree::CloneRetirementPrerequisite::None,
+                            &crate::database::save_lifecycle_session,
+                        )
+                        .map(|_| ())
+                }
+            }
+            let error = finish(&mut controller, id, state, &RefusePrivateRootRemoval).unwrap_err();
+            assert!(format!("{error:#}").contains("injected private root removal failure"));
+            assert_eq!(
+                crate::database::read_durable_session_record(id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                state
+            );
+            assert!(worker.is_dir() && profile.is_dir());
+            finish(&mut controller, id, state, &ProcessExecutor).unwrap();
+            assert!(!worker.exists() && !profile.exists());
+            assert!(reports.join(id).is_dir());
+        });
+    }
 }
 
 /// Records the purpose of every command. The worker-root probe either runs
@@ -1498,6 +1596,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         "apple".into(),
         TargetTemplate::AppleContainer {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
@@ -2589,6 +2688,8 @@ fn force_destroy_removes_a_failed_subagent() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir_all(&worker_root).unwrap();
+    let profile = targets::local_nested_profile_root(session_id);
+    std::fs::create_dir_all(&profile).unwrap();
     let mut controller = failed_subagent_controller(&worker_root, session_id);
     let reports = seed_child_reports(&mut controller, session_id, directory.path());
     let deleted = RefCell::new(Vec::new());
@@ -2607,10 +2708,8 @@ fn force_destroy_removes_a_failed_subagent() {
     })
     .unwrap();
 
-    assert!(
-        worker_root.exists(),
-        "the environment retains private files until all shared writers stop"
-    );
+    assert!(!worker_root.exists());
+    assert!(!profile.exists());
     assert!(!controller.state.sessions.contains_key(session_id));
     assert!(!controller.state.subagents.contains_key(session_id));
     assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
@@ -3187,13 +3286,18 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
         },
     };
     persist_controller_fixture(&mut controller);
+    let child_id = "closed-child";
+    let mut child = controller.state.sessions[session_id].clone();
+    child.id = child_id.into();
+    child.state = SessionState::Stopped;
+    child.target = None;
+    let mut relation = failed_subagent_relation(child_id);
+    relation.parent_session_id = session_id.into();
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+    let data = mj_core::config::data_dir();
+    crate::database::tool_details::append_tool_detail(&data, child_id, "detail", "{}").unwrap();
     let err = crate::controller::test_support::worker_test_scope(session_id, || {
-        controller.suspend_without_checkpoint_with(
-            session_id,
-            true,
-            &CancellingFailingExecutor,
-            |_| Ok(()),
-        )
+        controller.suspend_without_checkpoint(session_id, true, &CancellingFailingExecutor)
     })
     .unwrap_err();
     assert!(format!("{err:#}").contains("cancelled cleanup"));
@@ -3202,6 +3306,12 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
         SessionState::Running
     );
     assert!(controller.state.sessions[session_id].target.is_some());
+    assert!(
+        crate::database::load_session_record(child_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(data.join("tool-details/closed-child.mjtd").exists());
 }
 
 #[test]
@@ -3573,6 +3683,7 @@ async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
             &channels.control,
             &consent,
             Some(before_close),
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .unwrap();
@@ -3687,6 +3798,7 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
             &channels.control,
             &consent,
             Some(before_close),
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .unwrap_err();
@@ -4178,6 +4290,7 @@ async fn failed_move_keep_lookup_recovers_the_accepted_suspend() {
             None,
             LatchExclusivity::HoldThroughClose,
             None,
+            SuspendSettlement::Suspend,
         )
         .await
         .unwrap_err();
@@ -4333,6 +4446,7 @@ async fn origin_delta_move_reuses_the_source_lease_until_quiescence() {
             Some(held_relay),
             LatchExclusivity::HoldThroughClose,
             None,
+            SuspendSettlement::Suspend,
         )
         .await
         .unwrap_err();
@@ -4545,6 +4659,7 @@ async fn older_worker_suspend_fails_clearly_when_lease_cannot_be_acquired_withou
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .expect_err("older worker upgrade must fail when worker is not idle");
@@ -4720,6 +4835,7 @@ async fn legacy_closing_with_idle_relay_enters_origin_delta_and_refuses_without_
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             Some(Box::pin(async { Ok(()) })),
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .expect_err("legacy Closing with Idle relay and untracked file must refuse");
@@ -4791,6 +4907,7 @@ async fn legacy_closing_with_running_relay_enters_origin_delta_and_refuses_witho
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             Some(Box::pin(async { Ok(()) })),
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .expect_err("legacy Closing with Running relay and untracked file must refuse");
@@ -4895,6 +5012,7 @@ async fn legacy_closing_with_closed_relay_finishes_from_installed_checkpoint() {
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .unwrap();
@@ -4994,6 +5112,7 @@ async fn legacy_closing_with_closing_relay_waits_and_finishes_from_installed_che
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .unwrap();
@@ -5064,6 +5183,7 @@ async fn legacy_destroying_finishes_from_installed_checkpoint_without_relay_or_e
             &channels.control,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            crate::controller::lifecycle::SuspendSettlement::Suspend,
         )
         .await
         .unwrap();
@@ -5558,6 +5678,7 @@ async fn podman_managed_workspace_origin_delta_and_cutoff_quiescence_routes_thro
         "local-podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "agent-dev:latest".into(),
                 pull_policy: Default::default(),
@@ -5718,6 +5839,7 @@ fn suspend_wait_is_worker_owned_returns_true_without_io_for_unreachable_ssh_and_
         "local-podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "agent-dev:latest".into(),
                 pull_policy: Default::default(),

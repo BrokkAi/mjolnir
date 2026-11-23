@@ -761,7 +761,7 @@ test('container remembered size is clamped to the reported host limits', async (
 test('container sizing enforces the useful minimum and hard remaining RAM', async ({ page }) => {
   const containerTarget = {
     ...defaultContainerTarget,
-    container_memory_hard_limit: true,
+    container_memory_hard_limit_reason: "this target is configured to enforce RAM limits",
     container_capacity: {
       total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
       reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
@@ -778,6 +778,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
   await page.locator('#new-resource-cpus').fill('4');
   await page.locator('#new-resource-memory').fill('9');
   await expect(page.locator('#new-resource-error')).toContainText('host has 7.9 GiB left');
+  await expect(page.locator('#new-resource-error')).toContainText('this target is configured to enforce RAM limits');
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-memory').fill('7.9');
   await expect(page.locator('#new-resource-error')).toHaveText('');
@@ -787,7 +788,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
 test('unknown live-container sizing is never rendered as zero capacity', async ({ page }) => {
   const containerTarget = {
     ...defaultContainerTarget,
-    container_memory_hard_limit: true,
+    container_memory_hard_limit_reason: "this target is configured to enforce RAM limits",
     container_capacity: {
       total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
       reserved: { cpus: 0, memory_bytes: 6 * 1024 ** 3 },
@@ -805,7 +806,7 @@ test('unknown live-container sizing is never rendered as zero capacity', async (
   await expect(page.locator('#new-next')).toBeDisabled();
 });
 
-test('container overcommit warns and remains launchable except for Apple RAM', async ({ context }) => {
+test('container overcommit warns or refuses according to the target RAM policy', async ({ context }) => {
   const baseCapacity = {
     total: { cpus: 8, memory_bytes: 32 * 1024 ** 3 },
     reserved: { cpus: 0, memory_bytes: 8 * 1024 ** 3 },
@@ -814,15 +815,15 @@ test('container overcommit warns and remains launchable except for Apple RAM', a
     complete: true,
   };
   const cases = [
-    { name: 'non-Apple CPU and RAM', hardRam: false, cpu: '6', memory: '20', submits: true, warning: 'Asks for more RAM than the 16 GiB left on this host; it will still start.' },
-    { name: 'Apple CPU', hardRam: true, cpu: '6', memory: '8', submits: true },
-    { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'host has 16 GiB left' },
+    { name: 'non-Apple CPU and RAM', cpu: '6', memory: '20', submits: true, warning: 'Asks for more RAM than the 16 GiB left on this host; it will still start.' },
+    { name: 'Apple CPU', reason: 'Apple containers do not give freed memory back to macOS', cpu: '6', memory: '8', submits: true },
+    { name: 'Apple RAM', reason: 'Apple containers do not give freed memory back to macOS', cpu: '4', memory: '20', submits: false, error: 'host has 16 GiB left' },
   ];
   for (const scenario of cases) {
     const page = await context.newPage();
     const target = {
       ...defaultContainerTarget,
-      container_memory_hard_limit: scenario.hardRam,
+      container_memory_hard_limit_reason: scenario.reason,
       container_capacity: baseCapacity,
       container_host_limits: baseCapacity.total,
       default_resource_allocation: { kind: 'container', cpus: 4, memory_bytes: 8 * 1024 ** 3 },

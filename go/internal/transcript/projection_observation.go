@@ -611,7 +611,7 @@ func projectCommandStarted(
 			if err != nil {
 				return err
 			}
-			entry.Content = slices.Insert(entry.Content, 0, any(note))
+			entry.Content = []any{note}
 		}
 		entryAcceptedOrdinal := entry.AcceptedOrdinal
 		setQueue(mutation, queue)

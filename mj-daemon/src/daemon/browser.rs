@@ -66,6 +66,7 @@ pub(crate) struct BrowserInputs {
     pub(crate) launch_failures: SharedSnapshot<Vec<ViewerLaunchFailure>>,
     pub(crate) action_errors: SnapshotMap<String, String>,
     pub(crate) project_sources: SnapshotMap<String, ResolvedProjectSource>,
+    pub(crate) retired_session_ids: SharedSnapshot<BTreeSet<String>>,
     pub(crate) notices: SharedSnapshot<Vec<RuntimeNotice>>,
 }
 
@@ -118,6 +119,7 @@ impl BrowserInputs {
                 .changes(&other.project_sources)
                 .next()
                 .is_none()
+            && self.retired_session_ids == other.retired_session_ids
             && self.notices == other.notices
     }
 }
@@ -185,6 +187,19 @@ impl BrowserState {
         };
         for id in invalid {
             self.inputs.project_sources.remove_shared(&id);
+        }
+        if let Some(committed) = owner.committed() {
+            let retired = &committed.retired_container_allocations;
+            if retired.len() != self.inputs.retired_session_ids.len()
+                || retired
+                    .keys()
+                    .any(|id| !self.inputs.retired_session_ids.contains(id))
+            {
+                self.inputs.retired_session_ids =
+                    retired.keys().cloned().collect::<BTreeSet<_>>().into();
+            }
+        } else if !self.inputs.retired_session_ids.is_empty() {
+            self.inputs.retired_session_ids = Default::default();
         }
         self.inputs.clone()
     }

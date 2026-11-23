@@ -104,13 +104,13 @@ fn ssh() -> SshTarget {
     }
 }
 
-struct PodmanPreflightExecutor {
-    seen: RefCell<Vec<CommandSpec>>,
+pub(super) struct PodmanPreflightExecutor {
+    pub(super) seen: RefCell<Vec<CommandSpec>>,
     outputs: RefCell<Vec<CommandOutput>>,
 }
 
 impl PodmanPreflightExecutor {
-    fn with_outputs(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
+    pub(super) fn with_outputs(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
         Self {
             seen: RefCell::new(vec![]),
             outputs: RefCell::new(outputs.into_iter().collect()),
@@ -148,12 +148,89 @@ impl CommandExecutor for PodmanPreflightExecutor {
     }
 }
 
-fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
+pub(super) fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
     CommandOutput {
         status: 0,
         stdout: stdout.as_ref().to_vec(),
         stderr: vec![],
     }
+}
+
+#[test]
+fn apple_container_status_and_start_follow_the_cli_exit_and_json_contract() {
+    const RUNNING: &[u8] = br#"{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.7.0"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 27.0.1 (Build 26A434)"},"paths":{"appRoot":"/Users/jonathan/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.7.0/"},"resources":{"containersRunning":0,"containersTotal":0,"images":2},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.7.0"},"status":"running"}"#;
+    let stopped = CommandOutput {
+        status: 1,
+        stdout: br#"{"status":"unregistered"}"#.to_vec(),
+        stderr: vec![],
+    };
+    let broken = CommandOutput {
+        status: 64,
+        stdout: vec![],
+        stderr: b"Error: Unknown option --format".to_vec(),
+    };
+    let remote = ssh();
+    for host in [None, Some(&remote)] {
+        let commands = |executor: &PodmanPreflightExecutor| {
+            executor
+                .seen
+                .borrow()
+                .iter()
+                .map(|command| {
+                    if let Some(ssh) = host {
+                        assert_eq!(command.program, "ssh");
+                        assert_eq!(command.args[command.args.len() - 2], ssh.destination);
+                        unwrapped_remote_line(command.args.last().unwrap()).replace('\'', "")
+                    } else {
+                        format!("{} {}", command.program, command.args.join(" "))
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let observe = PodmanPreflightExecutor::with_outputs([stopped.clone(), broken.clone()]);
+        assert!(matches!(
+            apple_container_runtime_status(host, &observe).unwrap(),
+            AppleContainerStatus::Stopped { .. }
+        ));
+        assert_eq!(
+            apple_container_runtime_status(host, &observe).unwrap(),
+            AppleContainerStatus::Broken {
+                status: 64,
+                detail: "Error: Unknown option --format".into(),
+            }
+        );
+        let broken_install = PodmanPreflightExecutor::with_outputs([broken.clone()]);
+        let error = ensure_apple_container_runtime(host, &broken_install).unwrap_err();
+        assert!(error.to_string().contains("status 64"));
+        assert_eq!(
+            commands(&broken_install),
+            ["container system status --format json"]
+        );
+
+        let start = PodmanPreflightExecutor::with_outputs([
+            stopped.clone(),
+            podman_output(b""),
+            podman_output(RUNNING),
+        ]);
+        assert_eq!(
+            ensure_apple_container_runtime(host, &start).unwrap(),
+            AppleContainerRuntime::Started
+        );
+        assert_eq!(
+            commands(&start),
+            [
+                "container system status --format json",
+                "container system start --enable-kernel-install",
+                "container system status --format json",
+            ]
+        );
+    }
+    let unreachable = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 255,
+        stdout: vec![],
+        stderr: b"ssh: Connection closed".to_vec(),
+    }]);
+    assert!(apple_container_runtime_status(Some(&remote), &unreachable).is_err());
 }
 
 #[test]
@@ -216,7 +293,7 @@ fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
     };
     let (result_tx, result_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let result = ensure_apple_container_runtime(&executor);
+        let result = ensure_apple_container_runtime(None, &executor);
         result_tx.send(result).unwrap();
     });
 
@@ -498,10 +575,15 @@ fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
 
     let stopped = PodmanPreflightExecutor::with_outputs([CommandOutput {
         status: 1,
-        stdout: vec![],
+        stdout: br#"{"ServerVersion":"","OSType":"","MemoryLimit":false}"#.to_vec(),
         stderr: b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n".to_vec(),
     }]);
-    let error = verify_local_docker(&stopped).unwrap_err().to_string();
+    let error = verify_local_docker(&stopped).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<DockerUnavailable>(),
+        Some(DockerUnavailable::NotRunning { .. })
+    ));
+    let error = error.to_string();
     assert!(
         error.starts_with("Docker is installed, but its daemon is not running."),
         "{error}"
@@ -510,16 +592,107 @@ fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
 
     let refused = PodmanPreflightExecutor::with_outputs([CommandOutput {
         status: 1,
-        stdout: vec![],
+        stdout: br#"{"ServerVersion":"","OSType":"","MemoryLimit":false}"#.to_vec(),
         stderr: b"permission denied while trying to connect to the Docker daemon socket\n".to_vec(),
     }]);
-    let error = verify_local_docker(&refused).unwrap_err().to_string();
+    let error = verify_local_docker(&refused).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<DockerUnavailable>(),
+        Some(DockerUnavailable::NotAnswering { status: 1, .. })
+    ));
+    let error = error.to_string();
     assert!(
         error.starts_with(
-            "Docker did not answer its check on this host: `docker version` exited with status 1: permission denied"
+            "Docker did not answer its check on this host: `docker info` exited with status 1: permission denied"
         ),
         "{error}"
     );
+}
+
+#[test]
+fn docker_preflight_distinguishes_unenforceable_limits_from_unknown_capabilities() {
+    use CgroupLimit::{Cpu, Memory};
+    for (driver, version, rootless, capabilities, expected) in [
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsQuota":false,"CpuCfsPeriod":true,"MemoryLimit":true}"#,
+            &[Cpu][..],
+        ),
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsQuota":true,"CpuCfsPeriod":true,"MemoryLimit":false}"#,
+            &[Memory],
+        ),
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsPeriod":false,"MemoryLimit":false}"#,
+            &[Cpu, Memory],
+        ),
+        (
+            "none",
+            "2",
+            false,
+            r#"{"CpuCfsQuota":false,"CpuCfsPeriod":false,"MemoryLimit":false}"#,
+            &[Cpu, Memory],
+        ),
+        (
+            "none",
+            "1",
+            false,
+            r#"{"CpuCfsQuota":false,"CpuCfsPeriod":false,"MemoryLimit":false}"#,
+            &[Cpu, Memory],
+        ),
+        ("none", "2", false, "{}", &[]),
+        (
+            "systemd",
+            "2",
+            true,
+            r#"{"CpuCfsQuota":"false","MemoryLimit":null}"#,
+            &[],
+        ),
+        (
+            "systemd",
+            "2",
+            false,
+            r#"{"CpuCfsQuota":false,"MemoryLimit":false}"#,
+            &[],
+        ),
+        (
+            "cgroupfs",
+            "1",
+            true,
+            r#"{"CpuCfsQuota":false,"MemoryLimit":false}"#,
+            &[],
+        ),
+    ] {
+        let mut info: serde_json::Value = serde_json::from_str(capabilities).unwrap();
+        info["ServerVersion"] = "27.5.1".into();
+        info["OSType"] = "linux".into();
+        info["CgroupDriver"] = driver.into();
+        info["CgroupVersion"] = version.into();
+        if rootless {
+            info["SecurityOptions"] =
+                serde_json::json!(["name=seccomp,profile=builtin", "name=rootless"]);
+        }
+        let executor = PodmanPreflightExecutor::with_outputs([podman_output(info.to_string())]);
+        let preflight = verify_local_docker(&executor).unwrap();
+        assert_eq!(preflight.cgroups.unenforceable_limits, expected, "{info}");
+        assert_eq!(preflight.warnings.is_empty(), expected.is_empty(), "{info}");
+        for warning in preflight.warnings {
+            assert!(warning.detail.starts_with("Rootless Docker"));
+            assert_eq!(
+                warning.remediation.contains("Enable cgroup v2"),
+                version == "1"
+            );
+            assert!(warning.remediation.contains("Delegate=pids memory cpu"));
+        }
+    }
 }
 
 #[test]
@@ -1537,8 +1710,8 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         None,
     )
     .unwrap();
-    assert_eq!(apple.commands[1].args[0], "run");
-    assert!(!apple.commands[1].args.contains(&"--init".to_owned()));
+    assert_eq!(apple.commands[0].args[0], "run");
+    assert!(!apple.commands[0].args.contains(&"--init".to_owned()));
 }
 
 /// `never` means never, including the daemon's own background download.
@@ -5400,7 +5573,7 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         .expect("the cleanup runs a removal script");
     assert!(script.contains(&format!("/var/lib/hel/workers/{BORROWED_CHILD}")));
     assert!(script.contains(&format!("/var/lib/hel/profiles/{BORROWED_CHILD}")));
-    assert!(script.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(!script.contains(".local/share/hel/profiles/"));
     assert!(
         !script.contains(&format!("/var/lib/hel/workers/{SESSION}")),
         "a child must never remove its parent's worker root: {script}"
@@ -5409,6 +5582,22 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         !script.contains("podman rm") && !script.contains("docker rm"),
         "a child must never remove the borrowed container: {script}"
     );
+    let ssh_locator = TargetLocator::SshBare {
+        ssh: ssh(),
+        workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+        worker_id: Some(BORROWED_CHILD.into()),
+    };
+    let cleanup = borrowed_worker_cleanup_plan(&ssh_locator, BORROWED_CHILD).unwrap();
+    let command = cleanup.scripts()[0].args.last().unwrap();
+    let removal = command
+        .lines()
+        .find(|line| line.contains("rm -rf --"))
+        .unwrap();
+    assert!(removal.contains(&format!(".local/share/hel/workers/{BORROWED_CHILD}")));
+    assert!(removal.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(!removal.contains(SESSION));
+    assert!(!removal.contains("workspaces"));
+    assert!(!removal.contains("/var/lib/hel/profiles/"));
 }
 
 #[test]

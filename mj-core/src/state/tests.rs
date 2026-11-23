@@ -410,6 +410,7 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         false,
         &["podman".into()],
         [&parent, &child, &provisioning],
+        [],
     );
     // A boot-time pool is already net of the host's own needs: the same
     // commitments leave exactly the reserve more.
@@ -421,6 +422,7 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         true,
         &["podman".into()],
         [&parent, &child, &provisioning],
+        [],
     );
     assert_eq!(pool.reserved.memory_bytes, 0);
     assert_eq!(
@@ -485,6 +487,7 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         false,
         &["podman".into()],
         [&defaults],
+        [],
     );
     assert!(!unknown.complete);
 }
@@ -500,6 +503,7 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
         false,
         &["podman".into()],
         state.sessions.values(),
+        [],
     );
 
     assert!(!capacity.complete);
@@ -573,6 +577,7 @@ fn sample_config() -> Config {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
@@ -1751,6 +1756,14 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         max_total_size: Some("20GB".into()),
         ..Default::default()
     });
+    state.validate_setup_update(&before, &after).unwrap();
+    let mut after = before.clone();
+    let crate::config::TargetTemplate::LocalPodman { container } =
+        after.targets.get_mut(&session.target_template_id).unwrap()
+    else {
+        panic!("sample session uses a podman target");
+    };
+    container.memory_hard_limit = Some(true);
     state.validate_setup_update(&before, &after).unwrap();
     // Any other container change is still refused.
     let mut after = before.clone();

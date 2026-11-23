@@ -959,42 +959,15 @@ impl RetainedContainer {
         }
         // The source's limits were enforceable when it was created; the host
         // may have stopped delegating their controllers since.
-        let unenforceable = match &host {
-            ImageHost::LocalPodman | ImageHost::SshPodman(_)
-                if self.memory > 0 || self.nano_cpus > 0 =>
-            {
-                let ssh = match &host {
-                    ImageHost::SshPodman(ssh) => Some(ssh),
-                    _ => None,
-                };
-                match probe_podman_unenforceable_limits(ssh, executor) {
-                    Ok(limits) => limits,
-                    Err(error) => {
-                        tracing::warn!(
-                            error = format!("{error:#}"),
-                            "could not read Podman's cgroup controllers; keeping container limits"
-                        );
-                        Vec::new()
-                    }
-                }
-            }
-            _ => Vec::new(),
-        };
-        let dropped = [
-            (CgroupLimit::Memory, self.memory > 0),
-            (CgroupLimit::Cpu, self.nano_cpus > 0),
-        ]
-        .into_iter()
-        .filter(|(limit, set)| *set && unenforceable.contains(limit))
-        .map(|(limit, _)| limit)
-        .collect::<Vec<_>>();
-        if !dropped.is_empty() {
-            executor.notify_notice(&format!(
-                "{} {}",
-                unenforceable_limits_detail(&dropped),
-                CGROUP_DELEGATION_REMEDIATION
-            ));
-        }
+        let dropped = unenforceable_container_limits(
+            &host,
+            None,
+            |limit| match limit {
+                CgroupLimit::Memory => self.memory > 0,
+                CgroupLimit::Cpu => self.nano_cpus > 0,
+            },
+            executor,
+        );
         if self.memory > 0 && !dropped.contains(&CgroupLimit::Memory) {
             args.extend(["--memory".into(), self.memory.to_string()]);
         }
@@ -1766,6 +1739,64 @@ mod tests {
                 .contains("storage-preserving upgrades do not support"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn replacement_drops_only_the_limits_the_destination_cannot_enforce() {
+        use super::super::tests::{PodmanPreflightExecutor, podman_output};
+
+        let session_id = "55555555555555555555555555555555";
+        for (engine, info, dropped, kept) in [
+            (
+                "podman",
+                r#"{"cgroupVersion":"v2","cgroupControllers":["pids","cpu"]}"#,
+                "--memory",
+                "--cpus",
+            ),
+            (
+                "docker",
+                r#"{"ServerVersion":"27.5.1","OSType":"linux","SecurityOptions":["name=rootless"],"CgroupVersion":"2","CgroupDriver":"systemd","CpuCfsQuota":false,"MemoryLimit":true}"#,
+                "--cpus",
+                "--memory",
+            ),
+        ] {
+            let mut plan = container_upgrade_test_plan(session_id);
+            plan.source_id = "source-id".into();
+            plan.mounts.clear();
+            plan.memory = 8 * 1024 * 1024 * 1024;
+            plan.nano_cpus = 4_000_000_000;
+            if engine == "docker" {
+                plan.locator = TargetLocator::LocalDocker {
+                    container_id: plan.name.clone(),
+                    borrowed_from: None,
+                };
+            }
+            let mut backup: serde_json::Value =
+                serde_json::from_str(&retained_inspection(&[])).unwrap();
+            backup[0]["Config"]["Labels"]["dev.mj.session"] = session_id.into();
+            backup[0]["State"]["Running"] = false.into();
+            let failure = |message: &str| CommandOutput {
+                status: 1,
+                stdout: vec![],
+                stderr: message.as_bytes().to_vec(),
+            };
+            let executor = PodmanPreflightExecutor::with_outputs([
+                failure("no such container"),
+                podman_output(backup.to_string()),
+                podman_output(info),
+                failure("fixture stops after capturing the run command"),
+            ]);
+            let error = plan.replace(session_id, &executor).unwrap_err();
+            assert!(error.to_string().contains("fixture stops"), "{error:#}");
+            let commands = executor.seen.borrow();
+            assert_eq!(commands[2].program, engine);
+            assert_eq!(commands[2].args[0], "info");
+            let run = &commands[3];
+            assert_eq!(run.args[0], "run");
+            assert!(!run.args.iter().any(|arg| arg == dropped), "{run:?}");
+            assert!(run.args.iter().any(|arg| arg == kept), "{run:?}");
+            assert!(run.args.iter().any(|arg| arg == "--pids-limit"), "{run:?}");
+        }
     }
 
     // Hard-won: #1326: automatic recreation deleted uncheckpointed workspace and cache storage.

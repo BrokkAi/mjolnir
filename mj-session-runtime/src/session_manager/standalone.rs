@@ -1,10 +1,9 @@
 use super::*;
 use mj_core::config::ConfigLoadError;
 use mj_core::guardian::{
-    GUARDIAN_CONFIG_INVALID_TOML, GUARDIAN_CONFIG_NEEDS_UPGRADE, GUARDIAN_CONFIG_UNREADABLE,
-    GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT, GuardianReviewOutcome,
-    GuardianReviewRequest, GuardianReviewResult, MAX_PENDING_GUARDIAN_REVIEWS, Outcome,
-    WOLF_STAGE1_ALLOW_THRESHOLD, safe_daemon_guardian_failure_reason,
+    DaemonGuardianFailure, GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT,
+    GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
+    MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD,
 };
 use mj_core::state::MaterializedExecutionState;
 use mj_core::transcript::TranscriptItem;
@@ -1354,116 +1353,146 @@ async fn execute_guardian_review(
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let mut toml_location = None;
-    let mut decision = tokio::time::timeout(GUARDIAN_REVIEW_TIMEOUT, async {
-        let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
-            Ok(Ok(config)) => config,
-            Ok(Err(error)) => {
-                let reason = match error.downcast_ref::<ConfigLoadError>() {
-                    Some(ConfigLoadError::Toml { location, .. }) => {
-                        toml_location = *location;
-                        GUARDIAN_CONFIG_INVALID_TOML
-                    }
-                    Some(ConfigLoadError::NewerSchema { .. }) => GUARDIAN_CONFIG_NEEDS_UPGRADE,
-                    None if error.is::<std::io::Error>() => GUARDIAN_CONFIG_UNREADABLE,
-                    None => "could not load configuration",
-                };
-                return GuardianReviewOutcome::AskPerson { reason: reason.into() };
-            }
-            Err(error) => {
-                return GuardianReviewOutcome::AskPerson {
-                    reason: format!("could not read configuration: {error}"),
-                };
-            }
-        };
-        if !config.guardian.enabled {
-            return GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_DISABLED_REASON.into(),
-            };
-        }
-        let mut stage1_score = None;
-        if config.guardian.local_classifier && let Some(classifier) = classifier {
-            match classifier.classify(&request).await {
-                GuardianStage1Verdict::Scored { unsafe_prob, tokens, elapsed_ms } => {
-                    let local_allow = (0.0..=WOLF_STAGE1_ALLOW_THRESHOLD).contains(&unsafe_prob);
-                    tracing::info!(
-                        target: "mj_guardian",
-                        stage = "stage1_wolf",
-                        unsafe_prob,
-                        threshold = WOLF_STAGE1_ALLOW_THRESHOLD,
-                        tokens,
-                        elapsed_ms,
-                        local_allow,
-                        "Wolf Defender Jev scored a permission request"
-                    );
-                    stage1_score = Some(unsafe_prob);
-                    if local_allow {
-                        return GuardianReviewOutcome::Allow {
-                            stage: "stage1_wolf".into(),
-                            stage1_score,
-                        };
-                    }
-                }
-                GuardianStage1Verdict::EscalatedActionTooLong => {
-                    tracing::debug!(target: "mj_guardian", "Wolf action length exceeded");
-                }
-                GuardianStage1Verdict::Overflow { tokens } => {
-                    tracing::debug!(target: "mj_guardian", tokens, "Wolf case token limit exceeded");
-                }
-                GuardianStage1Verdict::Unavailable { reason } => {
-                    tracing::debug!(target: "mj_guardian", %reason, "Wolf classifier unavailable");
-                }
-            }
-        }
-        match review_guardian_with_utility(&config, &request, cancel).await {
-            GuardianUtilityOutcome::Reviewed { assessment, .. } => {
-                let stage = "utility_llm".into();
-                match assessment.enforced_outcome() {
-                    Outcome::Allow => GuardianReviewOutcome::Allow {
-                        stage,
-                        stage1_score,
-                    },
-                    Outcome::Deny => GuardianReviewOutcome::Deny {
-                        rationale: assessment.rationale,
-                        risk_level: assessment.risk_level,
-                        user_authorization: assessment.user_authorization,
-                        stage,
-                        stage1_score,
-                    },
-                }
-            }
-            GuardianUtilityOutcome::NoUtilityModel { .. } => {
-                GuardianReviewOutcome::UseAcpFallback { stage1_score }
-            }
-            GuardianUtilityOutcome::Failed { error } => {
-                GuardianReviewOutcome::AskPerson { reason: error }
-            }
-        }
-    })
+    let result = tokio::time::timeout(
+        GUARDIAN_REVIEW_TIMEOUT,
+        run_guardian_review(&request, classifier, cancel),
+    )
     .await
-    .unwrap_or_else(|_| GuardianReviewOutcome::AskPerson {
-        reason: "its daemon review timed out".into(),
-    });
-    if let GuardianReviewOutcome::AskPerson { reason } = &mut decision
-        && reason != GUARDIAN_DISABLED_REASON
-    {
-        let safe_reason = safe_daemon_guardian_failure_reason(reason);
-        tracing::warn!(
-            target: "mj_guardian",
-            session_id = %request.session_id,
-            tool_call_id = %request.tool_call_id,
-            request_id = %request.request_id,
-            reason = safe_reason,
-            toml_line = toml_location.map(|(line, _)| line),
-            toml_column = toml_location.map(|(_, column)| column),
-            "daemon guardian review failed"
-        );
-        *reason = safe_reason.to_owned();
-    }
+    .unwrap_or_else(|_| Err(DaemonFailure::new(DaemonGuardianFailure::TimedOut)));
+    let decision = match result {
+        Ok(decision) => decision,
+        Err(failure) => {
+            let reason = failure.kind.as_str();
+            tracing::warn!(
+                target: "mj_guardian",
+                session_id = %request.session_id,
+                tool_call_id = %request.tool_call_id,
+                request_id = %request.request_id,
+                reason,
+                config_line = failure.config_location.map(|(line, _)| line),
+                config_column = failure.config_location.map(|(_, column)| column),
+                "daemon guardian review failed"
+            );
+            GuardianReviewOutcome::AskPerson {
+                reason: reason.into(),
+            }
+        }
+    };
     GuardianReviewResult {
         request_id: request.request_id,
         decision,
     }
+}
+
+struct DaemonFailure {
+    kind: DaemonGuardianFailure,
+    config_location: Option<(usize, usize)>,
+}
+
+impl DaemonFailure {
+    fn new(kind: DaemonGuardianFailure) -> Self {
+        Self {
+            kind,
+            config_location: None,
+        }
+    }
+}
+
+async fn run_guardian_review(
+    request: &GuardianReviewRequest,
+    classifier: Option<Arc<dyn GuardianStage1>>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<GuardianReviewOutcome, DaemonFailure> {
+    let config = match mj_core::runtime::spawn_blocking(mj_core::config::Config::load).await {
+        Ok(Ok(config)) => config,
+        Ok(Err(error)) => {
+            let config_error = error.downcast_ref::<ConfigLoadError>();
+            let kind = match config_error {
+                Some(ConfigLoadError::Toml { .. }) => DaemonGuardianFailure::ConfigInvalidToml,
+                Some(ConfigLoadError::Schema { .. }) => DaemonGuardianFailure::ConfigInvalidSchema,
+                Some(ConfigLoadError::NewerSchema { .. }) => {
+                    DaemonGuardianFailure::ConfigNeedsUpgrade
+                }
+                None if error.is::<std::io::Error>() => DaemonGuardianFailure::ConfigUnreadable,
+                None => DaemonGuardianFailure::ConfigLoadFailed,
+            };
+            return Err(DaemonFailure {
+                kind,
+                config_location: config_error.and_then(ConfigLoadError::location),
+            });
+        }
+        Err(_) => return Err(DaemonFailure::new(DaemonGuardianFailure::ConfigLoadFailed)),
+    };
+    if !config.guardian.enabled {
+        return Ok(GuardianReviewOutcome::AskPerson {
+            reason: GUARDIAN_DISABLED_REASON.into(),
+        });
+    }
+    let mut stage1_score = None;
+    if config.guardian.local_classifier
+        && let Some(classifier) = classifier
+    {
+        match classifier.classify(request).await {
+            GuardianStage1Verdict::Scored {
+                unsafe_prob,
+                tokens,
+                elapsed_ms,
+            } => {
+                let local_allow = (0.0..=WOLF_STAGE1_ALLOW_THRESHOLD).contains(&unsafe_prob);
+                tracing::info!(
+                    target: "mj_guardian",
+                    stage = "stage1_wolf",
+                    unsafe_prob,
+                    threshold = WOLF_STAGE1_ALLOW_THRESHOLD,
+                    tokens,
+                    elapsed_ms,
+                    local_allow,
+                    "Wolf Defender Jev scored a permission request"
+                );
+                stage1_score = Some(unsafe_prob);
+                if local_allow {
+                    return Ok(GuardianReviewOutcome::Allow {
+                        stage: "stage1_wolf".into(),
+                        stage1_score,
+                    });
+                }
+            }
+            GuardianStage1Verdict::EscalatedActionTooLong => {
+                tracing::debug!(target: "mj_guardian", "Wolf action length exceeded");
+            }
+            GuardianStage1Verdict::Overflow { tokens } => {
+                tracing::debug!(target: "mj_guardian", tokens, "Wolf case token limit exceeded");
+            }
+            GuardianStage1Verdict::Unavailable { reason } => {
+                tracing::debug!(target: "mj_guardian", %reason, "Wolf classifier unavailable");
+            }
+        }
+    }
+    let decision = match review_guardian_with_utility(&config, request, cancel).await {
+        GuardianUtilityOutcome::Reviewed { assessment, .. } => {
+            let stage = "utility_llm".into();
+            match assessment.enforced_outcome() {
+                Outcome::Allow => GuardianReviewOutcome::Allow {
+                    stage,
+                    stage1_score,
+                },
+                Outcome::Deny => GuardianReviewOutcome::Deny {
+                    rationale: assessment.rationale,
+                    risk_level: assessment.risk_level,
+                    user_authorization: assessment.user_authorization,
+                    stage,
+                    stage1_score,
+                },
+            }
+        }
+        GuardianUtilityOutcome::NoUtilityModel { .. } => {
+            GuardianReviewOutcome::UseAcpFallback { stage1_score }
+        }
+        GuardianUtilityOutcome::Failed { error } => {
+            return Err(DaemonFailure::new(error));
+        }
+    };
+    Ok(decision)
 }
 
 type TemporarilyHydratedItems = HashMap<String, (Arc<TranscriptItem>, Arc<TranscriptItem>)>;

@@ -1361,6 +1361,7 @@ fn create_attempt(
             .machines
             .insert(record.target.clone(), machine.clone());
         let container = ContainerTemplate {
+            memory_hard_limit: None,
             image: image.into(),
             pull_policy: Default::default(),
             platform: Some(platform.into()),

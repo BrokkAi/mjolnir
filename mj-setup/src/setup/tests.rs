@@ -91,14 +91,14 @@ impl CommandExecutor for FakeExecutor {
 
 struct RuntimeProbeExecutor {
     commands: RefCell<Vec<CommandSpec>>,
-    outputs: RefCell<Vec<CommandOutput>>,
+    outputs: RefCell<Vec<Result<CommandOutput>>>,
 }
 
 impl RuntimeProbeExecutor {
     fn new(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
         Self {
             commands: RefCell::new(vec![]),
-            outputs: RefCell::new(outputs.into_iter().collect()),
+            outputs: RefCell::new(outputs.into_iter().map(Ok).collect()),
         }
     }
 }
@@ -132,7 +132,7 @@ impl CommandExecutor for RuntimeProbeExecutor {
         if self.outputs.borrow().is_empty() {
             anyhow::bail!("no canned output for {}", command.program);
         }
-        Ok(self.outputs.borrow_mut().remove(0))
+        self.outputs.borrow_mut().remove(0)
     }
 }
 
@@ -517,7 +517,7 @@ fn podman_without_delegated_cpu_cgroup_is_a_warning_but_still_usable() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         ok(info.to_string().as_bytes()),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
     ]);
     let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
     let podman = runtimes
@@ -533,7 +533,7 @@ fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         podman_info(true),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
     ]);
     let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
 
@@ -554,7 +554,7 @@ fn macos_setup_probes_rootless_podman_and_keeps_platform_gated_runtimes_out() {
         let executor = RuntimeProbeExecutor::new([
             ok(b"podman version 5.4.2\n"),
             podman_info(true),
-            ok(b"29.0.1 linux\n"),
+            ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
         ]);
         let runtimes = probe_local_runtimes(
             &executor,
@@ -584,7 +584,7 @@ fn macos_setup_probes_rootless_podman_and_keeps_platform_gated_runtimes_out() {
 }
 
 #[test]
-fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
+fn supported_macos_setup_observes_apple_container_without_starting_it() {
     let platform = ApplePlatform::Macos {
         architecture: "aarch64".into(),
         major_version: 26,
@@ -592,9 +592,9 @@ fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         podman_info(true),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
         ok(b"container version 1\n"),
-        ok(b"running\n"),
+        ok(br#"{"status":"running"}"#),
     ]);
     let runtimes = probe_local_runtimes(&executor, &platform);
     let apple = runtimes
@@ -604,11 +604,56 @@ fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
     assert!(apple.usable());
     assert_eq!(executor.commands.borrow().len(), 5);
 
+    for (output, status, usable) in [
+        (
+            CommandOutput {
+                status: 1,
+                stdout: br#"{"status":"unregistered"}"#.to_vec(),
+                stderr: vec![],
+            },
+            CheckStatus::Warning,
+            true,
+        ),
+        (
+            CommandOutput {
+                status: 64,
+                stdout: b"unexpected Apple CLI output".to_vec(),
+                stderr: b"Error: Unknown option --format".to_vec(),
+            },
+            CheckStatus::Fixable,
+            false,
+        ),
+    ] {
+        let executor = RuntimeProbeExecutor::new([
+            ok(b"podman version 5.4.2\n"),
+            podman_info(true),
+            ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
+            ok(b"container version 1.7.0\n"),
+            output,
+        ]);
+        let apple = probe_local_runtimes(&executor, &platform)
+            .into_iter()
+            .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
+            .unwrap();
+        assert_eq!(apple.status, status);
+        assert_eq!(apple.usable(), usable);
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 5);
+        assert_eq!(commands[4].args, ["system", "status", "--format", "json"]);
+        if !usable {
+            assert!(apple.detail.contains("unexpected Apple CLI output"));
+            assert!(apple.detail.contains("Error: Unknown option --format"));
+        }
+    }
+
     let missing = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         podman_info(true),
-        ok(b"29.0.1 linux\n"),
+        ok(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#),
     ]);
+    missing.outputs.borrow_mut().push(Err(
+        std::io::Error::from(std::io::ErrorKind::NotFound).into()
+    ));
     let runtimes = probe_local_runtimes(&missing, &platform);
     let apple = runtimes
         .iter()

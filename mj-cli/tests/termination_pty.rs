@@ -698,7 +698,7 @@ image = "ubuntu:24.04"
             &tools,
             "docker",
             &format!(
-                "#!/bin/sh\ncase \"$1\" in\n  version) echo '27.0.0 linux' ;;\n  image) : > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.05; done; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  info) echo '{{\"ServerVersion\":\"27.0.0\",\"OSType\":\"linux\"}}' ;;\n  image) : > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.05; done; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
                 storage.path().join(FIRST_RUN_CHECK_STARTED).display(),
                 storage.path().join(FIRST_RUN_CHECK_RELEASE).display()
             ),

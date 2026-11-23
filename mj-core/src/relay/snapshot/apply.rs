@@ -252,13 +252,15 @@ fn hook_steering_prompt(
     if queued.command_id != steering.queued_prompt_id {
         bail!("hook steer prompt is not at the queue head");
     }
-    let StoredQueuedRelayPayload::Prompt { prompt } = &queued.payload else {
-        bail!("hook steer target is not a prompt");
-    };
-    if crate::acp::steering_text_context(prompt).is_none() {
+    let prompt = snapshot
+        .dispatches
+        .get(&queued.command_id)
+        .and_then(|dispatch| dispatch.command.prompt_blocks())
+        .ok_or_else(|| anyhow!("hook steer target is not a prompt"))?;
+    if crate::acp::steering_text_context(&prompt).is_none() {
         bail!("hook steer prompt cannot be represented as text context");
     }
-    Ok(prompt.clone())
+    Ok(prompt.into_owned())
 }
 
 fn complete_hook_steering(
@@ -831,7 +833,6 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot.handled_commands.insert(
                 command_id.clone(),
                 HandledRelayCommand {
-                    command: Some(command.clone()),
                     terminal_identity: None,
                     accepted_ordinal: event.ordinal,
                     terminal_ordinal: None,
@@ -848,27 +849,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             );
             // Prompts and configuration changes share one FIFO queue so they
             // reach the agent in the order the user submitted them.
-            let payload = match command {
-                command if command.prompt_blocks().is_some() => {
-                    Some(StoredQueuedRelayPayload::Prompt {
-                        prompt: command
-                            .prompt_blocks()
-                            .expect("prompt command")
-                            .into_owned(),
-                    })
-                }
-                RelayCommand::SetConfig { key, value } => {
-                    Some(StoredQueuedRelayPayload::SetConfig {
-                        key: key.clone(),
-                        value: value.clone(),
-                    })
-                }
-                _ => None,
-            };
-            if let Some(payload) = payload {
-                let entry = StoredQueuedRelayCommand {
+            if command.is_queue_entry() {
+                let entry = QueuedRelayPrompt {
                     command_id: command_id.clone(),
-                    payload,
                     created_at_ms: *created_at_ms,
                 };
                 if *insert_at_front {
@@ -918,18 +901,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .position(|queued| queued.command_id == *command_id)
                         .ok_or_else(|| anyhow!("started prompt {command_id} was not queued"))?;
                     let queued = snapshot.queued_prompts.remove(index);
-                    let StoredQueuedRelayPayload::Prompt { prompt } = queued.payload else {
-                        bail!("queued command {command_id} is not a prompt");
-                    };
                     snapshot.execution = RelayExecutionState::Running;
                     // New input supersedes the finished turn the liveness
                     // describes once it runs, not while it is only queued: a
                     // queued prompt that is dropped leaves the child held.
                     snapshot.work_liveness = None;
                     snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
-                    snapshot.active_prompt = Some(StoredActiveRelayPrompt {
+                    snapshot.active_prompt = Some(ActiveRelayPrompt {
                         command_id: queued.command_id,
-                        prompt,
                         created_at_ms: queued.created_at_ms,
                         started_at_ms: *started_at_ms,
                     });
@@ -1197,9 +1176,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .queued_prompts
                         .first()
                         .ok_or_else(|| anyhow!("steered prompt is no longer queued"))?;
-                    if queued.command_id != *queued_command_id
-                        || !matches!(queued.payload, StoredQueuedRelayPayload::Prompt { .. })
-                    {
+                    if queued.command_id != *queued_command_id {
                         bail!("steered prompt is not the queued prompt head");
                     }
                     let target = snapshot
@@ -1387,10 +1364,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .handled_commands
                 .get(command_id)
                 .ok_or_else(|| anyhow!("retry assessment for unknown command {command_id}"))?;
-            if !handled
-                .command
-                .as_ref()
-                .is_some_and(|command| command.kind() == RelayCommandKind::Prompt)
+            if !snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| dispatch.command.kind() == RelayCommandKind::Prompt)
                 && !handled
                     .terminal_identity
                     .as_ref()
@@ -1398,9 +1375,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             {
                 bail!("retry assessment requires a prompt command");
             }
-            let superseded = snapshot.handled_commands.values().any(|other| {
+            let superseded = snapshot.handled_commands.iter().any(|(id, other)| {
                 other.accepted_ordinal > handled.accepted_ordinal
-                    && (other.command.as_ref().is_some_and(cancels_capacity_retry)
+                    && (snapshot
+                        .dispatches
+                        .get(id)
+                        .is_some_and(|dispatch| cancels_capacity_retry(&dispatch.command))
                         || other
                             .terminal_identity
                             .as_ref()
@@ -1632,18 +1612,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     bail!("invalid interrupted prompt recovery {recovery_id}");
                 }
                 let accepted_ordinal = snapshot.handled_commands[command_id].accepted_ordinal;
-                // Release every stored copy of the old execution payload before
-                // installing its replacement. No journal prefix or snapshot can
-                // contain two accepted copies, even at the snapshot byte limit.
+                // Release the old dispatch before installing its replacement.
+                // No journal prefix or snapshot can contain two accepted turns.
                 snapshot.compact_terminal_commands()?;
-                let prompt = command
-                    .prompt_blocks()
-                    .ok_or_else(|| anyhow!("recovery command is not a prompt"))?
-                    .into_owned();
+                if command.prompt_blocks().is_none() {
+                    bail!("recovery command is not a prompt");
+                }
                 snapshot.handled_commands.insert(
                     recovery_id.to_owned(),
                     HandledRelayCommand {
-                        command: Some(command.clone()),
                         terminal_identity: None,
                         accepted_ordinal,
                         terminal_ordinal: None,
@@ -1660,9 +1637,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 );
                 snapshot.queued_prompts.insert(
                     0,
-                    StoredQueuedRelayCommand {
+                    QueuedRelayPrompt {
                         command_id: recovery_id.to_owned(),
-                        payload: StoredQueuedRelayPayload::Prompt { prompt },
                         created_at_ms: event.recorded_at_ms,
                     },
                 );
@@ -2165,30 +2141,37 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
 
 impl RelaySnapshot {
     /// Drop execution payloads only after every side effect of a terminal event.
-    /// Also upgrades legacy receipts when a stored snapshot is opened.
     pub fn compact_terminal_commands(&mut self) -> Result<bool> {
         let mut changed = false;
         for (id, handled) in &mut self.handled_commands {
-            if handled.terminal_ordinal.is_none() {
-                continue;
-            }
-            if let Some(command) = &handled.command {
-                handled.terminal_identity = Some(TerminalRelayCommandIdentity {
-                    digest: relay_command_digest(command)?,
-                    mailbox_event_key: match command {
-                        RelayCommand::DeliverMailboxEvent { event } => Some(event.key.clone()),
-                        _ => None,
-                    },
-                    prompt: command.kind() == RelayCommandKind::Prompt,
-                    cancels_capacity_retry: cancels_capacity_retry(command),
-                    releases_history: releases_history(command),
-                });
-                handled.command = None;
+            if handled.terminal_ordinal.is_some()
+                && let Some(dispatch) = self.dispatches.get(id)
+            {
+                if handled.terminal_identity.is_none() {
+                    handled.terminal_identity = Some(TerminalRelayCommandIdentity::from_command(
+                        &dispatch.command,
+                    )?);
+                }
+                self.dispatches.remove(id);
                 changed = true;
             }
-            changed |= self.dispatches.remove(id).is_some();
         }
         Ok(changed)
+    }
+}
+
+impl TerminalRelayCommandIdentity {
+    pub(super) fn from_command(command: &RelayCommand) -> Result<Self> {
+        Ok(Self {
+            digest: relay_command_digest(command)?,
+            mailbox_event_key: match command {
+                RelayCommand::DeliverMailboxEvent { event } => Some(event.key.clone()),
+                _ => None,
+            },
+            prompt: command.kind() == RelayCommandKind::Prompt,
+            cancels_capacity_retry: cancels_capacity_retry(command),
+            releases_history: releases_history(command),
+        })
     }
 }
 

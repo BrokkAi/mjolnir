@@ -59,10 +59,9 @@ def main():
                    capture_output=True, text=True)
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(seed)], check=True)
     (seed / "README.md").write_text("Review before push regression fixture.\n")
-    if args.brief_writer:
-        (seed / "greeting.py").write_text('def greeting(name):\n    return f"Hello, {name}"\n')
-        (seed / "app.py").write_text('from greeting import greeting\n\ndef welcome():\n    return greeting("world")\n')
-        git(seed, "add", "greeting.py", "app.py")
+    (seed / "greeting.py").write_text('def greeting(name):\n    return f"Hello, {name}"\n')
+    (seed / "app.py").write_text('from greeting import greeting\n\ndef welcome():\n    return greeting("world")\n')
+    git(seed, "add", "greeting.py", "app.py")
     git(seed, "add", "README.md")
     git(seed, "-c", "user.name=Mj test", "-c", "user.email=mj-test@example.invalid",
         "commit", "-qm", "Fixture on main")
@@ -264,15 +263,10 @@ effort = {json.dumps(args.effort)}
                         VALUES (OLD.child_session_id, OLD.parent_session_id, OLD.record_json);
                     END;
                 """)
-        prompt = '''This is an isolated live regression. Append exactly the line `reviewed change` to README.md and commit it on the current branch. Follow Mjolnir's instructions about review before pushing. If a review finds issues, fix them, commit the fixes, and call request_review again; continue until you receive a clean verdict. Then push the branch to origin. When the push has succeeded, reply DONE. Do not edit any other files.'''
+        prompt = '''This is an isolated live regression. Change greeting.py to return `f"Welcome, {name}"` instead of `f"Hello, {name}"`. Also append exactly the line `reviewed change` to README.md and commit both changes on the current branch. Follow Mjolnir's instructions about review before pushing. If a review finds issues, fix them, commit the fixes, and call request_review again; continue until you receive a clean verdict. Then push the branch to origin. When the push has succeeded, reply DONE. Do not edit files other than greeting.py and README.md.'''
         if args.brief_writer:
-            prompt = prompt.replace("Append exactly the line `reviewed change` to README.md",
-                                    "Change greeting.py to return `f\"Welcome, {name}\"` instead of "
-                                    "`f\"Hello, {name}\"`. Also append exactly the line `reviewed change` to README.md")
             prompt = prompt.replace("Then push the branch to origin. When the push has succeeded, reply DONE.",
                                     "When the clean review arrives, reply DONE. Do not push.")
-            prompt = prompt.replace("Do not edit any other files.",
-                                    "Do not edit files other than greeting.py and README.md.")
         prompt += (" If Git reports a read-only filesystem or sandbox denial, request "
                    "permission to run that Git command outside the sandbox and continue. "
                    "The commit and push to this local fixture origin are authorized.")

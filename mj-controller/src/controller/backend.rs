@@ -315,6 +315,7 @@ impl Controller {
             executor,
             TargetCheck::BeforeLaunch,
         )
+        .map(|_| ())
     }
 
     /// The check a session wizard runs before it offers a target: the same
@@ -329,6 +330,7 @@ impl Controller {
             executor,
             TargetCheck::BeforeLaunch,
         )
+        .map(|_| ())
     }
 
     fn configured_target(&self, target_id: &str) -> Result<&TargetTemplate> {
@@ -438,7 +440,7 @@ fn push_unique(paths: &mut Vec<String>, more: impl IntoIterator<Item = String>) 
 
 /// Check a target before a launch, resume, or move uses it.
 ///
-/// An SSH host's container runtime is verified by first-run setup, `mj doctor`,
+/// An SSH host's Podman or Docker runtime is verified by first-run setup, `mj doctor`,
 /// and the Targets pane's Test action; here it is assumed to still be as
 /// they left it, and only the host's reachability is checked. That probe
 /// joins an open shared connection, so it usually costs one SSH channel.
@@ -446,58 +448,15 @@ pub(super) fn preflight_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
     check: TargetCheck,
-) -> Result<()> {
+) -> Result<Option<targets::CgroupCapabilities>> {
     match template {
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
-        | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => {
-            verify_ssh_connectivity(&SshTarget::from(ssh), executor)
+        | TargetTemplate::SshDocker { ssh, .. } => {
+            verify_ssh_connectivity(&SshTarget::from(ssh), executor).map(|()| None)
         }
         _ => verify_target(template, executor, check),
     }
-}
-
-/// Whether a local container engine can run sessions, as the launch
-/// preflight and the dashboard's Targets pane judge it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalEngineReadiness {
-    Ready,
-    /// The engine's command is not on this host.
-    NotInstalled,
-    /// The command is there, but the engine did not answer its check.
-    NotReady,
-}
-
-/// Run the launch preflight's engine check for a local container target
-/// kind (`local-podman`, `local-docker`, or `apple-container`).
-///
-/// Answers `None` for any other kind: their readiness is not a local engine's.
-pub fn local_engine_readiness(
-    kind: &str,
-    executor: &impl CommandExecutor,
-) -> Option<LocalEngineReadiness> {
-    let result = match kind {
-        "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
-        "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
-        // Observe only: opening the launch options must not start a service
-        // the user may have stopped. Starting stays with daemon startup and
-        // the launch preflight.
-        "apple-container" => {
-            targets::apple_container_runtime_status(executor).and_then(|status| match status {
-                targets::AppleContainerStatus::Running => Ok(()),
-                targets::AppleContainerStatus::Stopped { status, detail } => {
-                    anyhow::bail!("container system status exited with status {status}: {detail}")
-                }
-            })
-        }
-        _ => return None,
-    };
-    Some(match result {
-        Ok(()) => LocalEngineReadiness::Ready,
-        Err(error) if is_missing_command(&error) => LocalEngineReadiness::NotInstalled,
-        Err(_) => LocalEngineReadiness::NotReady,
-    })
 }
 
 pub use mj_targets::command_checks::is_missing_command;
@@ -507,25 +466,27 @@ pub(super) fn verify_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
     check: TargetCheck,
-) -> Result<()> {
+) -> Result<Option<targets::CgroupCapabilities>> {
     let then_retry = check.then_retry();
+    let capabilities = |preflight: targets::ContainerPreflight, show_warnings: bool| {
+        if show_warnings {
+            for warning in preflight.warnings {
+                executor.notify_notice(&warning.notice());
+            }
+        }
+        Some(preflight.cgroups)
+    };
     match template {
         TargetTemplate::LocalPodman { .. } => targets::verify_local_podman(executor)
-            .map(|preflight| {
-                // A launch reports what it changes for these itself.
-                if check == TargetCheck::BeforeLaunch {
-                    for warning in preflight.warnings {
-                        executor.notify_notice(&warning.notice());
-                    }
-                }
-            })
+            // A launch reports the limits it actually drops.
+            .map(|preflight| capabilities(preflight, check == TargetCheck::BeforeLaunch))
             .map_err(|error| {
                 anyhow::anyhow!(
                     "local Podman is not ready. Fix the problem below{then_retry}: {error:#}"
                 )
             }),
         TargetTemplate::LocalDocker { .. } => targets::verify_local_docker(executor)
-            .map(|_| ())
+            .map(|preflight| capabilities(preflight, check == TargetCheck::BeforeLaunch))
             .map_err(
                 |error| match error.downcast_ref::<targets::DockerUnavailable>() {
                     // Leads with the sentence the launch options use, so a
@@ -546,11 +507,7 @@ pub(super) fn verify_target(
         TargetTemplate::SshPodman { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_podman(&ssh, executor)
-                .map(|preflight| {
-                    for warning in preflight.warnings {
-                        executor.notify_notice(&warning.notice());
-                    }
-                })
+                .map(|preflight| capabilities(preflight, true))
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Podman is not ready on {}. Fix the problem below{then_retry}: {error:#}",
@@ -561,7 +518,7 @@ pub(super) fn verify_target(
         TargetTemplate::SshDocker { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_docker(&ssh, executor)
-                .map(|_| ())
+                .map(|preflight| capabilities(preflight, true))
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Docker preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
@@ -570,8 +527,8 @@ pub(super) fn verify_target(
                 })
         }
         TargetTemplate::AppleContainer { .. } => {
-            targets::ensure_apple_container_runtime(executor)
-                .map(|_| ())
+            targets::ensure_apple_container_runtime(None, executor)
+                .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "Apple container is not ready{then_retry}. Fix the problem below: {error:#}"
@@ -580,8 +537,10 @@ pub(super) fn verify_target(
         }
         TargetTemplate::SshAppleContainer { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
-            targets::verify_ssh_apple_container(&ssh, executor)
-                .map(|_| ())
+            targets::validate_ssh(&ssh)
+                .and_then(|()| verify_ssh_connectivity(&ssh, executor))
+                .and_then(|()| targets::ensure_apple_container_runtime(Some(&ssh), executor))
+                .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Apple container preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
@@ -595,7 +554,7 @@ pub(super) fn verify_target(
             // before the first command that needs it.
             super::worker_binary::ensure_microvm_engine(&ssh, executor)
                 .and_then(|()| targets::verify_ssh_nitro(&ssh, executor))
-                .map(|_| ())
+                .map(|_| None)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "Nitro sandbox host preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
@@ -604,10 +563,10 @@ pub(super) fn verify_target(
                 })
         }
         TargetTemplate::SshBare { ssh, .. } => {
-            verify_ssh_connectivity(&SshTarget::from(ssh), executor)
+            verify_ssh_connectivity(&SshTarget::from(ssh), executor).map(|()| None)
         }
         TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
-        TargetTemplate::LocalBare => Ok(()),
+        TargetTemplate::LocalBare => Ok(None),
     }
 }
 

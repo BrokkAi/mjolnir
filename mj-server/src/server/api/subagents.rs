@@ -1669,6 +1669,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![],
@@ -1972,6 +1973,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: candidates(),
         });
@@ -2043,6 +2045,7 @@ mod tests {
         staged: Option<Vec<(u64, SubagentCandidates)>>,
         discovery_fails: bool,
         telemetry_store: Option<mj_accounts::quota_telemetry::QuotaTelemetryStore>,
+        quota_preferences: Vec<String>,
         config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
     }
@@ -2081,6 +2084,11 @@ mod tests {
 
         fn quota_telemetry_store(&self) -> mj_accounts::quota_telemetry::QuotaTelemetryStore {
             self.telemetry_store.clone().unwrap_or_default()
+        }
+
+        fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
+            let preferences = self.quota_preferences.clone();
+            Box::pin(async move { Ok(preferences) })
         }
 
         fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
@@ -2336,6 +2344,7 @@ mod tests {
             staged: None,
             discovery_fails: true,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: SubagentConfig {
                 straightforward: vec![choice.clone()],
                 subtle: vec![choice],
@@ -2398,7 +2407,11 @@ mod tests {
             ready_first: false,
             staged: None,
             discovery_fails: false,
-            telemetry_store: Some(telemetry_store),
+            telemetry_store: Some(telemetry_store.clone()),
+            // Force `probe-fails-zero` first despite weighted tier-0 sampling,
+            // and prefer `runway-one` over `healthy-two` so a stale-telemetry
+            // redraw would deterministically pick `runway-one`.
+            quota_preferences: vec!["probe-fails-zero".into(), "runway-one".into()],
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: offered.clone(),
@@ -2423,6 +2436,15 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            telemetry_store
+                .snapshot()
+                .recent_placements
+                .get("runway-one")
+                .map_or(0, Vec::len),
+            30,
+            "probe-fails-zero must be probed first so the redraw sees the concurrent placements"
+        );
         assert_eq!(selected.profile_id, "healthy-two");
     }
 
@@ -2433,6 +2455,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![candidate("ready", Some(70), &["fixed"])],
@@ -2462,6 +2485,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2495,6 +2519,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![paid, candidate("subscription", Some(80), &["fixed"])],
@@ -2524,6 +2549,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![candidate("stalled-default", Some(80), &["fixed"])],
@@ -2569,6 +2595,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2607,6 +2634,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2714,6 +2742,7 @@ mod tests {
                 staged: None,
                 discovery_fails: false,
                 telemetry_store: None,
+                quota_preferences: Vec::new(),
                 config: SubagentConfig {
                     straightforward: vec![SubagentChoice {
                         model: "sonnet".into(),
@@ -2794,6 +2823,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config,
             candidates: SubagentCandidates {
                 offered: vec![
@@ -2850,6 +2880,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: config.clone(),
             candidates: candidates.clone(),
         });
@@ -2903,6 +2934,7 @@ mod tests {
                 staged: None,
                 discovery_fails: false,
                 telemetry_store: None,
+                quota_preferences: Vec::new(),
                 config: config.clone(),
                 candidates,
             })
@@ -2943,6 +2975,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates,
         });
@@ -2999,6 +3032,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: SubagentConfig {
                 straightforward: vec![SubagentChoice {
                     model: "no-effort".into(),
@@ -3060,6 +3094,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: mj_core::config::SubagentConfig {
                 straightforward: vec![
                     mj_core::config::SubagentChoice {
@@ -3130,6 +3165,7 @@ mod tests {
             staged: None,
             discovery_fails: false,
             telemetry_store: None,
+            quota_preferences: Vec::new(),
             config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![

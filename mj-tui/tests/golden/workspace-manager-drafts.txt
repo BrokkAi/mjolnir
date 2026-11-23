@@ -112,11 +112,11 @@ action: None
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
-│No sessions   │Enter recovers the selected draft · Esc returns to the list                  │               │
-│Create new w  │terminal composer  · 2026-10-01 12:00  · session-1                  Back     │               │
-│              │web viewer  · 2026-10-02 09:30                                      Recover  │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
+│No sessions   │Select a draft to recover or discard · Esc returns to the list               │               │
+│Create new w  │Draft session · 2026-10-01 12:00 · Detached draft preview       Back         │               │
+│              │unattached · 2026-10-02 09:30 · Unattached draft preview        Discard      │               │
+│              │                                                                Discard all  │               │
+│              │                                                                Recover      │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
@@ -129,8 +129,8 @@ action: None
 │  Host / fle  │                                                                             │               │
 ╰────────────  │                                                                             │  ─────────────╯
 ╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
-│ANTHROPIC     │                                                                             │               │
-│  claude-1:   │                                                                             │               │
+│ANTHROPIC     │Draft session · terminal composer (PID 4100)                                 │               │
+│  claude-1:   │Detached draft preview                                                       │               │
 │OPENAI        │                                                                             │               │
 │  codex-1: r  │                                                                             │               │
 │  codex-2: r  │                                                                             │               │
@@ -147,11 +147,11 @@ action: None
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
-│No sessions   │Enter recovers the selected draft · Esc returns to the list                  │               │
-│Create new w  │terminal composer  · 2026-10-01 12:00  · session-1                  Back     │               │
-│              │web viewer  · 2026-10-02 09:30                                      Recover  │               │
-│              │                                                                             │               │
-│              │                                                                             │               │
+│No sessions   │Select a draft to recover or discard · Esc returns to the list               │               │
+│Create new w  │Draft session · 2026-10-01 12:00 · Detached draft preview       Back         │               │
+│              │unattached · 2026-10-02 09:30 · Unattached draft preview        Discard      │               │
+│              │                                                                Discard all  │               │
+│              │                                                                Recover      │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
@@ -164,8 +164,8 @@ action: None
 │  Host / fle  │                                                                             │               │
 ╰────────────  │                                                                             │  ─────────────╯
 ╭ Profiles ▾   │                                                                             │  ────── ▁   ▄ ╮
-│ANTHROPIC     │                                                                             │               │
-│  claude-1:   │                                                                             │               │
+│ANTHROPIC     │unattached · web viewer                                                      │               │
+│  claude-1:   │Unattached draft preview                                                     │               │
 │OPENAI        │                                                                             │               │
 │  codex-1: r  │                                                                             │               │
 │  codex-2: r  │                                                                             │               │
@@ -174,18 +174,19 @@ action: None
 │Nothing need                                                                                                │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
+action: DiscardWorkspaceDrafts { generation: 1, workspace_id: "beta", draft_id: None }
+action: DiscardWorkspaceDrafts { generation: 1, workspace_id: "beta", draft_id: Some("draft-terminal") }
 
-=== draft recovery completed (110x32) ===
+=== draft discard completed (110x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Echo  Foxtrot             ≡ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
-│No sessions   │Draft recovered.                                                             │               │
+│No sessions   │Draft discarded.                                                             │               │
 │Create new w  │No detached drafts.                                                 Back     │               │
+│              │                                                                    Discard  │               │
 │              │                                                                    Recover  │               │
-│              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │
 │              │                                                                             │               │

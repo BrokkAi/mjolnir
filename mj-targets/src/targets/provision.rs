@@ -158,11 +158,6 @@ pub fn provision_plan_named(
         }
         TargetTemplate::AppleContainer(container) => {
             validate_container_template(container)?;
-            commands.push(
-                CommandSpec::new("container", ["system", "status"])
-                    .purpose("check Apple container service")
-                    .stage(ProvisionStage::Provisioning),
-            );
             commands.extend(apple_image_prepare_commands(container));
             commands.push(container_run(
                 "container",

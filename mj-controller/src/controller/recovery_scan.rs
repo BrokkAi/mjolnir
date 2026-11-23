@@ -1985,6 +1985,7 @@ mod tests {
     fn recovery_container_scan_requires_both_managed_and_session_labels() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
@@ -2015,11 +2016,18 @@ mod tests {
         );
     }
 
-    /// Answers the container listing the scan runs and fails everything else,
-    /// which is what a container with no worker in it does to the ownership
-    /// probe.
+    /// Emulates discovery of a container with no readable worker marker.
     struct ListingExecutor {
         listing: String,
+        teardown: Option<ContainerTeardown>,
+    }
+
+    #[derive(Default)]
+    struct ContainerTeardown {
+        allow_remove: bool,
+        allow_revoke: bool,
+        revocation_commands: std::sync::atomic::AtomicUsize,
+        removed: std::sync::atomic::AtomicBool,
     }
 
     impl CommandExecutor for ListingExecutor {
@@ -2055,6 +2063,47 @@ mod tests {
                     stderr: Vec::new(),
                 });
             }
+            if let Some(teardown) = &self.teardown {
+                if matches!(
+                    command.purpose.as_str(),
+                    "remove temporary Move authorized_keys entry"
+                        | "remove temporary Move SSH key and known_hosts"
+                ) {
+                    assert_eq!(command.program, "ssh");
+                    let args = command.args.join(" ");
+                    assert!(args.contains("builder@test-remote"));
+                    assert!(args.contains("retired-move"));
+                    teardown
+                        .revocation_commands
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(CommandOutput {
+                        status: i32::from(!teardown.allow_revoke),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+
+                if command.args.iter().any(|arg| arg == "mj-remove-container") {
+                    if !teardown.allow_remove {
+                        bail!("host unavailable during container removal");
+                    }
+                    teardown
+                        .removed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if command.program == "sh" {
+                    let present = command
+                        .args
+                        .iter()
+                        .any(|arg| arg == "mj-confirm-podman-absent")
+                        && !teardown.removed.load(std::sync::atomic::Ordering::Relaxed);
+                    return Ok(CommandOutput {
+                        status: i32::from(present),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
             Ok(CommandOutput {
                 status: 1,
                 stdout: Vec::new(),
@@ -2069,6 +2118,7 @@ mod tests {
             "local".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ignored".into(),
                     pull_policy: Default::default(),
@@ -2086,7 +2136,13 @@ mod tests {
         .unwrap();
         let mut state = State::default();
         state.sessions.insert(record.id.clone(), record);
-        (Controller { config, state }, ListingExecutor { listing })
+        (
+            Controller { config, state },
+            ListingExecutor {
+                listing,
+                teardown: None,
+            },
+        )
     }
 
     fn errored_podman_session(session_id: &str) -> SessionRecord {
@@ -2117,9 +2173,182 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(test_name(module_path!(), name))
             .env("MJ_TEST_MOVE_OWNERSHIP_SCAN", "1")
+            .env("MJ_INSTANCE", "move-ownership-scan")
             .isolated_store(directory.path())
             .run();
         false
+    }
+
+    #[test]
+    fn retired_harness_destroy_retries_and_orphan_recovery_keeps_the_checkpoint() {
+        const TEST: &str =
+            "retired_harness_destroy_retries_and_orphan_recovery_keeps_the_checkpoint";
+        if !isolated_scan(TEST) {
+            return;
+        }
+        use crate::database::{self, EnvironmentPhase};
+        let _writer = database::install_isolated_test_writer();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut session = errored_podman_session(session_id);
+        session.target = Some(Box::new(TargetLocator::LocalPodman {
+            container_id: targets::resource_name(session_id).unwrap(),
+            workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+            borrowed_from: None,
+        }));
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoint = mj_core::state::CheckpointMetadata {
+            archive_path: directory.path().join("checkpoint.hel.zip"),
+            sha256: "a".repeat(64),
+            created_at: session.created_at.clone(),
+            event_frontier: 0,
+        };
+        session.checkpoint = Some(Box::new(checkpoint.clone()));
+        let key_path = directory.path().join("move-key");
+        let known_hosts_path = directory.path().join("move-known-hosts");
+        let mut operation: mj_core::state::MoveOperation =
+            serde_json::from_value(serde_json::json!({
+                "operation_id": "retired-move",
+                "selection": { "session_id": session_id },
+                "source_profile_id": session.last_profile,
+                "source_target_template_id": session.target_template_id,
+                "source_additional_mounts": [],
+                "configuration_fingerprint": "",
+                "queue": "discard",
+                "phase": "failed",
+                "queue_admission_started": false,
+                "queue_admission_finished": false,
+                "cancellation_requested": false,
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+                "granted_keys": [{
+                    "host": "test-host",
+                    "comment": "mj-move",
+                    "private_key_path": key_path,
+                    "known_hosts_path": known_hosts_path,
+                }],
+            }))
+            .unwrap();
+        operation.granted_keys.push(mj_core::state::GrantedMoveKey {
+            host: "test-remote".into(),
+            comment: "mj-move-retired-move".into(),
+            private_key_path: Some("/remote/mj-move-retired-move.key".into()),
+            known_hosts_path: None,
+            authorized_keys_path: Some("/remote/authorized_keys".into()),
+            worker_bin: Some("/remote/hel".into()),
+            ssh_target: Some(mj_core::targets::SshTarget {
+                destination: "builder@test-remote".into(),
+                ssh_args: Vec::new(),
+            }),
+        });
+        let (mut controller, mut executor) = podman_scan_controller(session.clone());
+        controller.state.sessions.remove(session_id);
+
+        for orphan in [false, true] {
+            std::fs::write(&checkpoint.archive_path, b"checkpoint").unwrap();
+            std::fs::write(&key_path, b"ephemeral key fixture").unwrap();
+            std::fs::write(&known_hosts_path, b"known hosts fixture").unwrap();
+            database::save_session(&session).unwrap();
+            database::save_move_operation(&operation).unwrap();
+            database::test_fixtures::retire_test_harness(session_id).unwrap();
+            executor.teardown = Some(ContainerTeardown::default());
+            let destroy = |controller: &mut Controller, executor: &ListingExecutor| {
+                crate::controller::test_support::worker_test_scope(session_id, || {
+                    if orphan {
+                        controller
+                            .destroy_orphan_worker(session_id, "local", session_id, true, executor)
+                    } else {
+                        controller
+                            .force_destroy_session(
+                                session_id,
+                                executor,
+                                super::super::BranchDisposition::Keep,
+                            )
+                            .map(|_| ())
+                    }
+                })
+            };
+            if !orphan {
+                let error = destroy(&mut controller, &executor).unwrap_err();
+                assert!(
+                    format!("{error:#}")
+                        .contains("could not revoke all temporary Move SSH credentials")
+                );
+                let row = database::load_retired_harness_session(session_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    row.owned_environment.unwrap().phase,
+                    EnvironmentPhase::Active
+                );
+                let (move_id, keys) = database::load_move_granted_keys(session_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(move_id, operation.operation_id);
+                assert_eq!(keys, operation.granted_keys[1..]);
+                executor.teardown.as_mut().unwrap().allow_revoke = true;
+            }
+            let error = destroy(&mut controller, &executor).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("host unavailable"),
+                "{error:#}"
+            );
+            let retained = database::load_retired_harness_session(session_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                retained.owned_environment.unwrap().phase,
+                EnvironmentPhase::Retiring
+            );
+            assert_eq!(
+                database::load_session_checkpoint(session_id)
+                    .unwrap()
+                    .as_ref(),
+                Some(&checkpoint)
+            );
+            assert_eq!(key_path.is_file(), orphan);
+            executor.teardown.as_mut().unwrap().allow_remove = true;
+            destroy(&mut controller, &executor).unwrap();
+            assert!(
+                executor
+                    .teardown
+                    .as_ref()
+                    .unwrap()
+                    .removed
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            // The successful revocation is durable before the failed teardown.
+            // Only the first two attempts can reach SSH.
+            assert_eq!(
+                executor
+                    .teardown
+                    .as_ref()
+                    .unwrap()
+                    .revocation_commands
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                if orphan { 0 } else { 4 }
+            );
+            let row = database::load_retired_harness_session(session_id).unwrap();
+            let stored_checkpoint = database::load_session_checkpoint(session_id).unwrap();
+            if orphan {
+                assert_eq!(
+                    row.unwrap().owned_environment.unwrap().phase,
+                    EnvironmentPhase::Reclaimed
+                );
+                assert_eq!(stored_checkpoint.as_ref(), Some(&checkpoint));
+                assert!(checkpoint.archive_path.is_file());
+                assert!(key_path.is_file() && known_hosts_path.is_file());
+            } else {
+                assert!(row.is_none());
+                assert!(stored_checkpoint.is_none());
+                assert!(
+                    database::worker_environments(session_id)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(!checkpoint.archive_path.exists());
+                assert!(!key_path.exists() && !known_hosts_path.exists());
+            }
+        }
     }
 
     // Hard-won: 75136459: recovery missed a container after its errored session stopped naming it
@@ -2263,6 +2492,7 @@ mod tests {
         let session = "0123456789abcdef0123456789abcdef";
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -2317,6 +2547,7 @@ mod tests {
     fn recovery_docker_scan_accepts_json_lines_and_builds_a_docker_locator() {
         let template = TargetTemplate::LocalDocker {
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),

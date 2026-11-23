@@ -15,7 +15,7 @@ use anvil_client::infer::{
 use anvil_client::kimi_auth::KimiBackendConfig;
 use anvil_client::llm_client::{LlmBackend, ModelMetadata, OpenAiClient};
 use anvil_client::meta_client::{MetaClient, MetaClientConfig};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -27,7 +27,8 @@ use crate::quota::{ProfileQuota, QuotaRefreshRequest};
 use mj_core::codex_provider::{BuiltInCodexProvider, CodexProviderDefinition, CodexProviderKind};
 use mj_core::config::{Config, HarnessKind, HarnessProfile};
 use mj_core::guardian::{
-    Assessment, GuardianReviewRequest, assessment_json_schema, reviewer_instructions_tool_free,
+    Assessment, DaemonGuardianFailure, GuardianReviewRequest, UtilityInferenceFailure,
+    assessment_json_schema, reviewer_instructions_tool_free,
 };
 
 const QUOTA_FRESH_SECONDS: u64 = 20 * 60;
@@ -87,17 +88,39 @@ pub struct UtilityLlmRuntime {
     backend_cache: tokio::sync::Mutex<BTreeMap<String, CachedBackend>>,
 }
 
-/// No enabled profile offers a direct model with local credentials.
-#[derive(Debug)]
-struct NoUtilityModel(String);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UtilityResolveKind {
+    NoUtilityModel,
+    QuotaExhausted,
+    NoSupportedModel,
+    DiscoveryFailed,
+    SelectionFailed,
+    Cancelled,
+}
 
-impl std::fmt::Display for NoUtilityModel {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+#[derive(Debug)]
+struct UtilityResolveError {
+    kind: UtilityResolveKind,
+    detail: String,
+}
+
+impl UtilityResolveError {
+    fn cancelled() -> anyhow::Error {
+        Self {
+            kind: UtilityResolveKind::Cancelled,
+            detail: "utility-model discovery cancelled".into(),
+        }
+        .into()
     }
 }
 
-impl std::error::Error for NoUtilityModel {}
+impl std::fmt::Display for UtilityResolveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for UtilityResolveError {}
 
 impl UtilityLlmRuntime {
     pub fn shared() -> &'static Self {
@@ -116,21 +139,30 @@ impl UtilityLlmRuntime {
             .filter(|(_, profile)| profile_serves_as_utility(profile))
             .collect::<Vec<_>>();
         if cancel.is_cancelled() {
-            bail!("utility-model discovery cancelled")
+            return Err(UtilityResolveError::cancelled());
         }
         if supported.is_empty() {
-            return Err(NoUtilityModel(
-                "no enabled utility model is configured; enable or add a direct utility profile"
-                    .into(),
-            )
+            return Err(UtilityResolveError {
+                kind: UtilityResolveKind::NoUtilityModel,
+                detail:
+                    "no enabled utility model is configured; enable or add a direct utility profile"
+                        .into(),
+            }
             .into());
         }
         let Some(quotas) = cancel.run_until_cancelled(self.quotas(&supported)).await else {
-            bail!("utility-model discovery cancelled");
+            return Err(UtilityResolveError::cancelled());
         };
         let mut candidates = Vec::new();
         let mut reasons = Vec::new();
-        let mut missing_credentials = Vec::new();
+        let mut failure: Option<UtilityResolveKind> = None;
+        let mut record_failure = |kind: UtilityResolveKind| {
+            failure = Some(match failure {
+                None => kind,
+                Some(existing) if existing == kind => existing,
+                Some(_) => UtilityResolveKind::SelectionFailed,
+            });
+        };
         for (profile_id, profile) in supported {
             let Some(family) = utility_family(profile) else {
                 continue;
@@ -139,15 +171,17 @@ impl UtilityLlmRuntime {
                 .run_until_cancelled(self.backend(profile_id, profile))
                 .await
             else {
-                bail!("utility-model discovery cancelled");
+                return Err(UtilityResolveError::cancelled());
             };
             let backend = match backend {
                 Ok(Some(backend)) => backend,
                 Ok(None) => {
-                    missing_credentials.push(format!("{profile_id}: credentials are unavailable"));
+                    record_failure(UtilityResolveKind::NoUtilityModel);
+                    reasons.push(format!("{profile_id}: credentials are unavailable"));
                     continue;
                 }
                 Err(error) => {
+                    record_failure(UtilityResolveKind::SelectionFailed);
                     reasons.push(format!("{profile_id}: {error}"));
                     continue;
                 }
@@ -159,6 +193,7 @@ impl UtilityLlmRuntime {
             {
                 Some(value) => value,
                 None => {
+                    record_failure(UtilityResolveKind::QuotaExhausted);
                     reasons.push(format!("{profile_id}: quota is exhausted"));
                     continue;
                 }
@@ -167,16 +202,18 @@ impl UtilityLlmRuntime {
                 .run_until_cancelled(backend.list_model_metadata())
                 .await
             else {
-                bail!("utility-model discovery cancelled");
+                return Err(UtilityResolveError::cancelled());
             };
             let catalog = match catalog {
                 Ok(catalog) => catalog,
                 Err(error) => {
+                    record_failure(UtilityResolveKind::DiscoveryFailed);
                     reasons.push(format!("{profile_id}: model discovery failed: {error}"));
                     continue;
                 }
             };
             let Some(metadata) = newest_family_model(family, &catalog) else {
+                record_failure(UtilityResolveKind::NoSupportedModel);
                 reasons.push(format!(
                     "{profile_id}: no matching utility model was discovered"
                 ));
@@ -201,15 +238,11 @@ impl UtilityLlmRuntime {
         }
         candidates.sort_by(candidate_order);
         if candidates.is_empty() {
-            if reasons.is_empty() && !missing_credentials.is_empty() {
-                return Err(NoUtilityModel(format!(
-                    "no usable utility model: {}",
-                    missing_credentials.join("; ")
-                ))
-                .into());
+            return Err(UtilityResolveError {
+                kind: failure.unwrap_or(UtilityResolveKind::SelectionFailed),
+                detail: format!("no usable utility model: {}", reasons.join("; ")),
             }
-            reasons.extend(missing_credentials);
-            bail!("no usable utility model: {}", reasons.join("; "))
+            .into());
         }
         Ok(candidates)
     }
@@ -393,8 +426,27 @@ pub enum GuardianUtilityOutcome {
         reason: String,
     },
     Failed {
-        error: String,
+        error: DaemonGuardianFailure,
     },
+}
+
+fn guardian_selection_failure(error: anyhow::Error) -> GuardianUtilityOutcome {
+    use UtilityResolveKind::*;
+    let error = match error.downcast::<UtilityResolveError>() {
+        Ok(resolved) => match resolved.kind {
+            NoUtilityModel => {
+                return GuardianUtilityOutcome::NoUtilityModel {
+                    reason: resolved.detail,
+                };
+            }
+            QuotaExhausted => DaemonGuardianFailure::UtilityQuotaExhausted,
+            NoSupportedModel => DaemonGuardianFailure::UtilityNoSupportedModel,
+            DiscoveryFailed => DaemonGuardianFailure::UtilityDiscoveryFailed,
+            SelectionFailed | Cancelled => DaemonGuardianFailure::UtilitySelectionFailed,
+        },
+        Err(_) => DaemonGuardianFailure::UtilitySelectionFailed,
+    };
+    GuardianUtilityOutcome::Failed { error }
 }
 
 pub async fn review_guardian_with_utility(
@@ -405,16 +457,7 @@ pub async fn review_guardian_with_utility(
     let started = Instant::now();
     let candidates = match UtilityLlmRuntime::shared().resolve(config, &cancel).await {
         Ok(candidates) => candidates,
-        Err(error) => {
-            if let Some(unavailable) = error.downcast_ref::<NoUtilityModel>() {
-                return GuardianUtilityOutcome::NoUtilityModel {
-                    reason: unavailable.to_string(),
-                };
-            }
-            return GuardianUtilityOutcome::Failed {
-                error: format!("{error:#}"),
-            };
-        }
+        Err(error) => return guardian_selection_failure(error),
     };
     let (profile_id, model, output) = match infer_structured_with_failover(
         &candidates,
@@ -431,18 +474,24 @@ pub async fn review_guardian_with_utility(
             // Provider errors can include fragments of the prompt or reply.
             let kind = error
                 .downcast_ref::<UtilityRequestError>()
-                .map(|error| error.kind);
+                .map(|error| match error.kind {
+                    InferErrorKind::InvalidRequest => UtilityInferenceFailure::InvalidRequest,
+                    InferErrorKind::Cancelled => UtilityInferenceFailure::Cancelled,
+                    InferErrorKind::Authentication => UtilityInferenceFailure::Authentication,
+                    InferErrorKind::RateLimited => UtilityInferenceFailure::RateLimited,
+                    InferErrorKind::ContextLength => UtilityInferenceFailure::ContextLength,
+                    InferErrorKind::Transport => UtilityInferenceFailure::Transport,
+                    InferErrorKind::StructuredOutput => UtilityInferenceFailure::StructuredOutput,
+                    InferErrorKind::Provider => UtilityInferenceFailure::Provider,
+                });
             return GuardianUtilityOutcome::Failed {
-                error: kind.map_or_else(
-                    || "utility guardian inference failed".to_owned(),
-                    |kind| format!("utility guardian inference failed ({kind:?})"),
-                ),
+                error: DaemonGuardianFailure::UtilityInference(kind),
             };
         }
     };
     let Ok(mut assessment) = serde_json::from_value::<Assessment>(output) else {
         return GuardianUtilityOutcome::Failed {
-            error: "invalid guardian assessment".into(),
+            error: DaemonGuardianFailure::InvalidAssessment,
         };
     };
     assessment.rationale = assessment.rationale.trim().to_owned();
@@ -980,11 +1029,158 @@ mod tests {
             .resolve(&config, &CancellationToken::new())
             .await
             .unwrap_err();
-        assert!(error.is::<NoUtilityModel>(), "{error:#}");
+        assert_eq!(
+            error.downcast_ref::<UtilityResolveError>().unwrap().kind,
+            UtilityResolveKind::NoUtilityModel,
+        );
         assert!(
             error.to_string().contains("no enabled utility model"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn guardian_selection_classifies_quota_and_discovery_without_exposing_details() {
+        const CHILD: &str = "MJ_UTILITY_GUARDIAN_SELECTION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            mj_targets::test_isolation::IsolatedTest::new(mj_targets::test_isolation::test_name(
+                module_path!(),
+                "guardian_selection_classifies_quota_and_discovery_without_exposing_details",
+            ))
+            .env(CHILD, "1")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+
+        use anvil_client::llm_client::{LlmResponse, StreamChatRequest};
+        use futures::future::BoxFuture;
+
+        struct Backend {
+            discovery_failed: bool,
+        }
+
+        impl LlmBackend for Backend {
+            fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>>> {
+                Box::pin(async {
+                    if self.discovery_failed {
+                        Err(anyhow!("SECRET_DATA from model discovery"))
+                    } else {
+                        Ok(vec!["model-outside-supported-families".into()])
+                    }
+                })
+            }
+
+            fn stream_chat(&self, _: StreamChatRequest) -> BoxFuture<'_, Result<LlmResponse>> {
+                panic!("a failed selection must stop before inference")
+            }
+        }
+
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let runtime = UtilityLlmRuntime::default();
+        let mut config = Config::default();
+        config.profiles.clear();
+        for id in ["exhausted", "unsupported", "broken"] {
+            let profile = HarnessProfile::new(HarnessKind::Kimi, root.path().join(id));
+            runtime.backend_cache.lock().await.insert(
+                id.into(),
+                (
+                    profile.clone(),
+                    Arc::new(Backend {
+                        discovery_failed: id == "broken",
+                    }),
+                ),
+            );
+            config.profiles.insert(id.into(), profile);
+        }
+        config.profiles.insert(
+            "unauthenticated".into(),
+            HarnessProfile::new(HarnessKind::Kimi, root.path().join("unauthenticated")),
+        );
+
+        let report = ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            profile_id: "exhausted".into(),
+            harness: HarnessKind::Kimi,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(0),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(now_seconds() as i64 + 3600),
+            }],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: now_seconds(),
+            rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
+        };
+        let identity = quota_request("exhausted", &config.profiles["exhausted"]).cache_identity();
+        crate::database::save_quota_report(&identity, &report).unwrap();
+
+        for (ids, expected) in [
+            (
+                &["exhausted", "unsupported", "broken"][..],
+                Some(DaemonGuardianFailure::UtilitySelectionFailed),
+            ),
+            (
+                &["exhausted", "unauthenticated"][..],
+                Some(DaemonGuardianFailure::UtilitySelectionFailed),
+            ),
+            (&["unauthenticated"][..], None),
+            (
+                &["exhausted"][..],
+                Some(DaemonGuardianFailure::UtilityQuotaExhausted),
+            ),
+            (
+                &["unsupported"][..],
+                Some(DaemonGuardianFailure::UtilityNoSupportedModel),
+            ),
+            (
+                &["broken"][..],
+                Some(DaemonGuardianFailure::UtilityDiscoveryFailed),
+            ),
+        ] {
+            let mut config = config.clone();
+            config.profiles.retain(|id, _| ids.contains(&id.as_str()));
+            // Each resolve prunes the cache for disabled profiles.
+            let selection = UtilityLlmRuntime {
+                backend_cache: tokio::sync::Mutex::new(runtime.backend_cache.lock().await.clone()),
+            };
+            let error = selection
+                .resolve(&config, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            if ids.contains(&"broken") {
+                assert!(error.to_string().contains("SECRET_DATA"), "{error:#}");
+            }
+            let outcome = guardian_selection_failure(error);
+            let Some(expected) = expected else {
+                assert!(
+                    matches!(outcome, GuardianUtilityOutcome::NoUtilityModel { .. }),
+                    "expected ACP fallback for missing credentials alone, received {outcome:?}"
+                );
+                continue;
+            };
+            let GuardianUtilityOutcome::Failed { error } = outcome else {
+                panic!("expected a Guardian failure, received {outcome:?}");
+            };
+            assert_eq!(error, expected);
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                json!({
+                    "status": "failed",
+                    "error": expected.as_str(),
+                })
+            );
+        }
     }
 
     #[tokio::test]

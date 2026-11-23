@@ -12,7 +12,7 @@ use std::path::Path;
 /// permission to write a file, as a prompt-injected reviewer would. A reply
 /// of `<hang>` waits for the review to be cancelled, `<exit>` makes the
 /// reviewer process die mid-review, and `<hold>` before a reply holds it until
-/// the test writes `release`.
+/// the test writes `release`. A first reply of `<start-error>` rejects initialization.
 const SCRIPTED_HARNESS: &str = r#"
 import json, os, sys, time
 root, commands, replies = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3])
@@ -56,6 +56,9 @@ while True:
         if params.get('clientInfo', {}).get('title') == 'Mjolnir guardian':
             role = 'reviewer'
             record('reviewer_initialize', params)
+            if replies and replies[0] == '<start-error>':
+                send({'jsonrpc':'2.0','id':ident,'error':{'code':-32603,'message':'SECRET_DATA'}})
+                continue
         result = {'protocolVersion': 1, 'agentCapabilities': {}}
     elif method == 'session/new':
         session = 'main' if role == 'session' else 'review-%d' % len(recorded_lines('reviewer_session_new'))
@@ -74,6 +77,7 @@ while True:
             record('reviewer_tool_outcome', ask('reviewer-write', params['sessionId'], 'reviewer-call', 'Write', 'edit', {'path': '/tmp/pwned'}))
         reply = replies[reviews]
         if reply == '<exit>':
+            print('SECRET_DATA', file=sys.stderr, flush=True)
             sys.exit(1)
         if reply.startswith('<hold>'):
             while not os.path.exists(os.path.join(root, 'release')): time.sleep(0.01)
@@ -667,11 +671,50 @@ async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_detail
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{GuardianReviewOutcome, GuardianReviewResult};
 
+    let failures = [
+        ("its daemon review timed out", "the daemon review timed out"),
+        (
+            "could not load configuration: SECRET_DATA",
+            "could not load configuration",
+        ),
+        (
+            "could not read configuration: SECRET_DATA",
+            "the daemon configuration file is unreadable",
+        ),
+        (
+            "no usable utility model: SECRET_DATA",
+            "could not select a utility guardian model",
+        ),
+        (
+            "the daemon configuration has invalid settings",
+            "the daemon configuration has invalid settings",
+        ),
+        (
+            "all utility guardian models are out of quota",
+            "all utility guardian models are out of quota",
+        ),
+        (
+            "no supported utility guardian model was found",
+            "no supported utility guardian model was found",
+        ),
+        (
+            "utility guardian model discovery failed",
+            "utility guardian model discovery failed",
+        ),
+        (
+            "utility guardian inference failed (RateLimited)",
+            "utility guardian inference failed (RateLimited)",
+        ),
+        (
+            "utility guardian inference failed (Provider) SECRET_DATA",
+            "the daemon reviewer failed",
+        ),
+    ];
     let temp = tempfile::tempdir().unwrap();
     let endpoint = Arc::new(GuardianEndpoint::default());
     let (requests, mut events, runtime, _) = start_scripted_harness(
         temp.path(),
-        &["touch first", "touch second", "touch third"],
+        &failures.map(|_| "touch test"),
         &[],
         &[],
         Some(endpoint.clone()),
@@ -681,20 +724,6 @@ async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_detail
             spec.approval_choices = Default::default();
         },
     );
-    let failures = [
-        (
-            "utility guardian inference failed (RateLimited)",
-            "utility guardian inference failed (RateLimited)",
-        ),
-        (
-            "could not load configuration: SECRET_DATA",
-            "could not load configuration",
-        ),
-        (
-            "utility guardian inference failed (Provider) SECRET_DATA",
-            "the daemon reviewer failed",
-        ),
-    ];
     for (reason, expected) in failures {
         let request = wait_for_guardian_request(&endpoint).await;
         endpoint.complete(GuardianReviewResult {
@@ -740,6 +769,46 @@ async fn guardian_daemon_failure_keeps_the_category_and_redacts_sensitive_detail
         "{replies:?}"
     );
     runtime.abort();
+}
+
+#[tokio::test]
+async fn guardian_acp_failures_report_distinct_categories_without_bridge_output() {
+    for (replies, expected, starts, prompts) in [
+        (
+            ["<start-error>"; 3],
+            "the ACP reviewer failed to start",
+            1,
+            0,
+        ),
+        (["<exit>"; 3], "the ACP reviewer bridge disconnected", 3, 3),
+        (
+            ["SECRET_DATA without a verdict"; 3],
+            "the ACP reviewer exhausted its review attempts",
+            1,
+            3,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (_requests, mut events, runtime, _) =
+            start_scripted_kimi(temp.path(), &["touch test"], &replies, &[]);
+        let form = loop {
+            if let RuntimeEvent::ElicitationRequested { request } = next_event(&mut events).await {
+                break request;
+            }
+        };
+        assert!(
+            form.message.starts_with(&ask_person_preface(&format!(
+                "its review failed: {expected}"
+            ))),
+            "{}",
+            form.message
+        );
+        assert!(!form.message.contains("SECRET_DATA"), "{}", form.message);
+        assert_eq!(recorded(temp.path(), "reviewer_initialize").len(), starts);
+        assert_eq!(recorded(temp.path(), "reviewer_prompts").len(), prompts);
+        runtime.abort();
+        assert!(runtime.await.unwrap_err().is_cancelled());
+    }
 }
 
 #[tokio::test]

@@ -1585,8 +1585,7 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
 #[tokio::test]
 async fn guardian_actor_cascades_requests_added_after_attachment() {
     use mj_core::guardian::{
-        GUARDIAN_CONFIG_INVALID_TOML, GUARDIAN_CONFIG_NEEDS_UPGRADE, GUARDIAN_CONFIG_UNREADABLE,
-        GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
+        DaemonGuardianFailure, GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
         WOLF_STAGE1_ALLOW_THRESHOLD,
     };
 
@@ -1696,19 +1695,25 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         (
             "invalid-config",
             GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_CONFIG_INVALID_TOML.into(),
+                reason: DaemonGuardianFailure::ConfigInvalidToml.as_str().into(),
+            },
+        ),
+        (
+            "invalid-settings",
+            GuardianReviewOutcome::AskPerson {
+                reason: DaemonGuardianFailure::ConfigInvalidSchema.as_str().into(),
             },
         ),
         (
             "newer-config",
             GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_CONFIG_NEEDS_UPGRADE.into(),
+                reason: DaemonGuardianFailure::ConfigNeedsUpgrade.as_str().into(),
             },
         ),
         (
             "unreadable-config",
             GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_CONFIG_UNREADABLE.into(),
+                reason: DaemonGuardianFailure::ConfigUnreadable.as_str().into(),
             },
         ),
     ] {
@@ -1718,6 +1723,13 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
             "guardian-disabled" => guardian_off_config.save().unwrap(),
             "invalid-config" => {
                 mj_core::config::atomic_write(&config_path, b"invalid SECRET_DATA").unwrap();
+            }
+            "invalid-settings" => {
+                let config = format!(
+                    "version = {}\n[guardian]\nenabled = \"false\"\n",
+                    mj_core::config::CONFIG_VERSION
+                );
+                mj_core::config::atomic_write(&config_path, config.as_bytes()).unwrap();
             }
             "newer-config" => {
                 let config = format!("version = {}\n", mj_core::config::CONFIG_VERSION + 1);
@@ -2219,6 +2231,115 @@ fn relay_ack_race_peer(
         attachments
     });
     (duplex_relay_client(controller, LEASED_RELAY_SESSION), peer)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn wire_budget_queue_refusal_keeps_the_worker_connection() {
+    use mj_core::relay::{
+        RELAY_STATE_BYTE_BUDGET, RelayErrorCode, RelayObservation, RelaySnapshot,
+    };
+
+    const CHILD: &str = "MJ_TEST_WIRE_BUDGET_QUEUE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "wire_budget_queue_refusal_keeps_the_worker_connection",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap(),
+    ));
+    let target = leased_relay_target(root.path());
+    let (client, peer) = relay_ack_race_peer(relay.clone(), None);
+    let mut connection = Some(
+        StandaloneSession::connect_inner(&target, Some(client), None)
+            .await
+            .unwrap(),
+    );
+    let gate = Arc::default();
+    let queued_id = "q".repeat(128);
+    let refused_id = "r".repeat(128);
+    let command = RelayCommand::Prompt {
+        prompt: vec!["do the work".into()],
+    };
+    actor::submit_actor_command(&gate, &target, &mut connection, "active-prompt", &command)
+        .await
+        .unwrap();
+    actor::submit_actor_command(&gate, &target, &mut connection, &queued_id, &command)
+        .await
+        .unwrap();
+    let before = {
+        let mut relay = relay.lock().unwrap();
+        // Use two events so neither observation reaches the separate event
+        // budget and gets truncated before it can fill the operational state.
+        relay
+            .record_observation(RelayObservation::ConfigurationUpdated {
+                key: "wire-budget-padding".into(),
+                value: "z".repeat(32 * 1024),
+            })
+            .unwrap();
+        let path = root.path().join(mj_core::relay::RELAY_STATE_FILE);
+        let mut snapshot: RelaySnapshot =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let key = "wire-budget-fixture".to_owned();
+        snapshot.config.insert(key.clone(), String::new());
+        let used = serde_json::to_vec(&snapshot.operational_state())
+            .unwrap()
+            .len();
+        relay
+            .record_observation(RelayObservation::ConfigurationUpdated {
+                key,
+                value: "z".repeat(RELAY_STATE_BYTE_BUDGET - used - 80),
+            })
+            .unwrap();
+        relay.latest_ordinal()
+    };
+
+    let error = actor::submit_actor_command(&gate, &target, &mut connection, &refused_id, &command)
+        .await
+        .unwrap_err();
+    let failure = actor::submit_failure(&error);
+    assert_eq!(failure.code, Some(RelayErrorCode::InvalidState));
+    assert!(failure.refused);
+    assert!(!failure.unconfirmed);
+    assert_eq!(
+        failure.message,
+        "The session queue is full. Wait for queued prompts to run or remove queued input, then try again."
+    );
+    assert!(connection.is_some());
+    {
+        let relay = relay.lock().unwrap();
+        assert_eq!(relay.latest_ordinal(), before);
+        let queue = relay.operational_state().queued_prompts;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].command_id, queued_id);
+    }
+
+    actor::submit_actor_command(
+        &gate,
+        &target,
+        &mut connection,
+        "remove-old-prompt",
+        &RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: queued_id,
+        },
+    )
+    .await
+    .unwrap();
+    actor::submit_actor_command(&gate, &target, &mut connection, &refused_id, &command)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay.lock().unwrap().operational_state().queued_prompts[0].command_id,
+        refused_id
+    );
+    drop(connection);
+    assert_eq!(peer.await.unwrap().len(), 1);
 }
 
 #[cfg(unix)]

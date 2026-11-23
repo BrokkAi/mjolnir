@@ -26,19 +26,20 @@ pub(super) fn managed_resource_identity_args(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PodmanPreflight {
+pub struct ContainerPreflight {
     pub version: String,
     /// Non-fatal host configuration problems that can make sessions fragile.
-    pub warnings: Vec<PodmanPreflightWarning>,
+    pub warnings: Vec<ContainerPreflightWarning>,
+    pub cgroups: CgroupCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PodmanPreflightWarning {
+pub struct ContainerPreflightWarning {
     pub detail: String,
     pub remediation: String,
 }
 
-impl PodmanPreflightWarning {
+impl ContainerPreflightWarning {
     pub fn notice(&self) -> String {
         format!("{} {}", self.detail, self.remediation)
     }
@@ -90,32 +91,79 @@ impl PodmanHost<'_> {
 ///
 /// This intentionally never pulls an image. Image availability is verified by
 /// `mj doctor --smoke` and by the subsequent target creation command.
-pub fn verify_local_podman(executor: &impl CommandExecutor) -> Result<PodmanPreflight> {
+pub fn verify_local_podman(executor: &impl CommandExecutor) -> Result<ContainerPreflight> {
     verify_podman(PodmanHost::Local, executor)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DockerPreflight {
-    pub version: String,
 }
 
 /// Verify that the Docker CLI can reach a Linux Docker daemon.
 ///
 /// Image and OverlayFS support are exercised by `mj doctor --smoke`;
 /// this fast probe runs before every launch and never pulls an image.
-pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPreflight> {
+pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<ContainerPreflight> {
     verify_docker(None, executor)
 }
 
-static APPLE_CONTAINER_ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static LOCAL_APPLE_CONTAINER_ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The single gate shared by startup, launch readiness, and image refresh.
-#[cfg(test)]
-pub(super) fn apple_container_runtime_gate() -> &'static std::sync::Mutex<()> {
-    &APPLE_CONTAINER_ENSURE
+type RuntimeGate = std::sync::Mutex<()>;
+type SshRuntimeGates = std::collections::HashMap<String, std::sync::Weak<RuntimeGate>>;
+
+fn ssh_apple_container_runtime_gate(destination: &str) -> std::sync::Arc<RuntimeGate> {
+    static GATES: std::sync::LazyLock<std::sync::Mutex<SshRuntimeGates>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut gates = GATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    gates.retain(|_, gate| gate.strong_count() != 0);
+    if let Some(gate) = gates.get(destination).and_then(std::sync::Weak::upgrade) {
+        return gate;
+    }
+    let gate = std::sync::Arc::new(RuntimeGate::default());
+    gates.insert(destination.to_owned(), std::sync::Arc::downgrade(&gate));
+    gate
 }
 
-/// What ensuring Apple's local runtime did.
+#[cfg(test)]
+pub(super) fn apple_container_runtime_gate() -> &'static RuntimeGate {
+    &LOCAL_APPLE_CONTAINER_ENSURE
+}
+
+/// Build the same probe locally or on the SSH host.
+fn apple_container_command(
+    ssh: Option<&SshTarget>,
+    args: &[&str],
+    purpose: &'static str,
+) -> CommandSpec {
+    match ssh {
+        Some(ssh) => ssh_validation_command(
+            ssh,
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+            purpose,
+        ),
+        None => CommandSpec::new(args[0], args[1..].iter().copied()).purpose(purpose),
+    }
+    .stage(ProvisionStage::Provisioning)
+}
+
+fn run_apple_container_command(
+    ssh: Option<&SshTarget>,
+    args: &[&str],
+    purpose: &'static str,
+    executor: &impl CommandExecutor,
+) -> Result<CommandOutput> {
+    let output = executor.execute(&apple_container_command(ssh, args, purpose))?;
+    if let Some(ssh) = ssh {
+        ensure!(
+            output.status != 255,
+            "SSH failed on {} while trying to {purpose}: {}",
+            ssh.destination,
+            apple_container_output(&output)
+        );
+    }
+    Ok(output)
+}
+
+/// What ensuring Apple's runtime did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppleContainerRuntime {
     /// The service was already answering health checks.
@@ -124,26 +172,25 @@ pub enum AppleContainerRuntime {
     Started,
 }
 
-/// Ensure Apple's local container service is running.
-///
-/// Several launch surfaces can ask at once. One process-wide gate makes the
-/// check and start one decision, so two callers cannot both try to register
-/// the same launchd service. `--disable-kernel-install` keeps this unattended
-/// path from prompting for, or silently downloading, Apple's default kernel;
-/// the manual command documented for first-time setup remains interactive.
+/// Serialize the check and start per host so concurrent launches cannot
+/// both register the same service. The start flag installs the default
+/// kernel if needed without prompting.
 pub fn ensure_apple_container_runtime(
+    ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
 ) -> Result<AppleContainerRuntime> {
-    // A launch can own this gate through the unbounded ProcessExecutor used by
-    // the options API. Daemon shutdown joins the cancellable startup and image
-    // refresh callers, so they must be able to leave while waiting for it.
+    let remote_gate = ssh.map(|ssh| ssh_apple_container_runtime_gate(&ssh.destination));
+    let gate = remote_gate
+        .as_deref()
+        .unwrap_or(&LOCAL_APPLE_CONTAINER_ENSURE);
+    // Daemon shutdown can cancel a waiter even when a launch owns the gate.
     let mut backoff = Duration::from_millis(1);
     let _ensuring = loop {
         ensure!(
             !executor.cancellation_requested(),
             "operation cancelled while waiting to check Apple container runtime"
         );
-        match APPLE_CONTAINER_ENSURE.try_lock() {
+        match gate.try_lock() {
             Ok(guard) => break guard,
             Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -157,14 +204,20 @@ pub fn ensure_apple_container_runtime(
         "operation cancelled while checking Apple container runtime"
     );
 
-    if let AppleContainerStatus::Running = apple_container_runtime_status(executor)? {
-        return Ok(AppleContainerRuntime::Running);
+    match apple_container_runtime_status(ssh, executor)? {
+        AppleContainerStatus::Running => return Ok(AppleContainerRuntime::Running),
+        AppleContainerStatus::Broken { status, detail } => {
+            bail!("container system status failed with status {status}: {detail}");
+        }
+        AppleContainerStatus::Stopped { .. } => {}
     }
 
-    let start = CommandSpec::new("container", ["system", "start", "--disable-kernel-install"])
-        .purpose("start Apple container runtime")
-        .stage(ProvisionStage::Provisioning);
-    let output = executor.execute(&start)?;
+    let output = run_apple_container_command(
+        ssh,
+        &["container", "system", "start", "--enable-kernel-install"],
+        "start Apple container runtime",
+        executor,
+    )?;
     ensure!(
         output.status == 0,
         "container system start failed with status {}: {}",
@@ -172,67 +225,72 @@ pub fn ensure_apple_container_runtime(
         apple_container_output(&output)
     );
 
-    match apple_container_runtime_status(executor)? {
+    match apple_container_runtime_status(ssh, executor)? {
         AppleContainerStatus::Running => Ok(AppleContainerRuntime::Started),
-        AppleContainerStatus::Stopped { status, detail } => {
-            bail!("container system status still failed after start with status {status}: {detail}")
+        AppleContainerStatus::Stopped { detail } => {
+            bail!("Apple container service is still stopped after start: {detail}")
+        }
+        AppleContainerStatus::Broken { status, detail } => {
+            bail!("container system status failed after start with status {status}: {detail}")
         }
     }
 }
 
-/// What `container system status` says about Apple's local container service.
+/// What `container system status --format json` reports about the service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppleContainerStatus {
-    /// The command exited with status 0.
     Running,
-    /// The command ran and exited nonzero, which is how it reports a stopped
-    /// service. `detail` is whatever it printed.
-    Stopped { status: i32, detail: String },
+    Stopped { detail: String },
+    Broken { status: i32, detail: String },
 }
 
-/// Ask whether Apple's local container service is running, without changing
-/// anything.
-///
-/// This is the one owner of that question. Callers that only need to know
-/// (the launch options and the image refresher) use it alone; only
-/// `ensure_apple_container_runtime` goes on to start the service. An `Err`
-/// means the answer is unknown: the command could not run, timed out, or was
-/// cancelled.
+/// Observe the service without changing it. An error means the service
+/// could not be queried, for example because SSH failed or the probe timed out.
 pub fn apple_container_runtime_status(
+    ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
 ) -> Result<AppleContainerStatus> {
-    let status = CommandSpec::new(
-        "container",
-        APPLE_CONTAINER_STATUS_PROBE[1..].iter().copied(),
-    )
-    .purpose("check Apple container runtime")
-    .stage(ProvisionStage::Provisioning);
-    let output = executor.execute(&status)?;
-    Ok(if output.status == 0 {
-        AppleContainerStatus::Running
-    } else {
-        AppleContainerStatus::Stopped {
-            status: output.status,
-            detail: apple_container_output(&output),
+    let output = run_apple_container_command(
+        ssh,
+        &APPLE_CONTAINER_STATUS_PROBE,
+        "check Apple container runtime",
+        executor,
+    )?;
+    let report = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    let state = report.as_ref().and_then(|report| report["status"].as_str());
+    Ok(match (output.status, state) {
+        (0, Some("running")) => AppleContainerStatus::Running,
+        (status, Some("unregistered" | "stopped")) if status != 0 => {
+            AppleContainerStatus::Stopped {
+                detail: apple_container_output(&output),
+            }
         }
+        (status, _) => AppleContainerStatus::Broken {
+            status,
+            detail: apple_container_output(&output),
+        },
     })
 }
 
 fn apple_container_output(output: &CommandOutput) -> String {
-    [
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim(),
-    ]
-    .into_iter()
-    .filter(|message| !message.is_empty())
-    .collect::<Vec<_>>()
-    .join("\n")
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if detail.is_empty() {
+        format!("{stdout}{stderr}")
+    } else {
+        detail
+    }
 }
 
 pub fn verify_ssh_docker(
     ssh: &SshTarget,
     executor: &impl CommandExecutor,
-) -> Result<DockerPreflight> {
+) -> Result<ContainerPreflight> {
     validate_ssh(ssh)?;
     verify_docker(Some(ssh), executor).with_context(|| {
         format!(
@@ -247,118 +305,190 @@ pub fn verify_ssh_docker(
 pub const PLATFORM_PROBE: [&str; 2] = ["uname", "-sm"];
 pub const APPLE_CONTAINER_MACOS_PROBE: [&str; 2] = ["sw_vers", "-productVersion"];
 pub const APPLE_CONTAINER_VERSION_PROBE: [&str; 2] = ["container", "--version"];
-pub const APPLE_CONTAINER_STATUS_PROBE: [&str; 3] = ["container", "system", "status"];
+pub const APPLE_CONTAINER_STATUS_PROBE: [&str; 5] =
+    ["container", "system", "status", "--format", "json"];
 
-/// What a reachable Apple container host reported about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppleContainerPreflight {
-    /// The macOS release, as `sw_vers -productVersion` prints it.
-    pub macos_version: String,
-    /// What `container --version` prints, when the CLI answers it.
-    pub version: String,
+pub enum ApplePlatform {
+    Linux,
+    Macos {
+        architecture: String,
+        major_version: u32,
+    },
+    Other(String),
 }
 
-/// Verify that an SSH host can run Apple containers.
-///
-/// Apple's `container` CLI drives a per-host VM disk image, so a session's
-/// workspace lives on the SSH host exactly as a local one lives on this Mac.
-/// There is no daemon socket to reach over a tunnel, which is why this target
-/// exists as its own kind instead of a tunnel to a local runtime.
-///
-/// Platform support comes first: a Linux host has no `container` command and
-/// no reason to be told to install one.
-pub fn verify_ssh_apple_container(
+pub fn current_apple_platform(executor: &impl CommandExecutor) -> ApplePlatform {
+    if cfg!(target_os = "linux") {
+        return ApplePlatform::Linux;
+    }
+    if !cfg!(target_os = "macos") {
+        return ApplePlatform::Other(std::env::consts::OS.into());
+    }
+    let major_version = executor
+        .execute(&apple_container_command(
+            None,
+            &APPLE_CONTAINER_MACOS_PROBE,
+            "detect macOS version",
+        ))
+        .ok()
+        .filter(|output| output.status == 0)
+        .and_then(|output| macos_major_version(&output.stdout))
+        .unwrap_or(0);
+    ApplePlatform::Macos {
+        architecture: std::env::consts::ARCH.into(),
+        major_version,
+    }
+}
+
+fn macos_major_version(output: &[u8]) -> Option<u32> {
+    std::str::from_utf8(output)
+        .ok()?
+        .trim()
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppleContainerObservation {
+    UnsupportedPlatform { detail: String },
+    NotInstalled { detail: String },
+    Running { version: String },
+    Stopped,
+    Broken { status: i32, detail: String },
+}
+
+pub fn observe_apple_container(
+    platform: &ApplePlatform,
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerObservation> {
+    observe_apple_container_on_host(platform, None, executor)
+}
+
+pub fn observe_ssh_apple_container(
     ssh: &SshTarget,
     executor: &impl CommandExecutor,
-) -> Result<AppleContainerPreflight> {
+) -> Result<AppleContainerObservation> {
     validate_ssh(ssh)?;
-    let destination = &ssh.destination;
-    let probe = |args: [&str; 2], purpose: &'static str| {
-        ssh_validation_command(ssh, vec![args[0].to_owned(), args[1].to_owned()], purpose)
-            .stage(ProvisionStage::Provisioning)
-    };
-    let reported = |command: &CommandSpec| -> Result<String> {
-        let output = executor.execute(command).with_context(|| {
-            format!(
-                "Apple container preflight on {destination} could not run `{}`",
-                command.purpose
-            )
-        })?;
-        ensure!(
-            output.status == 0,
-            "Apple container preflight failed on {destination}: `{}` exited with status {}: {}",
-            command.purpose,
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    };
-
-    let uname = reported(&probe(
-        PLATFORM_PROBE,
+    let output = run_apple_container_command(
+        Some(ssh),
+        &PLATFORM_PROBE,
         "detect the Apple container host platform",
-    ))?;
-    let platform = TargetPlatform::parse(&uname).with_context(|| {
-        format!("Apple container preflight failed on {destination}: the host reported {uname:?}")
-    })?;
-    ensure!(
-        platform.os == TargetOs::Darwin,
-        "Apple container preflight failed on {destination}: Apple container runs only on macOS, and this host reports {:?}.",
-        uname
-    );
-    ensure!(
-        platform.architecture == "aarch64",
-        "Apple container preflight failed on {destination}: Apple container requires Apple silicon, and this host reports {uname:?}."
-    );
-
-    let macos_version = reported(&probe(
-        APPLE_CONTAINER_MACOS_PROBE,
-        "detect the remote macOS release",
-    ))?;
-    let major: u32 = macos_version
-        .split('.')
-        .next()
-        .and_then(|major| major.parse().ok())
-        .with_context(|| {
-            format!(
-                "Apple container preflight failed on {destination}: `sw_vers -productVersion` printed {macos_version:?}"
-            )
-        })?;
-    ensure!(
-        major >= APPLE_CONTAINER_MINIMUM_MACOS,
-        "Apple container preflight failed on {destination}: Apple container requires macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and this host runs {macos_version}."
-    );
-
-    let version = reported(&probe(
-        APPLE_CONTAINER_VERSION_PROBE,
-        "check the remote Apple container installation",
-    ))?;
-    // `container system status` exits nonzero while the daemon is stopped, so
-    // it is checked for its status rather than its words.
-    let status = ssh_validation_command(
-        ssh,
-        APPLE_CONTAINER_STATUS_PROBE.map(str::to_owned).to_vec(),
-        "check the remote Apple container daemon",
-    )
-    .stage(ProvisionStage::Provisioning);
-    let output = executor.execute(&status).with_context(|| {
-        format!("Apple container preflight on {destination} could not query the daemon")
-    })?;
+        executor,
+    )?;
     ensure!(
         output.status == 0,
-        "Apple container preflight failed on {destination}: the Apple container daemon is not running ({}). Start it there with `container system start`.",
-        [
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ]
-        .into_iter()
-        .filter(|message| !message.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+        "uname -sm failed with status {}: {}",
+        output.status,
+        apple_container_output(&output)
     );
-    Ok(AppleContainerPreflight {
-        macos_version,
-        version,
+    let uname = String::from_utf8_lossy(&output.stdout);
+    match TargetPlatform::parse(&uname) {
+        Ok(platform) => observe_ssh_apple_container_on_platform(ssh, platform, executor),
+        Err(error) => Ok(AppleContainerObservation::UnsupportedPlatform {
+            detail: format!("{} reported {:?}: {error}", ssh.destination, uname.trim()),
+        }),
+    }
+}
+
+/// Observe an SSH host whose platform the caller has already probed.
+pub fn observe_ssh_apple_container_on_platform(
+    ssh: &SshTarget,
+    platform: TargetPlatform,
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerObservation> {
+    let platform = match platform.os {
+        TargetOs::Linux => ApplePlatform::Linux,
+        TargetOs::Darwin => {
+            let major_version = if platform.architecture == "aarch64" {
+                let output = run_apple_container_command(
+                    Some(ssh),
+                    &APPLE_CONTAINER_MACOS_PROBE,
+                    "detect the remote macOS release",
+                    executor,
+                )?;
+                ensure!(
+                    output.status == 0,
+                    "sw_vers failed with status {}: {}",
+                    output.status,
+                    apple_container_output(&output)
+                );
+                macos_major_version(&output.stdout).with_context(|| {
+                    format!(
+                        "sw_vers printed an invalid macOS release: {}",
+                        apple_container_output(&output)
+                    )
+                })?
+            } else {
+                0
+            };
+            ApplePlatform::Macos {
+                architecture: platform.architecture.to_owned(),
+                major_version,
+            }
+        }
+    };
+    observe_apple_container_on_host(&platform, Some(ssh), executor)
+}
+
+fn observe_apple_container_on_host(
+    platform: &ApplePlatform,
+    ssh: Option<&SshTarget>,
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerObservation> {
+    use AppleContainerObservation as Observation;
+    let unsupported = match platform {
+        ApplePlatform::Linux => Some("macOS only".into()),
+        ApplePlatform::Other(current) => Some(format!("macOS only (current platform: {current})")),
+        ApplePlatform::Macos { architecture, .. }
+            if normalize_architecture(architecture).ok() != Some("aarch64") =>
+        {
+            Some("Apple container requires Apple silicon; Intel Macs are unsupported.".into())
+        }
+        ApplePlatform::Macos { major_version, .. }
+            if *major_version < APPLE_CONTAINER_MINIMUM_MACOS =>
+        {
+            Some(format!(
+                "Apple container requires macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer (found {major_version})."
+            ))
+        }
+        ApplePlatform::Macos { .. } => None,
+    };
+    if let Some(detail) = unsupported {
+        return Ok(Observation::UnsupportedPlatform { detail });
+    }
+
+    let version = match run_apple_container_command(
+        ssh,
+        &APPLE_CONTAINER_VERSION_PROBE,
+        "check Apple container installation",
+        executor,
+    ) {
+        Err(error) if ssh.is_none() && crate::command_checks::is_missing_command(&error) => {
+            return Ok(Observation::NotInstalled {
+                detail: error.root_cause().to_string(),
+            });
+        }
+        Err(error) => return Err(error),
+        Ok(output) if ssh.is_some() && output.status == 127 => {
+            return Ok(Observation::NotInstalled {
+                detail: apple_container_output(&output),
+            });
+        }
+        Ok(output) if output.status != 0 => {
+            return Ok(Observation::Broken {
+                status: output.status,
+                detail: apple_container_output(&output),
+            });
+        }
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    };
+    Ok(match apple_container_runtime_status(ssh, executor)? {
+        AppleContainerStatus::Running => Observation::Running { version },
+        AppleContainerStatus::Stopped { .. } => Observation::Stopped,
+        AppleContainerStatus::Broken { status, detail } => Observation::Broken { status, detail },
     })
 }
 
@@ -502,14 +632,14 @@ impl std::fmt::Display for DockerUnavailable {
                     "Docker is installed, but its daemon is not running."
                 )?;
                 if !reported.is_empty() {
-                    write!(formatter, " `docker version` said: {reported}")?;
+                    write!(formatter, " `docker info` said: {reported}")?;
                 }
                 Ok(())
             }
             Self::NotAnswering { status, reported } => {
                 write!(
                     formatter,
-                    "Docker did not answer its check on this host: `docker version` exited with status {status}"
+                    "Docker did not answer its check on this host: `docker info` exited with status {status}"
                 )?;
                 if !reported.is_empty() {
                     write!(formatter, ": {reported}")?;
@@ -541,20 +671,15 @@ fn is_missing_program(error: &anyhow::Error) -> bool {
 }
 
 /// The command the Docker check runs: it answers only when a daemon does.
-pub const DOCKER_SERVER_VERSION: [&str; 4] = [
-    "docker",
-    "version",
-    "--format",
-    "{{.Server.Version}} {{.Server.Os}}",
-];
+pub const DOCKER_SERVER_INFO: [&str; 4] = ["docker", "info", "--format", "{{json .}}"];
 
 pub(super) fn verify_docker(
     ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
-) -> Result<DockerPreflight> {
+) -> Result<ContainerPreflight> {
     let command = CommandSpec::new(
-        DOCKER_SERVER_VERSION[0],
-        DOCKER_SERVER_VERSION[1..].iter().copied(),
+        DOCKER_SERVER_INFO[0],
+        DOCKER_SERVER_INFO[1..].iter().copied(),
     )
     .purpose("check Docker daemon")
     .stage(ProvisionStage::Provisioning);
@@ -590,21 +715,42 @@ pub(super) fn verify_docker(
             return Err(problem.into());
         }
         bail!(
-            "Docker preflight failed: `docker version` exited with status {}: {reported}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
+            "Docker preflight failed: `docker info` exited with status {}: {reported}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
             output.status
         );
     }
-    let reported = String::from_utf8_lossy(&output.stdout);
-    let mut fields = reported.split_whitespace();
-    let version = fields.next().unwrap_or_default();
-    let os = fields.next().unwrap_or_default();
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("Docker preflight failed: `docker info` returned unparsable JSON")?;
+    let version = info["ServerVersion"].as_str().unwrap_or_default();
     ensure!(
-        !version.is_empty() && os == "linux",
-        "Docker preflight failed: expected a Linux Docker daemon, got {:?}. See {DOCKER_DOCUMENTATION_URL}.",
-        reported.trim()
+        !version.is_empty() && info["OSType"].as_str() == Some("linux"),
+        "Docker preflight failed: expected a Linux Docker daemon, got version {version:?} and OS {}. See {DOCKER_DOCUMENTATION_URL}.",
+        info["OSType"]
     );
-    Ok(DockerPreflight {
+    let no_driver = info["CgroupDriver"].as_str() == Some("none");
+    let rootless = no_driver
+        || info["SecurityOptions"].as_array().is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option.as_str() == Some("name=rootless"))
+        });
+    let cgroup_version = info["CgroupVersion"].as_str();
+    let mut cgroups = CgroupCapabilities::default();
+    if rootless && (cgroup_version == Some("2") || no_driver) {
+        let unsupported = |field: &str| info[field].as_bool() == Some(false);
+        if unsupported("CpuCfsQuota") || unsupported("CpuCfsPeriod") {
+            cgroups.unenforceable_limits.push(CgroupLimit::Cpu);
+        }
+        if unsupported("MemoryLimit") {
+            cgroups.unenforceable_limits.push(CgroupLimit::Memory);
+        }
+        cgroups.needs_cgroup_v2 = cgroup_version == Some("1");
+    }
+    let warnings = cgroups.warning("Docker", ssh).into_iter().collect();
+    Ok(ContainerPreflight {
         version: version.to_owned(),
+        warnings,
+        cgroups,
     })
 }
 
@@ -615,7 +761,7 @@ pub(super) fn verify_docker(
 pub fn verify_ssh_podman(
     ssh: &SshTarget,
     executor: &impl CommandExecutor,
-) -> Result<PodmanPreflight> {
+) -> Result<ContainerPreflight> {
     let host = PodmanHost::Ssh(ssh);
     validate_ssh(ssh).map_err(|error| {
         anyhow::anyhow!(
@@ -806,7 +952,7 @@ impl PodmanPostcondition {
 pub(super) fn verify_podman(
     host: PodmanHost<'_>,
     executor: &impl CommandExecutor,
-) -> Result<PodmanPreflight> {
+) -> Result<ContainerPreflight> {
     verify_podman_probes(host, cfg!(target_os = "macos"), |probe| {
         execute_podman_probe(executor, host, probe)
     })
@@ -821,7 +967,7 @@ pub(super) fn verify_podman_probes(
     host: PodmanHost<'_>,
     macos_host: bool,
     probe_output: impl Fn(PodmanProbe) -> Result<CommandOutput>,
-) -> Result<PodmanPreflight> {
+) -> Result<ContainerPreflight> {
     let version = probe_output(PodmanProbe::Version)?;
     let version = parse_podman_version(host, &version.stdout)?;
 
@@ -873,20 +1019,23 @@ pub(super) fn verify_podman_probes(
     }
 
     let mut warnings = Vec::new();
-    if !info.unenforceable_limits.is_empty() {
-        warnings.push(PodmanPreflightWarning {
-            detail: unenforceable_limits_detail(&info.unenforceable_limits),
-            remediation: format!(
-                "{}{}",
-                host.remediation_scope(),
-                CGROUP_DELEGATION_REMEDIATION
-            ),
-        });
-    }
-    Ok(PodmanPreflight { version, warnings })
+    let cgroups = CgroupCapabilities {
+        unenforceable_limits: info.unenforceable_limits,
+        ..Default::default()
+    };
+    let ssh = match host {
+        PodmanHost::Local => None,
+        PodmanHost::Ssh(ssh) => Some(ssh),
+    };
+    warnings.extend(cgroups.warning("Podman", ssh));
+    Ok(ContainerPreflight {
+        version,
+        warnings,
+        cgroups,
+    })
 }
 
-/// A session container limit that rootless Podman applies through a cgroup v2
+/// A session container limit that a rootless engine applies through a cgroup v2
 /// controller, which systemd must delegate to the user's session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CgroupLimit {
@@ -904,7 +1053,7 @@ impl CgroupLimit {
         }
     }
 
-    /// The `podman run` flag, as `backend_container` writes it, `--cpus=4`.
+    /// The run flag prefix used by `backend_container`.
     pub fn run_flag_prefix(self) -> &'static str {
         match self {
             Self::Cpu => "--cpus=",
@@ -917,22 +1066,83 @@ impl CgroupLimit {
 /// Podman runs with only the pids controller. runc then fails every container
 /// that sets `--cpus` or `--memory`, naming a missing `cpu.max` or
 /// `memory.swap.max`.
-pub const CGROUP_DELEGATION_REMEDIATION: &str = "To enforce them, have systemd delegate the controllers to user sessions: create `/etc/systemd/system/user@.service.d/80-delegate.conf` containing `[Service]` and `Delegate=pids memory cpu`, run `sudo systemctl daemon-reload`, then log in again.";
+const CGROUP_DELEGATION_REMEDIATION: &str = "Have systemd delegate the controllers to user sessions: create `/etc/systemd/system/user@.service.d/80-delegate.conf` containing `[Service]` and `Delegate=pids memory cpu`, run `sudo systemctl daemon-reload`, then log in again.";
 
-pub fn unenforceable_limits_detail(limits: &[CgroupLimit]) -> String {
-    let controllers = limits
-        .iter()
-        .map(|limit| limit.controller())
-        .collect::<Vec<_>>()
-        .join(" and ");
-    let noun = if limits.len() == 1 {
-        "controller"
-    } else {
-        "controllers"
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CgroupCapabilities {
+    pub unenforceable_limits: Vec<CgroupLimit>,
+    needs_cgroup_v2: bool,
+}
+
+impl CgroupCapabilities {
+    fn warning(&self, engine: &str, ssh: Option<&SshTarget>) -> Option<ContainerPreflightWarning> {
+        if self.unenforceable_limits.is_empty() {
+            return None;
+        }
+        let controllers = self
+            .unenforceable_limits
+            .iter()
+            .map(|limit| limit.controller())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let scope = ssh.map_or_else(String::new, |ssh| format!("On {}: ", ssh.destination));
+        let upgrade = if self.needs_cgroup_v2 {
+            "Enable cgroup v2, then configure delegation. "
+        } else {
+            ""
+        };
+        let restart = if engine == "Docker" {
+            " Restart the user Docker service after changing delegation."
+        } else {
+            ""
+        };
+        Some(ContainerPreflightWarning {
+            detail: format!(
+                "Rootless {engine} cannot enforce session {controllers} limits with its current cgroup configuration, so sessions start without them."
+            ),
+            remediation: format!("{scope}{upgrade}{CGROUP_DELEGATION_REMEDIATION}{restart}"),
+        })
+    }
+}
+
+/// Identify and report requested limits the destination engine cannot enforce.
+/// Reuse capabilities from launch preflight when the engine was just checked.
+pub fn unenforceable_container_limits(
+    host: &ImageHost,
+    preflight: Option<CgroupCapabilities>,
+    requested: impl Fn(CgroupLimit) -> bool,
+    executor: &impl CommandExecutor,
+) -> Vec<CgroupLimit> {
+    let (engine, ssh) = match host {
+        ImageHost::LocalPodman => ("Podman", None),
+        ImageHost::SshPodman(ssh) => ("Podman", Some(ssh)),
+        ImageHost::LocalDocker => ("Docker", None),
+        ImageHost::SshDocker(ssh) => ("Docker", Some(ssh)),
+        _ => return Vec::new(),
     };
-    format!(
-        "Rootless Podman cannot enforce session {controllers} limits because systemd does not delegate the {controllers} cgroup {noun} to this user, so sessions start without them."
-    )
+    if !CgroupLimit::ALL.into_iter().any(&requested) {
+        return Vec::new();
+    }
+    let mut cgroups = match preflight
+        .map_or_else(|| probe_container_unenforceable_limits(host, executor), Ok)
+    {
+        Ok(cgroups) => cgroups,
+        Err(error) => {
+            tracing::warn!(host = %host.label(), error = format!("{error:#}"), "could not read cgroup capabilities; keeping container limits");
+            executor.notify_notice(&format!(
+                "Could not read cgroup capabilities for {}, so the session keeps its CPU and memory limits: {error:#}",
+                host.label()
+            ));
+            return Vec::new();
+        }
+    };
+    cgroups
+        .unenforceable_limits
+        .retain(|limit| requested(*limit));
+    if let Some(warning) = cgroups.warning(engine, ssh) {
+        executor.notify_notice(&warning.notice());
+    }
+    cgroups.unenforceable_limits
 }
 
 /// The limits Podman cannot enforce, read from the `host` object of
@@ -963,14 +1173,17 @@ fn unenforceable_limits(host: &serde_json::Value) -> Vec<CgroupLimit> {
         .collect()
 }
 
-/// Ask the Podman that will run a container which limits it cannot enforce.
-pub fn probe_podman_unenforceable_limits(
-    ssh: Option<&SshTarget>,
+/// Ask the engine that will run the container which limits it can enforce.
+fn probe_container_unenforceable_limits(
+    host: &ImageHost,
     executor: &impl CommandExecutor,
-) -> Result<Vec<CgroupLimit>> {
-    let host = match ssh {
-        Some(ssh) => PodmanHost::Ssh(ssh),
-        None => PodmanHost::Local,
+) -> Result<CgroupCapabilities> {
+    let host = match host {
+        ImageHost::LocalPodman => PodmanHost::Local,
+        ImageHost::SshPodman(ssh) => PodmanHost::Ssh(ssh),
+        ImageHost::LocalDocker => return Ok(verify_docker(None, executor)?.cgroups),
+        ImageHost::SshDocker(ssh) => return Ok(verify_docker(Some(ssh), executor)?.cgroups),
+        _ => return Ok(CgroupCapabilities::default()),
     };
     let output = executor.execute(&host.command(
         &["podman", "info", "--format", "{{json .Host}}"],
@@ -985,7 +1198,10 @@ pub fn probe_podman_unenforceable_limits(
     }
     let host: serde_json::Value = serde_json::from_slice(&output.stdout)
         .context("`podman info --format '{{json .Host}}'` returned unparsable output")?;
-    Ok(unenforceable_limits(&host))
+    Ok(CgroupCapabilities {
+        unenforceable_limits: unenforceable_limits(&host),
+        ..Default::default()
+    })
 }
 
 /// The parts of `podman info` the preflight checks.
@@ -1086,7 +1302,7 @@ fn podman_info_failure(host: PodmanHost<'_>, observation: &str) -> anyhow::Error
 pub(super) fn ssh_podman_linger_warning(
     ssh: &SshTarget,
     output: Option<&CommandOutput>,
-) -> Option<PodmanPreflightWarning> {
+) -> Option<ContainerPreflightWarning> {
     let Some(output) = output else {
         return Some(linger_unavailable_warning(
             ssh,
@@ -1096,7 +1312,7 @@ pub(super) fn ssh_podman_linger_warning(
     let linger = String::from_utf8_lossy(&output.stdout);
     match (output.status, linger.trim().to_ascii_lowercase().as_str()) {
         (0, "yes") => None,
-        (0, "no") => Some(PodmanPreflightWarning {
+        (0, "no") => Some(ContainerPreflightWarning {
             detail: format!(
                 "Remote user lingering is disabled on {}; SSH-Podman sessions may be terminated when the last SSH connection closes.",
                 ssh.destination
@@ -1124,8 +1340,8 @@ pub(super) fn ssh_podman_linger_warning(
 pub(super) fn linger_unavailable_warning(
     ssh: &SshTarget,
     reason: String,
-) -> PodmanPreflightWarning {
-    PodmanPreflightWarning {
+) -> ContainerPreflightWarning {
+    ContainerPreflightWarning {
         detail: format!(
             "Remote user-manager durability check is unavailable on {} because {reason}. Mjolnir cannot verify whether rootless Podman sessions survive logout.",
             ssh.destination

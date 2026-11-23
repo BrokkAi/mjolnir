@@ -3182,10 +3182,10 @@ function containerAllocationFromDraft(draft, target, savedAllocation = undefined
   }
   const allocation = { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes };
   let error = '';
-  if (!editing && target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
+  if (!editing && target?.container_memory_hard_limit_reason && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
     error = !capacity || !capacity.complete
       ? 'a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
-      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
+      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. Mjolnir enforces this host's RAM budget because ${target.container_memory_hard_limit_reason}. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
   }
   const remaining = capacity?.remaining ?? target?.container_host_limits;
   const overcommitsMemory = Boolean(remaining && BigInt(memoryBytes) > BigInt(remaining.memory_bytes));
@@ -3647,7 +3647,7 @@ function renderNewForm() {
     targetNotes: snapshot.target_availability_notes,
     targets: step.key === 'target' ? [
       launchableTargets(snapshot.targets).map(t => [t.id, t.kind, t.resource_allocation_kind,
-        t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit]),
+        t.default_resource_allocation, t.container_host_limits, t.container_capacity, t.container_memory_hard_limit_reason]),
       newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
       newDraft.rememberContainerSize,
       newDraft.resourceLoading, newDraft.resourceError,
@@ -7055,11 +7055,56 @@ async function openChangedFiles(session) {
   close.onclick = () => dialog.close();
   controls.append(close);
   dialog.append(status, error, list, diffView, controls);
+  const url = `/api/v1/sessions/${encodeURIComponent(session.id)}/diff?json=true`;
+  let selection = 0;
+  async function loadPatch(path) {
+    const current = ++selection;
+    status.textContent = 'Loading diff…';
+    error.textContent = '';
+    diffView.textContent = '';
+    try {
+      const result = await request(`${url}&path=${encodeURIComponent(path)}`);
+      if (!dialog.open || selection !== current) return;
+      diffView.textContent = result.diff;
+      status.textContent = result.diff ? '' : 'No diff for this path';
+    } catch (failure) {
+      if (!dialog.open || selection !== current) return;
+      status.textContent = '';
+      error.textContent = failure.message;
+    }
+  }
   try {
-    const result = await request(`/api/v1/sessions/${encodeURIComponent(session.id)}/diff?json=true`);
+    const result = await request(url);
     if (!dialog.open) return;
-    const paths = changedFilePaths(result?.diff);
-    if (!paths.length) {
+    const tracked = result.tracked_files || [];
+    const untracked = result.untracked_files || [];
+    if (result.tracked_files || result.untracked_files) {
+      for (const file of tracked) {
+        const item = el('li');
+        const open = button(file.path, 'secondary diffstat-path');
+        open.type = 'button';
+        open.onclick = () => loadPatch(file.path);
+        const counts = file.binary ? 'binary' : `+${file.insertions} −${file.deletions}`;
+        item.append(open, el('span', 'dim', counts));
+        list.append(item);
+      }
+      for (const path of untracked) {
+        const item = el('li');
+        item.append(el('span', 'diffstat-path', path), el('span', 'dim', 'untracked'));
+        list.append(item);
+      }
+      const remaining = result.untracked_total - untracked.length;
+      if (remaining > 0) {
+        list.append(el('li', 'dim', `… and ${remaining} more untracked files`));
+      }
+      if (untracked.length || remaining > 0) {
+        list.after(el('p', 'dim', 'Use mj fetch to read untracked files.'));
+      }
+      status.textContent = tracked.length ? 'Select a file to view its diff.' : '';
+      return;
+    }
+    const paths = changedFilePaths(result.diff);
+    if (!result.diff) {
       status.textContent = 'No changes';
       diffView.remove();
       list.remove();
