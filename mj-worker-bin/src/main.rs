@@ -537,14 +537,6 @@ fn bootstrap_login_environment(
             std::env::current_exe()?
         };
         if let WorkerCommand::Run { root, .. } = &args.command {
-            // The fetch command is a separate process and does not repeat this
-            // login-environment setup. Record the temporary directory this
-            // session will actually use so fetch can allow it explicitly.
-            // A checkpoint-only restart uses the bootstrap environment, not the
-            // session's login environment, so it keeps the session's record.
-            if needs_login {
-                record_session_temp_dir(root, &environment)?;
-            }
             record_startup_step(root, "re-exec");
         }
         let mut arguments = std::env::args_os();
@@ -1083,53 +1075,8 @@ fn push_error(error: PushBranchError) -> anyhow::Error {
     }
 }
 
-/// Write an export payload to standard output unchanged. A diff and a file are
-/// bytes the caller reassembles, so nothing may add or trim a newline.
 /// File name, beside the installed `hel`, of the session temporary directory.
 const SESSION_TEMP_DIR_FILE: &str = "session-temp-dir";
-
-/// The temporary directory the session worker will run with.
-///
-/// This follows the same variable order as `std::env::temp_dir`, but reads the
-/// login environment the session owner just resolved. It does not read the
-/// process that happens to be serving a fetch.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn session_temporary_directory(
-    environment: &mj_harness_install::login_environment::Environment,
-) -> PathBuf {
-    let named = |name: &str| {
-        environment
-            .get(name)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    };
-    #[cfg(windows)]
-    {
-        named("TMP")
-            .or_else(|| named("TEMP"))
-            .or_else(|| named("USERPROFILE"))
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Temp"))
-    }
-    #[cfg(not(windows))]
-    {
-        named("TMPDIR").unwrap_or_else(|| PathBuf::from("/tmp"))
-    }
-}
-
-#[cfg_attr(not(unix), allow(dead_code))]
-fn record_session_temp_dir(
-    root: &Path,
-    environment: &mj_harness_install::login_environment::Environment,
-) -> Result<()> {
-    let directory = session_temporary_directory(environment);
-    let text = directory
-        .to_str()
-        .context("session temporary directory is not UTF-8")?;
-    // The file holds the path exactly: no newline, so a reader never trims a
-    // directory name that legitimately starts or ends with whitespace.
-    mj_core::config::atomic_write(&root.join(SESSION_TEMP_DIR_FILE), text.as_bytes())
-        .context("record the session temporary directory")
-}
 
 /// The session temporary directory recorded next to this worker binary.
 ///
@@ -1157,6 +1104,8 @@ fn recorded_session_temp_dir() -> Option<PathBuf> {
     }
 }
 
+/// Write an export payload to standard output unchanged. A diff and a file are
+/// bytes the caller reassembles, so nothing may add or trim a newline.
 fn write_stdout(bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let mut stdout = std::io::stdout().lock();
