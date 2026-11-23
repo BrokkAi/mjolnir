@@ -146,7 +146,7 @@ func ManagedHarnessManifestMatches(path string, harness HarnessKind, installID s
 
 const (
 	CodexACPPackage    = "@brokkai/codex-acp"
-	CodexACPVersion    = "1.15.0"
+	CodexACPVersion    = "1.15.1"
 	CodexCLIVersion    = "0.170.0"
 	ClaudeACPVersion   = "0.108.0"
 	ClaudeCLIVersion   = "2.1.326"
@@ -492,7 +492,7 @@ func Pin(kind HarnessKind) HarnessPin {
 		return HarnessPin{InstallID: "muse-acp-0.25.0_muse-1.4.23-R8977.1", DisplayVersion: "muse-acp 0.25.0 + Muse Code 1.4.23-R8977.1", Entrypoint: "bin/muse", CLIEntrypoint: "bin/muse"}
 	case HarnessKindCodex:
 		// pkg2: require a runnable CLI even when npm reports success.
-		return HarnessPin{InstallID: "brokkai-codex-acp-1.15.0_codex-0.170.0_pkg2", DisplayVersion: "@brokkai/codex-acp 1.15.0 + codex 0.170.0", Entrypoint: "node_modules/.bin/codex-acp", CLIEntrypoint: CodexCLIEntrypoint}
+		return HarnessPin{InstallID: "brokkai-codex-acp-1.15.1_codex-0.170.0_pkg2", DisplayVersion: "@brokkai/codex-acp 1.15.1 + codex 0.170.0", Entrypoint: "node_modules/.bin/codex-acp", CLIEntrypoint: CodexCLIEntrypoint}
 	case HarnessKindClaude:
 		// pkg2 approved the native install script. pkg3 requires the
 		// installed CLI to run before issuing a receipt.
