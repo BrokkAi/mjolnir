@@ -485,20 +485,17 @@ pub fn display_url(url: &str) -> String {
 }
 
 pub fn expand_github_source(source: &str) -> Result<String> {
-    let canonical = canonical_github_https_url(source, Shorthand::Allowed);
     let source = source.trim();
     let shorthand = !source.contains("://")
         && !source.contains('@')
         && !source.contains(':')
         && source.contains('/');
-    let expanded = if let Some(canonical) = canonical {
-        canonical
-    } else if shorthand {
+    let expanded = if shorthand {
         let (owner, repository) = github_owner_repo(source)
             .with_context(|| format!("invalid GitHub owner/repository {source:?}"))?;
         format!("https://github.com/{owner}/{repository}.git")
     } else {
-        source.to_owned()
+        normalize_network_url(source, Shorthand::Rejected)
     };
     validate_network_url(&expanded).with_context(|| {
         format!(
@@ -507,6 +504,21 @@ pub fn expand_github_source(source: &str) -> Result<String> {
         )
     })?;
     Ok(expanded)
+}
+
+fn has_http_userinfo(url: &str) -> bool {
+    let Some((scheme, endpoint)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let authority = endpoint
+        .trim_start_matches(['/', '\\'])
+        .split(['/', '?', '#', '\\'])
+        .next()
+        .unwrap_or_default();
+    authority.contains('@')
 }
 
 pub fn canonical_github_https_url(source: &str, shorthand: Shorthand) -> Option<String> {
@@ -519,21 +531,61 @@ pub fn canonical_github_https_url(source: &str, shorthand: Shorthand) -> Option<
     })
 }
 
+/// Normalize a Git network URL without changing its transport or removing
+/// embedded HTTP credentials needed for operational Git commands.
 pub fn normalize_network_url(source: &str, shorthand: Shorthand) -> String {
-    canonical_github_https_url(source, shorthand).unwrap_or_else(|| source.trim().to_owned())
-}
-
-pub fn normalize_project_source(source: &str, shorthand: Shorthand) -> String {
-    match parse_github_remote(source, shorthand).filter(|remote| remote.is_default_endpoint()) {
-        Some(remote) if remote.spelling == GithubSpelling::Shorthand => {
-            format!("{}/{}", remote.owner, remote.repository)
-        }
-        Some(remote) => format!(
+    let source = source.trim();
+    if has_http_userinfo(source) {
+        return source.to_owned();
+    }
+    let Some(remote) =
+        parse_github_remote(source, shorthand).filter(|remote| remote.is_default_endpoint())
+    else {
+        return source.to_owned();
+    };
+    match remote.spelling {
+        GithubSpelling::Shorthand | GithubSpelling::Https | GithubSpelling::Http => format!(
             "https://github.com/{}/{}.git",
             remote.owner, remote.repository
         ),
-        None => source.trim().to_owned(),
+        GithubSpelling::Scp | GithubSpelling::Ssh => {
+            format!("git@github.com:{}/{}.git", remote.owner, remote.repository)
+        }
+        GithubSpelling::Git => source.to_owned(),
     }
+}
+
+/// Normalize a project source for storage after `project_source` has removed
+/// any HTTP userinfo, preserving GitHub shorthand and SSH vs HTTPS transport.
+pub fn normalize_project_source(source: &str, shorthand: Shorthand) -> String {
+    let source = source.trim();
+    if let Some(remote) =
+        parse_github_remote(source, shorthand).filter(|remote| remote.is_default_endpoint())
+        && remote.spelling == GithubSpelling::Shorthand
+    {
+        return format!("{}/{}", remote.owner, remote.repository);
+    }
+    normalize_network_url(source, shorthand)
+}
+
+/// Return a sanitized, normalized URL for user-facing clone/push previews.
+///
+/// Default-endpoint GitHub remotes are shown as
+/// `https://github.com/{owner}/{repository}.git` (stripping any userinfo and
+/// unifying SSH/HTTPS/suffix spellings). Other remotes use [`display_url`].
+pub fn display_network_url(url: &str) -> String {
+    let sanitized = display_url(url.trim());
+    canonical_github_https_url(&sanitized, Shorthand::Rejected).unwrap_or(sanitized)
+}
+
+/// Sanitize, normalize, and deduplicate a list of user-facing remote URLs
+/// while preserving first-seen order.
+pub fn display_network_urls(urls: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    urls.iter()
+        .map(|url| display_network_url(url))
+        .filter(|url| seen.insert(url.clone()))
+        .collect()
 }
 
 /// Whether [`parse_github_remote`] accepts a bare `owner/repository`.
@@ -864,38 +916,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_sources_normalize_without_collapsing_alternate_routes() {
+    fn github_sources_normalize_preserving_transport_credentials_and_alternate_routes() {
         assert_eq!(
-            expand_github_source("git@github.com:BrokkAi/mjolnir.git").unwrap(),
-            "https://github.com/BrokkAi/mjolnir.git"
+            expand_github_source("git@github.com:BrokkAi/mjolnir").unwrap(),
+            "git@github.com:BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            expand_github_source("ssh://git@github.com/BrokkAi/mjolnir").unwrap(),
+            "git@github.com:BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            expand_github_source("https://github.com/jbellis/sessionwiki/").unwrap(),
+            "https://github.com/jbellis/sessionwiki.git"
+        );
+        assert_eq!(
+            expand_github_source("https://user:token@github.com/owner/private").unwrap(),
+            "https://user:token@github.com/owner/private"
         );
         assert_eq!(
             normalize_project_source("https://github.com/BrokkAi/mjolnir", Shorthand::Allowed),
             "https://github.com/BrokkAi/mjolnir.git"
         );
         assert_eq!(
+            normalize_project_source(
+                "ssh://git@github.com/BrokkAi/mjolnir.git",
+                Shorthand::Allowed
+            ),
+            "git@github.com:BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
             normalize_project_source("BrokkAi/mjolnir.git", Shorthand::Allowed),
             "BrokkAi/mjolnir"
         );
         let mut source = NetworkGitSource {
-            fetch_url: "git@github.com:BrokkAi/mjolnir.git".into(),
+            fetch_url: "ssh://git@github.com/BrokkAi/mjolnir".into(),
             push_urls: vec![
                 "https://github.com/BrokkAi/mjolnir".into(),
-                "git@github.com:BrokkAi/mjolnir.git".into(),
+                "https://GITHUB.COM/BrokkAi/mjolnir/".into(),
+                "git@github.com:BrokkAi/mjolnir".into(),
+                "ssh://git@github.com/BrokkAi/mjolnir.git".into(),
+                "https://user:token@github.com/BrokkAi/mjolnir".into(),
                 "ssh://git@ssh.github.com:443/BrokkAi/mjolnir.git".into(),
                 "ssh://git@github.com:22/BrokkAi/mjolnir.git".into(),
                 "https://git.example/repo".into(),
             ],
         };
         source.normalize();
-        assert_eq!(source.fetch_url, "https://github.com/BrokkAi/mjolnir.git");
+        assert_eq!(source.fetch_url, "git@github.com:BrokkAi/mjolnir.git");
         assert_eq!(
             source.push_urls,
             vec![
                 "https://github.com/BrokkAi/mjolnir.git",
+                "git@github.com:BrokkAi/mjolnir.git",
+                "https://user:token@github.com/BrokkAi/mjolnir",
                 "ssh://git@ssh.github.com:443/BrokkAi/mjolnir.git",
                 "ssh://git@github.com:22/BrokkAi/mjolnir.git",
-                "https://git.example/repo"
+                "https://git.example/repo",
+            ]
+        );
+        assert_eq!(
+            display_network_url(&source.fetch_url),
+            "https://github.com/BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            display_network_urls(&source.push_urls),
+            vec![
+                "https://github.com/BrokkAi/mjolnir.git",
+                "ssh://ssh.github.com:443/BrokkAi/mjolnir.git",
+                "ssh://github.com:22/BrokkAi/mjolnir.git",
+                "https://git.example/repo",
             ]
         );
     }

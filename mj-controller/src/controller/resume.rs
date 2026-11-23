@@ -1694,12 +1694,7 @@ fn fetch_source_commit(
                     "https://github.com/{}/{}.git",
                     github.owner, github.repository
                 )
-            } else if matches!(
-                github.spelling,
-                mj_core::remote_git::GithubSpelling::Shorthand
-                    | mj_core::remote_git::GithubSpelling::Scp
-                    | mj_core::remote_git::GithubSpelling::Ssh
-            ) {
+            } else if github.spelling == mj_core::remote_git::GithubSpelling::Shorthand {
                 format!("git@github.com:{}/{}.git", github.owner, github.repository)
             } else {
                 expanded

@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ProjectBundle;
-use crate::remote_git::{NetworkGitSource, display_url, validate_network_url};
+use crate::remote_git::{
+    NetworkGitSource, display_network_url, display_network_urls, display_url, validate_network_url,
+};
 use crate::targets::{CommandExecutor, CommandOutput, CommandSpec};
 
 /// What a session's checkout looks like right now: the branch, how far it
@@ -614,12 +616,8 @@ fn resolve_local_repository_with_remote(
                         .to_owned(),
                     missing_remote: remote,
                     replacement_remote,
-                    fetch_url: display_url(&source.fetch_url),
-                    push_urls: source
-                        .push_urls
-                        .iter()
-                        .map(|url| display_url(url))
-                        .collect(),
+                    fetch_url: display_network_url(&source.fetch_url),
+                    push_urls: display_network_urls(&source.push_urls),
                 }
                 .into());
             }
