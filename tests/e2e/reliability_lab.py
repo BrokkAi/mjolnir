@@ -754,9 +754,9 @@ for line in sys.stdin:
         managed_entrypoint = managed_install / "node_modules/.bin/codex-acp"
         managed_entrypoint.parent.mkdir(parents=True)
         managed_entrypoint.symlink_to(bridge)
-        managed_codex = managed_install / "node_modules/@openai/codex/bin/codex.js"
-        managed_codex.parent.mkdir(parents=True)
-        managed_codex.write_text("// deterministic reliability fixture\n")
+        managed_codex = managed_install / "node_modules/.bin/codex"
+        managed_codex.write_text("#!/bin/sh\n# deterministic reliability fixture\nexit 0\n")
+        managed_codex.chmod(0o700)
         (managed_install / "mj-harness.json").write_text(
             json.dumps(
                 {

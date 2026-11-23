@@ -31,11 +31,11 @@ pub(crate) fn runtime_environment(
 #[cfg(unix)]
 pub(crate) async fn managed_runtime(
     environment: &BTreeMap<String, String>,
-) -> Result<mj_core::harness_install::Located> {
+) -> Result<mj_harness_install::harness_install::Located> {
     let policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
     let (command, args) =
         mj_core::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
-    mj_core::harness_install::locate(
+    mj_harness_install::harness_install::locate(
         mj_core::placement::local_harness_runtime(),
         HarnessKind::Antigravity,
         policy,
@@ -63,7 +63,7 @@ pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result
             .context("Antigravity quota CLI was not resolved")?
     };
     #[cfg(not(unix))]
-    let program = mj_core::program_path::find_antigravity_program(&environment)
+    let program = mj_harness_install::program_path::find_antigravity_program(&environment)
         .await?
         .context("Antigravity requires agy installed on this target")?;
     let source = harness_authentication_marker(HarnessKind::Antigravity, home);

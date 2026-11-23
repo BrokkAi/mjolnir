@@ -26,6 +26,15 @@ impl RuntimeState {
                 },
                 result: active.result.clone(),
                 acceptance: active.acceptance.clone(),
+                destroy_admission: (kind == LifecycleKind::ForceDestroy)
+                    .then(|| {
+                        active
+                            .upgrade_work
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                    })
+                    .flatten(),
             }))
     }
 

@@ -311,6 +311,10 @@ pub struct DurableRelay {
     journal_generation: u64,
     /// Retry physical prefix cleanup once after reopen, or after a failed GC.
     journal_cleanup_pending: bool,
+    /// A failed rollback left the on-disk append boundary unknown.
+    journal_append_failure: Option<String>,
+    #[cfg(test)]
+    journal_append_fault: Option<journal::JournalAppendFault>,
     pending_live_baselines: Vec<PendingLiveBaseline>,
     pending_native_resumes: Vec<PendingNativeResume>,
     acp_activity: AcpActivityClock,
@@ -1052,6 +1056,9 @@ impl DurableRelay {
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
             journal_cleanup_pending: true,
+            journal_append_failure: None,
+            #[cfg(test)]
+            journal_append_fault: None,
             pending_live_baselines: Vec::new(),
             pending_native_resumes: Vec::new(),
             acp_activity: AcpActivityClock::default(),
@@ -1566,6 +1573,17 @@ impl DurableRelay {
         self.mailbox_delivery_mode = Some(mode);
     }
 
+    pub(crate) fn update_mailbox_delivery_mode(
+        &mut self,
+        mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    ) {
+        self.mailbox_delivery_mode = mode;
+    }
+
+    pub(crate) fn in_place_move_hold_active(&self) -> bool {
+        self.snapshot.in_place_move_hold.is_some()
+    }
+
     /// The relay-owned turn boundary shared by command promotion, checkpoint
     /// admission, and background-work accounting. Activity classification
     /// also presents an in-progress `/clear` as a turn, but that command must
@@ -1583,20 +1601,10 @@ impl DurableRelay {
     /// the daemon reads; `worker_facts_match_the_published_state` pins them
     /// together.
     pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
-        let background_commands = self.background_commands().len() + self.native_agent_count();
+        let background = self.background_commands();
+        let background_commands = background.len() + self.native_agent_count();
         self.turn_context
             .set_counts(background_commands, self.snapshot.queued_prompts.len());
-        self.turn_context.set_background_inventory(
-            self.background_commands(),
-            self.snapshot
-                .native_agents
-                .iter()
-                .filter(|(_, agent)| {
-                    agent.state == mj_core::native_agent::NativeAgentState::Running
-                })
-                .map(|(id, _)| id.clone())
-                .collect(),
-        );
         let mut facts = mj_core::activity::ActivityFacts {
             execution: self.snapshot.execution,
             prompt_started_at_ms: self
@@ -1611,8 +1619,7 @@ impl DurableRelay {
             inferred_idle_since_ms: None,
             queued_commands: self.snapshot.queued_prompts.len(),
             tools_in_flight: self.foreground_tools.snapshot(),
-            background_started_at_ms: self
-                .background_commands()
+            background_started_at_ms: background
                 .iter()
                 .map(|command| command.started_at_ms)
                 .chain(
@@ -1622,7 +1629,10 @@ impl DurableRelay {
                         .filter_map(|shell| shell.started_at_ms),
                 )
                 .min(),
-            background_commands: self.background_commands().len() + self.native_agent_count(),
+            background_commands,
+            antigravity_task_started_at_ms: BackgroundCommand::oldest_antigravity_task_start(
+                &background,
+            ),
             active_user_shells: self.snapshot.active_user_shells.len(),
             active_agent_terminals: self.active_agent_terminals.len(),
             goal_active: self.snapshot.goal.active(),
@@ -1654,6 +1664,17 @@ impl DurableRelay {
             }),
             background_needed: None,
         };
+        self.turn_context.set_background_inventory(
+            background,
+            self.snapshot
+                .native_agents
+                .iter()
+                .filter(|(_, agent)| {
+                    agent.state == mj_core::native_agent::NativeAgentState::Running
+                })
+                .map(|(id, _)| id.clone())
+                .collect(),
+        );
         (
             facts.expected_continuation,
             facts.inferred_idle_since_ms,

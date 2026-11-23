@@ -285,7 +285,10 @@ pub(super) fn validate_move_request(
             "confirm that the active turn may be interrupted",
         ));
     }
-    if !preparation.queued_commands.is_empty() && request.queue.is_none() {
+    let queue_locked = session.move_recovery.as_ref().is_some_and(|recovery| {
+        recovery.queue_admission_started && !recovery.queue_admission_finished
+    }) || preparation.locked_queue.is_some();
+    if !preparation.queued_commands.is_empty() && request.queue.is_none() && !queue_locked {
         return Err(ApiError::bad_request(
             "choose whether queued work is discarded or started after the move",
         ));
@@ -616,7 +619,7 @@ fn validate_action_against(
                     "attached directories are unsupported for bare targets",
                 ));
             }
-            mj_controller::controller::validate_resource_allocation(
+            mj_targets::targets::validate_resource_allocation(
                 target.resource_allocation_kind,
                 resource_allocation.as_deref(),
             )
@@ -1093,7 +1096,7 @@ pub(super) fn require_launchable_target<'a>(
     if target.runtime_missing {
         return Err(ApiError::bad_request(format!(
             "target \"{id}\" cannot run sessions: {}. Install it or choose another target.",
-            mj_controller::targets::engine_not_installed(engine_name(&target.kind)),
+            mj_targets::targets::engine_not_installed(engine_name(&target.kind)),
         )));
     }
     Ok(target)

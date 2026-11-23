@@ -1562,17 +1562,18 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         }
     }
     let pending = preparation.queued_commands.len();
-    let queue = match (args.queue, pending, args.yes) {
-        (Some(queue), _, _) => Some(queue.into()),
-        (None, 0, _) => None,
-        (None, _, true) => {
+    let queue = match (args.queue, preparation.locked_queue, pending, args.yes) {
+        (Some(queue), _, _, _) => Some(queue.into()),
+        (None, Some(locked), _, _) => Some(locked),
+        (None, None, 0, _) => None,
+        (None, None, _, true) => {
             let error = anyhow::anyhow!(queued_commands_need_choice(pending));
             if args.json {
                 print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
             }
             return Err(error);
         }
-        (None, _, false) => Some(prompt_queue_choice(pending).await?),
+        (None, None, _, false) => Some(prompt_queue_choice(pending).await?),
     };
 
     print_move_conversion(&preparation);

@@ -186,6 +186,22 @@ fn subagent_waiting_for_background(
     )
 }
 
+pub(crate) fn projected_activity(
+    view: Option<&RuntimeSessionView>,
+) -> mj_core::activity::ActivityState {
+    if let Some(state) = view
+        .filter(|view| view.connected)
+        .and_then(|view| view.operational.as_deref())
+    {
+        return state.activity_state();
+    }
+    let materialized = view.and_then(|view| view.materialized.as_deref());
+    mj_core::activity::while_disconnected(
+        materialized.map_or(Default::default(), |view| view.execution),
+        materialized.and_then(|view| view.last_activity_at_ms),
+    )
+}
+
 fn own_verdict(
     runtime: &RuntimeProjection,
     committed: Option<&mj_controller::database::CommittedState>,
@@ -222,7 +238,6 @@ fn own_verdict(
     let live = view.and_then(|v| v.operational.as_deref());
     let form = has_waiting_form(view);
     let attention = runtime.metadata.session_attention.get(id);
-    let activity = live.map(|v| v.activity_state());
     let running = live.is_some_and(|live| {
         live.active_prompt.is_some()
             || live.harness_turn.is_some()
@@ -248,9 +263,8 @@ fn own_verdict(
         && !form
         && (running
             || live.is_some_and(mj_core::relay::RelayOperationalState::has_work_in_flight)
-            || activity
-                .as_ref()
-                .is_some_and(|state| state.has_work_in_flight()));
+            // Retained turn facts still inform interrupt and work ownership.
+            || live.is_some_and(|state| state.activity_state().has_work_in_flight()));
     let can_interrupt = !queue_held && !form && state.has_live_worker();
     let turn_targetable = !queue_held && unfinished_turn && turn_interrupt_command(live).is_ok();
     let failed_first_launch = runtime.metadata.failed_launch_retries.contains(id);
@@ -280,8 +294,7 @@ fn own_verdict(
         move_queue_held: queue_held,
         idle: transition.is_none()
             && (state == SessionState::Parked
-                || state == SessionState::Running
-                    && activity.as_ref().is_some_and(|a| a.is_idle())),
+                || state == SessionState::Running && projected_activity(view).is_idle()),
         working: state == SessionState::Running
             && view.is_some_and(|v| v.connected)
             && (live.is_some_and(|live| {

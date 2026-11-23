@@ -191,29 +191,23 @@ class SteerLab:
         hook.chmod(0o700)
         return hook
 
-    def codex_cli_entrypoint(self) -> Path:
+    def codex_pin_install(self) -> tuple[Path, Path, str]:
         pins = (self.repo_root / "mj-core/src/harness_runtime.rs").read_text(encoding="utf-8")
-        versions = {}
-        for name in ("CODEX_ACP_VERSION", "CODEX_CLI_VERSION"):
-            match = re.search(rf'pub const {name}: &str = "([^"]+)";', pins)
-            if not match:
-                raise ScenarioFailure(f"could not read {name} from the harness pins")
-            versions[name] = match.group(1)
-        install_id = (
-            f"brokkai-codex-acp-{versions['CODEX_ACP_VERSION']}"
-            f"_codex-{versions['CODEX_CLI_VERSION']}"
-        )
+        install_match = re.search(r'install_id: "(brokkai-codex-acp-[^"]+)"', pins)
+        version_match = re.search(r'pub const CODEX_CLI_VERSION: &str = "([^"]+)";', pins)
+        if not install_match or not version_match:
+            raise ScenarioFailure("could not read Codex pin metadata from harness_runtime.rs")
+        install_id = install_match.group(1)
+        cli_version = version_match.group(1)
         cache_bases = [self.cache, Path.home() / ".cache"]
         configured_cache = os.environ.get("XDG_CACHE_HOME")
         if configured_cache:
             cache_bases.append(Path(configured_cache).expanduser())
         for cache_base in dict.fromkeys(path.resolve() for path in cache_bases):
-            candidate = (
-                cache_base / "mjolnir/harnesses/codex" / install_id
-                / "node_modules/@openai/codex/bin/codex.js"
-            )
+            source_install = cache_base / "mjolnir/harnesses/codex" / install_id
+            candidate = source_install / "node_modules/.bin/codex"
             if candidate.is_file():
-                return candidate
+                return source_install, candidate.resolve(), cli_version
         raise ScenarioFailure(
             "the pinned Codex CLI needed for the isolated hook is absent "
             f"from the managed harness cache (install {install_id})"
@@ -221,19 +215,21 @@ class SteerLab:
 
     def install_codex_test_wrapper(self) -> None:
         """Seed this run's managed cache with a test-local trust wrapper."""
-        source_cli = self.codex_cli_entrypoint()
-        source_install = source_cli.parents[4]
+        source_install, source_cli, cli_version = self.codex_pin_install()
         install = self.cache / "mjolnir" / "harnesses" / "codex" / source_install.name
         if install.exists():
             raise ScenarioFailure(f"isolated Codex harness install already exists: {install}")
         (install / "node_modules" / "@brokkai").mkdir(parents=True)
+        (install / "node_modules" / ".bin").mkdir(parents=True)
         shutil.copy2(source_install / "mj-harness.json", install / "mj-harness.json")
         (install / "node_modules" / "@brokkai" / "codex-acp").symlink_to(
             source_install / "node_modules" / "@brokkai" / "codex-acp",
             target_is_directory=True,
         )
-        wrapper = install / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
-        wrapper.parent.mkdir(parents=True)
+        (install / "node_modules" / ".bin" / "codex-acp").symlink_to(
+            (source_install / "node_modules" / ".bin" / "codex-acp").resolve()
+        )
+        wrapper = install / "node_modules" / ".bin" / "codex"
         wrapper.write_text(
             "#!/bin/sh\n"
             f"exec node {shlex.quote(str(source_cli))} "
@@ -245,7 +241,7 @@ class SteerLab:
             [str(wrapper), "--version"], capture_output=True, text=True,
             timeout=15, env=self.env,
         )
-        if result.returncode or versions["CODEX_CLI_VERSION"] not in result.stdout:
+        if result.returncode or cli_version not in result.stdout:
             raise ScenarioFailure(
                 "isolated Codex wrapper did not launch the pinned CLI: "
                 f"status={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"

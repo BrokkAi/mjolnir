@@ -26,7 +26,6 @@ mj-checkpoint.workspace = true
 mj-client.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
-axum.workspace = true
 axum-server.workspace = true
 chrono.workspace = true
 futures = "0.3"
@@ -53,6 +52,7 @@ mj-setup.workspace = true
 mj-server.workspace = true
 mj-review-host.workspace = true
 mj-github-relevance.workspace = true
+mj-github-watch.workspace = true
 
 [dev-dependencies]
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.

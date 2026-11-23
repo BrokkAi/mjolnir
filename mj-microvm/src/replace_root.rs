@@ -386,7 +386,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::microvm::state::{ImageRefs, STATE_FORMAT, VmVolume};
+    use crate::state::{ImageRefs, STATE_FORMAT, VmVolume};
 
     const OLD_IMAGE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const NEW_IMAGE: &str = "2222222222222222222222222222222222222222222222222222222222222222";

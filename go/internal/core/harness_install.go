@@ -1,4 +1,4 @@
-// Port of mj-core/src/harness_install.rs.
+// Port of mj-harness-install/src/harness_install.rs.
 
 // Exact, target-local harness installations, including container fallbacks.
 
@@ -1080,7 +1080,7 @@ func verifyInstallScriptsRan(ctx context.Context, staging string, harness Harnes
 	}
 	return fmt.Errorf("managed %s harness install skipped install scripts for %s. npm gates dependency install "+
 		"scripts, so add each package to allowScripts in "+
-		"mj-core/assets/harnesses/%s/package.json and reinstall.",
+		"mj-harness-install/assets/harnesses/%s/package.json and reinstall.",
 		harness.DisplayName(), strings.Join(pending, ", "), harness.ID())
 }
 

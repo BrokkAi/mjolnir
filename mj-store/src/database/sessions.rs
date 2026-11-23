@@ -37,18 +37,40 @@ pub fn save_new_session(
     remember_launch_choices: bool,
     remember_container_size: bool,
 ) -> Result<()> {
+    save_new_session_with_preferences(
+        session,
+        container_size,
+        NewSessionPreferences {
+            remember_launch_choices,
+            remember_container_size,
+            remember_subagent_policy: remember_launch_choices,
+        },
+    )
+}
+
+pub struct NewSessionPreferences {
+    pub remember_launch_choices: bool,
+    pub remember_container_size: bool,
+    pub remember_subagent_policy: bool,
+}
+
+pub fn save_new_session_with_preferences(
+    session: &SessionRecord,
+    container_size: Option<(String, HostContainerSize)>,
+    preferences: NewSessionPreferences,
+) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_new_session", move |_| {
-        save_new_session_to(
+        save_new_session_with_preferences_to(
             &database_path(),
             &session,
             container_size,
-            remember_launch_choices,
-            remember_container_size,
+            preferences,
         )
     })
 }
 
+#[cfg(test)]
 pub(super) fn save_new_session_to(
     path: &Path,
     session: &SessionRecord,
@@ -56,6 +78,29 @@ pub(super) fn save_new_session_to(
     remember_launch_choices: bool,
     remember_container_size: bool,
 ) -> Result<()> {
+    save_new_session_with_preferences_to(
+        path,
+        session,
+        container_size,
+        NewSessionPreferences {
+            remember_launch_choices,
+            remember_container_size,
+            remember_subagent_policy: remember_launch_choices,
+        },
+    )
+}
+
+fn save_new_session_with_preferences_to(
+    path: &Path,
+    session: &SessionRecord,
+    container_size: Option<(String, HostContainerSize)>,
+    preferences: NewSessionPreferences,
+) -> Result<()> {
+    let NewSessionPreferences {
+        remember_launch_choices,
+        remember_container_size,
+        remember_subagent_policy,
+    } = preferences;
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     validate_session_record(session)?;
@@ -69,7 +114,7 @@ pub(super) fn save_new_session_to(
         write_host_container_size(&tx, &host, size)?;
     }
     let policy = session.subagents.clone().unwrap_or_default();
-    if remember_launch_choices && policy.updates_remembered_choice(session.harness_kind) {
+    if remember_subagent_policy && policy.updates_remembered_choice(session.harness_kind) {
         tx.execute(
             "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
              ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
@@ -242,6 +287,39 @@ pub fn load_subagent(child_session_id: &str) -> Result<Option<mj_core::subagent:
         .optional()?
         .map(|json| serde_json::from_str(&json).context("decode sub-agent record"))
         .transpose()
+}
+
+/// Whether a sub-agent child has handed back its report for its parent's
+/// newest task, from what the store holds; see
+/// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
+/// that has never finished a turn, has not.
+pub fn subagent_has_handed_back(
+    child_session_id: &str,
+    liveness: &mj_core::subagent::Liveness,
+) -> Result<bool> {
+    let Some(relation) = load_subagent(child_session_id)? else {
+        return Ok(false);
+    };
+    // A child is parked only once its turn ended and its parent was told, so
+    // whatever the parent was going to get from it, it has.
+    if load_session_state(child_session_id)? == Some(SessionState::Parked) {
+        return Ok(true);
+    }
+    let Some((execution, active_turn, last_turn)) =
+        load_materialized_turn_outcome(child_session_id)?
+    else {
+        return Ok(false);
+    };
+    let report = load_subagent_report(child_session_id)?;
+    let working = active_turn.is_some() || !matches!(execution, MaterializedExecutionState::Idle);
+    Ok(mj_core::subagent::has_handed_back(
+        relation.handback_tool,
+        &report,
+        working,
+        last_turn.as_ref(),
+        liveness,
+        mj_core::clock::epoch_millis(),
+    ))
 }
 
 pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::SubagentRecord>> {

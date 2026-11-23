@@ -153,6 +153,12 @@ pub struct ApiSession {
     /// cannot prove.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_state: Option<mj_core::activity::ActivityState>,
+    /// Active lifecycle operation and its current stages, on session detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<crate::server::ViewerOperation>,
+    /// The daemon's worker connection, on session detail when observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayHealth>,
     pub has_error: bool,
     /// A launch failure or a safe lifecycle failure, including a failed Move.
     /// Raw runtime error text is deliberately not published for a running
@@ -211,6 +217,8 @@ impl From<&ViewerSession> for ApiSession {
             chat_phase: session.chat_phase,
             is_idle: session.is_idle,
             activity_state: session.activity_state.clone(),
+            operation: None,
+            relay: None,
             has_error: session.has_error,
             error: session.launch_error.clone(),
             storage_problem: session.storage_problem.clone(),
@@ -297,7 +305,7 @@ pub struct StartSessionRequest {
     /// must hold one repository. The session cannot be resumed or moved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_later_history: bool,
-    /// Omitted uses the selected profile's subagent setting.
+    /// Omitted tries Mjolnir and may fall back to the selected harness's default.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -436,7 +444,7 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-pub use mj_controller::profile_scheduler::{CandidateQuota, SubagentCandidate, SubagentCandidates};
+pub use mj_accounts::profile_scheduler::{CandidateQuota, SubagentCandidate, SubagentCandidates};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubagentView {
@@ -508,6 +516,20 @@ pub enum RelayState {
     ProjectionIntegrity,
 }
 
+impl RelayState {
+    pub fn of(connected: bool, error: Option<&mj_client::session::ViewError>) -> Self {
+        use mj_client::session::ViewError;
+        // A recorded error outranks the connection flag.
+        match error {
+            Some(ViewError::Unreachable(_)) => Self::Unreachable,
+            Some(ViewError::TargetMissing(_)) => Self::TargetMissing,
+            Some(ViewError::ProjectionIntegrity(_)) => Self::ProjectionIntegrity,
+            None if connected => Self::Connected,
+            None => Self::Disconnected,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayHealth {
     pub state: RelayState,
@@ -518,30 +540,16 @@ pub struct RelayHealth {
 
 impl From<&mj_client::session::ManagedSessionView> for RelayHealth {
     fn from(view: &mj_client::session::ManagedSessionView) -> Self {
-        use mj_client::session::ViewError;
-        // A recorded error outranks `connected`: it is the specific thing
-        // standing between the caller and a finished turn.
-        match &view.error {
-            Some(error) => Self {
-                state: match error {
-                    ViewError::Unreachable(_) => RelayState::Unreachable,
-                    ViewError::TargetMissing(_) => RelayState::TargetMissing,
-                    ViewError::ProjectionIntegrity(_) => RelayState::ProjectionIntegrity,
-                },
-                detail: Some(error.detail().to_owned()),
-            },
-            None if view.connected => Self {
-                state: RelayState::Connected,
-                detail: view
-                    .snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.subagent_queue_error.clone()),
-            },
-            None => Self {
-                state: RelayState::Disconnected,
-                detail: None,
-            },
-        }
+        let state = RelayState::of(view.connected, view.error.as_ref());
+        let detail = match &view.error {
+            Some(error) => Some(error.detail().to_owned()),
+            None if view.connected => view
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.subagent_queue_error.clone()),
+            None => None,
+        };
+        Self { state, detail }
     }
 }
 
@@ -734,12 +742,12 @@ pub struct TurnState {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
 }
 
-pub use mj_controller::database::TurnSummary;
+pub use mj_store::database::TurnSummary;
 
-pub use mj_controller::database::StartFollowup;
+pub use mj_store::database::StartFollowup;
 
 /// A page of transcript items, read from the durable projection.
-pub use mj_controller::database::TranscriptPage;
+pub use mj_store::database::TranscriptPage;
 
 /// A branch the daemon pushed on the caller's behalf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,7 +846,7 @@ pub struct FinishedReviewQuery {
 pub struct FinishedReviewResponse {
     pub session_id: String,
     #[serde(default)]
-    pub review: Option<mj_controller::database::FinishedReview>,
+    pub review: Option<mj_store::database::FinishedReview>,
 }
 
 // ---------------------------------------------------------------------------

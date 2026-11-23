@@ -1,5 +1,12 @@
 use super::views::{LifecycleStallProgress, StalledLifecycle};
 use super::*;
+use mj_core::subagent::SubagentPolicy;
+
+#[derive(Clone, Copy)]
+pub(super) enum CreateDelegationDefault {
+    Mjolnir,
+    Harness,
+}
 
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -45,7 +52,16 @@ impl PostCreateWait {
 impl RuntimeState {
     pub(super) async fn start_create_session(
         self: &Arc<Self>,
+        request: CreateSessionRequest,
+    ) -> Result<RegisteredSession> {
+        self.start_create_session_with_delegation_default(request, CreateDelegationDefault::Mjolnir)
+            .await
+    }
+
+    pub(super) async fn start_create_session_with_delegation_default(
+        self: &Arc<Self>,
         mut request: CreateSessionRequest,
+        delegation_default: CreateDelegationDefault,
     ) -> Result<RegisteredSession> {
         let (primary_selection, provider_reservation, delegation_notice) = if request
             .profile_id
@@ -128,7 +144,12 @@ impl RuntimeState {
             (None, None, None)
         };
         let (registered, _, warning) = self
-            .start_create_session_inner(request, LifecycleControl::default(), None)
+            .start_create_session_inner(
+                request,
+                LifecycleControl::default(),
+                None,
+                delegation_default,
+            )
             .await?;
         if let Some(reservation) = provider_reservation {
             reservation.commit(Some(registered.session.id.clone()));
@@ -486,8 +507,13 @@ impl RuntimeState {
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
     ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
-        self.start_create_session_inner(request, control, Some(publication))
-            .await
+        self.start_create_session_inner(
+            request,
+            control,
+            Some(publication),
+            CreateDelegationDefault::Mjolnir,
+        )
+        .await
     }
 
     pub(super) async fn start_create_session_inner(
@@ -495,34 +521,67 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
+        delegation_default: CreateDelegationDefault,
     ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
         let mut admission_timing =
             mj_controller::launch_timing::LaunchPhaseTimer::new("", "admit and register session");
         tracing::info!(profile_id = %request.profile_id, target_id = %request.target_template_id,
             "session launch admission started");
-        let mut request = request;
         let parent = request.profile_id.clone();
-        let supplied = request.subagents.clone();
-        let (config, policy) = blocking(move || {
+        let (config, kind) = blocking(move || {
             let controller = Controller::load()?;
-            let profile = controller.config.named_profile(&parent)?;
-            let policy = supplied
-                .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
-            Ok((controller.config, policy))
+            let kind = controller.config.named_profile(&parent)?.kind;
+            Ok((controller.config, kind))
         })
         .await?;
+        let implicit_mjolnir = request.subagents.is_none()
+            && matches!(delegation_default, CreateDelegationDefault::Mjolnir);
+        let policy = request
+            .subagents
+            .unwrap_or_else(|| match delegation_default {
+                CreateDelegationDefault::Mjolnir => SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+                CreateDelegationDefault::Harness => SubagentPolicy::default_for(kind),
+            });
         let validation_timing =
             mj_controller::launch_timing::LaunchPhaseTimer::new("", "validate subagent choices");
-        mj_controller::controller::profile_config::validate_session_subagent_policy(
-            self.profile_catalog
-                .get()
-                .expect("catalog installed before serving"),
-            &config,
-            &request.profile_id,
-            &policy,
-            &request.target_template_id,
-        )
-        .await?;
+        let validation =
+            mj_controller::controller::profile_config::validate_session_subagent_policy(
+                self.profile_catalog
+                    .get()
+                    .expect("catalog installed before serving"),
+                &config,
+                &request.profile_id,
+                &policy,
+                &request.target_template_id,
+            )
+            .await;
+        let (policy, delegation_notice) = match validation {
+            Err(error)
+                if implicit_mjolnir
+                    && request.supervisors != Some(true)
+                    && let Some(refusal) = mj_core::refusal::Refusal::of(&error)
+                    && refusal.code() == Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) =>
+            {
+                let fallback = SubagentPolicy::default_for(kind);
+                let mode = if fallback.is_native() {
+                    "native"
+                } else {
+                    "none"
+                };
+                let notice = format!(
+                    "Mjolnir delegation is unavailable. Using sub-agent mode {mode} for this session. {}",
+                    refusal.message()
+                );
+                (fallback, Some(notice))
+            }
+            result => {
+                result?;
+                (policy, None)
+            }
+        };
         drop(validation_timing);
         if let Some(allocation) = request.resource_allocation.as_ref() {
             validate_minimum_container_allocation(allocation)?;
@@ -544,7 +603,7 @@ impl RuntimeState {
             .await?;
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = mj_controller::upgrade::activity("session admission")?;
-        request.subagents = Some(policy);
+        let skip_remembering_subagent_policy = delegation_notice.is_some();
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
         let preferences_owner = self.clone();
@@ -571,13 +630,14 @@ impl RuntimeState {
                 request.title,
                 SessionLaunchOptions {
                     remember_launch_choices: request.remember_launch_choices,
+                    skip_remembering_subagent_policy,
                     remember_container_size: request.remember_container_size,
                     create_managed_worktree: request.create_managed_worktree,
                     at: request.at,
                     branch: request.branch,
                     base: request.base,
                     no_later_history: request.no_later_history,
-                    subagents: request.subagents,
+                    subagents: Some(policy),
                     oracle: request.oracle,
                     supervisors: request.supervisors,
                     oracle_choice: request.oracle_choice,
@@ -659,12 +719,16 @@ impl RuntimeState {
         .await?;
         admission_timing.set_session_id(&registered.session.id);
         drop(admission_timing);
-        let capacity_warning = [oracle_notice, _container_admission.warning.clone()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n");
-        let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
+        let warning = [
+            delegation_notice,
+            oracle_notice,
+            _container_admission.warning.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+        let warning = (!warning.is_empty()).then_some(warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
         self.start_create_lifecycle(
@@ -683,7 +747,7 @@ impl RuntimeState {
         );
         self.reload_controller().await?;
         drop(publishing);
-        Ok((registered, review_notice, capacity_warning))
+        Ok((registered, review_notice, warning))
     }
 
     /// Admit the Create lifecycle of a registered session, top-level or
@@ -766,16 +830,41 @@ impl RuntimeState {
                 {
                     let _handoff = mj_controller::upgrade::activity_unless_draining("failed launch retry admission")?;
                     ensure!(!cancelled.load(Ordering::Acquire), "launch retry cancelled before admission");
-                    let Some(operation_id) = blocking(move || mj_controller::database::begin_failed_launch_retry(record)).await? else {
+                    let Some((operation_id, first_prompt_unsent)) = blocking(move || {
+                        // Retry dismisses settled groups, so check for an unsent
+                        // first prompt before it does. This only affects the notice.
+                        let first_prompt_unsent = match mj_controller::database::load_latest_startup_group(&record.id) {
+                            Ok(steps) => steps.iter().any(|step| {
+                                step.phase == "failed"
+                                    && step.accepted_ordinal.is_none()
+                                    && matches!(
+                                        serde_json::from_str::<StartupStep>(&step.step_json),
+                                        Ok(StartupStep::ApiPrompt { .. })
+                                    )
+                            }),
+                            Err(error) => {
+                                tracing::warn!(session_id = %record.id, %error, "could not read startup steps for the retry notice");
+                                false
+                            }
+                        };
+                        mj_controller::database::begin_failed_launch_retry(record)
+                            .map(|retry| retry.map(|operation_id| (operation_id, first_prompt_unsent)))
+                    }).await? else {
                         return Err(Refusal::precondition(
                             "This session changed while Retry launch was waiting. Check its current status.",
                         ).into());
                     };
                     tracing::info!(%session_id, %operation_id, "accepted retry of failed session launch");
-                    state.push_public_notice(
-                        &session_id,
-                        "Relaunching the stored launch request. Prompts that failed with the previous launch are not resent.",
-                    );
+                    let notice = if first_prompt_unsent {
+                        let instance = mj_core::config::instance_name()
+                            .map_or_else(String::new, |name| format!(" --instance={name}"));
+                        format!(
+                            "Relaunching the stored launch request. Your first prompt is still unsent. In the dashboard, type or paste it again. From the shell, resend your original prompt file with `mj{instance} message --session {session_id} --prompt-file ORIGINAL_PROMPT_FILE` or pass your original prompt text as an argument to `mj{instance} message --session {session_id}`."
+                        )
+                    } else {
+                        "Relaunching the stored launch request. Prompts that failed with the previous launch are not resent.".to_owned()
+                    };
+                    state.push_public_notice(&session_id, notice);
                     accepted.send_replace(Some(Ok(())));
                 }
                 state.reload_controller().await?;
@@ -1069,7 +1158,241 @@ mod capacity_admission_tests {
 
 #[cfg(test)]
 mod delegation_replay_tests {
+    use super::{CreateDelegationDefault, CreateWait, LifecycleControl};
     use mj_controller::controller::test_support::{IsolatedTest, test_name};
+
+    #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
+    async fn create_resolves_omitted_delegation_before_persisting_session_and_preferences() {
+        use mj_core::config::{
+            Config, HarnessKind, HarnessProfile, SubagentChoice, TargetTemplate,
+        };
+        use mj_core::subagent::SubagentPolicy;
+
+        const CHILD: &str = "MJ_TEST_CREATE_DEFAULT_DELEGATION";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "create_resolves_omitted_delegation_before_persisting_session_and_preferences",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "create-default-delegation")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let project = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        for (name, harness) in [
+            ("codex", HarnessKind::Codex),
+            ("dsh", HarnessKind::Dsh),
+            ("kimi", HarnessKind::Kimi),
+        ] {
+            config.profiles.insert(
+                name.into(),
+                HarnessProfile::new(harness, mj_core::config::data_dir().join(name)),
+            );
+        }
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        config.save().unwrap();
+        let workspace = mj_controller::database::create_workspace("create delegation").unwrap();
+        let runtime = crate::daemon::tests::test_runtime_state_loading_the_store();
+        let catalog =
+            mj_controller::profile_catalog::ProfileCatalog::with_probe(std::sync::Arc::new(|_| {
+                Box::pin(async {
+                    Ok(mj_core::worker_launch::ProfileConfig {
+                        model: Some("available-model".into()),
+                        models: vec![mj_core::acp::SessionConfigChoice {
+                            value: "available-model".into(),
+                            name: "Available Model".into(),
+                            description: None,
+                        }],
+                        efforts: Vec::new(),
+                        observed_at: chrono::Utc::now().timestamp(),
+                    })
+                })
+            }));
+        runtime
+            .profile_catalog
+            .set(catalog)
+            .unwrap_or_else(|_| panic!("install test catalog"));
+        let request = |profile_id: &str, subagents, remember_launch_choices| {
+            mj_client::daemon::CreateSessionRequest {
+                oracle: Some(false),
+                supervisors: None,
+                oracle_choice: None,
+                remember_launch_choices,
+                remember_container_size: false,
+                create_managed_worktree: Some(false),
+                at: None,
+                branch: None,
+                base: None,
+                no_later_history: false,
+                subagents,
+                review: None,
+                no_project_memory: false,
+                no_github_events: false,
+                no_github_credentials: false,
+                notifications_ignored: false,
+                initial_prompt: None,
+                workspace_id: workspace.id.clone(),
+                profile_id: profile_id.into(),
+                provider: None,
+                bundle_id: mj_core::config::raw_project_context_id(
+                    &project.path().to_string_lossy(),
+                ),
+                project_directory: Some(project.path().to_owned()),
+                target_template_id: "localhost".into(),
+                additional_mounts: Vec::new(),
+                resource_allocation: None,
+                title: "create delegation".into(),
+                session_title_override: None,
+            }
+        };
+        let mjolnir = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        let cases = [
+            (
+                "codex",
+                None,
+                None,
+                SubagentPolicy::Native,
+                Some(("native", "[subagents.straightforward]")),
+                None,
+            ),
+            (
+                "dsh",
+                None,
+                None,
+                SubagentPolicy::None,
+                Some(("none", "[subagents.straightforward]")),
+                None,
+            ),
+            (
+                "kimi",
+                Some("available-model"),
+                None,
+                SubagentPolicy::Native,
+                Some(("native", "Kimi")),
+                None,
+            ),
+            (
+                "codex",
+                Some("available-model"),
+                None,
+                mjolnir.clone(),
+                None,
+                Some(mjolnir.clone()),
+            ),
+            (
+                "codex",
+                Some("unavailable-model"),
+                None,
+                SubagentPolicy::Native,
+                Some(("native", "unavailable-model")),
+                Some(mjolnir),
+            ),
+            (
+                "codex",
+                Some("available-model"),
+                Some(SubagentPolicy::None),
+                SubagentPolicy::None,
+                None,
+                Some(SubagentPolicy::None),
+            ),
+        ];
+        for (profile, model, supplied, effective, fallback, remembered) in cases {
+            config.subagents.straightforward = model
+                .into_iter()
+                .map(|model| SubagentChoice {
+                    model: model.into(),
+                    effort: None,
+                })
+                .collect();
+            config.save().unwrap();
+            let (publish, publication) = tokio::sync::oneshot::channel();
+            let control = LifecycleControl::default();
+            let (registered, _, notice) = runtime
+                .start_create_session_controlled(
+                    request(profile, supplied, true),
+                    control.clone(),
+                    publication,
+                )
+                .await
+                .unwrap();
+            let state = mj_controller::database::load_state().unwrap();
+            assert_eq!(registered.session.subagents.as_ref(), Some(&effective));
+            assert_eq!(
+                state.sessions[&registered.session.id].subagents.as_ref(),
+                Some(&effective)
+            );
+            assert_eq!(
+                state.last_subagent_policies.get(profile),
+                remembered.as_ref()
+            );
+            assert_eq!(state.last_oracle_choices.get(profile), Some(&false));
+            if let Some((mode, reason)) = fallback {
+                let notice = notice.expect("an implicit fallback reports its mode and reason");
+                assert!(notice.contains(&format!("mode {mode}")), "{notice}");
+                assert!(notice.contains(reason), "{notice}");
+            } else {
+                assert_eq!(notice, None);
+            }
+            control.request_cancel("create delegation test cancelled");
+            drop(publish);
+            assert!(matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    runtime.wait_create_outcome(&registered.session.id)
+                )
+                .await
+                .expect("cancelled creation must settle its durable intent"),
+                CreateWait::Failed(_)
+            ));
+        }
+
+        // The Wiki restore path asks for the historical harness policy.
+        // Keep the same usable Straightforward choice in place, so inheriting
+        // fresh Create defaults here would be visible in the persisted record.
+        let (publish, publication) = tokio::sync::oneshot::channel();
+        let control = LifecycleControl::default();
+        let (registered, _, notice) = runtime
+            .start_create_session_inner(
+                request("codex", None, false),
+                control.clone(),
+                Some(publication),
+                CreateDelegationDefault::Harness,
+            )
+            .await
+            .unwrap();
+        assert_eq!(notice, None);
+        assert_eq!(
+            mj_controller::database::load_state().unwrap().sessions[&registered.session.id]
+                .subagents,
+            Some(SubagentPolicy::Native)
+        );
+        control.request_cancel("archive delegation test cancelled");
+        drop(publish);
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                runtime.wait_create_outcome(&registered.session.id)
+            )
+            .await
+            .expect("cancelled creation must settle its durable intent"),
+            CreateWait::Failed(_)
+        ));
+    }
 
     // Hard-won: #1562: a cancelled create stayed unfinished when cached eligibility omitted its durable record.
     #[tokio::test]
@@ -1338,17 +1661,22 @@ mod delegation_replay_tests {
             title: "must not register".into(),
             session_title_override: None,
         };
-        let error = runtime
-            .start_create_session(request)
-            .await
-            .expect_err("a refusal");
-        let refusal = mj_core::refusal::Refusal::of(&error).expect("a request refusal");
-        assert!(refusal.message().contains("[subagents.straightforward]"));
-        assert!(refusal.message().contains("--subagent-straightforward"));
-        assert_eq!(
-            refusal.code(),
-            Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
-        );
+        let mut supervisors_requested = request.clone();
+        supervisors_requested.subagents = None;
+        supervisors_requested.supervisors = Some(true);
+        for request in [request, supervisors_requested] {
+            let error = runtime
+                .start_create_session(request)
+                .await
+                .expect_err("a refusal");
+            let refusal = mj_core::refusal::Refusal::of(&error).expect("a request refusal");
+            assert!(refusal.message().contains("[subagents.straightforward]"));
+            assert!(refusal.message().contains("--subagent-straightforward"));
+            assert_eq!(
+                refusal.code(),
+                Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
+            );
+        }
         assert!(runtime.active_lifecycles().is_empty());
         let state = mj_controller::database::load_state().unwrap();
         assert_eq!(state.sessions.len(), 1);

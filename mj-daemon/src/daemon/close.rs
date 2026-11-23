@@ -739,17 +739,14 @@ impl RuntimeState {
                 session_id.clone(),
                 LifecycleKind::Cleanup,
                 |state, session_id, cancelled, _session_admission| async move {
-                    blocking(move || {
-                        let mut controller = Controller::load()?;
-                        let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(cancelled),
-                            state,
-                            session_id.clone(),
-                        );
-                        controller.cleanup_stopped_target(&session_id, &executor)?;
-                        Ok(DaemonLifecycleResult::Done)
-                    })
-                    .await
+                    let mut controller = Controller::load()?;
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled),
+                        state,
+                        session_id.clone(),
+                    );
+                    controller.cleanup_stopped_target_resumable(&session_id, &executor)?;
+                    Ok(DaemonLifecycleResult::Done)
                 },
             )
             .await?;
@@ -871,60 +868,14 @@ impl RuntimeState {
             {
                 continue;
             }
-            if let Err(error) = self.start_deferred_cleanup(session_id.clone()).await {
+            if let Err(error) = self.start_deferred_cleanup(session_id.clone()).await
+                && !super::actions::is_upgrade_handoff_refusal(&error)
+            {
                 tracing::warn!(%session_id, error = format!("{error:#}"), "could not resume deferred Podman cleanup");
                 self.push_notice(
                     &session_id,
                     format!("Could not resume container storage cleanup: {error:#}"),
                 );
-            }
-        }
-    }
-
-    pub(super) async fn wait_for_deferred_cleanup(
-        self: &Arc<Self>,
-        session_id: &str,
-    ) -> Result<()> {
-        let existing = {
-            let lifecycle_owner = self.owner();
-            let lifecycle = &lifecycle_owner.lifecycle;
-            lifecycle.get(session_id).and_then(|active| {
-                (active.kind == LifecycleKind::Cleanup).then(|| active.result.clone())
-            })
-        };
-        let result = match existing {
-            Some(result) => result,
-            None => {
-                let needs_cleanup = blocking({
-                    let session_id = session_id.to_owned();
-                    move || {
-                        let controller = Controller::load()?;
-                        Ok(controller
-                            .state
-                            .sessions
-                            .get(&session_id)
-                            .is_some_and(|session| {
-                                session.state == SessionState::Stopped && session.target.is_some()
-                            }))
-                    }
-                })
-                .await?;
-                if !needs_cleanup {
-                    return Ok(());
-                }
-                self.start_deferred_cleanup(session_id.to_owned()).await?
-            }
-        };
-        let channel = result.clone();
-        let outcome = Self::wait_lifecycle_result(result).await;
-        self.remove_completed_lifecycle(&channel);
-        match outcome? {
-            DaemonLifecycleResult::Done => Ok(()),
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
-                unreachable!("cleanup cannot return a move outcome")
-            }
-            DaemonLifecycleResult::DeferredCleanup => {
-                unreachable!("cleanup cannot schedule another cleanup")
             }
         }
     }

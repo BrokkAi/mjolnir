@@ -105,7 +105,7 @@ pub use subagent_backend::*;
 mod github;
 use github::github_token;
 mod mailbox;
-pub use mj_controller::wait_policy::*;
+pub use mj_session_runtime::wait_policy::*;
 mod routes;
 pub use routes::*;
 mod config;

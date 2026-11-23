@@ -271,7 +271,7 @@ pub const WORKER_PID_FILE: &str = "worker.pid";
 pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
 /// The startup step a worker records while it reads the account's login-shell
 /// environment. That probe carries its own deadline
-/// ([`crate::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT`]), so the
+/// (`mj_harness_install::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT`), so the
 /// controller watching a starting worker defers to the probe's deadline for
 /// this step instead of applying its stall detection to it.
 pub const WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT: &str = "login-environment";

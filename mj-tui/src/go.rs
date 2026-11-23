@@ -181,15 +181,12 @@ impl DashboardState {
 
     pub fn go_launch_action(&mut self, workspace_id: String, recipe: GoRecipe) -> DashboardAction {
         let oracle = self.state.last_oracle_choice_for(&recipe.profile_id);
-        // A recipe saved before DSH stopped offering Native, or one without a
-        // policy, reads as the choice this profile's harness offers.
-        let subagents = match self.config.profiles.get(&recipe.profile_id) {
-            Some(profile) => recipe
-                .subagents
-                .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind))
-                .as_choice_for(profile.kind),
-            None => recipe.subagents.unwrap_or_default(),
-        };
+        // Normalize explicit choices from old recipes and let admission resolve omission.
+        let profile = self.config.profiles.get(&recipe.profile_id);
+        let subagents = recipe.subagents.map(|policy| match profile {
+            Some(profile) => policy.as_choice_for(profile.kind),
+            None => policy,
+        });
         DashboardAction::CreateSession {
             remember_container_size: false,
             workspace_id,
@@ -207,7 +204,7 @@ impl DashboardState {
             }),
             project_directory: recipe.project_directory,
             create_managed_worktree: recipe.create_managed_worktree,
-            subagents: Some(subagents),
+            subagents,
             oracle: Some(oracle),
             supervisors: None,
             oracle_choice: None,
@@ -385,9 +382,18 @@ mod tests {
         // Preparation from A may finish while B is selected: never overwrite B's recipe.
         let mut prepared = first.recipe.clone().unwrap();
         prepared.bundle_id = Some("prepared-a".into());
+        prepared.subagents = None;
         let action = dashboard.go_launch_action(first_id.clone(), prepared.clone());
+        assert!(matches!(
+            &action,
+            DashboardAction::CreateSession {
+                subagents: None,
+                ..
+            }
+        ));
         let saved = dashboard.remember_go_launch(&action).unwrap();
         assert_eq!(saved.0, first.directory);
+        assert_eq!(saved.1.subagents, None);
         assert_eq!(dashboard.go_mode().unwrap().recipe, second.recipe);
 
         dashboard.set_active_workspace(Some("unbound-workspace".into()));
@@ -459,6 +465,7 @@ mod tests {
             target_template_id,
             project_directory,
             create_managed_worktree,
+            subagents,
             review,
             ..
         } = &action
@@ -471,6 +478,7 @@ mod tests {
             Some(simple_directory.as_path())
         );
         assert_eq!(*create_managed_worktree, Some(true));
+        assert_eq!(subagents, &expected.subagents);
         assert_eq!(review, &Some(mj_core::config::SessionReview::Off));
         assert!(
             dashboard.remember_go_launch(&action).is_none(),

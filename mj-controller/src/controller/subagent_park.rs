@@ -173,9 +173,13 @@ impl Controller {
             let handle = manager
                 .wait_for_session(session_id, PARK_ACTOR_TIMEOUT)
                 .await?;
-            let Some(mut lease) =
-                IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, session.harness_kind)
-                    .await?
+            let Some(mut lease) = IdleWorkspaceLease::acquire_for_replacement(
+                admission,
+                &handle,
+                session.harness_kind,
+                mj_core::activity::WorkerReplacement::Other,
+            )
+            .await?
             else {
                 return Ok(ParkOutcome::Busy);
             };
@@ -224,6 +228,178 @@ impl Controller {
         .await
     }
 
+    /// Pull a refreshed Codex login from a session's staged home back into the
+    /// canonical profile store keyed by `session.last_profile`.
+    ///
+    /// Returns `Ok(true)` when a newer login was installed, `Ok(false)` when
+    /// no update applied (non-Codex, symlinked/shared login, missing file,
+    /// already up to date, or staged `ownership.json` belongs to another
+    /// profile), and `Err` when reading or installing fails.
+    pub(in crate::controller) async fn pull_staged_codex_login(
+        &self,
+        session_id: &str,
+        session: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<bool> {
+        use mj_core::config::HarnessKind;
+        #[derive(serde::Deserialize)]
+        struct StagedOwnershipProfile {
+            profile_id: String,
+        }
+
+        if session.harness_kind != HarnessKind::Codex {
+            return Ok(false);
+        }
+        let Some(profile) = self.config.profiles.get(&session.last_profile) else {
+            return Ok(false);
+        };
+        if !profile.auth_scheme().uses_native_login_file() {
+            return Ok(false);
+        }
+        let launch = self
+            .current_worker_launch_config(session_id, backend)
+            .context("resolve launch config to pull staged Codex login")?;
+        let worker_root = crate::targets::worker_root(backend, session_id)?;
+        let canonical_marker = profile.authentication_marker();
+        let expected_profile = session.last_profile.clone();
+        let bytes = match backend {
+            targets::TargetLocator::LocalBare { .. } => {
+                let ownership_path = std::path::PathBuf::from(&worker_root).join("ownership.json");
+                let staged_path = mj_core::config::harness_authentication_marker(
+                    HarnessKind::Codex,
+                    &launch.harness_home,
+                );
+                if staged_path == canonical_marker {
+                    return Ok(false);
+                }
+                let expected = expected_profile.clone();
+                let maybe_bytes =
+                    mj_core::runtime::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+                        match std::fs::read(&ownership_path) {
+                            Ok(ownership_bytes) => {
+                                let ownership: StagedOwnershipProfile =
+                                    serde_json::from_slice(&ownership_bytes).with_context(|| {
+                                        format!(
+                                            "parse worker ownership {}",
+                                            ownership_path.display()
+                                        )
+                                    })?;
+                                if ownership.profile_id != expected {
+                                    tracing::warn!(
+                                        expected_profile = %expected,
+                                        staged_profile = %ownership.profile_id,
+                                        "skipping staged Codex login pull because ownership.json names another profile"
+                                    );
+                                    return Ok(None);
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => {
+                                return Err(error).with_context(|| {
+                                    format!("read worker ownership {}", ownership_path.display())
+                                });
+                            }
+                        }
+                        let metadata = match std::fs::symlink_metadata(&staged_path) {
+                            Ok(metadata) => metadata,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                return Ok(None);
+                            }
+                            Err(error) => {
+                                return Err(error).with_context(|| {
+                                    format!("inspect staged Codex login {}", staged_path.display())
+                                });
+                            }
+                        };
+                        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                            return Ok(None);
+                        }
+                        std::fs::read(&staged_path)
+                            .with_context(|| {
+                                format!("read staged Codex login {}", staged_path.display())
+                            })
+                            .map(Some)
+                    })
+                    .await
+                    .context("staged Codex login read task failed")??;
+                match maybe_bytes {
+                    Some(bytes) => bytes,
+                    None => return Ok(false),
+                }
+            }
+            _ => {
+                let ownership_path =
+                    format!("{}/ownership.json", worker_root.trim_end_matches('/'));
+                let staged_path = format!(
+                    "{}/{}",
+                    launch.harness_home.to_string_lossy().trim_end_matches('/'),
+                    HarnessKind::Codex.credential_file_name()
+                );
+                let command = targets::locator_command(
+                    targets::SshTrafficClass::Control,
+                    backend,
+                    vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "set -e; if [ -e \"$1\" ] || [ -L \"$1\" ]; then cat -- \"$1\"; fi; printf '\\0'; if [ ! -L \"$2\" ] && [ -f \"$2\" ]; then cat -- \"$2\"; fi".into(),
+                        "mj-pull-codex-login".into(),
+                        ownership_path,
+                        staged_path,
+                    ],
+                )
+                .purpose("read staged Codex login");
+                let output = executor
+                    .execute(&command)
+                    .context("execute staged Codex login read")?;
+                if output.status != 0 {
+                    anyhow::bail!(
+                        "read staged Codex login from target exited with status {}: {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                let Some(sep) = output.stdout.iter().position(|&byte| byte == 0) else {
+                    anyhow::bail!("unexpected staged Codex login probe output without separator");
+                };
+                let ownership_bytes = &output.stdout[..sep];
+                let auth_bytes = &output.stdout[sep + 1..];
+                if !ownership_bytes.is_empty() {
+                    let ownership: StagedOwnershipProfile = serde_json::from_slice(ownership_bytes)
+                        .context("parse remote worker ownership.json")?;
+                    if ownership.profile_id != expected_profile {
+                        tracing::warn!(
+                            session_id,
+                            expected_profile = %expected_profile,
+                            staged_profile = %ownership.profile_id,
+                            "skipping staged Codex login pull because ownership.json names another profile"
+                        );
+                        return Ok(false);
+                    }
+                }
+                if auth_bytes.is_empty() {
+                    return Ok(false);
+                }
+                auth_bytes.to_vec()
+            }
+        };
+        let install = mj_core::credentials::install_credentials_if_newer(
+            HarnessKind::Codex,
+            &canonical_marker,
+            &bytes,
+        )
+        .await
+        .context("install staged Codex login into canonical store")?;
+        if install.installed {
+            tracing::info!(
+                session_id,
+                profile = %session.last_profile,
+                "pulled refreshed Codex login from staged home"
+            );
+        }
+        Ok(install.installed)
+    }
+
     /// Pull a refreshed Codex login from a stopped sub-agent's staged home back
     /// into the canonical profile store before `Parked` is published (#1633).
     ///
@@ -237,154 +413,16 @@ impl Controller {
         backend: &targets::TargetLocator,
         executor: &(impl CommandExecutor + Sync),
     ) {
-        use mj_core::config::HarnessKind;
-
-        if session.harness_kind != HarnessKind::Codex {
-            return;
-        }
-        let Some(profile) = self.config.profiles.get(&session.last_profile) else {
-            return;
-        };
-        if !profile.auth_scheme().uses_native_login_file() {
-            return;
-        }
-        let launch = match self.current_worker_launch_config(session_id, backend) {
-            Ok(launch) => launch,
-            Err(error) => {
-                tracing::warn!(
-                    session_id,
-                    profile = %session.last_profile,
-                    error = format!("{error:#}"),
-                    "could not resolve launch config to pull parked Codex login"
-                );
-                return;
-            }
-        };
-        let canonical_marker = profile.authentication_marker();
-        let bytes = match backend {
-            targets::TargetLocator::LocalBare { .. } => {
-                let staged_path = mj_core::config::harness_authentication_marker(
-                    HarnessKind::Codex,
-                    &launch.harness_home,
-                );
-                if staged_path == canonical_marker {
-                    return;
-                }
-                match mj_core::runtime::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
-                    let metadata = match std::fs::symlink_metadata(&staged_path) {
-                        Ok(metadata) => metadata,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            return Ok(None);
-                        }
-                        Err(error) => {
-                            return Err(error).with_context(|| {
-                                format!("inspect parked Codex login {}", staged_path.display())
-                            });
-                        }
-                    };
-                    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                        return Ok(None);
-                    }
-                    std::fs::read(&staged_path)
-                        .with_context(|| {
-                            format!("read parked Codex login {}", staged_path.display())
-                        })
-                        .map(Some)
-                })
-                .await
-                {
-                    Ok(Ok(Some(bytes))) => bytes,
-                    Ok(Ok(None)) => return,
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            session_id,
-                            profile = %session.last_profile,
-                            error = format!("{error:#}"),
-                            "could not read parked Codex login"
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id,
-                            profile = %session.last_profile,
-                            error = format!("{error:#}"),
-                            "parked Codex login read task failed"
-                        );
-                        return;
-                    }
-                }
-            }
-            _ => {
-                let staged_path = format!(
-                    "{}/{}",
-                    launch.harness_home.to_string_lossy().trim_end_matches('/'),
-                    HarnessKind::Codex.credential_file_name()
-                );
-                let command = targets::locator_command(
-                    targets::SshTrafficClass::Control,
-                    backend,
-                    vec![
-                        "sh".into(),
-                        "-c".into(),
-                        "if [ ! -L \"$1\" ] && [ -f \"$1\" ]; then cat -- \"$1\"; fi".into(),
-                        "mj-pull-codex-login".into(),
-                        staged_path,
-                    ],
-                )
-                .purpose("read parked Codex login");
-                match executor.execute(&command) {
-                    Ok(output) if output.status == 0 => {
-                        if output.stdout.is_empty() {
-                            return;
-                        }
-                        output.stdout
-                    }
-                    Ok(output) => {
-                        tracing::warn!(
-                            session_id,
-                            profile = %session.last_profile,
-                            status = output.status,
-                            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                            "could not read parked Codex login from target"
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id,
-                            profile = %session.last_profile,
-                            error = format!("{error:#}"),
-                            "could not execute parked Codex login read"
-                        );
-                        return;
-                    }
-                }
-            }
-        };
-        match mj_core::credentials::install_credentials_if_newer(
-            HarnessKind::Codex,
-            &canonical_marker,
-            &bytes,
-        )
-        .await
+        if let Err(error) = self
+            .pull_staged_codex_login(session_id, session, backend, executor)
+            .await
         {
-            Ok(install) if install.installed => {
-                tracing::info!(
-                    session_id,
-                    profile = %session.last_profile,
-                    "pulled refreshed Codex login from parked sub-agent"
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(
-                    session_id,
-                    profile = %session.last_profile,
-                    error = format!("{error:#}"),
-                    "could not install parked Codex login into canonical store"
-                );
-            }
+            tracing::warn!(
+                session_id,
+                profile = %session.last_profile,
+                error = format!("{error:#}"),
+                "could not pull parked Codex login"
+            );
         }
     }
 

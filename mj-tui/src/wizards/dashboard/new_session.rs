@@ -323,7 +323,7 @@ impl DashboardState {
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
             remember_container_size: wizard.remember_container_size,
-            subagents: Some(wizard.subagents.selected()),
+            subagents: wizard.subagents.create_selection(),
             oracle: wizard
                 .subagents
                 .oracle_available()
@@ -499,7 +499,7 @@ impl DashboardState {
             &target_template_id,
             &self.config,
             &self.profile_capabilities,
-            &policy,
+            Some(&policy),
             chooser.oracle,
             chooser.supervisors,
         );

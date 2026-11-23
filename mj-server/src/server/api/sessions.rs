@@ -50,7 +50,22 @@ pub(super) async fn get_session(
     let (mut session, enforcement) = {
         let snapshot = state.snapshot_rx.borrow();
         let record = require_session_record(&snapshot, &session_id)?;
-        (ApiSession::from(record), record.execution_enforcement)
+        let mut session = ApiSession::from(record);
+        // Like the public session error, this omits raw runtime errors that
+        // can contain hostnames and paths. Publish the stages and relay state.
+        session.operation =
+            record
+                .operation
+                .as_deref()
+                .map(|operation| crate::server::ViewerOperation {
+                    notice: None,
+                    ..operation.clone()
+                });
+        session.relay = record.relay_state.map(|state| RelayHealth {
+            state,
+            detail: None,
+        });
+        (session, record.execution_enforcement)
     };
     if let Ok(backend) = backend(&state) {
         session.profile_login_error = backend.profile_login_errors()?.remove(&session.profile_id);
@@ -125,7 +140,7 @@ async fn discover_project(
     let path = directory.to_owned();
     mj_core::runtime::spawn_blocking(move || {
         let executor = mj_core::targets::ProcessExecutor;
-        let path = mj_controller::controller::resolve_target_input_path(
+        let path = mj_build_cache::cache_host::resolve_target_input_path(
             &mj_core::config::TargetTemplate::LocalBare,
             &path,
             &executor,
@@ -293,15 +308,19 @@ pub(super) async fn start_session(
     if !bundle_id.is_empty() {
         match backend.validate_github_bundle(bundle_id.clone()).await {
             Ok(()) => {}
-            Err(mj_controller::controller::GithubBundleSelectionError::UnknownBundle(message)) => {
-                return Err(ApiFailure::bad_request(message));
-            }
-            Err(mj_controller::controller::GithubBundleSelectionError::MultipleInstallations(
+            Err(mj_session_runtime::github_app::GithubBundleSelectionError::UnknownBundle(
                 message,
             )) => {
+                return Err(ApiFailure::bad_request(message));
+            }
+            Err(
+                mj_session_runtime::github_app::GithubBundleSelectionError::MultipleInstallations(
+                    message,
+                ),
+            ) => {
                 return Err(ApiFailure::conflict(message));
             }
-            Err(mj_controller::controller::GithubBundleSelectionError::Provider(error)) => {
+            Err(mj_session_runtime::github_app::GithubBundleSelectionError::Provider(error)) => {
                 return Err(ApiFailure::unavailable(format!(
                     "could not resolve GitHub App installation for bundle {bundle_id:?}: {error:#}"
                 )));
@@ -707,8 +726,8 @@ pub(super) async fn wiki_search(
     let backend = backend(&state)?.clone();
     let limit = query
         .limit
-        .unwrap_or(mj_controller::sessionwiki::DEFAULT_WIKI_LIMIT)
-        .clamp(1, mj_controller::sessionwiki::MAX_WIKI_LIMIT);
+        .unwrap_or(mj_sessionwiki::sessionwiki::DEFAULT_WIKI_LIMIT)
+        .clamp(1, mj_sessionwiki::sessionwiki::MAX_WIKI_LIMIT);
     let page = backend
         .wiki_search(query.q.unwrap_or_default(), limit)
         .await

@@ -1,7 +1,7 @@
 //! Fixtures shared by the worker client tests here and in mj-daemon, which reaches
 //! them through the `test-support` feature.
 
-#[cfg(unix)]
+#[cfg(any(test, unix))]
 use super::*;
 
 pub const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
@@ -221,4 +221,34 @@ pub fn granting_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
     bin
+}
+
+#[cfg(test)]
+pub(crate) fn duplex_relay_client(
+    controller: tokio::io::DuplexStream,
+    session_id: &str,
+) -> RelayClient {
+    let (output, input) = tokio::io::split(controller);
+    RelayClient {
+        child: None,
+        input: Some(Box::new(input)),
+        output: BufReader::new(Box::new(output)),
+        request_timeout: RELAY_RPC_TIMEOUT,
+        abandoned: None,
+        next_request: 1,
+        connection_nonce: 1,
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        session_id: session_id.into(),
+        relay_version: "duplex-test-peer".into(),
+        worker_build: None,
+        latest_ordinal: 0,
+        latest_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        subagent_acknowledged: None,
+        subagent_queue: BTreeMap::new(),
+        subagent_publication: None,
+        known_state: None,
+        handshake_complete: true,
+        ssh_session: None,
+        adoption_wait_progress: None,
+    }
 }

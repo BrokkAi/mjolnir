@@ -70,7 +70,7 @@ impl StandaloneSession {
         Self::connect_inner(target, None, None).await
     }
 
-    async fn connect_inner(
+    pub(super) async fn connect_inner(
         target: &RelaySessionTarget,
         prepared: Option<RelayClient>,
         baseline: Option<mj_core::relay::LiveSessionBaseline>,
@@ -466,57 +466,59 @@ impl StandaloneSession {
         let mut repaired_frontiers = std::collections::HashSet::new();
         loop {
             let after_ordinal = self.materialized.applied_event_ordinal;
-            match self.catch_up_fixed_frontier().await {
+            let error = match self.catch_up_fixed_frontier().await {
                 Ok(()) => break,
-                Err(error) if error.downcast_ref::<ProjectionAdvancedError>().is_some() => {
-                    let (durable, window) = load_projection(&self.materialized.session_id).await?;
-                    if durable.applied_event_ordinal <= after_ordinal {
-                        return Err(error);
+                Err(error) => error,
+            };
+            let advancement = error.downcast_ref::<ProjectionAdvancedError>();
+            if advancement.is_none() && !relay_desynchronized(&error) {
+                return Err(error);
+            }
+            // Another connection can commit and ACK beyond our cursor. Try
+            // its durable projection first, then attach from that exact cursor.
+            let (durable, window) = load_projection(&self.materialized.session_id).await?;
+            if let Some(ProjectionAdvancedError { required }) = advancement
+                && (durable.applied_event_ordinal <= after_ordinal
+                    || durable.applied_event_ordinal < required.ordinal
+                    || (durable.applied_event_ordinal == required.ordinal
+                        && durable.applied_event_digest != required.digest))
+            {
+                return Err(ProjectionIntegrityError(format!(
+                    "durable projection for {} is at {}:{} and does not support advancement to {}:{}",
+                    self.materialized.session_id,
+                    durable.applied_event_ordinal,
+                    durable.applied_event_digest,
+                    required.ordinal,
+                    required.digest,
+                ))
+                .into());
+            }
+            if durable.applied_event_ordinal > after_ordinal {
+                self.materialized = durable;
+                self.window = window;
+                continue;
+            }
+            let behind_retention = after_ordinal < self.operational.retained_event_ordinal();
+            self.repair_projection()
+                .await
+                .with_context(|| {
+                    if behind_retention {
+                        format!("controller store is behind the worker's retained journal for {} at ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
+                    } else {
+                        format!("controller projection for {} cannot catch up from ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
                     }
-                    self.materialized = durable;
-                    self.window = window;
-                    continue;
-                }
-                Err(error) if relay_desynchronized(&error) => {
-                    // Another connection can commit and ACK beyond our cursor.
-                    // The shared durable projection, rather than a checkpoint,
-                    // owns that advancement and is the first repair source.
-                    let (durable, window) = load_projection(&self.materialized.session_id).await?;
-                    if durable.applied_event_ordinal > after_ordinal {
-                        self.materialized = durable;
-                        self.window = window;
-                        continue;
-                    }
-                    let behind_retention =
-                        after_ordinal < self.operational.retained_event_ordinal();
-                    self.repair_projection()
-                        .await
-                        .with_context(|| {
-                            if behind_retention {
-                                format!("controller store is behind the worker's retained journal for {} at ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
-                            } else {
-                                format!("controller projection for {} cannot catch up from ordinal {after_ordinal}: {error:#}", self.materialized.session_id)
-                            }
-                        })?;
-                    repaired = true;
-                    // Repair rebuilds from the same durable checkpoint every
-                    // time. If catching up from that frontier still desyncs — as
-                    // it does when relay history is unreadable past the
-                    // checkpoint — repairing again lands on the same frontier and
-                    // would loop forever. Fail loudly on the second visit instead
-                    // of hanging; recovery got everything the checkpoint covers.
-                    let frontier = self.materialized.applied_event_ordinal;
-                    if !repaired_frontiers.insert(frontier) {
-                        bail!(
-                            "controller projection for {} cannot catch up: relay history is \
-                             unreadable and rebuilding from checkpoint frontier {frontier} does \
-                             not get past it",
-                            self.materialized.session_id
-                        );
-                    }
-                    continue;
-                }
-                Err(error) => return Err(error),
+                })?;
+            repaired = true;
+            // Repair rebuilds from the same durable checkpoint every time.
+            // If catch-up still desyncs there, another repair cannot help.
+            let frontier = self.materialized.applied_event_ordinal;
+            if !repaired_frontiers.insert(frontier) {
+                bail!(
+                    "controller projection for {} cannot catch up: relay history is \
+                     unreadable and rebuilding from checkpoint frontier {frontier} does \
+                     not get past it",
+                    self.materialized.session_id
+                );
             }
         }
         if let Some(queue) = &self.subagent_queue
@@ -656,6 +658,14 @@ impl StandaloneSession {
                 .client
                 .acknowledge(cursor.ordinal, &cursor.digest)
                 .await?;
+            // The reply carries the worker's global watermark. A newer ACK
+            // requires reloading the projection before publishing any state.
+            if acknowledged.ordinal > cursor.ordinal {
+                return Err(ProjectionAdvancedError {
+                    required: acknowledged,
+                }
+                .into());
+            }
             ensure!(
                 acknowledged == cursor,
                 "relay acknowledged cursor {}:{} instead of {}:{}",
@@ -1071,7 +1081,7 @@ impl StandaloneSession {
                                 ProjectionApplyOutcome::Applied => {}
                                 ProjectionApplyOutcome::AlreadyApplied => {
                                     return Err(ProjectionAdvancedError {
-                                        event_ordinal: ordinal,
+                                        required: RelayCursor { ordinal, digest },
                                     }
                                     .into());
                                 }

@@ -29,10 +29,14 @@ WORKDIR /src
 # .dockerignore admits exactly these paths.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY mj-core/ mj-core/
+COPY mj-harness-install/ mj-harness-install/
 COPY mj-review/ mj-review/
 COPY mj-checkpoint/ mj-checkpoint/
 COPY mj-transcript/ mj-transcript/
 COPY mj-build-id/ mj-build-id/
+COPY mj-microvm/ mj-microvm/
+COPY mj-worker-mcp/ mj-worker-mcp/
+COPY mj-worker-review/ mj-worker-review/
 COPY mj-worker/ mj-worker/
 COPY mj-worker-bin/ mj-worker-bin/
 COPY mj-client/ mj-client/
@@ -49,6 +53,7 @@ COPY mj-session-runtime/ mj-session-runtime/
 COPY mj-review-host/ mj-review-host/
 COPY mj-profile-catalog/ mj-profile-catalog/
 COPY mj-github-relevance/ mj-github-relevance/
+COPY mj-github-watch/ mj-github-watch/
 COPY mj-controller/ mj-controller/
 COPY mj-setup/ mj-setup/
 COPY mj-server/ mj-server/
@@ -356,12 +361,12 @@ RUN printf '%s\n' \
         > /etc/profile.d/10-cargo-path.sh \
     && bash -lc 'command -v cargo && command -v samply'
 
-COPY mj-core/assets/muse/runtime.json /opt/mjolnir/muse-runtime.json
+COPY mj-harness-install/assets/muse/runtime.json /opt/mjolnir/muse-runtime.json
 COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
 RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
 ENV MUSE_CLI=/usr/local/bin/muse
 
-COPY mj-core/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json
+COPY mj-harness-install/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json
 COPY scripts/install-antigravity.py /opt/mjolnir/install-antigravity.py
 RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true

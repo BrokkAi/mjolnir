@@ -1438,21 +1438,6 @@ impl HarnessKind {
         matches!(self, Self::Muse)
     }
 
-    /// An executable a managed install must create beside its pinned
-    /// entrypoint, relative to the install root.
-    pub const fn extra_managed_entrypoint(self) -> Option<&'static str> {
-        match self {
-            Self::Grok => Some("bin/agent"),
-            Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex
-            | Self::Kimi
-            | Self::Muse
-            | Self::OpenCode
-            | Self::Dsh
-            | Self::Antigravity => None,
-        }
-    }
-
     /// Harness-specific arguments that start its ACP stdio server.
     pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);

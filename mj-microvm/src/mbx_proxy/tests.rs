@@ -220,7 +220,7 @@ async fn protocol_boundary() {
             Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "microvm::mbx_proxy::tests::mbx_proxy_protocol_boundary",
+                    "mbx_proxy::tests::mbx_proxy_protocol_boundary",
                     "--nocapture",
                 ])
                 .env(CHECK_FIXTURE, "1")
@@ -387,7 +387,7 @@ fn mbx_proxy_device_binding() {
     const CHILD: &str = "MJ_TEST_MBX_BINDING_NETNS";
     if std::env::var_os(CHILD).is_none() {
         assert!(sys::is_root(), "run this ignored test with sudo -E");
-        let name = "microvm::mbx_proxy::tests::mbx_proxy_device_binding";
+        let name = "mbx_proxy::tests::mbx_proxy_device_binding";
         checked(
             Command::new("unshare")
                 .args(["--net", "--mount", "--"])

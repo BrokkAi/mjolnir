@@ -400,6 +400,12 @@ impl Adapter {
                 .lock()
                 .expect("adapter session set")
                 .insert(started.session_id.clone());
+            if let Some(notice) = &started.notice
+                && let Err(error) =
+                    crate::api_commands::write_start_notice(std::io::stderr().lock(), notice)
+            {
+                tracing::warn!(%error, session_id = %started.session_id, %notice, "could not write session launch notice to stderr");
+            }
             anyhow::Ok((started.session_id, client))
         });
         let (session_id, client) = created

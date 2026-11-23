@@ -2653,7 +2653,7 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
     assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
     let antigravity: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../mj-core/assets/antigravity/runtime.json"
+        "../../../mj-harness-install/assets/antigravity/runtime.json"
     ))
     .unwrap();
     assert_eq!(
@@ -2661,7 +2661,7 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         mj_core::harness_runtime::ANTIGRAVITY_VERSION
     );
     assert!(CONTAINERFILE.contains(
-        "COPY mj-core/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json"
+        "COPY mj-harness-install/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json"
     ));
     assert!(CONTAINERFILE.contains("RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin"));
     assert!(CONTAINERFILE.contains("ENV AGY_CLI_DISABLE_AUTO_UPDATE=true"));
@@ -2695,11 +2695,11 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../mj-core/assets/harnesses/claude/package.json"
+        "../../../mj-harness-install/assets/harnesses/claude/package.json"
     ))
     .unwrap();
     let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../mj-core/assets/harnesses/claude/package-lock.json"
+        "../../../mj-harness-install/assets/harnesses/claude/package-lock.json"
     ))
     .unwrap();
     for (name, version) in [

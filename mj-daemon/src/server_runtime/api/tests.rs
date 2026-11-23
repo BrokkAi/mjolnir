@@ -4950,6 +4950,229 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
     );
 }
 
+// Hard-won: #1341: send_message refused a moving session as Closing and dropped the message.
+#[tokio::test]
+async fn send_message_queues_in_mailbox_while_target_is_moving_instead_of_refusing_closing() {
+    if !isolated_parked_test(
+        "send_message_queues_in_mailbox_while_target_is_moving_instead_of_refusing_closing",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    const CALLER: &str = "0305d10cd40fb1342e5ad6171d6ae993";
+    const MOVING_PEER: &str = "0bf0983d553751026807d97d54857ede";
+    const CLOSING_PEER: &str = "11112222333344445555666677778888";
+
+    let caller = parent_record(CALLER, "caller");
+    mj_controller::database::save_session(&caller).unwrap();
+    let mut closing = parent_record(CLOSING_PEER, "closing");
+    closing.state = SessionState::Closing;
+    mj_controller::database::save_session(&closing).unwrap();
+    let mut moving = parent_record(MOVING_PEER, "moving");
+    moving.state = SessionState::Closing;
+    mj_controller::database::save_session(&moving).unwrap();
+
+    // Backend has no connected worker actor for MOVING_PEER or CLOSING_PEER,
+    // matching a cross-target Move whose source worker has disconnected/stopped.
+    let exports = ParkingExports::new(SessionState::Closing, None);
+    let (backend, _) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let send = |request_id: &str, target: &str| mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: request_id.into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: target.into(),
+            message: "schema coordination notice".into(),
+        },
+    };
+
+    // Ordinary Closing without an active Move is still refused.
+    let ordinary_close = backend
+        .execute_subagent_tool(CALLER.into(), send("ordinary-close", CLOSING_PEER))
+        .await;
+    assert!(ordinary_close.is_error);
+    assert!(
+        ordinary_close
+            .message
+            .contains("Closing and cannot receive messages"),
+        "{}",
+        ordinary_close.message
+    );
+    assert!(
+        mj_controller::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Active Move in Capturing (Closing) queues durably in mailbox_outbox.
+    let mut move_op =
+        mj_controller::controller::move_session::test_fixtures::source_recovery_operation(&moving);
+    move_op.phase = mj_core::state::MovePhase::Capturing;
+    mj_controller::database::save_move_operation(&move_op).unwrap();
+
+    let during_closing = backend
+        .execute_subagent_tool(CALLER.into(), send("moving-closing", MOVING_PEER))
+        .await;
+    assert!(!during_closing.is_error, "{}", during_closing.message);
+    let body: serde_json::Value = serde_json::from_str(&during_closing.message).unwrap();
+    assert_eq!(body["via"], "mailbox");
+    assert_eq!(body["session_id"], MOVING_PEER);
+    assert_eq!(body["note"], super::subagent_input::QUEUED_UNTIL_MOVE_NOTE);
+
+    // Idempotent retry while the Move is still active keeps the same row and note.
+    let retry_closing = backend
+        .execute_subagent_tool(CALLER.into(), send("moving-closing", MOVING_PEER))
+        .await;
+    assert!(!retry_closing.is_error, "{}", retry_closing.message);
+    let retry_body: serde_json::Value = serde_json::from_str(&retry_closing.message).unwrap();
+    assert_eq!(retry_body["via"], "mailbox");
+    assert_eq!(
+        retry_body["note"],
+        super::subagent_input::QUEUED_UNTIL_MOVE_NOTE
+    );
+
+    // Active Move in Transferring (Stopped) also queues durably instead of
+    // reporting stopped (suspended).
+    moving.state = SessionState::Stopped;
+    mj_controller::database::save_session(&moving).unwrap();
+    move_op.phase = mj_core::state::MovePhase::Transferring;
+    mj_controller::database::save_move_operation(&move_op).unwrap();
+
+    let during_transfer = backend
+        .execute_subagent_tool(CALLER.into(), send("moving-stopped", MOVING_PEER))
+        .await;
+    assert!(!during_transfer.is_error, "{}", during_transfer.message);
+    let transfer_body: serde_json::Value = serde_json::from_str(&during_transfer.message).unwrap();
+    assert_eq!(transfer_body["via"], "mailbox");
+    assert_eq!(
+        transfer_body["note"],
+        super::subagent_input::QUEUED_UNTIL_MOVE_NOTE
+    );
+
+    let pending = mj_controller::database::pending_mailbox_events(10).unwrap();
+    let keys: Vec<&str> = pending.iter().map(|row| row.event_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "session-message-moving-closing",
+            "session-message-moving-stopped",
+        ]
+    );
+
+    // Retrying a request that already took the startup queue route keeps its
+    // startup receipt instead of creating a duplicate mailbox row while moving.
+    let startup_cmd =
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("startup-first");
+    mj_controller::database::enqueue_startup_deliveries(vec![
+        mj_controller::database::StartupDelivery {
+            session_id: MOVING_PEER.into(),
+            command_id: startup_cmd,
+            step_json: serde_json::to_string(&crate::daemon::StartupStep::SessionMessage {
+                sender_id: CALLER.into(),
+                sender_title: caller.message_name(),
+                text: "schema coordination notice".into(),
+                created_at_ms: 1,
+                waited_on_group: None,
+            })
+            .unwrap(),
+            phase: "pending".into(),
+            group_id: None,
+            accepted_ordinal: None,
+            error: None,
+        },
+    ])
+    .unwrap();
+    let startup_retry = backend
+        .execute_subagent_tool(CALLER.into(), send("startup-first", MOVING_PEER))
+        .await;
+    assert!(!startup_retry.is_error, "{}", startup_retry.message);
+    let startup_body: serde_json::Value = serde_json::from_str(&startup_retry.message).unwrap();
+    assert_eq!(startup_body["via"], "queued");
+    assert_eq!(
+        startup_body["note"],
+        super::subagent_input::QUEUED_UNTIL_STARTUP_NOTE
+    );
+    assert_eq!(
+        mj_controller::database::pending_mailbox_events(10)
+            .unwrap()
+            .len(),
+        2,
+        "startup retry must not insert a duplicate mailbox_outbox row"
+    );
+
+    // While a Move is active and the source worker is still connected on an
+    // older relay protocol, mailbox delivery defers the event as Pending
+    // instead of permanently failing it before the destination worker attaches.
+    moving.state = SessionState::Running;
+    mj_controller::database::save_session(&moving).unwrap();
+    let legacy_exports = ParkingExports::with_modern_worker(SessionState::Running, None, false);
+    legacy_exports
+        .records
+        .lock()
+        .unwrap()
+        .insert(MOVING_PEER.into(), moving.clone());
+    let legacy_remote = mj_controller::session_manager::spawn_remote_session_manager().unwrap();
+    legacy_remote
+        .targets
+        .send_replace(vec![mj_controller::session_manager::RelaySessionTarget {
+            session_id: MOVING_PEER.into(),
+            spec: mj_controller::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    let mut legacy_view = ready_view("model");
+    let legacy_snapshot = legacy_view.snapshot.as_mut().unwrap();
+    legacy_snapshot.materialized.session_id = MOVING_PEER.into();
+    legacy_snapshot.operational.session_id = MOVING_PEER.into();
+    legacy_snapshot.operational.relay_protocol_version =
+        Some(mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL - 1);
+    legacy_remote
+        .publisher
+        .publish(MOVING_PEER.into(), legacy_view)
+        .await
+        .unwrap();
+    legacy_remote
+        .control
+        .wait_for_session(MOVING_PEER, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let queued_event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    let held = crate::daemon::mailbox_delivery::deliver_mailbox_event(
+        legacy_exports,
+        &legacy_remote.control,
+        MOVING_PEER,
+        queued_event,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            held,
+            mj_controller::mailbox_outbox::MailboxEventDelivery::Pending(_)
+        ),
+        "expected Pending while Move is active on a legacy source worker, got {held:?}"
+    );
+    legacy_remote.shutdown.shutdown().await.unwrap();
+
+    // Once the Move is no longer active (Failed) and the session stays Stopped,
+    // new sends are refused as stopped.
+    moving.state = SessionState::Stopped;
+    mj_controller::database::save_session(&moving).unwrap();
+    move_op.phase = mj_core::state::MovePhase::Failed;
+    mj_controller::database::save_move_operation(&move_op).unwrap();
+    let after_failure = backend
+        .execute_subagent_tool(CALLER.into(), send("after-failure", MOVING_PEER))
+        .await;
+    assert!(after_failure.is_error);
+    assert!(
+        after_failure.message.contains("stopped (suspended)"),
+        "{}",
+        after_failure.message
+    );
+}
+
 // Hard-won: #1349: close compared a unique child prefix with full session IDs and refused an owned child.
 #[tokio::test]
 async fn close_resolves_an_owned_child_prefix_and_persists_the_full_id() {
@@ -8001,9 +8224,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         .unhealthy(test_profile, "sol", now)
         .unwrap()
         .describe();
-    let expected = format!(
-        "profile {test_profile} is {description}. A new spawn will choose another eligible profile; send_message would run this child on {test_profile} again."
-    );
+    let expected = format!("profile {test_profile} is {description}.");
     backend.reconcile_parent_reports("parent-1").await.unwrap();
     let events = mj_controller::database::pending_mailbox_events(10).unwrap();
     assert_eq!(events.len(), 1);

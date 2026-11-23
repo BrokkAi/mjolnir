@@ -207,12 +207,19 @@ impl RuntimeState {
         Ok(result)
     }
 
-    pub(super) async fn destroy_stopped_session(
+    pub(super) async fn start_destroy_stopped_session(
         self: &Arc<Self>,
         session_id: String,
         branch: BranchDisposition,
-    ) -> Result<()> {
-        self.force_destroy_session(session_id, branch).await
+    ) -> Result<StartedLifecycle> {
+        self.start_destroy_session(
+            session_id,
+            branch,
+            LifecycleKind::ForceDestroy,
+            true,
+            DestroyRequest::AwaitingReceipt,
+        )
+        .await
     }
 
     /// Discard the record of a session that ended as `Lost`: its managed
@@ -317,10 +324,9 @@ impl RuntimeState {
             .sync_now(true)
             .await
             .context("sync SessionWiki before archiving stopped sessions")?;
-        // The sync is restartable and holds no admission; the archive changes
-        // sessions, so a handoff waits for it from here. It does not start
-        // while a handoff is waiting: the next daemon's tick runs it.
-        let Ok(_work) = mj_controller::upgrade::activity_unless_draining("SessionWiki archive")
+        // A draining daemon leaves archive preparation for the next tick.
+        let Ok(preparation) =
+            mj_controller::upgrade::activity_unless_draining("SessionWiki archive preparation")
         else {
             tracing::debug!(
                 "a daemon upgrade is waiting; the SessionWiki archive pass waits for the next daemon"
@@ -421,6 +427,9 @@ impl RuntimeState {
         })
         .await
         .context("check the SessionWiki index before archiving")?;
+        // Each archive takes its own admission after entering the lifecycle
+        // queue. The batch must not hold admission while queued behind cleanup.
+        drop(preparation);
         let mut archived = 0;
         for session_id in candidates {
             if !children.contains(&session_id) && !indexed.contains(&session_id) {
@@ -493,7 +502,6 @@ impl RuntimeState {
         .await?;
         self.stop_subagents(children, LifecycleKind::StopSubagent, None)
             .await?;
-        self.wait_for_deferred_cleanup(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
             move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
@@ -508,23 +516,34 @@ impl RuntimeState {
         self.run_lifecycle(session_id, kind, {
             let retained = retained.clone();
             move |state, session_id, cancelled, _session_admission| async move {
-                blocking(move || {
-                    let mut controller = Controller::load()?;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state,
-                        session_id.clone(),
-                    );
-                    let kept = controller.destroy_session_controlled_with_checkout(
-                        &session_id,
-                        &executor,
-                        branch,
-                        checkout,
-                    )?;
-                    *retained.lock().unwrap_or_else(PoisonError::into_inner) = kept;
-                    Ok(DaemonLifecycleResult::Done)
-                })
-                .await
+                let mut controller = Controller::load()?;
+                let executor = DaemonStageReportingExecutor::new(
+                    CancellableProcessExecutor::new(cancelled),
+                    state,
+                    session_id.clone(),
+                );
+                // If archive won the queue before automatic cleanup, finish
+                // the stopped target's checkpoint-preserving retirement
+                // without holding daemon handoff admission.
+                if controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|session| {
+                        session.state == SessionState::Stopped && session.target.is_some()
+                    })
+                {
+                    mj_controller::targets::CommandExecutor::begin_resumable_work(&executor)?;
+                    controller.cleanup_stopped_target_resumable(&session_id, &executor)?;
+                }
+                let kept = controller.destroy_session_controlled_with_checkout(
+                    &session_id,
+                    &executor,
+                    branch,
+                    checkout,
+                )?;
+                *retained.lock().unwrap_or_else(PoisonError::into_inner) = kept;
+                Ok(DaemonLifecycleResult::Done)
             }
         })
         .await?;
@@ -750,7 +769,13 @@ impl RuntimeState {
         if let Some(started) = self.join_lifecycle(&session_id, kind, &key)? {
             return Ok(started);
         }
-        let _upgrade_work = mj_controller::upgrade::destroy_activity(&requested_session_id)?;
+        let accepted_work = if matches!(request, DestroyRequest::AwaitingReceipt) {
+            None
+        } else {
+            Some(mj_controller::upgrade::destroy_activity(
+                &requested_session_id,
+            )?)
+        };
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
         let started = self
             .admit_prepared_lifecycle(
@@ -759,7 +784,7 @@ impl RuntimeState {
                 request.lifecycle_start(key),
                 Some(acceptance),
                 move |state, session_id, cancelled, _session_admission| async move {
-                    let _upgrade_work = _upgrade_work;
+                    let _accepted_work = accepted_work;
                     let children = blocking({
                         let session_id = session_id.clone();
                         move || mj_controller::database::begin_session_destroy(&session_id)

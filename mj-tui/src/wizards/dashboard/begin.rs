@@ -122,16 +122,14 @@ impl DashboardState {
             .new_wizard_profile_id(profile)
             .expect("an offered profile was checked above");
         let profile_id = profile_id.as_str();
-        let remembered = self.state.last_subagent_policy_for(profile_id);
-        let mut delegation = subagents::SubagentDraft::new(remembered.clone());
-        delegation.oracle = self.state.last_oracle_choice_for(profile_id);
-        delegation.supervisors = self.state.last_supervisor_choice_for(profile_id);
+        let remembered = self.state.remembered_subagent_policy_for(profile_id);
+        let mut delegation = subagents::SubagentDraft::default();
         delegation.refresh_create(
             profile_id,
             &target_id,
             &self.config,
             &self.profile_capabilities,
-            &remembered,
+            remembered.as_ref(),
             self.state.last_oracle_choice_for(profile_id),
             self.state.last_supervisor_choice_for(profile_id),
         );

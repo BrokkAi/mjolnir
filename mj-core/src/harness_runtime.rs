@@ -1,8 +1,8 @@
 //! Exact harness versions used by Mjolnir-managed installations.
 //!
-//! Installation and process ownership live in `brokk-mj-worker`; this module
-//! holds shared pin metadata and managed-install paths/manifests so the
-//! controller and worker cannot silently disagree about an installation.
+//! Installation lives in `brokk-mj-harness-install`. This module holds shared
+//! pin metadata and managed-install paths and manifests so the controller
+//! and worker agree on installations.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -20,10 +20,10 @@ const MANAGED_HARNESSES_DIR: &str = "harnesses";
 const MANAGED_NODE_DIR: &str = "node";
 
 /// The exact Node.js release Mjolnir installs when the target has no
-/// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
+/// compatible runtime. Keep this in lockstep with `mj-harness-install/assets/node/runtime.json`.
 pub const NODE_VERSION: &str = "24.22.1";
 
-/// Keep in lockstep with `assets/mise/runtime.json`. Static musl binary hashes:
+/// Keep in lockstep with `mj-harness-install/assets/mise/runtime.json`. Static musl binary hashes:
 /// https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
 pub const MISE_VERSION: &str = "2026.11.9";
 
@@ -454,8 +454,8 @@ impl NpmBridge {
 pub struct HarnessPin {
     /// Identity of the installed content, and the directory name under the
     /// harness cache. Change it whenever the installed bytes change, including
-    /// a change to the harness asset `package.json`, so caches written by an
-    /// earlier packaging are replaced instead of reused.
+    /// a change to the harness asset `package.json`, or when receipts from
+    /// earlier packaging no longer establish that an installation is usable.
     pub install_id: &'static str,
     pub display_version: &'static str,
     pub entrypoint: &'static str,
@@ -477,16 +477,16 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.15.0_codex-0.170.0",
+            // pkg2: require a runnable CLI even when npm reports success.
+            install_id: "brokkai-codex-acp-1.15.0_codex-0.170.0_pkg2",
             display_version: "@brokkai/codex-acp 1.15.0 + codex 0.170.0",
             entrypoint: "node_modules/.bin/codex-acp",
             cli_entrypoint: CODEX_CLI_ENTRYPOINT,
         },
         HarnessKind::Claude => HarnessPin {
-            // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
-            // Installs made before that change kept the package's native-binary
-            // stub, so their identity must not match this pin.
-            install_id: "claude-agent-acp-0.108.0_claude-2.1.326_pkg2",
+            // pkg2 approved the native install script. pkg3 requires the
+            // installed CLI to run before issuing a receipt.
+            install_id: "claude-agent-acp-0.108.0_claude-2.1.326_pkg3",
             display_version: "claude-agent-acp 0.108.0 + Claude Code 2.1.326",
             entrypoint: "node_modules/.bin/claude-agent-acp",
             cli_entrypoint: "node_modules/.bin/claude",

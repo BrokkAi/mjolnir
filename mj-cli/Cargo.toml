@@ -22,6 +22,7 @@ test-hooks = []
 [dependencies]
 tempfile.workspace = true
 mj-core.workspace = true
+mj-harness-install.workspace = true
 mj-build-id.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true

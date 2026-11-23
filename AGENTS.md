@@ -260,7 +260,7 @@ container sessions run the same harness versions as managed bare workers:
 - Codex and Claude bridges, Kimi Code, Grok, and OpenCode: update the
   `npm install --global` line in
   `containers/Containerfile.agent-dev`, as well as the package files in
-  `mj-core/assets/harnesses/`. The test
+  `mj-harness-install/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
 - Claude Code or its bridge: run `python3 tests/e2e/claude_stripped_credentials.py`
@@ -272,7 +272,7 @@ container sessions run the same harness versions as managed bare workers:
   against the new pin. Sessions trust Mjolnir's MCP servers through agy's
   undocumented project grant file; the script checks that agy still reads it
   and still matches a grant to the owning server rather than the call title.
-- Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
+- Muse: update `mj-harness-install/assets/muse/runtime.json`. The image installs Muse
   from that file.
 - dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
   the `npm install --global` line in `containers/Containerfile.agent-dev`. DSH

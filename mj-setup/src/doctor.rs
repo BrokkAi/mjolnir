@@ -508,8 +508,8 @@ fn build_cache_release_check(
 #[cfg(unix)]
 fn session_environment_check() -> Option<DoctorCheck> {
     let started = std::time::Instant::now();
-    let resolved = mj_core::login_environment::account_shell()
-        .and_then(|shell| Ok((shell, mj_core::login_environment::discover()?)));
+    let resolved = mj_harness_install::login_environment::account_shell()
+        .and_then(|shell| Ok((shell, mj_harness_install::login_environment::discover()?)));
     let elapsed = started.elapsed();
     match resolved {
         Ok((shell, environment)) => Some(session_environment_check_from(

@@ -38,14 +38,15 @@ the box later to restore the same choices. Container targets are unconstrained
 inside their isolation boundary but have no YOLO permission setting, so they
 use the shared choices.
 
-**Create** and **Move…** offer **Native** (the agent's own sub-agents) or **Mjolnir** (children Mjolnir starts and tracks) delegation. Mjolnir
-requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task
-in the set the destination target uses.
-DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
-**None** instead. A DSH session starts on Mjolnir when the last choice was
-Mjolnir and Straightforward is configured, and on None otherwise. Its choice
-becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
-does not change what the next Claude or Codex session starts with.
+**Create** and **Move…** offer **Native** (the harness's own sub-agents),
+**Mjolnir** (children Mjolnir starts and tracks), and **None**. Mjolnir
+requires a Claude, Codex, DSH, OpenCode, or Antigravity profile and a configured
+Straightforward choice. DSH and Antigravity offer **Mjolnir** and **None**.
+
+On a profile without a remembered choice, **Create** defaults to Mjolnir
+when available. If Mjolnir is unavailable, it uses Native on harnesses with
+their own sub-agents and None on DSH and Antigravity. **Move…** carries forward
+the session's delegation choice by default.
 OpenCode has no steering, so a child's report reaches an OpenCode parent when
 its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
 (for example in a container built from an older image) loads its MCP tools

@@ -206,6 +206,7 @@ impl LifecycleControl {
     /// is, and the next daemon finishes it from its durable record.
     fn interrupt(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.shutdown_stop.notify_waiters();
     }
 
     /// Whether daemon shutdown is what stopped the operation's commands, so a
@@ -512,7 +513,7 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// before this daemon started: its checkpoint is sealed, or a child's final
 /// conversation is durable, and stopping cleanup now only strands the target.
 fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    kind == LifecycleKind::StartupCleanup
+    matches!(kind, LifecycleKind::Cleanup | LifecycleKind::StartupCleanup)
         || matches!(
             kind,
             LifecycleKind::Suspend | LifecycleKind::Restart | LifecycleKind::UpgradeContainer
@@ -808,6 +809,9 @@ pub(crate) struct StartedLifecycle {
     receipt: LifecycleReceipt,
     result: LifecycleWatch,
     acceptance: LifecycleAcceptance,
+    /// Cloned destroy hold for synchronous callers that must keep handoff
+    /// admission through writing their final acknowledgement.
+    destroy_admission: Option<mj_controller::upgrade::Work>,
 }
 
 impl LifecycleFailure {

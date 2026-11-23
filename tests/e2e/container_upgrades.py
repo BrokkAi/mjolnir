@@ -71,7 +71,8 @@ class Regression(Lab):
 
     def record(self, session):
         reply = self.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
-        return reply["value"]
+        value = reply["value"]
+        return value.get("record", value)
 
     def container(self, session):
         return self.record(session)["target"]["container_id"]

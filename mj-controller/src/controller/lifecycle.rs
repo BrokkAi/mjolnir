@@ -24,32 +24,7 @@ pub(super) mod origin_delta;
 mod subagent;
 use origin_delta::OriginDeltaSuspend;
 
-/// Trusted public guidance attached at the failing lifecycle boundary. Never
-/// derive it from an error chain, which can contain credentials and host paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LifecycleFailureReason {
-    WorkerContact,
-    Checkpoint,
-    Cleanup,
-    RetainedMoveSource,
-    UnsealedMoveSource,
-    HarnessUnavailable,
-}
-
-impl std::fmt::Display for LifecycleFailureReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::WorkerContact => "Suspension could not contact the worker. Resume the session to repair its runtime, then retry suspension.",
-            Self::Checkpoint => "Suspension could not save its recovery checkpoint. Retry suspension; the existing environment was kept.",
-            Self::Cleanup => "Suspension could not finish removing its target. Retry suspension to finish cleanup; retained environments and recovery data were kept.",
-            Self::RetainedMoveSource => "Suspension interrupted Move before the destination was ready; the source workspace was kept. Resume the session to repair its runtime, then retry suspension.",
-            Self::UnsealedMoveSource => "Suspension could not establish a sealed Move checkpoint. Resume the session to repair its runtime, then retry suspension; existing environments and recovery data were kept.",
-            Self::HarnessUnavailable => "Suspension could not save the session without its harness, which failed to open; the environment was kept. Resume the session to retry its harness, or destroy it.",
-        })
-    }
-}
-
-impl std::error::Error for LifecycleFailureReason {}
+pub use mj_session_types::LifecycleFailureReason;
 
 /// What destroying a session does with its managed worktree's git branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,22 +903,33 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let mut origin_delta = matches!(
+        let is_origin_delta = matches!(
             checkpoint_export_policy,
             CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
-        )
-        .then(|| OriginDeltaSuspend::load(self, session_id, executor))
-        .transpose()?;
+        );
+        let yield_origin_delta_preflight = move_intent.is_some() && is_origin_delta;
+        if yield_origin_delta_preflight {
+            executor.begin_resumable_work()?;
+        }
+        let origin_delta = is_origin_delta
+            .then(|| OriginDeltaSuspend::load(self, session_id, executor))
+            .transpose();
+        let preflight_result = match &origin_delta {
+            Ok(Some(attempt))
+                if !attempt.accepted()
+                    || (before_close.is_none() && !attempt.request_recorded()) =>
+            {
+                self.preflight_origin_delta_suspension(session_id, consent, executor)
+            }
+            _ => Ok(()),
+        };
+        if yield_origin_delta_preflight {
+            executor.end_resumable_work("persist Move source stop")?;
+        }
+        let mut origin_delta = origin_delta?;
         let legacy_closing_intent = previous.state == SessionState::Closing
             && origin_delta.as_ref().is_some_and(|attempt| !attempt.accepted());
-        if matches!(
-            checkpoint_export_policy,
-            CheckpointExportPolicy::OriginDelta | CheckpointExportPolicy::OriginDeltaCutoff
-        ) && origin_delta.as_ref().is_some_and(|attempt| {
-            !attempt.accepted() || (before_close.is_none() && !attempt.request_recorded())
-        }) && let Err(error) =
-            self.preflight_origin_delta_suspension(session_id, consent, executor)
-        {
+        if let Err(error) = preflight_result {
             let error = if legacy_closing_intent {
                 mj_core::refusal::Refusal::precondition(format!(
                     "suspend requested before the upgrade needs consent: {error:#}"
@@ -1196,6 +1182,10 @@ impl Controller {
                     ).await);
                 }
             });
+        }
+
+        let yield_capture = origin_delta.is_some() || move_intent.is_some();
+        if yield_capture {
             executor.begin_resumable_work()?;
         }
 
@@ -1221,8 +1211,12 @@ impl Controller {
                 &capture_consent,
             )
             .await;
-        if origin_delta.is_some() {
-            executor.end_resumable_work("record managed clone capture outcome")?;
+        if yield_capture {
+            executor.end_resumable_work(if origin_delta.is_some() {
+                "record managed clone capture outcome"
+            } else {
+                "record Move source capture outcome"
+            })?;
         }
         let mut latched = match checkpoint {
             Ok(latched) => latched,
@@ -2537,6 +2531,23 @@ impl Controller {
             executor,
             crate::database::save_lifecycle_session,
         )
+    }
+
+    /// Deferred cleanup can restart from the stopped locator. Only the final
+    /// session-record write needs daemon admission.
+    pub fn cleanup_stopped_target_resumable(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        self.cleanup_stopped_target_with(session_id, executor, |record| {
+            executor.end_resumable_work("settle deferred cleanup")?;
+            ensure!(
+                !executor.shutdown_interrupted(),
+                "deferred cleanup interrupted"
+            );
+            crate::database::save_lifecycle_session(record)
+        })
     }
 
     fn cleanup_stopped_target_with(

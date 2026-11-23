@@ -14,7 +14,9 @@ use crate::checkpoint_transfer::restore_command;
 use crate::session_manager::new_command_id;
 use mj_checkpoint::archive::{
     CanonicalQueuedCommandKind, CanonicalSessionSnapshot, CheckpointRepositoryBundle, SystemGit,
-    checkpoint_bundle_prerequisites, read_checkpoint_repository_bundles, verify_archive_streaming,
+    checkpoint_bundle_prerequisites, manifest_uses_origin_delta,
+    read_checkpoint_manifest_and_repository_bundles, read_checkpoint_repository_bundles,
+    verify_archive_streaming,
 };
 use mj_checkpoint::checkpoint::CheckpointRestoreSpec;
 use mj_core::config::{Config, HarnessKind, ProjectRepository, mount_history_host};
@@ -248,7 +250,20 @@ impl Controller {
             }
             return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
         }
-        let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
+        let (manifest, repositories) =
+            read_checkpoint_manifest_and_repository_bundles(&checkpoint.archive_path)?;
+        // The destination checks the delta's prerequisites after cloning the
+        // archived origin, which may only be reachable from that target.
+        for repository in &manifest.repositories {
+            if let Some(origin) = repository
+                .metadata
+                .origin_delta
+                .as_ref()
+                .and_then(|delta| delta.origin_url.as_deref())
+            {
+                mj_core::remote_git::validate_network_url(origin)?;
+            }
+        }
         self.preflight_verified_repository_sources(
             session_id,
             ResumeRepositoryBundles {
@@ -2091,10 +2106,7 @@ impl Controller {
         let is_history_cutoff_origin_delta =
             super::network_git::manifest_has_history_cutoff_origin_delta(archive_manifest)
                 && super::backend::session_history_cutoff(&previous)?.is_some();
-        let origin_delta = archive_manifest
-            .repositories
-            .iter()
-            .any(|repository| repository.metadata.origin_delta.is_some());
+        let origin_delta = manifest_uses_origin_delta(archive_manifest);
         if origin_delta && plan != ResumePlan::InPlace {
             let originless = archive_manifest.repositories.iter().any(|repository| {
                 repository

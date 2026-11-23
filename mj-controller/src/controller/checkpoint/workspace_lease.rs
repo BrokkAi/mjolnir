@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::activity::WorkerReplacement;
 
 // Preserve the existing upgrade handshake deadline for both connection owners.
 const IDLE_WORKER_RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -10,6 +11,7 @@ pub struct IdleWorkspaceLease {
     pub(super) lease: ManagedSessionLease,
     pub(super) command_id: String,
     pub(super) harness: HarnessKind,
+    replacement: WorkerReplacement,
     ready_cursor: RelayCursor,
     _worker_owner: crate::worker_lifecycle::WorkerPermit,
 }
@@ -21,14 +23,33 @@ impl IdleWorkspaceLease {
         handle: &ManagedSessionHandle,
         harness: HarnessKind,
     ) -> Result<Option<Self>> {
+        Self::acquire_for_replacement(
+            admission,
+            handle,
+            harness,
+            WorkerReplacement::AutomaticUpgrade,
+        )
+        .await
+    }
+
+    pub(in crate::controller) async fn acquire_for_replacement(
+        admission: &crate::recovery_gate::SessionAdmission,
+        handle: &ManagedSessionHandle,
+        harness: HarnessKind,
+        replacement: WorkerReplacement,
+    ) -> Result<Option<Self>> {
         let worker_owner =
             crate::worker_lifecycle::WorkerPermit::acquire(handle.session_id(), admission)?;
         tokio::time::timeout(IDLE_WORKER_RESERVATION_TIMEOUT, async {
-            let Some(mut lease) = handle.lease_idle_connection(harness, admission).await? else {
+            let Some(mut lease) = handle
+                .lease_idle_connection(harness, replacement, admission)
+                .await?
+            else {
                 return Ok(None);
             };
             let Some((command_id, ready_cursor)) =
-                Self::reserve_connection_for_upgrade(lease.connection_mut(), harness).await?
+                Self::reserve_connection_for_upgrade(lease.connection_mut(), harness, replacement)
+                    .await?
             else {
                 // A legacy bootstrap may already hold BeginCheckpoint.
                 // Disconnect on deferral so the worker cancels that barrier.
@@ -38,6 +59,7 @@ impl IdleWorkspaceLease {
                 lease,
                 command_id,
                 harness,
+                replacement,
                 ready_cursor,
                 _worker_owner: worker_owner,
             }))
@@ -50,9 +72,13 @@ impl IdleWorkspaceLease {
     pub(in crate::controller) async fn reserve_connection_for_upgrade(
         connection: &mut StandaloneSession,
         harness: HarnessKind,
+        replacement: WorkerReplacement,
     ) -> Result<Option<(String, RelayCursor)>> {
         tokio::time::timeout(IDLE_WORKER_RESERVATION_TIMEOUT, async {
-            if !connection.operational().safe_to_replace(harness) {
+            if !connection
+                .operational()
+                .safe_to_replace_for(harness, replacement)
+            {
                 return Ok(None);
             }
             let command_id = new_command_id("worker-upgrade")?;
@@ -102,7 +128,10 @@ impl IdleWorkspaceLease {
                     None
                 };
                 snapshot.operational.checkpoint_barrier = None;
-                if !snapshot.operational.safe_to_replace(harness) {
+                if !snapshot
+                    .operational
+                    .safe_to_replace_for(harness, replacement)
+                {
                     // Dropping the connection releases the barrier even if its
                     // acknowledgement was lost. No worker is stopped.
                     return Ok(None);
@@ -142,6 +171,7 @@ impl IdleWorkspaceLease {
         Self::verify_reserved_snapshot(
             self.lease.connection_mut(),
             self.harness,
+            self.replacement,
             &self.command_id,
             &self.ready_cursor,
         )
@@ -151,19 +181,25 @@ impl IdleWorkspaceLease {
     pub(in crate::controller) async fn verify_reserved_connection(
         connection: &mut StandaloneSession,
         harness: HarnessKind,
+        replacement: WorkerReplacement,
         command_id: &str,
         ready_cursor: &RelayCursor,
     ) -> Result<bool> {
-        Ok(
-            Self::verify_reserved_snapshot(connection, harness, command_id, ready_cursor)
-                .await?
-                .is_some(),
+        Ok(Self::verify_reserved_snapshot(
+            connection,
+            harness,
+            replacement,
+            command_id,
+            ready_cursor,
         )
+        .await?
+        .is_some())
     }
 
     async fn verify_reserved_snapshot(
         connection: &mut StandaloneSession,
         harness: HarnessKind,
+        replacement: WorkerReplacement,
         command_id: &str,
         ready_cursor: &RelayCursor,
     ) -> Result<Option<ManagedSessionSnapshot>> {
@@ -184,7 +220,7 @@ impl IdleWorkspaceLease {
         snapshot.operational.checkpoint_barrier = None;
         Ok(snapshot
             .operational
-            .safe_to_replace(harness)
+            .safe_to_replace_for(harness, replacement)
             .then_some(snapshot))
     }
 
@@ -229,6 +265,7 @@ impl IdleWorkspaceLease {
                         lease,
                         command_id,
                         harness,
+                        replacement: WorkerReplacement::Other,
                         ready_cursor,
                         _worker_owner: worker_owner,
                     };

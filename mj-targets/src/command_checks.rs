@@ -60,3 +60,12 @@ pub fn installed_digest_matches(
                 .is_some_and(|digest| digest.eq_ignore_ascii_case(expected))
     })
 }
+
+/// Whether a command failed because its program is not installed.
+pub fn is_missing_command(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}

@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 mj-core.workspace = true
+mj-harness-install.workspace = true
 mj-client.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true

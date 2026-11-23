@@ -1,4 +1,4 @@
-// Port of the tests in mj-core/src/harness_install.rs.
+// Port of the tests in mj-harness-install/src/harness_install.rs.
 
 package core
 

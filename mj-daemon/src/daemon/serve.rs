@@ -188,7 +188,7 @@ pub(super) async fn serve_client(
         );
         // Hold through the acknowledgement, not merely the action's result.
         let activity = upgrade_request_activity(&request.action);
-        let mut import_registration = None;
+        let mut response_admission = None;
         let result = if let DaemonAction::ProveIdentity { ref nonce } = request.action {
             use hmac::Mac;
             Ok(DaemonReply::IdentityProof {
@@ -606,7 +606,7 @@ pub(super) async fn serve_client(
                                             Ok(DaemonReply::Done)
                                         }).await.context("import registration task panicked")?;
                                         // Retain admission through write_response below.
-                                        import_registration = Some(registration);
+                                        response_admission = Some(registration);
                                         registered
                                     }
                                 }
@@ -664,6 +664,24 @@ pub(super) async fn serve_client(
                     }
                     None => Err("unknown upload blob".into()),
                 }
+            } else if let DaemonAction::DestroyStoppedSession { session_id } = request.action {
+                match state
+                    .start_destroy_stopped_session(session_id, BranchDisposition::Keep)
+                    .await
+                {
+                    Ok(started) => {
+                        // Retain the admitted destroy hold through write_response below.
+                        response_admission = started.destroy_admission;
+                        RuntimeState::wait_lifecycle_result(started.result)
+                            .await
+                            .map(|_| DaemonReply::Done)
+                            .map_err(|error| format!("{error:#}"))
+                    }
+                    Err(error) if super::actions::is_upgrade_handoff_refusal(&error) => {
+                        Ok(DaemonReply::UpgradePending)
+                    }
+                    Err(error) => Err(format!("{error:#}")),
+                }
             } else {
                 Box::pin(handle_action(
                     request.action,
@@ -686,7 +704,7 @@ pub(super) async fn serve_client(
             },
         )
         .await?;
-        drop(import_registration);
+        drop(response_admission);
     }
 }
 

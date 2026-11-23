@@ -9680,7 +9680,7 @@ fn session_instructions_stalled_read_does_not_hold_runtime_shutdown() {
 #[cfg(unix)]
 #[tokio::test]
 async fn reload_launch_config_propagates_replacement_bridge_startup_failure() {
-    let _ = mj_core::login_environment::initialize_from_parent();
+    let _ = mj_harness_install::login_environment::initialize_from_parent();
     let temp = tempfile::tempdir().unwrap();
     let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
         silence: None,
@@ -9763,7 +9763,7 @@ for line in sys.stdin:
 #[cfg(unix)]
 #[tokio::test]
 async fn reload_launch_config_spawns_updated_command_args_and_writes_supervisor_spec() {
-    let _ = mj_core::login_environment::initialize_from_parent();
+    let _ = mj_harness_install::login_environment::initialize_from_parent();
     let temp = tempfile::tempdir().unwrap();
     let bridge_script = |session_id: &str| {
         format!(

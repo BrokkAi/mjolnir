@@ -498,6 +498,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
+                skip_remembering_subagent_policy: false,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
@@ -588,6 +589,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
+                skip_remembering_subagent_policy: false,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
@@ -687,6 +689,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
                 supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
+                skip_remembering_subagent_policy: false,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
@@ -1056,6 +1059,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
+                skip_remembering_subagent_policy: false,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
@@ -1330,6 +1334,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
                 supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
+                skip_remembering_subagent_policy: false,
                 remember_container_size: true,
                 review: None,
                 no_project_memory: false,
@@ -1535,114 +1540,6 @@ fn noting_a_launch_failure_writes_the_diagnostic_and_returns_the_reason() {
         "{saved}"
     );
 }
-#[test]
-fn inherited_git_settings_allow_only_portable_non_executable_values() {
-    let settings = inherited_git_settings(parse_git_config_entries(
-            b"user.name\nAgent User\0USER.EMAIL\nagent@example.test\0pull.rebase\ntrue\0alias.deploy\n!ship\0credential.helper\nstore\0core.editor\nvim\0include.path\n/host/config\0user.name\nFinal User\0",
-        )
-        .unwrap());
-
-    assert_eq!(
-        settings,
-        BTreeMap::from([
-            ("pull.rebase".into(), "true".into()),
-            ("user.email".into(), "agent@example.test".into()),
-            ("user.name".into(), "Final User".into()),
-        ])
-    );
-}
-
-// Hard-won: #1368: one valueless key such as `[core] bare` made the whole config unreadable.
-#[test]
-fn inherited_git_settings_read_valueless_keys_as_true() {
-    let settings = inherited_git_settings(
-        parse_git_config_entries(b"core.bare\0rerere.enabled\0user.name\nAgent User\0").unwrap(),
-    );
-
-    assert_eq!(
-        settings,
-        BTreeMap::from([
-            ("rerere.enabled".into(), "true".into()),
-            ("user.name".into(), "Agent User".into()),
-        ])
-    );
-}
-
-#[test]
-fn inherited_git_settings_reject_non_utf8_output() {
-    assert!(parse_git_config_entries(b"user.name\n\xff\0").is_err());
-}
-
-// Hard-won: dbe0e48f4: a controller with no ~/.gitconfig failed every container launch.
-#[test]
-fn host_git_identity_reads_missing_files_as_unset_and_saves_into_them() {
-    let home = tempfile::tempdir().unwrap();
-    let system = home.path().join("system-gitconfig");
-    let git = || {
-        let mut command = Command::new("git");
-        command
-            .env_remove("GIT_CONFIG_GLOBAL")
-            .env_remove("GIT_CONFIG_NOSYSTEM")
-            .env("GIT_CONFIG_SYSTEM", &system)
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join("xdg"));
-        command
-    };
-
-    let config = read_host_git_config(&git).unwrap().unwrap();
-    assert!(config.merged().is_empty());
-    assert!(host_git_identity(&git).unwrap().needs_setup());
-
-    // A system-wide name applies to host sessions, so it counts; the
-    // missing email is still worth asking for.
-    std::fs::write(&system, "[user]\n\tname = System Name\n").unwrap();
-    assert_eq!(
-        host_git_identity(&git).unwrap(),
-        GitIdentity {
-            name: Some("System Name".to_owned()),
-            email: None,
-            per_directory: false,
-        }
-    );
-
-    // The prompt's answer must create the missing global file, override the
-    // system name, and read back whole.
-    let identity = write_global_git_identity(&git, " Ada Lovelace ", "ada@example.test").unwrap();
-    assert_eq!(
-        identity,
-        GitIdentity {
-            name: Some("Ada Lovelace".to_owned()),
-            email: Some("ada@example.test".to_owned()),
-            per_directory: false,
-        }
-    );
-    assert!(home.path().join(".gitconfig").is_file());
-}
-
-// Hard-won: #1368: Save wrote a plain identity over the user's per-directory includeIf identities.
-#[test]
-fn host_git_identity_does_not_offer_to_override_per_directory_identities() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        home.path().join(".gitconfig"),
-        "[includeIf \"gitdir:~/work/\"]\n\tpath = work.gitconfig\n",
-    )
-    .unwrap();
-    let git = || {
-        let mut command = Command::new("git");
-        command
-            .env_remove("GIT_CONFIG_GLOBAL")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join("xdg"));
-        command
-    };
-
-    let identity = host_git_identity(&git).unwrap();
-    assert!(identity.per_directory && !identity.is_complete());
-    assert!(!identity.needs_setup());
-}
-
 #[test]
 fn podman_inherited_git_settings_use_global_scope_for_every_saved_user() {
     let ssh = SshTarget {

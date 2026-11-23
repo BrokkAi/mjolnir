@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncWriteExt;
 
 use mj_core::relay::RelayObservation;
-use mj_core::session_image::{IMAGE_RECIPE_DIR, RECIPE_FILES};
+use mj_harness_install::session_image::{IMAGE_RECIPE_DIR, RECIPE_FILES};
 
 use crate::relay::RelayCell;
 pub(super) const LOG_FILE: &str = "project-tools.log";
@@ -340,7 +340,7 @@ pub(super) async fn plan(
     roots: &[PathBuf],
     environment: &mut BTreeMap<String, String>,
 ) -> Result<Option<Install>> {
-    let mise = mj_core::harness_install::ensure_mise_runtime(environment)
+    let mise = mj_harness_install::harness_install::ensure_mise_runtime(environment)
         .await
         .context("install mise runtime")?;
     apply_environment(environment, roots, Some(&mise))?;

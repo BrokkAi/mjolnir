@@ -139,7 +139,7 @@ pub(super) async fn submit_prompt(
     }
     // Recording and submitting hold an upgrade admission, so a handoff waits
     // for the prompt instead of ending the daemon between them.
-    let _admission = mj_controller::upgrade::activity("API prompt submission")
+    let _admission = mj_store::upgrade::activity("API prompt submission")
         .map_err(|_| ApiFailure::unavailable("the daemon is shutting down"))?;
     // A caller that names its command can retry it; one that does not sends
     // a new command each time, so its record gets an identity of its own.
@@ -355,7 +355,7 @@ pub(super) async fn usage(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
     Query(query): Query<UsageQuery>,
-) -> Result<Json<mj_controller::database::UsagePage>, ApiFailure> {
+) -> Result<Json<mj_store::database::UsagePage>, ApiFailure> {
     let page = backend(&state)?
         .usage(
             session_id,
@@ -370,7 +370,7 @@ pub(super) async fn usage(
 pub(super) async fn usage_tree(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-) -> Result<Json<mj_controller::database::UsageTree>, ApiFailure> {
+) -> Result<Json<mj_store::database::UsageTree>, ApiFailure> {
     let tree = backend(&state)?
         .usage_tree(session_id)
         .await?

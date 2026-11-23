@@ -1,4 +1,4 @@
-// Port of mj-core/src/login_environment.rs (platforms without the Windows
+// Port of mj-harness-install/src/login_environment.rs (platforms without the Windows
 // environment block).
 
 //go:build !windows

@@ -3,7 +3,38 @@ use super::*;
 use mj_controller::session_manager::{GuardianStage1, GuardianStage1Verdict};
 use mj_core::guardian::GuardianReviewRequest;
 use mj_github_relevance::guardian_classifier::{GuardianClassifier, GuardianStage1Result};
+use mj_github_watch::service::{GithubWatchHost, GithubWatchSnapshot};
 use std::{future::Future, pin::Pin, time::Instant};
+
+impl GithubWatchHost for RuntimeState {
+    fn github_watch_snapshot(&self) -> GithubWatchSnapshot {
+        let projection = self.controller_projection();
+        GithubWatchSnapshot {
+            enabled: projection.config.github_events_enabled(),
+            config: projection.config.github.watch,
+            jev: projection.config.jev,
+            state: projection.state,
+        }
+    }
+
+    fn github_events_enabled(&self) -> bool {
+        self.with_config(Config::github_events_enabled)
+    }
+
+    fn push_public_notice(&self, text: String) {
+        self.push_public_notice("", text);
+    }
+
+    async fn github_token_for_session(&self, session_id: &str) -> Result<Option<String>> {
+        let controller = mj_core::runtime::spawn_blocking(Controller::load)
+            .await
+            .context("load controller for GitHub watch credentials")??;
+        controller
+            .github_token_for_session(session_id)
+            .await
+            .context("resolve GitHub watch credential")
+    }
+}
 
 struct WolfGuardianStage1(Arc<GuardianClassifier>);
 
@@ -787,7 +818,7 @@ pub(super) async fn run_daemon_runtime(
         manager_control.clone(),
         cancellation.clone(),
     ));
-    let mut github_watch_task = mj_core::runtime::spawn(crate::github_watch::service::run(
+    let mut github_watch_task = mj_core::runtime::spawn(mj_github_watch::service::run(
         state.clone(),
         cancellation.clone(),
     ));

@@ -2817,6 +2817,7 @@ mod tests {
             cross_harness: false,
             active: true,
             queued_commands: Vec::new(),
+            locked_queue: None,
             fingerprint: "fingerprint".into(),
             operation_id: "move-1".into(),
         };

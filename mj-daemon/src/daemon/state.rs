@@ -1,6 +1,7 @@
 /// Consecutive failed delivery rounds before a startup step is given up.
 pub(super) const STARTUP_STEP_ATTEMPTS: u32 = 5;
 
+use super::create::CreateDelegationDefault;
 use super::*;
 
 #[derive(Debug)]
@@ -326,40 +327,41 @@ impl RuntimeState {
         // Keep queued user prompts behind the archive context even if another
         // client observes the newly registered session before this call returns.
         let _startup_admission = self.startup_enqueue.lock().await;
+        let create = CreateSessionRequest {
+            oracle: None,
+            supervisors: None,
+            oracle_choice: None,
+            remember_launch_choices: false,
+            remember_container_size: false,
+            at: None,
+            branch: None,
+            base: None,
+            no_later_history: false,
+            create_managed_worktree: None,
+            subagents: None,
+            review: None,
+            no_project_memory: false,
+            no_github_events: false,
+            no_github_credentials: false,
+            notifications_ignored: false,
+            initial_prompt: None,
+            workspace_id: request.workspace_id,
+            profile_id: request.profile_id,
+            provider: None,
+            bundle_id,
+            project_directory: Some(project_directory),
+            target_template_id: request.target_template_id,
+            additional_mounts: request.additional_mounts,
+            resource_allocation: request.resource_allocation,
+            title: archived.title.clone(),
+            // The harness names a session after its first message, and the
+            // first message here carries the hidden hand-off. Pinning the
+            // archived session's own title keeps that text out of every
+            // list the session appears in.
+            session_title_override: Some(archived.title.clone()),
+        };
         let registered = self
-            .start_create_session(CreateSessionRequest {
-                oracle: None,
-                supervisors: None,
-                oracle_choice: None,
-                remember_launch_choices: false,
-                remember_container_size: false,
-                at: None,
-                branch: None,
-                base: None,
-                no_later_history: false,
-                create_managed_worktree: None,
-                subagents: None,
-                review: None,
-                no_project_memory: false,
-                no_github_events: false,
-                no_github_credentials: false,
-                notifications_ignored: false,
-                initial_prompt: None,
-                workspace_id: request.workspace_id,
-                profile_id: request.profile_id,
-                provider: None,
-                bundle_id,
-                project_directory: Some(project_directory),
-                target_template_id: request.target_template_id,
-                additional_mounts: request.additional_mounts,
-                resource_allocation: request.resource_allocation,
-                title: archived.title.clone(),
-                // The harness names a session after its first message, and the
-                // first message here carries the hidden hand-off. Pinning the
-                // archived session's own title keeps that text out of every
-                // list the session appears in.
-                session_title_override: Some(archived.title.clone()),
-            })
+            .start_create_session_with_delegation_default(create, CreateDelegationDefault::Harness)
             .await?;
         let session_id = registered.session.id.clone();
         // The hand-off rides the session's startup queue so that a prompt

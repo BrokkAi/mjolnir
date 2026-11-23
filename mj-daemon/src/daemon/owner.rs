@@ -15,6 +15,15 @@ struct WorkerInputsPublication {
     inputs: Arc<PollableWorkerInputs>,
 }
 
+/// An in-place Move that has captured a relay store id for its dispatch hold
+/// (and may have staged destination profile files on disk) without completing
+/// `RestartHarnessInPlace` leaves disk potentially ahead of `session.last_profile`.
+/// Fence credential sync until the Move either completes the restart or
+/// confirms source files intact and clears the store fence.
+fn move_fences_in_place_credentials(op: &mj_core::state::MoveOperation) -> bool {
+    op.in_place && op.in_place_expected_store_id.is_some() && !op.in_place_harness_restarted
+}
+
 impl PollableWorkerInputs {
     // Credentials use the session's route and its ancestor chain. Unrelated
     // record changes must not invalidate a session already admitted to sync.
@@ -29,6 +38,10 @@ impl PollableWorkerInputs {
                 != owner
                     .committed()
                     .and_then(|committed| committed.moves.get(session_id))
+            || self
+                .moves
+                .get(session_id)
+                .is_some_and(move_fences_in_place_credentials)
         {
             return false;
         }
@@ -78,7 +91,13 @@ impl PollableWorkerInputs {
     pub(super) fn staged_credentials(&self) -> BTreeSet<String> {
         let mut staged = crate::pollers::staged_credential_sessions(&self.controller());
         // Ancestors describe command routing, while the owner authorizes IDs.
-        staged.retain(|id| self.ids.binary_search(id).is_ok());
+        staged.retain(|id| {
+            self.ids.binary_search(id).is_ok()
+                && !self
+                    .moves
+                    .get(id)
+                    .is_some_and(move_fences_in_place_credentials)
+        });
         staged
     }
 
@@ -1100,5 +1119,111 @@ mod tests {
             1,
             "an ended session stays reported once"
         );
+    }
+
+    #[test]
+    fn in_place_move_fences_credential_sync_until_restarted_or_cleared() {
+        use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
+        use mj_core::credentials::CredentialSyncTarget;
+
+        let temp = tempfile::tempdir().unwrap();
+        let worker_root = temp.path().join(LATCH_RELAY_SESSION);
+        std::fs::create_dir_all(worker_root.join("profile")).unwrap();
+        let mut state = mj_core::state::State::default();
+        let mut record =
+            runtime_test_session(LATCH_RELAY_SESSION, "workspace", SessionState::Running);
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root,
+        }));
+        let mut config = Config::default();
+        config.profiles.insert(
+            "dest".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                "/dest-profile",
+            ),
+        );
+        config.targets.insert(
+            "local-bare".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        record.target_template_id = "local-bare".into();
+        state.sessions.insert(LATCH_RELAY_SESSION.into(), record);
+        let mut owner = RuntimeStateOwner::new(
+            Controller {
+                config,
+                state: state.clone(),
+            },
+            Arc::new(|_, _| {}),
+        );
+        let target = CredentialSyncTarget {
+            session_id: LATCH_RELAY_SESSION.into(),
+            profile_id: "work".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            profile_home: "/profile".into(),
+            aws_credentials: None,
+            skips_login_file_sync: false,
+            github: Default::default(),
+            sync_github_token: false,
+            skills_scope: mj_core::skills::SkillsScope::Localhost,
+            spec: mj_core::targets::CommandSpec::new("fixture", [LATCH_RELAY_SESSION]),
+        };
+        let mut op = mj_controller::controller::move_session::test_fixtures::in_place_operation(
+            &owner.controller,
+            "dest",
+        );
+
+        let commit = |seq: u64, op: &mj_core::state::MoveOperation| {
+            let mut moves = mj_core::snapshot_map::SnapshotMap::new();
+            moves.insert(LATCH_RELAY_SESSION.into(), op.clone());
+            Arc::new(mj_controller::database::CommittedState {
+                sequence: seq,
+                state: state.clone(),
+                moves,
+                native_agents: Default::default(),
+                startup_groups: Default::default(),
+                subagent_reports: Default::default(),
+                turns: Default::default(),
+                wait_revisions: Default::default(),
+            })
+        };
+
+        // Before store fence is captured: credential sync is admitted.
+        owner.observe_committed(&commit(1, &op));
+        let before = owner.pollable_worker_inputs();
+        assert!(before.staged_credentials().contains(LATCH_RELAY_SESSION));
+        assert!(before.session_is_current(&owner, LATCH_RELAY_SESSION));
+
+        // Store fence captured while harness restart has not completed:
+        // credential sync is excluded AND any in-flight preparation is rejected.
+        op.in_place_expected_store_id = Some("store-1".into());
+        owner.observe_committed(&commit(2, &op));
+        let (published, receiver) = tokio::sync::watch::channel(Vec::new());
+        assert!(!owner.install_credentials(
+            &before,
+            &BTreeSet::new(),
+            vec![target],
+            &published,
+            None,
+        ));
+        assert!(receiver.borrow().is_empty());
+        let fenced = owner.pollable_worker_inputs();
+        assert!(!fenced.staged_credentials().contains(LATCH_RELAY_SESSION));
+        assert!(!fenced.session_is_current(&owner, LATCH_RELAY_SESSION));
+
+        // Even after a Failed phase (e.g. crash/ambiguous failure while staged),
+        // credential sync stays fenced until cleared or restarted.
+        op.phase = mj_core::state::MovePhase::Failed;
+        owner.observe_committed(&commit(3, &op));
+        let failed = owner.pollable_worker_inputs();
+        assert!(!failed.staged_credentials().contains(LATCH_RELAY_SESSION));
+        assert!(!failed.session_is_current(&owner, LATCH_RELAY_SESSION));
+
+        // Once harness restart completes (or store fence is cleared), sync resumes.
+        op.in_place_harness_restarted = true;
+        owner.observe_committed(&commit(4, &op));
+        let restarted = owner.pollable_worker_inputs();
+        assert!(restarted.staged_credentials().contains(LATCH_RELAY_SESSION));
+        assert!(restarted.session_is_current(&owner, LATCH_RELAY_SESSION));
     }
 }
