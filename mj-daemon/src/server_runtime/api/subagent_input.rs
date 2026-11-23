@@ -47,8 +47,10 @@ pub(super) fn ensure_subagent_child_can_receive_work(
     record: &mj_core::state::SessionRecord,
     work: &str,
 ) -> Result<()> {
-    ensure!(
-        record.state.can_receive_child_work(),
+    if record.state.can_receive_child_work() {
+        return Ok(());
+    }
+    let mut error = anyhow!(
         "child session is {:?}; queued {work} was not delivered{}",
         record.state,
         record
@@ -57,7 +59,10 @@ pub(super) fn ensure_subagent_child_can_receive_work(
             .map(|error| format!(": {error}"))
             .unwrap_or_default()
     );
-    Ok(())
+    if record.state == SessionState::Error {
+        error = error.context(mj_core::subagent::FAILED_CHILD_CLOSE_GUIDANCE);
+    }
+    Err(error)
 }
 
 impl ApiBackend {

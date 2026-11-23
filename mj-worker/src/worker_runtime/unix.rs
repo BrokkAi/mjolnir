@@ -1694,6 +1694,46 @@ pub async fn run_daemon_owned(
         remove_control_socket(&socket, "startup")
             .with_context(|| format!("remove stale socket {}", socket.display()))?;
     }
+    // Check the target directory before serving any relay requests. Otherwise
+    // a child process can fail to spawn with ENOENT for its cwd, and a caller
+    // that already attached can see only the ensuing relay disconnect.
+    if !checkpoint_only {
+        const STEP: &str = "working-directory";
+        super::record_startup_step(&root, STEP);
+        // Only a directory that is gone or is not a directory is permanent.
+        // Other errors, such as ESTALE or EIO from a network filesystem, can
+        // clear up. They exit with an ordinary error and no startup-failure
+        // marker, because every reader of that marker (unpark and recovery)
+        // takes it to mean that starting again would only repeat the failure.
+        let problem = match std::fs::metadata(&config.cwd) {
+            Ok(metadata) if metadata.is_dir() => None,
+            Ok(_) => Some(("path is not a directory".to_owned(), true)),
+            Err(error) => {
+                let permanent = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                );
+                Some((error.to_string(), permanent))
+            }
+        };
+        if let Some((problem, permanent)) = problem {
+            let message = format!(
+                "worker working directory {} is unavailable: {problem}",
+                config.cwd.display()
+            );
+            super::record_startup_failure(&root, STEP, &message);
+            if !permanent {
+                return Err(anyhow::anyhow!(message));
+            }
+            return Err(mj_core::relay::WorkerHarnessStartupFailure {
+                message,
+                kind: Some(
+                    mj_core::relay::WorkerHarnessStartupFailureKind::WorkingDirectoryUnavailable,
+                ),
+            }
+            .into());
+        }
+    }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
     let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
     // Validate and recover durable state before publishing a socket. A
@@ -2419,7 +2459,10 @@ async fn supervise_preparation<T>(
         tracing::warn!(%step, "a preparation thread was still running when preparation failed");
     }
     Err(PreparationStop::Failed(anyhow::Error::new(
-        mj_core::relay::WorkerHarnessStartupFailure { message },
+        mj_core::relay::WorkerHarnessStartupFailure {
+            message,
+            kind: None,
+        },
     )))
 }
 

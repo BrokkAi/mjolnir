@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--instance", required=True)
     parser.add_argument("--mailbox-regression-only", action="store_true")
     parser.add_argument("--restart-regression-only", action="store_true")
+    parser.add_argument("--missing-child-cwd-only", action="store_true")
     parser.add_argument("--create-restart-only", action="store_true")
     quota_modes = parser.add_mutually_exclusive_group()
     quota_modes.add_argument("--child-quota-only", action="store_true")
@@ -266,10 +267,10 @@ def main():
 
         # Keep the default fixture explicitly OpenAI-backed for its subagents.
         (lab.profile / "config.toml").write_text('model_provider = "openai"\n')
-        if quota_only:
+        if quota_only or args.missing_child_cwd_only:
             (lab.profile / "auth.json").write_text(json.dumps({
                 "auth_mode": "chatgpt",
-                "tokens": {"access_token": "quota-fixture-token"},
+                "tokens": {"access_token": "fixture-token"},
             }))
         config_path = lab.config / "config.toml"
 
@@ -418,7 +419,7 @@ def main():
                 time.sleep(0.05)
             raise RuntimeError(f"no worker tool socket for {session}")
 
-        def tool(session, action, params=None, *, raw_message=False):
+        def tool(session, action, params=None, *, raw_message=False, expect_error=False):
             request = {
                 "request_id": uuid.uuid4().hex,
                 "created_at_ms": int(time.time() * 1000),
@@ -453,7 +454,7 @@ def main():
                 )
             result = reply.get("result")
             assert result is not None, reply
-            assert not result["is_error"], result
+            assert result["is_error"] == expect_error, result
             return result["message"] if raw_message else json.loads(result["message"])
 
         def worker_status(session):
@@ -623,6 +624,24 @@ def main():
                 time.sleep(0.1)
             raise RuntimeError(f"report was not acknowledged in the outbox: {session}, {finished_child}, {rows}")
 
+        def wait_parked(session):
+            # At least the park lifecycle's own 120-second deadline. Cleanup
+            # kills the worker, so a shorter wait aborts a still-valid park.
+            deadline = time.monotonic() + max(WAIT_SECONDS, 120)
+            while time.monotonic() < deadline:
+                with sqlite3.connect(
+                    f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True
+                ) as database:
+                    row = database.execute(
+                        "SELECT state, last_error FROM sessions WHERE session_id = ?", (session,)
+                    ).fetchone()
+                if row and row[0].lower() == "parked":
+                    return
+                if row and row[0].lower() == "error":
+                    raise RuntimeError(f"child parking failed for {session}: {row}")
+                time.sleep(0.1)
+            raise RuntimeError(f"child completion did not park {session}: {row}")
+
         def mailbox_acceptance(session, text):
             with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
                 rows = database.execute(
@@ -642,6 +661,52 @@ def main():
                     return
                 time.sleep(0.05)
             raise RuntimeError(f"mailbox event was not accepted: {session}, {text}")
+
+        # Hard-won: #1664: a removed worktree made parked-child wakes look retryable.
+        if args.missing_child_cwd_only:
+            worktree = lab.runtime_root / "child worktree"
+            lab.git_output(["worktree", "add", "--detach", str(worktree)], lab.project)
+            prompt = "Return a short fixture report."
+            child = tool(parent, "spawn", {
+                "task_name": "child-with-worktree",
+                "instructions": prompt,
+                "working_directory": str(worktree),
+            })["child_session_id"]
+            wait_prompt(child, prompt)
+            worker_root = endpoint(child).parent
+            report = "child finished in its worktree"
+            tool(child, "handback", {"message": report})
+            release(child, prompt)
+            wait_report(parent, child, report)
+            wait_parked(child)
+            lab.git_output(["worktree", "remove", str(worktree)], lab.project)
+
+            message = {"child_session_id": child, "message": "Wake after worktree removal."}
+            result = tool(parent, "send_message", message, expect_error=True)
+            assert str(worktree) in result["error"], result
+            assert "close_agent" in result["error"], result
+            assert "retry" not in result["error"] and "Broken pipe" not in result["error"], result
+
+            startup = json.loads((worker_root / "worker-startup.json").read_text())
+            assert startup["failure"]["step"] == "working-directory", startup
+            assert "bind-socket" not in {step["step"] for step in startup["steps"]}, startup
+            exit_record = json.loads((worker_root / "worker-exit.json").read_text())
+            failure = exit_record["harness_startup_failure"]
+            assert failure["kind"] == "working_directory_unavailable", exit_record
+            assert str(worktree) in failure["message"], exit_record
+
+            listed = tool(parent, "list_agents")["agents"][0]
+            assert listed["state"] == "error", listed
+            assert str(worktree) in listed["error"] and "close_agent" in listed["next_action"], listed
+            assert not listed.get("parked") and not listed.get("promptable"), listed
+
+            result = tool(parent, "send_message", message, expect_error=True)
+            assert str(worktree) in result["error"] and "close_agent" in result["error"], result
+            assert startup == json.loads((worker_root / "worker-startup.json").read_text())
+            assert tool(parent, "close_agent", {"child_session_id": child})["closed"]
+            print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),
+                              "result": "passed"}), flush=True)
+            return
 
         # Hard-won: #1492: exercise both provider delivery modes through real
         # workers without traversing the independent child-startup regression.
@@ -1235,24 +1300,6 @@ def main():
             assert legacy_reply["status"] == "reports_arrive_as_messages", legacy_reply
             assert "end your turn" in legacy_reply["next_action"], legacy_reply
 
-        def wait_parked(session):
-            # At least the park lifecycle's own 120-second deadline. Cleanup
-            # kills the worker, so a shorter wait aborts a still-valid park.
-            deadline = time.monotonic() + max(WAIT_SECONDS, 120)
-            while time.monotonic() < deadline:
-                with sqlite3.connect(
-                    f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True
-                ) as database:
-                    row = database.execute(
-                        "SELECT state, last_error FROM sessions WHERE session_id = ?", (session,)
-                    ).fetchone()
-                if row and row[0].lower() == "parked":
-                    return
-                if row and row[0].lower() == "error":
-                    raise RuntimeError(f"child parking failed for {session}: {row}")
-                time.sleep(0.1)
-            raise RuntimeError(f"child completion did not park {session}: {row}")
-
         wait_parked(child)
         # Accepted child work and reports survive a daemon replacement.
         tool(
@@ -1572,7 +1619,7 @@ def main():
         )
     finally:
         try:
-            if quota_only and cli is not None:
+            if (quota_only or args.missing_child_cwd_only) and cli is not None:
                 cli("daemon", "stop", check=False)
         finally:
             for server in (catalog_proxy, glide_proxy):
