@@ -287,7 +287,7 @@ fn wire_notes(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -300,7 +300,6 @@ mod tests {
     const PURGE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const UNKNOWN: &str = "cccccccccccccccccccccccccccccccc";
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn purge_untracked_skips_a_busy_lifecycle_and_rewrites_a_stopped_legacy_archive() {
         if std::env::var_os(CHILD).is_none() {
@@ -490,7 +489,6 @@ mod tests {
         assert!(!busy_archive.exists());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn purge_untracked_all_reports_a_missing_archive_and_still_purges_the_rest() {
         const CHILD: &str = "MJ_PURGE_UNTRACKED_MISSING_ARCHIVE";
@@ -584,7 +582,6 @@ mod tests {
         assert!(!missing_archive.exists());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn purge_untracked_handoff_closes_while_a_rewrite_waits_to_commit() {
         const CHILD: &str = "MJ_PURGE_UNTRACKED_HANDOFF_DURING_REWRITE";

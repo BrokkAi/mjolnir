@@ -1121,6 +1121,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn in_place_move_fences_credential_sync_until_restarted_or_cleared() {
         use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION;
