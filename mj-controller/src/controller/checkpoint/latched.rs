@@ -640,6 +640,55 @@ impl Controller {
                 .await
                 .context("read the worker's native-session-use evidence at the checkpoint cut")?;
         }
+        // The projection shows a mailbox wake's messages as rows of their own
+        // and keeps no payload for the queued wake; the worker's queue owns
+        // it. Read each one at the held cut so the archive restores exactly
+        // what the agent would have been sent.
+        let wakes: Vec<usize> = canonical_session
+            .queued_prompts
+            .iter()
+            .enumerate()
+            .filter(|(_, queued)| {
+                queued.content.is_empty()
+                    && mj_core::continuation::carries_mailbox_wake(&queued.command_id)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if !wakes.is_empty()
+            && relay.connection_mut().protocol_version()
+                < mj_core::relay::RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL
+        {
+            relay.cancel_abandoned_barrier(admission).await?;
+            return Err(CheckpointDeferred::queued_mailbox_wake().into());
+        }
+        for index in wakes {
+            let queued = &mut canonical_session.queued_prompts[index];
+            let prompt = relay
+                .connection_mut()
+                .read_checkpoint_queued_prompt(
+                    barrier_command_id.clone(),
+                    cursor.clone(),
+                    queued.command_id.clone(),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "read queued mailbox wake {} at the checkpoint cut",
+                        queued.command_id
+                    )
+                })?
+                .filter(|prompt| !prompt.is_empty())
+                .with_context(|| {
+                    format!(
+                        "the worker's queue holds no prompt for mailbox wake {} at the checkpoint cut",
+                        queued.command_id
+                    )
+                })?;
+            queued.content = prompt
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<_>>()?;
+        }
         let native_session_id = barrier
             .operational
             .native_session_id

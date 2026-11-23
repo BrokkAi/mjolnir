@@ -623,7 +623,15 @@ pub fn materialized_queued_prompts_from_canonical(
                     }
                 }
             },
-            content: prompt.content.clone(),
+            // The projection keeps no payload for a mailbox wake, whose
+            // messages are rows of their own; the archive carries it only for
+            // the worker's queue. A restored wake shows and starts as a live
+            // one does, and the next checkpoint reads it from the worker again.
+            content: if mj_core::continuation::carries_mailbox_wake(&prompt.command_id) {
+                Vec::new()
+            } else {
+                prompt.content.clone()
+            },
             queued_at_ms: prompt.queued_at_ms,
             accepted_ordinal: None,
         })

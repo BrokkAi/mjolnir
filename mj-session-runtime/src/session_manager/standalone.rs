@@ -858,6 +858,19 @@ impl StandaloneSession {
             .await
     }
 
+    /// The prompt one command holds in the worker's queue at a ready
+    /// checkpoint barrier's cut.
+    pub async fn read_checkpoint_queued_prompt(
+        &mut self,
+        barrier_command_id: String,
+        cut: RelayCursor,
+        command_id: String,
+    ) -> Result<Option<Vec<agent_client_protocol::v1::schema::ContentBlock>>> {
+        self.client
+            .read_checkpoint_queued_prompt(barrier_command_id, cut, command_id)
+            .await
+    }
+
     pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {
         let ordinal = self.submit_accepted(command_id, command).await?;
         self.sync_in_place().await?;

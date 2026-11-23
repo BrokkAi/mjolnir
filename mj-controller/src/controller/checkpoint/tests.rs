@@ -2094,6 +2094,267 @@ fn a_move_checkpoint_can_verify_its_archive_without_source_harness_readiness() {
 }
 
 #[cfg(unix)]
+const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
+
+/// A worker that restarts during a mailbox wake requeues the wake as its
+/// restart continuation, and saving the failed session checkpoints that queue
+/// without a harness. The daemon's projection keeps no payload for a wake, so
+/// the latch archives the prompt the worker's queue holds at the cut; a worker
+/// too old to answer defers the checkpoint rather than export a queue it
+/// cannot restore.
+// Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
+    let current = mj_core::relay::RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL;
+    let Some(protocol) = std::env::var_os(QUEUED_WAKE_TEST_CHILD) else {
+        for protocol in [current, current - 1] {
+            let directory = tempfile::tempdir().unwrap();
+            let test_name = format!(
+                "{}::a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            IsolatedTest::new(test_name)
+                .env(QUEUED_WAKE_TEST_CHILD, protocol.to_string())
+                .env(LATCH_RELAY_MAX_PROTOCOL, protocol.to_string())
+                .env(LATCH_CHECKPOINT_ONLY, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .run();
+        }
+        return;
+    };
+    let protocol: u32 = protocol.to_str().unwrap().parse().unwrap();
+    let _writer = crate::database::install_isolated_test_writer();
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        eprintln!("the queued-wake checkpoint never returned");
+        std::process::exit(101);
+    });
+
+    /// Refuses every target command, keeping the export spec it was given.
+    #[derive(Default)]
+    struct ExportRecorder {
+        purposes: std::sync::Mutex<Vec<String>>,
+        exported: std::sync::Mutex<Option<CheckpointExportSpec>>,
+    }
+
+    impl CommandExecutor for ExportRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"no target is provisioned for this test".to_vec(),
+            })
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            if command.purpose == "export target checkpoint" {
+                *self.exported.lock().unwrap() = Some(serde_json::from_reader(input)?);
+            }
+            self.execute(command)
+        }
+    }
+
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let profile_home = data_directory.join("profile");
+    for directory in [&relay_root, &profile_home] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    // A parent's waking message started a turn, and the worker restarted
+    // before it finished.
+    let wake_prompt = {
+        let mut relay =
+            mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                native_session_id: "native-session".into(),
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+                resumed: true,
+            })
+            .unwrap();
+        relay
+            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let delivered = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: "deliver-parent-task".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: mj_core::relay::RelayRequest::Submit {
+                command_id: "deliver-parent-task".into(),
+                command: RelayCommand::DeliverMailboxEvent {
+                    event: mj_core::mailbox::MailboxEvent {
+                        key: "parent-task".into(),
+                        source: "parent".into(),
+                        wake: true,
+                        created_at_ms: 1,
+                        body: mj_core::mailbox::MailboxEventBody::PlainText {
+                            text: "Review the migration and report what breaks.".into(),
+                        },
+                    },
+                },
+            },
+        });
+        assert!(
+            matches!(delivered.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "{delivered:?}"
+        );
+        let started = relay.claim_pending_commands(true).unwrap();
+        let [wake] = started.as_slice() else {
+            panic!("expected only the mailbox wake to start: {started:?}");
+        };
+        assert!(matches!(wake.command, RelayCommand::MailboxWake { .. }));
+        wake.command.prompt_blocks().unwrap().into_owned()
+    };
+    drop(mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap());
+
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
+    }));
+    crate::database::save_session(&session).unwrap();
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(mj_core::config::HarnessKind::Codex, profile_home),
+    );
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "project".into(),
+            repositories: vec![ProjectRepository {
+                id: "project".into(),
+                github: Some("example/project".into()),
+                local: None,
+                destination: "project".into(),
+                git_ref: None,
+                mbx_namespace: None,
+            }],
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        },
+    };
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            &relay_root,
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let executor = ExportRecorder::default();
+    let result = controller
+        .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+            LATCH_RELAY_SESSION,
+            &executor,
+            Some(&channels.control),
+            LatchExclusivity::HoldThroughClose,
+            CheckpointExportPolicy::ReuseUnchangedArchive,
+            None,
+            None,
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("a checkpoint exported to a target that refuses every command");
+    };
+    let exported = executor.exported.lock().unwrap().take();
+    if protocol < current {
+        assert!(checkpoint_was_deferred(&error), "{error:#}");
+        assert!(
+            exported.is_none(),
+            "an old worker's queued wake was exported: {:?}",
+            executor.purposes.lock().unwrap()
+        );
+    } else {
+        assert!(
+            format!("{error:#}").contains("no target is provisioned for this test"),
+            "{error:#}"
+        );
+        let spec = exported.expect("the checkpoint never reached its export");
+        let [queued] = spec.canonical_session.queued_prompts.as_slice() else {
+            panic!(
+                "expected only the wake's continuation in the archived queue: {:?}",
+                spec.canonical_session.queued_prompts
+            );
+        };
+        assert!(mj_core::continuation::is_restart_continuation(
+            &queued.command_id
+        ));
+        assert!(mj_core::continuation::carries_mailbox_wake(
+            &queued.command_id
+        ));
+        assert_eq!(
+            queued.content,
+            wake_prompt
+                .iter()
+                .map(|block| serde_json::to_value(block).unwrap())
+                .collect::<Vec<_>>()
+        );
+        spec.canonical_session.validate().unwrap();
+        // Restored, the wake shows and starts as a live one: no payload.
+        assert!(
+            mj_transcript::projection::materialized_queued_prompts_from_canonical(
+                &spec.canonical_session.queued_prompts
+            )[0]
+            .content
+            .is_empty()
+        );
+    }
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in an

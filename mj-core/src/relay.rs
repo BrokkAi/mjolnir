@@ -208,7 +208,10 @@ pub const RELAY_GUARDIAN_REVIEW_PROTOCOL: u32 = 82;
 pub const RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL: u32 = 83;
 /// 84 adds worker-local Antigravity Stop-hook observations (`AntigravityStop`).
 pub const RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL: u32 = 84;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL;
+/// 85 reads one queued prompt at a ready checkpoint cut, so a checkpoint can
+/// archive a queued mailbox wake, whose payload the projection does not keep.
+pub const RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL: u32 = 85;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
