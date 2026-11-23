@@ -1044,6 +1044,19 @@ impl Controller {
         let capture_consent = match preflight_result {
             Ok(consent) => consent,
             Err(error) => {
+                if let Some(attempt) = origin_delta.as_ref().filter(|attempt| attempt.accepted()) {
+                    // The stop request may still be draining the old worker.
+                    // Keep its durable intent until recovery has settled it.
+                    if attempt.request_recorded() && !attempt.already_quiescent()
+                        && let Err(wait_error) = attempt.wait_for_stop(executor).await
+                    {
+                        return Err(error.context(format!("wait for accepted suspend: {wait_error:#}")));
+                    }
+                    drop(held_relay.take());
+                    return Err(self.restart_after_refused_origin_delta(
+                        admission, session_id, executor, manager, attempt, &previous, error,
+                    ).await);
+                }
                 let error = if legacy_closing_intent {
                     mj_core::refusal::Refusal::precondition(format!(
                         "suspend requested before the upgrade needs consent: {error:#}"

@@ -4083,6 +4083,98 @@ fn attach_local_managed_clone(session: &mut SessionRecord, clone: PathBuf, origi
     }));
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_move_keep_lookup_recovers_the_accepted_suspend() {
+    use crate::controller::move_session::test_fixtures::source_recovery_operation;
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+
+    let name = "failed_move_keep_lookup_recovers_the_accepted_suspend";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, clone) = init_managed_clone_with_origin(directory.path(), name);
+    let worker_root = directory.path().join("workers").join(name);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let operation = "origin-delta-suspend-test".to_owned();
+    wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    wire::write(
+        &worker_root,
+        wire::REQUEST,
+        &SuspendRequest {
+            operation: operation.clone(),
+            worker: WorkerIdentity {
+                pid: u32::MAX,
+                start: 0,
+            },
+            checkout: clone.clone(),
+            child_sessions: Vec::new(),
+        },
+    )
+    .unwrap();
+    wire::write(
+        &worker_root,
+        wire::RECEIPT,
+        &SuspendReceipt {
+            operation: operation.clone(),
+            error: None,
+        },
+    )
+    .unwrap();
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Closing;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    attach_local_managed_clone(&mut session, clone.clone(), origin);
+    let mut move_operation = source_recovery_operation(&session);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+    // The worker already stopped. The retained checkout can disappear before
+    // the resumed Move resolves its source keep path.
+    std::fs::rename(&clone, directory.path().join("unavailable-checkout")).unwrap();
+    let admission = crate::controller::test_support::session_admission(name);
+    let error = controller
+        .suspend_session_controlled_with_manager(
+            &admission,
+            name,
+            &ProcessExecutor,
+            None,
+            Some((&mut move_operation, None)),
+            SourceTargetDisposition::RetainForInPlaceSwap,
+            CheckpointExportPolicy::OriginDelta,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
+            None,
+            LatchExclusivity::HoldThroughClose,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let error = format!("{error:#}");
+    let lookup_error = format!("resolve checkout {}", clone.display());
+    assert!(error.contains(&lookup_error), "{error}");
+    let restart = wire::read::<SuspendReceipt>(&worker_root, wire::RESTART)
+        .unwrap()
+        .expect("the accepted suspend must durably request a restart");
+    assert_eq!(restart.operation, operation);
+    assert!(restart.error.unwrap().contains(&lookup_error));
+    // This fixture has no installed worker to restart. Its Closing state must
+    // survive so the durable restart can be retried, instead of claiming Running.
+    let stored = crate::database::load_session_record(name).unwrap().unwrap();
+    assert_eq!(stored.state, SessionState::Closing);
+    assert_eq!(controller.state.sessions[name].state, SessionState::Closing);
+}
+
 #[cfg(unix)]
 struct NoExportExecutor;
 
