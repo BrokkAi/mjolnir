@@ -2150,6 +2150,210 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
 }
 
 #[cfg(unix)]
+fn relay_ack_race_peer(
+    relay: Arc<Mutex<mj_worker::relay::DurableRelay>>,
+    delay_ack: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+) -> (RelayClient, tokio::task::JoinHandle<Vec<RelayCursor>>) {
+    use crate::worker_client::test_fixtures::duplex_relay_client;
+    use mj_core::relay::{
+        RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
+        RelayResponsePayload,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (controller, worker) = tokio::io::duplex(4096);
+    let peer = mj_core::runtime::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(worker);
+        let mut lines = BufReader::new(reader).lines();
+        let mut attachments = Vec::new();
+        let mut delay_ack = delay_ack;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let mut response = {
+                let mut relay = relay.lock().unwrap();
+                if let RelayRequest::Attach {
+                    after_ordinal,
+                    after_digest,
+                    ..
+                } = &request.request
+                {
+                    attachments.push(RelayCursor {
+                        ordinal: *after_ordinal,
+                        digest: after_digest.clone(),
+                    });
+                }
+                if matches!(request.request, RelayRequest::SetOperatorAway { .. }) {
+                    RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: RelayResponsePayload::Status(relay.operational_state()),
+                        },
+                    }
+                } else {
+                    relay.handle(request)
+                }
+            };
+            if let RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::Acknowledged {
+                        through_ordinal,
+                        through_digest,
+                    },
+            } = &mut response.body
+                && let Some((waiting, release)) = delay_ack.take()
+            {
+                waiting.send(()).unwrap();
+                release.await.unwrap();
+                // Model a worker returning its newer global watermark for the
+                // already validated cursor. Current workers can prune it first.
+                let relay = relay.lock().unwrap();
+                assert!(relay.acknowledged_through() > *through_ordinal);
+                *through_ordinal = relay.acknowledged_through();
+                *through_digest = relay.acknowledged_digest().to_owned();
+            }
+            let mut frame = serde_json::to_vec(&response).unwrap();
+            frame.push(b'\n');
+            writer.write_all(&frame).await.unwrap();
+        }
+        attachments
+    });
+    (duplex_relay_client(controller, LEASED_RELAY_SESSION), peer)
+}
+
+#[cfg(unix)]
+async fn relay_ack_race(commit_winner: bool) {
+    use mj_core::relay::RelayObservation;
+    use mj_core::state::TranscriptBody;
+
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "1.0.0").unwrap(),
+    ));
+    let target = leased_relay_target(root.path());
+    let (waiting, ack_received) = oneshot::channel();
+    let (release, delayed_ack) = oneshot::channel();
+    let (client, observer_peer) = relay_ack_race_peer(relay.clone(), Some((waiting, delayed_ack)));
+    let mut observer = StandaloneSession::connect_inner(&target, Some(client), None)
+        .await
+        .unwrap();
+    let record = |message: &str| {
+        relay
+            .lock()
+            .unwrap()
+            .record_observation(RelayObservation::Warning {
+                message: message.into(),
+            })
+            .unwrap()
+    };
+    let first_ordinal = record("observer's frontier");
+    let race = async {
+        ack_received.await.unwrap();
+        let winner_ordinal = record("winner's later event");
+        let (mut client, peer) = relay_ack_race_peer(relay.clone(), None);
+        let (cursor, expected) = if commit_winner {
+            let winner = StandaloneSession::connect_inner(&target, Some(client), None)
+                .await
+                .unwrap();
+            let cursor = RelayCursor {
+                ordinal: winner.operational.acknowledged_through,
+                digest: winner.operational.acknowledged_digest.clone(),
+            };
+            (cursor, Some(winner.materialized.clone()))
+        } else {
+            let state = client.status().await.unwrap();
+            let cursor = client
+                .acknowledge(state.latest_ordinal, &state.latest_digest)
+                .await
+                .unwrap();
+            drop(client);
+            (cursor, None)
+        };
+        assert_eq!(cursor.ordinal, winner_ordinal);
+        release.send(()).unwrap();
+        peer.await.unwrap();
+        (cursor, expected)
+    };
+    let (sync, (cursor, expected)) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(observer.sync_in_place(), race)
+    })
+    .await
+    .expect("both attachments complete the ACK race");
+
+    let durable = crate::database::load_materialized_session(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observer.materialized, durable);
+    if let Some(expected) = expected {
+        assert!(sync.unwrap());
+        assert_eq!(observer.materialized, expected);
+        assert_eq!(observer.operational.latest_ordinal, cursor.ordinal);
+        assert_eq!(observer.operational.acknowledged_through, cursor.ordinal);
+        assert_eq!(observer.operational.acknowledged_digest, cursor.digest);
+        let transcript: Vec<_> = durable
+            .transcript
+            .iter()
+            .map(|item| match &item.body {
+                TranscriptBody::System { text } => text.as_str(),
+                other => panic!("unexpected transcript item: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            transcript,
+            [
+                "warning: observer's frontier",
+                "warning: winner's later event"
+            ]
+        );
+    } else {
+        let error = sync.expect_err("an ACK ahead of the durable projection must fail");
+        assert!(projection_integrity_failure(&error), "{error:#}");
+        assert!(error.to_string().contains("does not support advancement"));
+        assert_eq!(observer.materialized.applied_event_ordinal, first_ordinal);
+        assert_eq!(observer.operational.latest_ordinal, 0);
+    }
+
+    drop(observer);
+    let attachments = observer_peer.await.unwrap();
+    assert_eq!(attachments.len(), if commit_winner { 3 } else { 2 });
+    if commit_winner {
+        assert_eq!(attachments.last(), Some(&cursor));
+    }
+}
+
+#[cfg(unix)]
+// Hard-won: #1407: another attachment's newer durable ACK failed a parked child's wake.
+#[tokio::test]
+async fn ahead_relay_ack_reloads_the_winning_durable_projection() {
+    const CHILD: &str = "MJ_TEST_DURABLE_RELAY_ACK_RACE";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "ahead_relay_ack_reloads_the_winning_durable_projection",
+        );
+        return;
+    }
+    relay_ack_race(true).await;
+}
+
+#[cfg(unix)]
+// Hard-won: #1407: a newer ACK needs a durable projection behind it.
+#[tokio::test]
+async fn ahead_relay_ack_fails_without_the_winning_durable_projection() {
+    const CHILD: &str = "MJ_TEST_UNSUPPORTED_RELAY_ACK_RACE";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "ahead_relay_ack_fails_without_the_winning_durable_projection",
+        );
+        return;
+    }
+    relay_ack_race(false).await;
+}
+
+#[cfg(unix)]
 #[test]
 fn stale_recovery_checks_durable_state_under_target_ownership() {
     const CHILD: &str = "MJ_STALE_RECOVERY_TEST_CHILD";
@@ -3453,7 +3657,12 @@ fn projection_integrity_failure_is_detected_only_for_integrity_errors() {
     .context("apply projection event");
     assert!(projection_integrity_failure(&integrity));
 
-    let concurrent = anyhow::Error::from(ProjectionAdvancedError { event_ordinal: 7 });
+    let concurrent = anyhow::Error::from(ProjectionAdvancedError {
+        required: RelayCursor {
+            ordinal: 7,
+            digest: "a".repeat(64),
+        },
+    });
     assert!(!projection_integrity_failure(&concurrent));
 
     let unreachable = anyhow::anyhow!("connection refused").context("connect relay proxy");

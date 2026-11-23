@@ -2,15 +2,15 @@ use super::*;
 
 #[derive(Debug)]
 pub struct ProjectionAdvancedError {
-    pub event_ordinal: u64,
+    pub required: RelayCursor,
 }
 
 impl std::fmt::Display for ProjectionAdvancedError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "another projector committed relay event {} first",
-            self.event_ordinal
+            "relay projection advanced to at least {}:{}",
+            self.required.ordinal, self.required.digest
         )
     }
 }
