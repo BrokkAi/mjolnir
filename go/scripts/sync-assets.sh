@@ -12,3 +12,4 @@ copy() { # copy <source relative to repo root> <destination relative to go/>
 }
 copy mj-core/assets internal/core/assets
 copy mj-harness-install/assets internal/harnessinstall/assets
+copy mj-accounts/assets internal/accounts/assets

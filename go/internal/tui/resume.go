@@ -22,10 +22,14 @@
 package tui
 
 import (
+	"cmp"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -506,13 +510,24 @@ func liveSearchStateMatches(state LiveSearchState, sessionID string) bool {
 // resumeDialog is the open resume dialog, including one held under the
 // destroy confirmation it opened; nil otherwise.
 func resumeDialog(mode Mode) *ResumeDialog {
-	panic("unported: mj-tui/src/resume.rs resume_dialog")
+	switch m := mode.(type) {
+	case ModeResumeDialog:
+		return m.ResumeDialog
+	case ModeConfirm:
+		if m.ConfirmDialog == nil {
+			return nil
+		}
+		if destroy, ok := m.confirmation.(ConfirmationDestroyStopped); ok {
+			return destroy.Reopen
+		}
+	}
+	return nil
 }
 
 // resumeDialogMut is resumeDialog for a caller that changes the dialog in
 // place.
 func resumeDialogMut(mode *Mode) *ResumeDialog {
-	panic("unported: mj-tui/src/resume.rs resume_dialog_mut")
+	return resumeDialog(*mode)
 }
 
 // PreviewKey is what the preview pane is showing: a SessionWiki session, and
@@ -531,7 +546,44 @@ func (d *ResumeDialog) focused() ResumeFocus {
 }
 
 func (d *ResumeDialog) prepare(rows []ResumeRow) {
-	panic("unported: mj-tui/src/resume.rs ResumeDialog::prepare")
+	form := &d.form
+	form.BeginUpdate()
+	form.DeclareWithEnabled(
+		ResumeFocusTabs,
+		chat.ControlKindTabs{Len: resumeTabCount, Selected: d.tab.index()},
+		true,
+	)
+	form.DeclareWithEnabled(ResumeFocusSearch, chat.ControlKindTextField{}, d.searchEnabled())
+	form.DeclareWithEnabled(
+		ResumeFocusSessions,
+		chat.ControlKindChoiceList{Len: len(rows), Selected: d.rowIndex},
+		len(rows) > 0,
+	)
+	hitCount := 0
+	if _, hits, ok := d.previewBody(rows); ok {
+		hitCount = len(hits)
+	}
+	form.DeclareWithEnabled(
+		ResumeFocusPreviousHit,
+		chat.ControlKindButton{},
+		d.previewHit > 0 && hitCount > 0,
+	)
+	form.DeclareWithEnabled(
+		ResumeFocusNextHit,
+		chat.ControlKindButton{},
+		d.previewHit+1 < hitCount,
+	)
+	form.DeclareWithEnabled(ResumeFocusCancel, chat.ControlKindButton{}, true)
+	if d.tab == ResumeTabHel {
+		form.DeclareWithEnabled(ResumeFocusDestroy, chat.ControlKindButton{}, d.canDestroy(rows))
+	}
+	form.DeclareWithEnabled(ResumeFocusOpen, chat.ControlKindButton{}, d.canOpen(rows))
+	keys := make([]string, len(rows))
+	for index := range rows {
+		keys[index] = rows[index].key.GoString()
+	}
+	form.SetListIdentity(ResumeFocusSessions, "["+strings.Join(keys, ", ")+"]")
+	form.EndFrame(ResumeFocusSessions)
 }
 
 // searchCaretAtEdge reports whether an arrow key pressed in the search box
@@ -589,13 +641,25 @@ func (d *ResumeDialog) canDestroy(rows []ResumeRow) bool {
 }
 
 func (d *ResumeDialog) isScanning() bool {
-	panic("unported: mj-tui/src/resume.rs ResumeDialog::is_scanning")
+	for _, profile := range d.profiles {
+		if profile.Error == nil &&
+			(profile.ScanProgress == nil || profile.ScanProgress[0] < profile.ScanProgress[1]) {
+			return true
+		}
+	}
+	return false
 }
 
 // scanProgress is the scanned and total counts summed across every profile
 // still loading.
 func (d *ResumeDialog) scanProgress() (scanned int, total int) {
-	panic("unported: mj-tui/src/resume.rs ResumeDialog::scan_progress")
+	for _, profile := range d.profiles {
+		if profile.ScanProgress != nil {
+			scanned += profile.ScanProgress[0]
+			total += profile.ScanProgress[1]
+		}
+	}
+	return scanned, total
 }
 
 // previewWikiID is the SessionWiki session the preview pane is showing,
@@ -634,7 +698,35 @@ func (d *ResumeDialog) activeQuery() (string, bool) {
 // rather than a string because a hit preview highlights the matched words
 // inside a line. ok is false when the selected row has no preview.
 func (d *ResumeDialog) previewBody(rows []ResumeRow) (lines []chat.Line, hitLines []int, ok bool) {
-	panic("unported: mj-tui/src/resume.rs ResumeDialog::preview_body")
+	wikiID, ok := d.previewWikiID(rows)
+	if !ok {
+		return nil, nil, false
+	}
+	muted := chat.Style{}.Foreground(chat.ThemePalette().Muted)
+	query, ok := d.activeQuery()
+	if !ok {
+		brief, ok := d.previews[wikiID]
+		if !ok {
+			return []chat.Line{chat.StyledLine("Loading the archived transcript…", muted)}, nil, true
+		}
+		// The briefing's first line is the SessionWiki crate's own
+		// `# Previous session: <title>` heading, which repeats the title of
+		// the row the pane sits under.
+		zone := displayNow().Location()
+		for index, line := range resumeStrLines(brief) {
+			if index == 0 {
+				continue
+			}
+			lines = append(lines, chat.RawLine(localizeBriefDate(line, zone)))
+		}
+		return lines, nil, true
+	}
+	transcript, ok := d.hits[PreviewKey{WikiID: wikiID, Query: query}]
+	if !ok {
+		return []chat.Line{chat.StyledLine("Loading the matching passages…", muted)}, nil, true
+	}
+	lines, hitLines = hitTranscriptLines(&transcript)
+	return lines, hitLines, true
 }
 
 func (d *ResumeDialog) errors() []string {
@@ -708,7 +800,37 @@ func timestampMs(timestamp string) (int64, bool) {
 
 // helRow is the Mjolnir tab's row for one session.
 func helRow(candidate client.ResumeCandidate) ResumeRow {
-	panic("unported: mj-tui/src/resume.rs hel_row")
+	status := helRowStatus(candidate.State)
+	var details string
+	if reason, ok := status.explanation(); ok {
+		details = fmt.Sprintf("%s · %s", reason, candidate.Project)
+	} else if !candidate.HasCheckpoint {
+		details = fmt.Sprintf("no checkpoint · %s", candidate.Project)
+	} else {
+		details = candidate.Project
+	}
+	if candidate.Publication != nil {
+		switch *candidate.Publication {
+		case core.PublicationStateUnpublished:
+			details += " · Unpublished work in recovery copy"
+		case core.PublicationStateUnknown:
+			details += " · Publication status unknown"
+		}
+	}
+	var lastActivityMs int64
+	if candidate.LastActivityMs != nil {
+		lastActivityMs = *candidate.LastActivityMs
+	}
+	return ResumeRow{
+		key:            resumeRowKeyHel(candidate.SessionID),
+		profileID:      candidate.LastProfile,
+		title:          candidate.Title,
+		origin:         candidate.Origin,
+		details:        details,
+		lastActivityMs: lastActivityMs,
+		status:         status,
+		publication:    candidate.Publication,
+	}
 }
 
 func helRowStatus(state core.SessionState) ResumeRowStatus {
@@ -750,7 +872,35 @@ func displayNow() time.Time {
 const sevenDaysMs int64 = 7 * 24 * 60 * 60 * 1_000
 
 func formatLastActive(now time.Time, thenMs int64) string {
-	panic("unported: mj-tui/src/resume.rs format_last_active")
+	if thenMs <= 0 {
+		return "unknown"
+	}
+	// chrono's from_timestamp_millis covers years -262143 to 262142; past
+	// that the instant is unknown, as it is in Rust.
+	if thenMs > maxChronoTimestampMs {
+		return "unknown"
+	}
+	then := time.UnixMilli(thenMs)
+	nowMs := now.UnixMilli()
+	elapsedMs := int64(0)
+	if thenMs <= nowMs {
+		elapsedMs = nowMs - thenMs
+	}
+	if elapsedMs > sevenDaysMs {
+		return then.In(now.Location()).Format("Jan 2, 2006")
+	}
+
+	seconds := elapsedMs / 1_000
+	switch {
+	case seconds < 60:
+		return "just now"
+	case seconds < 3_600:
+		return relativeTime(seconds/60, "minute")
+	case seconds < 86_400:
+		return relativeTime(seconds/3_600, "hour")
+	default:
+		return relativeTime(seconds/86_400, "day")
+	}
 }
 
 func relativeTime(value int64, unit string) string {
@@ -796,7 +946,168 @@ func harnessOfTool(tool string) (core.HarnessKind, bool) {
 // Dedupe rule: a Hel record whose native_session_id matches a scanned native
 // session of the same harness replaces that native row entirely.
 func mergedResumeRows(config *core.Config, state *core.StateState, history HistoryLoad, profiles []ImportProfileOption, wiki []client.WikiRow) []ResumeRow {
-	panic("unported: mj-tui/src/resume.rs merged_resume_rows")
+	// Until the daemon answers, nothing says which stopped sessions exist or
+	// which native sessions Mjolnir already holds, so the Mjolnir and Import
+	// rows wait for it. Archived search hits do not.
+	var loaded *ResumeHistory
+	if answer, ok := history.(HistoryLoadLoaded); ok {
+		loaded = answer.Value
+	}
+	adopted := map[nativeSessionKey]struct{}{}
+	var ownCheckouts []string
+	if loaded != nil {
+		for key := range loaded.adopted {
+			adopted[key] = struct{}{}
+		}
+		ownCheckouts = append(ownCheckouts, loaded.localCheckoutRoots...)
+	}
+	// Live records joined after the dialog opened can adopt more.
+	for session := range state.Sessions.Values() {
+		// Every record adopts its native session, live ones included: the
+		// native file of a session Hel is running now must not be offered as
+		// a second import.
+		if session.NativeSessionID != nil {
+			adopted[nativeSessionKey{harness: session.HarnessKind, nativeSessionID: *session.NativeSessionID}] = struct{}{}
+		}
+		// The record names one native thread, but a `/clear` starts another
+		// and the store records it only at the next checkpoint. Every thread
+		// that ran in the session's own checkout is the session's (R10-3).
+		if checkout, err := state.Checkout(session.ID); err == nil {
+			if managed, ok := checkout.(core.CheckoutManagedWorktree); ok && managed.Worktree != nil {
+				if _, local := managed.Worktree.Target.(core.ManagedWorktreeTargetLocal); local {
+					ownCheckouts = append(ownCheckouts, managed.Worktree.WorktreeRoot)
+				}
+			}
+		}
+	}
+	var rows []ResumeRow
+	if loaded == nil {
+		profiles = nil
+	}
+	// The daemon's rows, plus inactive records the feed itself carries (a
+	// session that failed after the dialog opened). The feed's record is
+	// newer when there is one: a session resumed since the dialog opened is
+	// active now, and the Live tab lists it. A sub-agent is resumed through
+	// its parent.
+	if loaded != nil {
+		ids := make([]string, 0, len(loaded.candidates))
+		for id := range loaded.candidates {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		for _, id := range ids {
+			candidate := loaded.candidates[id]
+			if state.Sessions.ContainsKey(candidate.SessionID) {
+				continue
+			}
+			rows = append(rows, helRow(candidate))
+		}
+	}
+	for session := range state.Sessions.Values() {
+		if session.State.IsActive() || state.IsSubagentSession(session.ID) {
+			continue
+		}
+		rows = append(rows, helRow(client.ResumeCandidateOf(session, config)))
+	}
+	for _, profile := range profiles {
+		for _, native := range profile.Sessions {
+			key := nativeSessionKey{harness: profile.HarnessKind, nativeSessionID: native.NativeSessionID}
+			if _, held := adopted[key]; held {
+				continue
+			}
+			if slices.ContainsFunc(ownCheckouts, func(checkout string) bool {
+				return resumePathStartsWith(native.Cwd, checkout)
+			}) {
+				continue
+			}
+			rows = append(rows, ResumeRow{
+				key:               resumeRowKeyNative(profile.HarnessKind, native.NativeSessionID),
+				profileID:         profile.ProfileID,
+				title:             native.Title,
+				origin:            nativeProjectTarget(native.ProjectDirectory),
+				details:           native.Details,
+				lastActivityMs:    native.LastActivityMs,
+				status:            ResumeRowStatusImportable,
+				nativelyArchived:  native.NativelyArchived,
+				unavailableReason: native.UnavailableReason,
+			})
+		}
+	}
+	// SessionWiki rows either annotate a row already here or become archived
+	// rows of their own. A row is archived only when nothing on this machine
+	// still holds the session: no Mjolnir record, and no native file an
+	// import could adopt.
+	for rank := range wiki {
+		hit := &wiki[rank]
+		var native *ResumeRowKey
+		if hit.NativeID != nil {
+			if harness, ok := harnessOfHit(hit); ok {
+				key := resumeRowKeyNative(harness, *hit.NativeID)
+				native = &key
+			}
+		}
+		listed := func(key ResumeRowKey) bool {
+			return slices.ContainsFunc(rows, func(row ResumeRow) bool { return row.key == key })
+		}
+		var existing *ResumeRowKey
+		if hit.HelSessionID != nil {
+			if key := resumeRowKeyHel(*hit.HelSessionID); listed(key) {
+				existing = &key
+			}
+		}
+		if existing == nil && native != nil && listed(*native) {
+			existing = native
+		}
+		if existing != nil {
+			if index := slices.IndexFunc(rows, func(row ResumeRow) bool { return row.key == *existing }); index >= 0 {
+				row := &rows[index]
+				id, place := hit.ID, rank
+				row.wikiMatch = &id
+				row.wikiRank = &place
+				if snippet, ok := snippetText(hit); ok {
+					row.details = fmt.Sprintf("%s · %s", row.details, snippet)
+				}
+			}
+			continue
+		}
+		if !hit.Archived {
+			continue
+		}
+		// The index carries the profile for a Mjolnir row. Every other row
+		// has only the tool that wrote it.
+		profileID := hit.Tool
+		if hit.Profile != nil {
+			profileID = *hit.Profile
+		}
+		title := hit.Title
+		if strings.TrimSpace(hit.Title) == "" {
+			title = hit.ID
+		}
+		var lastActivityMs int64
+		if hit.Started != nil {
+			if started, ok := timestampMs(*hit.Started); ok {
+				lastActivityMs = started
+			}
+		}
+		id, place := hit.ID, rank
+		rows = append(rows, ResumeRow{
+			key:            resumeRowKeyArchive(hit.ID),
+			profileID:      profileID,
+			title:          title,
+			origin:         archiveOriginOf(config, hit),
+			details:        archiveDetails(hit),
+			lastActivityMs: lastActivityMs,
+			status:         ResumeRowStatusRestorable,
+			wikiMatch:      &id,
+			wikiRank:       &place,
+			wikiProfile:    hit.Profile,
+			wikiTarget:     hit.Target,
+		})
+	}
+	// Newest first across the whole merged list; the key breaks ties so the
+	// order is stable between incremental scan updates.
+	sortResumeRowsNewestFirst(rows)
+	return rows
 }
 
 // snippetText is the matching text a search returned, on one line and
@@ -836,7 +1147,18 @@ func archiveOriginOf(config *core.Config, hit *client.WikiRow) string {
 // the project it works on is `<repository>/<relative>`, which is what the
 // other tabs name.
 func sourceProjectPath(path string) string {
-	panic("unported: mj-tui/src/resume.rs source_project_path")
+	parts := resumePathComponents(path)
+	marker := -1
+	for index := 0; index+3 <= len(parts); index++ {
+		if parts[index] == ".mj" && parts[index+1] == "worktrees" {
+			marker = index
+			break
+		}
+	}
+	if marker < 0 {
+		return path
+	}
+	return resumeJoinComponents(append(slices.Clone(parts[:marker]), parts[marker+3:]...))
 }
 
 func archiveOrigin(project string) string {
@@ -869,7 +1191,54 @@ func archiveDetails(hit *client.WikiRow) string {
 // matches appear immediately and conversation matches are not restricted to
 // the history page.
 func buildResumeRows(config *core.Config, state *core.StateState, dialog *ResumeDialog, checkpointArchiveSizes map[string]*uint64) ([]ResumeRow, [resumeTabCount]int) {
-	panic("unported: mj-tui/src/resume.rs build_resume_rows")
+	searching := !dialog.search.IsEmpty()
+	merged := mergedResumeRows(config, state, dialog.history, dialog.profiles, dialog.wiki)
+	// Counted before the tab filter: the other tabs' hits are already ranked
+	// here, and throwing them away is what hid where a query matched.
+	var hits [resumeTabCount]int
+	if searching {
+		for index := range merged {
+			row := &merged[index]
+			if row.wikiRank == nil {
+				continue
+			}
+			for _, tab := range []ResumeTab{ResumeTabHel, ResumeTabImport, ResumeTabArchive} {
+				if tab.includes(row) {
+					hits[tab.index()]++
+				}
+			}
+		}
+	}
+	var rows []ResumeRow
+	for _, row := range merged {
+		if !dialog.tab.includes(&row) || (searching && row.wikiRank == nil) {
+			continue
+		}
+		// The checkpoint's size is loaded in the background, so it is
+		// appended here rather than folded into the pure merge. Only a
+		// settled record is described by its checkpoint; on a running
+		// session the size belongs to whatever it was resumed from.
+		if row.key.Kind == ResumeRowKeyKindHel {
+			if size, ok := checkpointArchiveSizes[row.key.ID]; ok && size != nil {
+				row.details += fmt.Sprintf(" · %s", formatResourceBytes(*size))
+			}
+		}
+		if id, ok := row.sessionID(); ok {
+			if record := state.Sessions.GetShared(id); record != nil && record.LastError != nil {
+				row.details += fmt.Sprintf(" · %s · d: dismiss notification", *record.LastError)
+			}
+		}
+		rows = append(rows, row)
+	}
+	if searching {
+		// The index ranked these; the newest-first order the merge applied
+		// is not the answer's order and would hide the best hit below the
+		// rest.
+		slices.SortStableFunc(rows, func(left, right ResumeRow) int {
+			return cmp.Compare(resumeWikiRankKey(&left), resumeWikiRankKey(&right))
+		})
+	}
+	return rows, hits
 }
 
 // liveResumeRows is every session listed in a workspace, newest activity
@@ -878,7 +1247,68 @@ func buildResumeRows(config *core.Config, state *core.StateState, dialog *Resume
 // Built here rather than in buildResumeRows because what the Sessions pane
 // lists, and what each workspace is called, are this type's own knowledge.
 func (d *DashboardState) liveResumeRows(dialog *ResumeDialog) []ResumeRow {
-	panic("unported: mj-tui/src/resume.rs DashboardState::live_resume_rows")
+	query := strings.ToLower(strings.TrimSpace(dialog.search.String()))
+	config := d.config.Get()
+	var rows []ResumeRow
+	for session := range d.state.Get().Sessions.Values() {
+		// Use the pane's visibility owner across every workspace, including
+		// stopped sessions that still need a person's attention.
+		if !d.isOpenableWorkspaceSession(session) {
+			continue
+		}
+		// The state filter reads the same attention level the Sessions
+		// pane's letters read, so both narrow one list the same way. It sits
+		// here, where the session id is still in hand.
+		if dialog.liveState != nil && !dialog.liveState.admits(d.AttentionLevel(session.ID)) {
+			continue
+		}
+		if query != "" &&
+			!d.sessionMatchesMetadata(session, query) &&
+			!strings.Contains(strings.ToLower(d.workspaceDisplayName(session.WorkspaceID)), query) &&
+			!liveSearchStateMatches(dialog.liveSearch, session.ID) {
+			continue
+		}
+		workspace := d.workspaceDisplayName(session.WorkspaceID)
+		details := session.ProjectName(config)
+		publication, published := session.PublicationState()
+		if published {
+			details += " · Publication status unknown"
+		}
+		// The session record's `updated_at` changes only with the record, so
+		// for a running session it is often the creation time. The
+		// projection's last activity is what the Sessions pane orders by
+		// (I1-16).
+		var lastActivityMs int64
+		if at, ok := d.SessionActivityAtMs(session.ID); ok && at <= math.MaxInt64 {
+			lastActivityMs = int64(at)
+		} else if updated, ok := timestampMs(session.UpdatedAt); ok {
+			lastActivityMs = updated
+		}
+		var publicationState *core.PublicationState
+		if published {
+			publicationState = &publication
+		}
+		var wikiMatch *string
+		if liveSearchStateMatches(dialog.liveSearch, session.ID) {
+			id := session.ID
+			wikiMatch = &id
+		}
+		rows = append(rows, ResumeRow{
+			key:            resumeRowKeyLive(session.ID),
+			profileID:      session.LastProfile,
+			title:          session.ListedTitle(),
+			origin:         workspace,
+			details:        details,
+			lastActivityMs: lastActivityMs,
+			status:         ResumeRowStatusRunning,
+			publication:    publicationState,
+			wikiMatch:      wikiMatch,
+		})
+	}
+	// Newest first, with the key breaking ties so the order holds still
+	// between rebuilds.
+	sortResumeRowsNewestFirst(rows)
+	return rows
 }
 
 // RebuildResumeRows rebuilds the open dialog's rows from what they are
@@ -886,7 +1316,59 @@ func (d *DashboardState) liveResumeRows(dialog *ResumeDialog) []ResumeRow {
 // sizes, and the newest search answer. Every mutation of those inputs calls
 // this. Moving the selection only reads the rows.
 func (d *DashboardState) RebuildResumeRows() {
-	panic("unported: mj-tui/src/resume.rs DashboardState::rebuild_resume_rows")
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		d.resumeRowsField = nil
+		d.resumeHitCounts = make([]int, resumeTabCount)
+		return
+	}
+	// The Live list answers immediately from state, but the other tabs' hit
+	// counts still come from the index while Live is selected.
+	historyRows, hits := buildResumeRows(d.config.Get(), d.state.Get(), dialog, d.checkpointArchiveSizes)
+	rows := historyRows
+	if dialog.tab == ResumeTabLive {
+		rows = d.liveResumeRows(dialog)
+	}
+	kept := make([]ResumeRow, 0, len(rows))
+	for _, row := range rows {
+		if id, ok := row.sessionID(); ok && d.TransitionKind(id) != nil {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	d.resumeRowsField = kept
+	d.resumeHitCounts = hits[:]
+	for index := range d.resumeRowsField {
+		row := &d.resumeRowsField[index]
+		// Recovery is the settled record's offer; Enter on a running session
+		// goes to it, so a mark inviting a recovery here would not act.
+		var operation *core.MoveOperation
+		switch row.key.Kind {
+		case ResumeRowKeyKindHel:
+			if loaded, ok := dialog.history.(HistoryLoadLoaded); ok {
+				if retained, ok := loaded.Value.moves[row.key.ID]; ok {
+					operation = &retained
+				} else if retained, ok := d.moveOperations.Get(row.key.ID); ok {
+					operation = &retained
+				}
+			}
+		case ResumeRowKeyKindLive:
+			if session := d.state.Get().Sessions.GetShared(row.key.ID); session != nil && !session.State.IsActive() {
+				if retained, ok := d.moveOperations.Get(row.key.ID); ok {
+					operation = &retained
+				}
+			}
+		}
+		if operation != nil && !operation.OffersRetry() {
+			operation = nil
+		}
+		row.moveRecovery = operation
+	}
+	dialog.prepare(d.resumeRowsField)
+	// Background state updates can remove the selected row. Repair the key
+	// and index together so the form never points outside the freshly
+	// rebuilt list.
+	d.resyncResumeSelection()
 }
 
 // resumeRows are the rows the open dialog shows; empty when no dialog is
@@ -899,37 +1381,136 @@ func (d *DashboardState) resumeRows() []ResumeRow {
 // so needs a redraw faster than the one-second clock: loading dialogs,
 // session activity, or an in-flight lifecycle transition.
 func (d *DashboardState) NeedsFastTick() bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::needs_fast_tick")
+	dialogAnimates := false
+	switch mode := d.mode.(type) {
+	case ModeImporting:
+		dialogAnimates = true
+	case ModeTargetActions:
+		dialogAnimates = mode.TargetActionsDialog != nil && mode.testing != nil
+	case ModeResumeDialog:
+		// The scan notice lives on the Import tab, so it animates only while
+		// that tab is the one on screen.
+		dialog := mode.ResumeDialog
+		_, wikiPending := dialog.wikiSearch.(WikiSearchStatePending)
+		_, wikiRefreshing := dialog.wikiSearch.(WikiSearchStateRefreshing)
+		_, livePending := dialog.liveSearch.(LiveSearchStatePending)
+		_, liveRefreshing := dialog.liveSearch.(LiveSearchStateRefreshing)
+		_, historyLoading := dialog.history.(HistoryLoadLoading)
+		dialogAnimates = (dialog.isScanning() && dialog.tab == ResumeTabImport) ||
+			dialog.sync.Scanning() ||
+			wikiPending || wikiRefreshing ||
+			(dialog.tab == ResumeTabLive && (livePending || liveRefreshing)) ||
+			historyLoading
+	}
+	if dialogAnimates {
+		return true
+	}
+	if sync := d.sessionsText.Get().sync; sync != nil && sync.Scanning() {
+		return true
+	}
+	if d.openingSession != nil {
+		return true
+	}
+	operations := *d.sessionOperations.Get()
+	reviews := *d.sessionReviewsField.Get()
+	for _, session := range d.orderedSessions() {
+		if _, ok := operations[session.ID]; ok {
+			return true
+		}
+		if session.LastError == nil {
+			switch session.State {
+			case core.SessionStateProvisioning, core.SessionStateCheckpointing,
+				core.SessionStateClosing, core.SessionStateDestroying:
+				return true
+			}
+		}
+		if d.sessionIsWorking(session.ID) {
+			return true
+		}
+		if views, ok := reviews[session.ID]; ok && client.AnyWorking(resumeReviewViews(views)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DashboardState) resumeCommandSessionID() (string, bool) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::resume_command_session_id")
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		return "", false
+	}
+	rows := d.resumeRows()
+	index, ok := selectedIndex(dialog, len(rows))
+	if !ok {
+		return "", false
+	}
+	return rows[index].sessionID()
 }
 
 func (d *DashboardState) ShowResumeDialog(discoveryID uint64, profiles []ImportProfileOption) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::show_resume_dialog")
+	d.wikiSearchGeneration++
+	d.mode = ModeResumeDialog{&ResumeDialog{
+		discoveryID: discoveryID,
+		sync:        SyncEpisode{ID: discoveryID},
+		profiles:    profiles,
+		// The sessions a person is most likely looking for are the ones
+		// running now, so that is the tab the dialog opens on.
+		tab:           ResumeTabLive,
+		search:        chat.NewTextInput(),
+		form:          chat.NewDialog[ResumeFocus](),
+		openedAt:      time.Now(),
+		wikiRequestID: d.wikiSearchGeneration,
+		wikiSearch:    WikiSearchStatePending{},
+		liveSearch:    LiveSearchStateAnswered{Value: map[string]struct{}{}},
+		previews:      map[string]string{},
+		hits:          map[PreviewKey]client.WikiHitTranscript{},
+		history:       HistoryLoadLoading{},
+	}}
+	d.RebuildResumeRows()
+	// Record which row the initial selection lands on, so the first
+	// incremental scan result cannot slide the selection out from under it.
+	d.resyncResumeSelection()
+	// The dialog opens on Live with nothing focused yet, so the list gets the
+	// default focus EndFrame hands out; `/` or a click moves it to the search
+	// box from there.
 }
 
 // SetResumeFilter seeds Open with the workspace filter before its first
 // background search.
 func (d *DashboardState) SetResumeFilter(query string, state *SessionStateFilter) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::set_resume_filter")
+	if dialog := resumeDialogMut(&d.mode); dialog != nil {
+		dialog.search = chat.TextInputFromValue(query)
+		if state != nil {
+			filter := *state
+			dialog.liveState = &filter
+		} else {
+			dialog.liveState = nil
+		}
+	}
+	d.RebuildResumeRows()
+	d.resyncResumeSelection()
 }
 
 // SessionRecord is one session's record: the live one from the runtime feed,
 // or else a stopped one loaded on demand for the resume dialog, `mj go`, or
 // an import. The feed carries only live sessions.
 func (d *DashboardState) SessionRecord(sessionID string) *core.SessionRecord {
-	panic("unported: mj-tui/src/resume.rs DashboardState::session_record")
+	if session := d.state.Get().Sessions.GetShared(sessionID); session != nil {
+		return session
+	}
+	if cached := d.stoppedRecords.GetShared(sessionID); cached != nil {
+		return &cached.Record
+	}
+	return nil
 }
 
 // SetFailedLaunchRetries replaces what new-session defaults are chosen from.
 func (d *DashboardState) SetFailedLaunchRetries(sessions map[string]struct{}) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::set_failed_launch_retries")
+	d.failedLaunchRetries = sessions
 }
 
 func (d *DashboardState) SetContainerUpgradeSessions(sessions map[string]struct{}) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::set_container_upgrade_sessions")
+	d.containerUpgradeSessions = sessions
 }
 
 func (d *DashboardState) SetRecentLaunch(recent *core.RecentLaunch) {
@@ -943,13 +1524,27 @@ func (d *DashboardState) SetLaunchRecency(recency []client.LaunchRecency) {
 // ResumeCheckpointArchives is the checkpoint archives of the open dialog's
 // Mjolnir rows, whose sizes the rows show.
 func (d *DashboardState) ResumeCheckpointArchives() core.SnapshotMap[string, string] {
-	panic("unported: mj-tui/src/resume.rs DashboardState::resume_checkpoint_archives")
+	archives := core.NewSnapshotMap[string, string]()
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return archives
+	}
+	loaded, ok := mode.history.(HistoryLoadLoaded)
+	if !ok {
+		return archives
+	}
+	for _, candidate := range loaded.Value.candidates {
+		if candidate.CheckpointArchive != nil {
+			archives.Insert(candidate.SessionID, *candidate.CheckpointArchive)
+		}
+	}
+	return archives
 }
 
 // RememberStoppedRecord keeps one stopped record that something loaded on
 // demand: the session `mj go` starts in, or a session just imported.
 func (d *DashboardState) RememberStoppedRecord(session client.SessionRecordWithVerdict) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::remember_stopped_record")
+	d.stoppedRecords.Insert(session.Record.ID, session)
 }
 
 // ApplyResumeRecord opens the resume wizard on a record fetched for the row
@@ -957,26 +1552,89 @@ func (d *DashboardState) RememberStoppedRecord(session client.SessionRecordWithV
 // or for a row no longer being opened, is dropped. record is nil when the
 // session no longer exists; err is set when it could not be loaded.
 func (d *DashboardState) ApplyResumeRecord(sessionID string, record *client.SessionRecordWithVerdict, err error) DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_resume_record")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	dialog := mode.ResumeDialog
+	if dialog.opening == nil || *dialog.opening != sessionID {
+		return DashboardActionNone{}
+	}
+	dialog.opening = nil
+	switch {
+	case err != nil:
+		d.notices.Set(fmt.Sprintf("Could not load the session to resume: %s", err))
+		return DashboardActionNone{}
+	case record == nil:
+		d.notices.Set("That session no longer exists.")
+		return DashboardActionNone{}
+	}
+	d.RememberStoppedRecord(*record)
+	d.CancelModal()
+	return d.BeginResumeFor(sessionID)
 }
 
 // ApplyResumeCandidates installs the daemon's answer about stopped sessions
 // in the open dialog. Returns whether it was installed; an answer for a
 // dialog that has since closed or reopened is dropped.
 func (d *DashboardState) ApplyResumeCandidates(discoveryID uint64, candidates client.ResumeCandidates, err error) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_resume_candidates")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return false
+	}
+	dialog := mode.ResumeDialog
+	if dialog.discoveryID != discoveryID {
+		return false
+	}
+	if err != nil {
+		dialog.history = HistoryLoadFailed{Value: err.Error()}
+	} else {
+		history := resumeHistoryFrom(candidates)
+		dialog.history = HistoryLoadLoaded{Value: &history}
+	}
+	d.RebuildResumeRows()
+	d.resyncResumeSelection()
+	return true
 }
 
 // ApplyResumeProfile folds one profile's scan result into the open dialog,
 // keeping the selection on the same row.
 func (d *DashboardState) ApplyResumeProfile(discoveryID uint64, profile ImportProfileOption) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_resume_profile")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return
+	}
+	dialog := mode.ResumeDialog
+	if dialog.discoveryID != discoveryID {
+		return
+	}
+	index := slices.IndexFunc(dialog.profiles, func(candidate ImportProfileOption) bool {
+		return candidate.ProfileID == profile.ProfileID
+	})
+	if index >= 0 && importProfileOptionEqual(&dialog.profiles[index], &profile) {
+		return
+	}
+	// The slice may be shared with a copy of the dialog, so it is replaced
+	// rather than changed in place (Rust's Arc::make_mut).
+	profiles := slices.Clone(dialog.profiles)
+	if index >= 0 {
+		profiles[index] = profile
+	} else {
+		profiles = append(profiles, profile)
+	}
+	dialog.profiles = profiles
+	d.RebuildResumeRows()
+	d.resyncResumeSelection()
 }
 
 // ResumeSearchRequestID: the query remains active while a temporary overlay
 // covers its dialog.
 func (d *DashboardState) ResumeSearchRequestID() (uint64, bool) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::resume_search_request_id")
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		return 0, false
+	}
+	return dialog.wikiRequestID, true
 }
 
 func (d *DashboardState) ApplyWikiSearch(requestID uint64, page client.WikiSearchPage) {
@@ -987,13 +1645,48 @@ func (d *DashboardState) ApplyWikiSearch(requestID uint64, page client.WikiSearc
 // query generation; a delayed answer can never put an older query's rows or
 // previews into the list.
 func (d *DashboardState) ApplyResumeTextSearchResult(requestID uint64, matches []client.SessionTextMatch, err error) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_resume_text_search_result")
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil || dialog.wikiRequestID != requestID {
+		return false
+	}
+	if err != nil {
+		if _, refreshing := dialog.liveSearch.(LiveSearchStateRefreshing); refreshing {
+			message := err.Error()
+			dialog.sync.Status = &client.DaemonResult[client.WikiSyncStatus]{Err: &message}
+		}
+		dialog.liveSearch = LiveSearchStateFailed{Value: err.Error()}
+	} else {
+		found := make(map[string]struct{}, len(matches))
+		for _, hit := range matches {
+			found[hit.SessionID] = struct{}{}
+		}
+		dialog.liveSearch = LiveSearchStateAnswered{Value: found}
+	}
+	d.RebuildResumeRows()
+	return true
 }
 
 // ApplyWikiSearchResult: successes and failures share one admission point,
 // including refreshes.
 func (d *DashboardState) ApplyWikiSearchResult(requestID uint64, page client.WikiSearchPage, err error) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_wiki_search_result")
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil || dialog.wikiRequestID != requestID {
+		return false
+	}
+	if err != nil {
+		if _, refreshing := dialog.wikiSearch.(WikiSearchStateRefreshing); refreshing {
+			message := err.Error()
+			dialog.sync.Status = &client.DaemonResult[client.WikiSyncStatus]{Err: &message}
+		}
+		dialog.wikiSearch = WikiSearchStateFailed{Value: err.Error()}
+	} else {
+		dialog.wikiSearch = WikiSearchStateAnswered{Value: page.Status}
+		if !wikiRowsEqual(dialog.wiki, page.Rows) {
+			dialog.wiki = page.Rows
+		}
+	}
+	d.RebuildResumeRows()
+	return true
 }
 
 // NextWikiPreview is the preview the open dialog still needs for the row
@@ -1005,65 +1698,233 @@ func (d *DashboardState) ApplyWikiSearchResult(requestID uint64, page client.Wik
 // different row under an unmoved selection, and that row's transcript is
 // what the preview pane is already promising, so it is asked for here.
 func (d *DashboardState) NextWikiPreview() DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::next_wiki_preview")
+	var wikiID string
+	haveRow := false
+	if row := d.selectedResumeRow(); row != nil {
+		wikiID, haveRow = row.wikiID()
+	}
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil || !haveRow {
+		return DashboardActionNone{}
+	}
+	query, ok := dialog.activeQuery()
+	if !ok {
+		if _, cached := dialog.previews[wikiID]; cached ||
+			(dialog.previewPending != nil && *dialog.previewPending == wikiID) {
+			return DashboardActionNone{}
+		}
+		pending := wikiID
+		dialog.previewPending = &pending
+		return DashboardActionLoadArchivedBrief{WikiID: wikiID}
+	}
+	key := PreviewKey{WikiID: wikiID, Query: query}
+	if _, cached := dialog.hits[key]; cached || (dialog.hitsPending != nil && *dialog.hitsPending == key) {
+		return DashboardActionNone{}
+	}
+	dialog.hitsPending = &key
+	return DashboardActionLoadArchivedHits{WikiID: wikiID, Query: query}
 }
 
 // ApplyWikiBrief folds one fetched briefing into the open dialog's preview
 // cache.
 func (d *DashboardState) ApplyWikiBrief(wikiID string, markdown string) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_wiki_brief")
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil {
+		return
+	}
+	if dialog.previewPending != nil && *dialog.previewPending == wikiID {
+		dialog.previewPending = nil
+	}
+	previews := maps.Clone(dialog.previews)
+	if previews == nil {
+		previews = map[string]string{}
+	}
+	previews[wikiID] = markdown
+	dialog.previews = previews
 }
 
 // ApplyWikiHits folds one query's matching passages into the open dialog's
 // cache. A nil transcript means the index no longer holds that session,
 // which the pane shows the same way as a session with no match.
 func (d *DashboardState) ApplyWikiHits(wikiID string, query string, transcript *client.WikiHitTranscript) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::apply_wiki_hits")
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil {
+		return
+	}
+	key := PreviewKey{WikiID: wikiID, Query: query}
+	if dialog.hitsPending != nil && *dialog.hitsPending == key {
+		dialog.hitsPending = nil
+	}
+	showing := dialog.previewKey != nil && *dialog.previewKey == key
+	hits := maps.Clone(dialog.hits)
+	if hits == nil {
+		hits = map[PreviewKey]client.WikiHitTranscript{}
+	}
+	if transcript != nil {
+		hits[key] = *transcript
+	} else {
+		hits[key] = client.WikiHitTranscript{}
+	}
+	dialog.hits = hits
+	if showing {
+		// The passages are what the pane is already showing, so open it on
+		// the first match rather than at the top of the excerpt.
+		d.focusPreviewHit(0)
+	}
 }
 
 // focusPreviewHit moves the preview pane onto hit index, reporting whether
 // there was such a hit. The lines are wrapped here with the width the pane
 // was last drawn at, so the stored offset is the row the reader will see.
 func (d *DashboardState) focusPreviewHit(index int) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::focus_preview_hit")
+	var surface *chat.SurfaceFrame
+	if registered := d.frameSurfaces.Surface(chat.SurfaceIdResumePreview{}); registered != nil {
+		copied := *registered
+		surface = &copied
+	}
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		return false
+	}
+	lines, hitLines, ok := dialog.previewBody(d.resumeRowsField)
+	if !ok || index < 0 || index >= len(hitLines) {
+		return false
+	}
+	logical := hitLines[index]
+	scroll := 0
+	if surface != nil {
+		width := surface.Rect.Dx()
+		viewport := surface.Rect.Dy()
+		total := len(wrapPreviewLines(lines, width))
+		scroll = min(len(wrapPreviewLines(lines[:logical], width)), max(total-viewport, 0))
+	}
+	// Without a surface the pane has not been drawn yet, so its width is
+	// unknown; the next frame shows the excerpt from its top.
+	dialog = resumeDialogMut(&d.mode)
+	if dialog == nil {
+		return false
+	}
+	dialog.previewHit = index
+	dialog.previewScroll = scroll
+	return true
 }
 
 // stepPreviewHit moves step hits from the one the pane is on, stopping at
 // either end, and reports whether the keystroke belonged to the pane.
 func (d *DashboardState) stepPreviewHit(step int) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::step_preview_hit")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return false
+	}
+	dialog := mode.ResumeDialog
+	_, hitLines, ok := dialog.previewBody(d.resumeRowsField)
+	if !ok || len(hitLines) == 0 {
+		return false
+	}
+	next := min(max(dialog.previewHit+step, 0), len(hitLines)-1)
+	return d.focusPreviewHit(next)
 }
 
 // wikiSearchAction asks for a new search after the query changed. The
 // debounce and the dropping of stale answers live with the request id, not
 // with a timer here.
 func (d *DashboardState) wikiSearchAction() DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::wiki_search_action")
+	requestID, query, ok := d.NextWikiSearch()
+	if !ok {
+		return DashboardActionNone{}
+	}
+	return DashboardActionSearchArchivedSessions{RequestID: requestID, Query: query}
 }
 
 // NextWikiSearch claims the next search request id for the open dialog, with
 // the query it should run. ok is false when no dialog is open.
 func (d *DashboardState) NextWikiSearch() (requestID uint64, query string, ok bool) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::next_wiki_search")
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil {
+		return 0, "", false
+	}
+	d.wikiSearchGeneration++
+	dialog.wikiRequestID = d.wikiSearchGeneration
+	dialog.wikiSearch = WikiSearchStatePending{}
+	if strings.TrimSpace(dialog.search.Value()) == "" {
+		dialog.liveSearch = LiveSearchStateAnswered{Value: map[string]struct{}{}}
+	} else {
+		dialog.liveSearch = LiveSearchStatePending{}
+	}
+	dialog.wiki = nil
+	requestID, query = dialog.wikiRequestID, dialog.search.String()
+	d.RebuildResumeRows()
+	return requestID, query, true
 }
 
 // RefreshWikiSearch refreshes the same query without removing the results
 // under the selection.
 func (d *DashboardState) RefreshWikiSearch() (requestID uint64, query string, ok bool) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::refresh_wiki_search")
+	dialog := resumeDialogMut(&d.mode)
+	if dialog == nil {
+		return 0, "", false
+	}
+	d.wikiSearchGeneration++
+	dialog.wikiRequestID = d.wikiSearchGeneration
+	status, _ := wikiSearchStateStatus(dialog.wikiSearch)
+	dialog.wikiSearch = WikiSearchStateRefreshing{Value: status}
+	switch live := dialog.liveSearch.(type) {
+	case LiveSearchStateAnswered:
+		dialog.liveSearch = LiveSearchStateRefreshing{Value: maps.Clone(live.Value)}
+	case LiveSearchStateRefreshing:
+		dialog.liveSearch = LiveSearchStateRefreshing{Value: maps.Clone(live.Value)}
+	default:
+		dialog.liveSearch = LiveSearchStateRefreshing{Value: map[string]struct{}{}}
+	}
+	return dialog.wikiRequestID, dialog.search.String(), true
 }
 
 // resyncResumeSelection keeps rowIndex pointed at the selected row after the
 // list changed.
 func (d *DashboardState) resyncResumeSelection() {
-	panic("unported: mj-tui/src/resume.rs DashboardState::resync_resume_selection")
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		return
+	}
+	rows := d.resumeRows()
+	index := -1
+	if dialog.selected != nil {
+		index = slices.IndexFunc(rows, func(row ResumeRow) bool { return row.key == *dialog.selected })
+	}
+	if index < 0 {
+		index = min(dialog.rowIndex, max(len(rows)-1, 0))
+	}
+	var key *ResumeRowKey
+	if index < len(rows) {
+		selected := rows[index].key
+		key = &selected
+	}
+	dialog.rowIndex = index
+	dialog.selected = key
+	dialog.prepare(d.resumeRowsField)
+	d.syncResumePreviewKey()
 }
 
 // syncResumePreviewKey keeps the preview's scroll offset with the excerpt it
 // was made for. A different transcript, or the same one under a new query,
 // opens at its top and then on its first hit.
 func (d *DashboardState) syncResumePreviewKey() {
-	panic("unported: mj-tui/src/resume.rs DashboardState::sync_resume_preview_key")
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		return
+	}
+	var key *PreviewKey
+	if wikiID, ok := dialog.previewWikiID(d.resumeRowsField); ok {
+		query, _ := dialog.activeQuery()
+		key = &PreviewKey{WikiID: wikiID, Query: query}
+	}
+	if (dialog.previewKey == nil) == (key == nil) && (key == nil || *dialog.previewKey == *key) {
+		return
+	}
+	dialog.previewKey = key
+	dialog.previewScroll = 0
+	dialog.previewHit = 0
+	d.focusPreviewHit(0)
 }
 
 // switchResumeTab moves the dialog to one tab, and answers with what the new
@@ -1073,7 +1934,20 @@ func (d *DashboardState) syncResumePreviewKey() {
 // The Live tab answers its own list immediately, while its search also
 // updates the index results for the other tabs in the background.
 func (d *DashboardState) switchResumeTab(tab ResumeTab) DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::switch_resume_tab")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	dialog := mode.ResumeDialog
+	if dialog.tab != tab {
+		dialog.tab = tab
+		dialog.selected = nil
+		dialog.rowIndex = 0
+		d.RebuildResumeRows()
+		d.resyncResumeSelection()
+		d.settleResumeFocus()
+	}
+	return d.NextWikiPreview()
 }
 
 // settleResumeFocus puts the keyboard where the new tab's keys work: on the
@@ -1084,7 +1958,16 @@ func (d *DashboardState) switchResumeTab(tab ResumeTab) DashboardAction {
 // and an empty list hands the focus to whichever button comes next. A person
 // typing in the search box keeps it.
 func (d *DashboardState) settleResumeFocus() {
-	panic("unported: mj-tui/src/resume.rs DashboardState::settle_resume_focus")
+	target := d.resumeFocusOutsideSearch()
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return
+	}
+	form := &mode.form
+	if form.IsFocused(ResumeFocusSearch) {
+		return
+	}
+	form.Focus(target)
 }
 
 // resumeFocusOutsideSearch is where the keyboard belongs once it leaves the
@@ -1101,22 +1984,57 @@ func (d *DashboardState) resumeFocusOutsideSearch() ResumeFocus {
 // stepResumeTab moves the dialog step tabs along the strip, wrapping around
 // it.
 func (d *DashboardState) stepResumeTab(step int) DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::step_resume_tab")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	next := resumeTabFromIndex((mode.tab.index() + step) % resumeTabCount)
+	return d.switchResumeTab(next)
 }
 
 // clearResumeSearch empties the search box and puts the unfiltered list
 // back, the same rebuild deleting the last character would do.
 func (d *DashboardState) clearResumeSearch() DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::clear_resume_search")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	mode.search.Clear()
+	action := d.wikiSearchAction()
+	d.selectResumeRow(0)
+	return action
 }
 
 func (d *DashboardState) selectResumeRow(index int) {
-	panic("unported: mj-tui/src/resume.rs DashboardState::select_resume_row")
+	var key *ResumeRowKey
+	if rows := d.resumeRows(); index >= 0 && index < len(rows) {
+		selected := rows[index].key
+		key = &selected
+	}
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return
+	}
+	dialog := mode.ResumeDialog
+	dialog.rowIndex = index
+	dialog.selected = key
+	dialog.prepare(d.resumeRowsField)
+	d.syncResumePreviewKey()
 }
 
 // selectedResumeRow is a copy of the row the open dialog points at, or nil.
 func (d *DashboardState) selectedResumeRow() *ResumeRow {
-	panic("unported: mj-tui/src/resume.rs DashboardState::selected_resume_row")
+	dialog := resumeDialog(d.mode)
+	if dialog == nil {
+		return nil
+	}
+	rows := d.resumeRows()
+	index, ok := selectedIndex(dialog, len(rows))
+	if !ok {
+		return nil
+	}
+	row := rows[index]
+	return &row
 }
 
 // scrollResumePreview moves the preview pane when a wheel notch lands on it
@@ -1127,29 +2045,359 @@ func (d *DashboardState) selectedResumeRow() *ResumeRow {
 // registration carries both the hitbox and the wrapped line count the offset
 // clamps against.
 func (d *DashboardState) scrollResumePreview(event tea.Msg, focused ResumeFocus) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::scroll_resume_preview")
+	showing := false
+	// The registration is last frame's, so a selection that has just moved
+	// to a row without a transcript must not keep the pane's keys and
+	// hitbox until the next frame.
+	if mode, ok := d.mode.(ModeResumeDialog); ok {
+		showing = mode.hasPreview(d.resumeRowsField)
+	}
+	if !showing {
+		return false
+	}
+	registered := d.frameSurfaces.Surface(chat.SurfaceIdResumePreview{})
+	if registered == nil {
+		return false
+	}
+	surface := *registered
+	viewport := surface.Rect.Dy()
+	var step int
+	switch event := event.(type) {
+	case tea.MouseWheelMsg:
+		mouse := event.Mouse()
+		if !rectContains(surface.Rect, mouse.X, mouse.Y) {
+			return false
+		}
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			step = -previewScrollRows
+		case tea.MouseWheelDown:
+			step = previewScrollRows
+		default:
+			return false
+		}
+	case tea.KeyPressMsg:
+		if event.IsRepeat || resumeKeyModifiers(event.Mod) != 0 || focused != ResumeFocusSessions {
+			return false
+		}
+		switch chat.KeyPressCode(event) {
+		case tea.KeyPgUp:
+			step = -max(viewport, 1)
+		case tea.KeyPgDown:
+			step = max(viewport, 1)
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return false
+	}
+	dialog := mode.ResumeDialog
+	maximum := max(surface.TotalRows-viewport, 0)
+	next := min(max(dialog.previewScroll+step, 0), maximum)
+	moved := next != dialog.previewScroll
+	dialog.previewScroll = next
+	// The gesture belongs to the pane whether or not it had room to move, so
+	// a wheel at the end of the text does not fall through to the list.
+	d.lastEventConsumed = moved
+	return true
 }
 
 func (d *DashboardState) resumeScrollbarHandlesMouse(mouse tea.MouseMsg) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::resume_scrollbar_handles_mouse")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return false
+	}
+	pointer := mode.previewScrollbar
+	if pointer.IsDragging() {
+		return true
+	}
+	click, ok := mouse.(tea.MouseClickMsg)
+	if !ok || click.Button != tea.MouseLeft {
+		return false
+	}
+	geometry, ok := pointer.Geometry()
+	return ok && geometry.MaxScroll > 0 &&
+		click.X == geometry.Track.Min.X &&
+		click.Y >= geometry.Track.Min.Y &&
+		click.Y < geometry.Track.Max.Y
 }
 
 func (d *DashboardState) handleResumeScrollbarMouse(event tea.Msg) bool {
-	panic("unported: mj-tui/src/resume.rs DashboardState::handle_resume_scrollbar_mouse")
+	mouse, ok := event.(tea.MouseMsg)
+	if !ok {
+		return false
+	}
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return false
+	}
+	dialog := mode.ResumeDialog
+	switch outcome := dialog.previewScrollbar.HandleMouse(mouse).(type) {
+	case chat.ScrollbarPointerConsumed:
+		return true
+	case chat.ScrollbarPointerScrollTo:
+		dialog.previewScroll = outcome.Offset
+		return true
+	}
+	return false
 }
 
 func (d *DashboardState) handleResumeDialogEvent(event tea.Msg) DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::handle_resume_dialog_event")
+	mode, ok := d.mode.(ModeResumeDialog)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	focused := mode.focused()
+	if press, ok := event.(tea.KeyPressMsg); ok && !press.IsRepeat &&
+		chat.KeyPressCode(press) == 'd' && resumeKeyModifiers(press.Mod) == 0 &&
+		focused != ResumeFocusSearch {
+		return d.beginDismissNotification()
+	}
+	if d.handleResumeScrollbarMouse(event) {
+		return DashboardActionNone{}
+	}
+	if d.scrollResumePreview(event, focused) {
+		return DashboardActionNone{}
+	}
+	// Moving between the query's matches, with the list focused. `N` comes
+	// with Shift, so these cannot sit under the modifier-free block below.
+	if press, ok := event.(tea.KeyPressMsg); ok && !press.IsRepeat && focused == ResumeFocusSessions {
+		modifiers := resumeKeyModifiers(press.Mod)
+		if modifiers == 0 || modifiers == tea.ModShift {
+			step := 0
+			switch chat.KeyPressCode(press) {
+			case 'n', ']':
+				step = 1
+			case 'N', '[':
+				step = -1
+			}
+			if step != 0 && d.stepPreviewHit(step) {
+				d.lastEventConsumed = true
+				return DashboardActionNone{}
+			}
+		}
+	}
+	mode, ok = d.mode.(ModeResumeDialog)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	dialog := mode.ResumeDialog
+	if press, ok := event.(tea.KeyPressMsg); ok && !press.IsRepeat && resumeKeyModifiers(press.Mod) == 0 {
+		code := chat.KeyPressCode(press)
+		// Escape peels one layer at a time: the query first, then the box's
+		// hold on the keyboard, and only then the dialog. This is the order
+		// the Sessions pane's own filter already uses.
+		if code == tea.KeyEscape {
+			if !dialog.search.IsEmpty() {
+				return d.clearResumeSearch()
+			}
+			if focused == ResumeFocusSearch {
+				target := d.resumeFocusOutsideSearch()
+				if mode, ok := d.mode.(ModeResumeDialog); ok {
+					mode.form.Focus(target)
+				}
+				return DashboardActionNone{}
+			}
+		}
+		if focused == ResumeFocusSearch {
+			if code == tea.KeyDown {
+				dialog.form.Focus(ResumeFocusSessions)
+				return DashboardActionNone{}
+			}
+			// Readline first: the arrows walk the caret through the query,
+			// and reach the tab strip only when pressed against the end the
+			// caret is already sitting on.
+			if step, ok := tabStep(code); ok && dialog.searchCaretAtEdge(code) {
+				return d.stepResumeTab(step)
+			}
+		} else {
+			// Outside the box the strip is the dialog's left-to-right axis,
+			// so the arrows reach it from the list, the strip and the
+			// buttons alike, including from a list too empty to hold focus.
+			if step, ok := tabStep(code); ok {
+				return d.stepResumeTab(step)
+			}
+			switch {
+			case code == '/':
+				// A disabled box cannot take the focus, and asking for it
+				// would leave the focus pending until it can.
+				if dialog.searchEnabled() {
+					dialog.form.Focus(ResumeFocusSearch)
+				}
+				return DashboardActionNone{}
+			case code == tea.KeyDelete && focused == ResumeFocusSessions:
+				return d.destroySelectedResumeRow()
+			// The state letters narrow what is running, so they belong to
+			// the Live tab alone: the other tabs list sessions that have no
+			// current state, where every letter but `a` would match nothing.
+			case chat.IsCharKeyCode(code) && dialog.tab == ResumeTabLive:
+				if state, ok := sessionStateFilterFromLetter(code); ok {
+					dialog.liveState = state
+					d.RebuildResumeRows()
+					d.selectResumeRow(0)
+					return DashboardActionNone{}
+				}
+			}
+		}
+	}
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[ResumeFocus]:
+		d.CancelModal()
+	case chat.InteractionEdit[ResumeFocus]:
+		if interaction.ID == ResumeFocusSearch {
+			chat.TextFieldApply(&dialog.search, interaction.Edit)
+			action := d.wikiSearchAction()
+			d.selectResumeRow(0)
+			return action
+		}
+	case chat.InteractionSelect[ResumeFocus]:
+		switch interaction.ID {
+		case ResumeFocusTabs:
+			return d.switchResumeTab(resumeTabFromIndex(interaction.Index))
+		case ResumeFocusSessions:
+			d.selectResumeRow(interaction.Index)
+			return d.NextWikiPreview()
+		}
+	case chat.InteractionActivate[ResumeFocus]:
+		switch interaction.ID {
+		case ResumeFocusCancel:
+			d.CancelModal()
+		case ResumeFocusPreviousHit, ResumeFocusNextHit:
+			step := -1
+			if interaction.ID == ResumeFocusNextHit {
+				step = 1
+			}
+			d.stepPreviewHit(step)
+			if mode, ok := d.mode.(ModeResumeDialog); ok {
+				mode.form.Focus(ResumeFocusSessions)
+			}
+			return DashboardActionNone{}
+		// Enter on a query acts on its selected match, the same as Enter
+		// on the list. With nothing matched it only hands the list the
+		// focus.
+		case ResumeFocusSearch:
+			if row := d.selectedResumeRow(); row != nil {
+				return d.activateSelectedResumeRow(row)
+			}
+			if mode, ok := d.mode.(ModeResumeDialog); ok {
+				mode.form.Focus(ResumeFocusSessions)
+			}
+		case ResumeFocusTabs:
+			dialog.form.Focus(ResumeFocusSessions)
+		case ResumeFocusSessions, ResumeFocusOpen:
+			return d.activateSelectedResumeRow(d.selectedResumeRow())
+		case ResumeFocusDestroy:
+			return d.destroySelectedResumeRow()
+		case ResumeFocusCopyID:
+			if row := d.selectedResumeRow(); row != nil &&
+				row.unavailableReason != nil && row.key.Kind == ResumeRowKeyKindNative {
+				return DashboardActionCopyNativeSessionId{NativeSessionID: row.key.ID}
+			}
+		}
+	}
+	return DashboardActionNone{}
 }
 
 // destroySelectedResumeRow asks for confirmation before destroying the
 // selected row's session record.
 func (d *DashboardState) destroySelectedResumeRow() DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::destroy_selected_resume_row")
+	row := d.selectedResumeRow()
+	if row == nil {
+		return DashboardActionNone{}
+	}
+	// Destroy here removes a settled record. Ending a session that is still
+	// running has its own confirmations, and they belong to the pane that
+	// owns the session.
+	if row.key.Kind == ResumeRowKeyKindLive {
+		d.notices.Set("Stop or delete a running session from the Sessions pane.")
+		return DashboardActionNone{}
+	}
+	sessionID, ok := row.sessionID()
+	if !ok {
+		d.notices.Set("Mjolnir never destroys a harness's own session.")
+		return DashboardActionNone{}
+	}
+	d.CancelComponentPointer()
+	mode, ok := d.mode.(ModeResumeDialog)
+	d.mode = ModeDashboard{}
+	if !ok {
+		return DashboardActionNone{}
+	}
+	// The row is named as listed; the dashboard may not hold the record.
+	confirm := newConfirmDialog(ConfirmationDestroyStopped{
+		SessionID: sessionID,
+		Reopen:    mode.ResumeDialog,
+	}).namingSession(row.title)
+	d.mode = ModeConfirm{&confirm}
+	d.RebuildResumeRows()
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) activateSelectedResumeRow(row *ResumeRow) DashboardAction {
-	panic("unported: mj-tui/src/resume.rs DashboardState::activate_selected_resume_row")
+	if row == nil {
+		return DashboardActionNone{}
+	}
+	if reason, ok := row.status.explanation(); ok {
+		d.notices.Set(unresumableNotice(reason))
+		return DashboardActionNone{}
+	}
+	if row.unavailableReason != nil {
+		action := "resume"
+		if row.key.Kind == ResumeRowKeyKindNative {
+			action = "import"
+		}
+		d.notices.Set(fmt.Sprintf("Cannot %s: %s", action, *row.unavailableReason))
+		return DashboardActionNone{}
+	}
+	if row.moveRecovery != nil {
+		confirm := newConfirmDialog(ConfirmationRecoverMove{Operation: *row.moveRecovery})
+		d.mode = ModeConfirm{&confirm}
+		return DashboardActionNone{}
+	}
+	switch row.key.Kind {
+	case ResumeRowKeyKindLive:
+		sessionID := row.key.ID
+		session := d.state.Get().Sessions.GetShared(sessionID)
+		if session == nil {
+			d.notices.Set("That session is no longer running.")
+			return DashboardActionNone{}
+		}
+		workspaceID, active := session.WorkspaceID, session.State.IsActive()
+		d.CancelModal()
+		if !active {
+			return d.beginResumeInWorkspace(sessionID, workspaceID)
+		}
+		return d.focusSessionAnywhere(workspaceID, sessionID)
+	case ResumeRowKeyKindHel:
+		sessionID := row.key.ID
+		if d.SessionRecord(sessionID) == nil {
+			// The dialog lists rows, not records. Fetch the one picked and
+			// open the wizard when it arrives.
+			if mode, ok := d.mode.(ModeResumeDialog); ok {
+				opening := sessionID
+				mode.opening = &opening
+			}
+			return DashboardActionLoadResumeRecord{SessionID: sessionID}
+		}
+		d.CancelModal()
+		return d.BeginResumeFor(sessionID)
+	case ResumeRowKeyKindArchive:
+		d.CancelModal()
+		return d.beginArchiveRestore(row.key.ID, row.title, row.wikiProfile, row.wikiTarget)
+	default:
+		d.CancelModal()
+		return DashboardActionImportSession{
+			ProfileID:       row.profileID,
+			NativeSessionID: row.key.ID,
+			DisplayTitle:    row.title,
+		}
+	}
 }
 
 // RowLayout is the column widths for the row text, derived from the pane
@@ -1166,7 +2414,40 @@ type RowLayout struct {
 const minTitleCells = 20
 
 func rowLayout(width int, tab ResumeTab) RowLayout {
-	panic("unported: mj-tui/src/resume.rs row_layout")
+	// The Live tab has no profile column, so the title also gets back the
+	// two-space gap that would have separated it from the origin cell.
+	profile := 0
+	if tab != ResumeTabLive {
+		profile = max(min(14, width/5), 6)
+	}
+	origin := max(min(24, width/3), 8)
+	activity := max(min(14, width/4), 8)
+	gaps := 8
+	if profile == 0 {
+		gaps = 6
+	}
+	// The title keeps room for a status mark such as "[unavailable]". On a
+	// narrow list the other columns give up cells for it, down to their
+	// minimums, instead of pushing the mark past the list's edge.
+	short := max(profile+origin+activity+gaps+minTitleCells-width, 0)
+	for _, column := range []struct {
+		cells   *int
+		minimum int
+	}{{&origin, 8}, {&profile, 6}, {&activity, 8}} {
+		if *column.cells == 0 {
+			continue
+		}
+		give := min(short, max(*column.cells-column.minimum, 0))
+		*column.cells -= give
+		short -= give
+	}
+	reserved := profile + origin + activity + gaps
+	return RowLayout{
+		title:    max(width-reserved, 10),
+		profile:  profile,
+		origin:   origin,
+		activity: activity,
+	}
 }
 
 func nativeProjectTarget(projectDirectory string) string {
@@ -1271,20 +2552,440 @@ func resumeSessionsPane(area uv.Rectangle, preview bool) uv.Rectangle {
 }
 
 func renderResumeDialog(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState, dialog *ResumeDialog, surfaces *chat.FrameSurfaces) {
-	panic("unported: mj-tui/src/resume.rs render_resume_dialog")
+	popup := centeredModal(frame, surfaces, 84, resumeDialogHeight, area)
+	inner := chat.DialogShellPaddedInner(popup)
+	previewLines, hitLines, hasPreview := dialog.previewBody(dashboard.resumeRows())
+	hasPreview = hasPreview && previewFits(inner)
+	rows := resumeBands(inner, hasPreview)
+	// The footer is the last band whether or not a preview sits above it.
+	footerBand := rows[len(rows)-1]
+
+	form := &dialog.form
+	form.BeginFrame()
+	titleLine := dismissibleModalTitle(&form.Form, popup, "Sessions", chat.Title(true), true)
+	frame.RenderWidget(chat.Modal().WithTitle(titleLine), popup)
+	tabLabels := resumeTabLabels(dashboard, dialog)
+	chat.TabStripRender(frame, rows[0], tabLabels, dialog.tab.index(), &form.Form, ResumeFocusTabs)
+	searchFocused := form.IsFocused(ResumeFocusSearch)
+	searchArea := uv.Rect(rows[1].Min.X, rows[1].Min.Y, rows[1].Dx(), min(rows[1].Dy(), 1))
+	labelWidth := min(8, searchArea.Dx())
+	frame.RenderWidget(
+		chat.RawLine("Search: "),
+		uv.Rect(searchArea.Min.X, searchArea.Min.Y, labelWidth, searchArea.Dy()),
+	)
+	fieldArea := uv.Rect(
+		searchArea.Min.X+labelWidth,
+		searchArea.Min.Y,
+		searchArea.Dx()-labelWidth,
+		searchArea.Dy(),
+	)
+	// An incompatible index cannot answer history searches.
+	if placeholder, ok := dialog.searchPlaceholder(); ok {
+		form.Register(ResumeFocusSearch, chat.ControlKindTextField{}, fieldArea, false)
+		frame.RenderWidget(
+			chat.NewParagraph(chat.TextFrom(chat.StyledLine(
+				truncateToCells(placeholder, fieldArea.Dx(), TruncateSummary),
+				chat.Style{}.Foreground(chat.ThemePalette().Muted),
+			))),
+			fieldArea,
+		)
+	} else {
+		chat.TextFieldRender(frame, fieldArea, &dialog.search, &form.Form, ResumeFocusSearch)
+	}
+	listRows := dashboard.resumeRows()
+	sessionsFocused := form.IsFocused(ResumeFocusSessions)
+	block := chat.Panel(sessionsFocused || searchFocused).WithTitle(resumeListTitle(
+		dashboard,
+		dialog,
+		len(listRows),
+		rows[2].Dx(),
+	))
+	listArea := block.Inner(rows[2])
+	// Registered after the dialog body so a drag over the rows selects the
+	// list rather than the popup around it.
+	surfaces.Push(chat.SurfaceFrameFixed(chat.SurfaceIdResumeList{}, listArea))
+	frame.RenderWidget(block, rows[2])
+	tableRows := chat.VerticalLayout(chat.ConstraintLength(1), chat.ConstraintMin(1)).Split(listArea)
+	headerArea := uv.Rect(
+		tableRows[0].Min.X+2,
+		tableRows[0].Min.Y,
+		max(tableRows[0].Dx()-2, 0),
+		tableRows[0].Dy(),
+	)
+	listArea = tableRows[1]
+	layout := rowLayout(max(listArea.Dx()-2, 0), dialog.tab)
+	frame.RenderWidget(chat.NewParagraph(chat.TextFrom(resumeHeaderLine(&layout, dialog.tab))), headerArea)
+	now := displayNow()
+	if len(listRows) == 0 {
+		var message string
+		searchEmpty := dialog.search.IsEmpty()
+		switch {
+		case dialog.tab == ResumeTabImport && dialog.isScanning():
+			message = "Scanning native sessions…"
+		// Under a state filter the filter emptied the list, so say which.
+		case dialog.tab == ResumeTabLive && searchEmpty:
+			if dialog.liveState != nil {
+				message = fmt.Sprintf("No %s sessions", dialog.liveState.label())
+			} else {
+				message = "No live sessions"
+			}
+		case dialog.tab == ResumeTabHel && searchEmpty:
+			message = "No stopped Mjolnir sessions"
+		case dialog.tab == ResumeTabImport && searchEmpty:
+			message = "No importable sessions"
+		case dialog.tab == ResumeTabArchive && searchEmpty:
+			message = "No archived sessions"
+		default:
+			message = emptySearchMessage(dashboard, dialog)
+		}
+		frame.RenderWidget(chat.RawLine(message), listArea)
+		form.Register(ResumeFocusSessions, chat.ControlKindChoiceList{Len: 0, Selected: 0}, listArea, false)
+	} else {
+		items := make([]chat.Line, len(listRows))
+		for index := range listRows {
+			items[index] = resumeRowLine(&listRows[index], &layout, now)
+		}
+		chat.ChoiceListRender(frame, listArea, items, dialog.rowIndex, &form.Form, ResumeFocusSessions)
+	}
+	renderSessionScrollbar(
+		frame,
+		rows[2],
+		len(listRows),
+		form.ListOffset(ResumeFocusSessions),
+		max(listArea.Dy(), 1),
+	)
+
+	if hasPreview {
+		previewBand := rows[3]
+		_, active := dialog.activeQuery()
+		var title string
+		switch hits := len(hitLines); {
+		case !active:
+			title = " Archived transcript "
+		case hits == 0:
+			title = " Transcript · no hits "
+		default:
+			title = fmt.Sprintf(" Transcript · hit %d/%d ", min(dialog.previewHit, hits-1)+1, hits)
+		}
+		previewBlock := chat.Panel(false).WithTitle(chat.RawLine(title))
+		body := previewBlock.Inner(previewBand)
+		frame.RenderWidget(previewBlock, previewBand)
+		if len(hitLines) > 0 && previewBand.Dx() >= 30 {
+			for _, button := range []struct {
+				id        ResumeFocus
+				label     string
+				fromRight int
+				enabled   bool
+			}{
+				{ResumeFocusPreviousHit, "↑", 8, dialog.previewHit > 0},
+				{ResumeFocusNextHit, "↓", 4, dialog.previewHit+1 < len(hitLines)},
+			} {
+				buttonArea := uv.Rect(previewBand.Max.X-button.fromRight, previewBand.Min.Y, 3, 1)
+				form.Register(button.id, chat.ControlKindButton{}, buttonArea, button.enabled)
+				var style chat.Style
+				switch {
+				case !button.enabled:
+					style = chat.Muted()
+				case form.IsFocused(button.id) || form.IsArmed(button.id):
+					style = chat.FocusControl()
+				default:
+					style = chat.Actionable()
+				}
+				frame.RenderWidget(
+					chat.NewParagraph(chat.RawText(fmt.Sprintf("[%s]", button.label))).WithStyle(style),
+					buttonArea,
+				)
+			}
+		}
+		// Wrapped here rather than by the paragraph, so the scroll offset,
+		// the clamp and the scrollbar all count the same rows.
+		wrapped := wrapPreviewLines(previewLines, body.Dx())
+		viewport := body.Dy()
+		length := len(wrapped)
+		offset := min(dialog.previewScroll, max(length-viewport, 0))
+		surfaces.Push(chat.SurfaceFrameScrollable(
+			chat.SurfaceIdResumePreview{},
+			body,
+			offset,
+			max(length, viewport),
+		))
+		frame.RenderWidget(
+			chat.NewParagraph(chat.TextFrom(wrapped...)).WithScroll(min(offset, math.MaxUint16), 0),
+			body,
+		)
+		renderSessionScrollbar(frame, previewBand, length, offset, max(viewport, 1))
+		dialog.previewScrollbar.SetGeometry(sessionScrollbarGeometry(
+			previewBand,
+			length,
+			offset,
+			max(viewport, 1),
+		))
+	} else {
+		dialog.previewScrollbar.Clear()
+	}
+	var selected *ResumeRow
+	if index, ok := selectedIndex(dialog, len(listRows)); ok {
+		selected = &listRows[index]
+	}
+	var footer []chat.Line
+	if selected != nil {
+		text := selected.details
+		if id, ok := selected.sessionID(); ok {
+			if _, dismissible := dashboard.notificationDismissalTarget(id); dismissible {
+				text = fmt.Sprintf("d: dismiss notification · %s", selected.details)
+			}
+		}
+		footer = append(footer, chat.StyledLine(
+			truncateToCells(text, footerBand.Dx(), TruncateSummary),
+			chat.Style{}.Foreground(chat.ThemePalette().Muted),
+		))
+	}
+	if errors := dialog.errors(); dialog.tab == ResumeTabImport && len(errors) > 0 {
+		footer = append(footer, chat.StyledLine(
+			truncateToCells(fmt.Sprintf("Scan failed for %s", errors[0]), footerBand.Dx(), TruncateSummary),
+			chat.Style{}.Foreground(chat.ThemePalette().Warning),
+		))
+	}
+	buttons := []chat.ButtonSpec[ResumeFocus]{{ID: ResumeFocusCancel, Label: "Cancel", Enabled: true}}
+	var unavailableImport *string
+	if selected != nil && selected.key.Kind == ResumeRowKeyKindNative {
+		unavailableImport = selected.unavailableReason
+	}
+	if unavailableImport != nil {
+		buttons = append(buttons, chat.ButtonSpec[ResumeFocus]{ID: ResumeFocusCopyID, Label: "Copy session ID", Enabled: true})
+	}
+	importLabel := "Import"
+	if unavailableImport != nil {
+		if *unavailableImport == "missing Git repo" {
+			importLabel = "Cannot import: missing Git repo"
+		} else {
+			importLabel = "Cannot import"
+		}
+	}
+	if dialog.tab == ResumeTabHel {
+		buttons = append(buttons, chat.ButtonSpec[ResumeFocus]{
+			ID:      ResumeFocusDestroy,
+			Label:   "Destroy",
+			Enabled: dialog.canDestroy(listRows),
+		})
+	}
+	var openLabel string
+	switch dialog.tab {
+	case ResumeTabLive:
+		openLabel = "Open"
+	case ResumeTabHel:
+		openLabel = "Resume"
+	case ResumeTabImport:
+		openLabel = importLabel
+	default:
+		openLabel = "Restore"
+	}
+	buttons = append(buttons, chat.ButtonSpec[ResumeFocus]{
+		ID:      ResumeFocusOpen,
+		Label:   openLabel,
+		Enabled: dialog.canOpen(listRows),
+	})
+	// Keep the unavailable explanation visible when the action row would
+	// overflow.
+	splitActions := unavailableImport != nil && footerBand.Dx() < 68
+	actionHeight := 1
+	if splitActions {
+		actionHeight = 2
+	}
+	footer = chat.WrapLines(footer, footerBand.Dx())
+	noteHeight := min(len(footer), max(footerBand.Dy()-(actionHeight+1), 0))
+	noteArea := uv.Rect(
+		footerBand.Min.X,
+		max(footerBand.Max.Y-(actionHeight+1+noteHeight), 0),
+		footerBand.Dx(),
+		noteHeight,
+	)
+	frame.RenderWidget(
+		chat.NewParagraph(chat.TextFrom(footer...)).WithAlignment(chat.AlignmentCenter),
+		noteArea,
+	)
+	buttonHeight := 0
+	if footerBand.Dy() > 0 {
+		buttonHeight = 1
+	}
+	buttonArea := uv.Rect(
+		footerBand.Min.X,
+		max(footerBand.Max.Y-actionHeight, 0),
+		footerBand.Dx(),
+		buttonHeight,
+	)
+	if splitActions {
+		form.RenderActions(frame, buttonArea, buttons[:2])
+		explanationArea := uv.Rect(
+			buttonArea.Min.X,
+			buttonArea.Min.Y+1,
+			buttonArea.Dx(),
+			buttonArea.Dy(),
+		)
+		form.RenderActions(frame, explanationArea, buttons[2:])
+	} else {
+		form.RenderActions(frame, buttonArea, buttons)
+	}
+	form.EndFrame(ResumeFocusSessions)
 }
 
 // resumeTabLabels is the tab labels, carrying the scan progress on Import
 // and, while a query is active, how many rows each tab matched.
 func resumeTabLabels(dashboard *DashboardState, dialog *ResumeDialog) []string {
-	panic("unported: mj-tui/src/resume.rs resume_tab_labels")
+	searching := !dialog.search.IsEmpty()
+	scanned, total := dialog.scanProgress()
+	labels := make([]string, 0, resumeTabCount)
+	for _, tab := range []struct {
+		tab  ResumeTab
+		name string
+	}{
+		{ResumeTabLive, "Live"},
+		{ResumeTabHel, "Mjolnir"},
+		{ResumeTabImport, "Import"},
+		{ResumeTabArchive, "Archived"},
+	} {
+		label := " " + tab.name
+		// History counts belong to the limited index page. Live also has
+		// immediate metadata matches and a separate conversation answer.
+		if searching && tab.tab != ResumeTabLive {
+			label += fmt.Sprintf(" · %d", dashboard.resumeHitCount(tab.tab))
+		}
+		if tab.tab == ResumeTabImport && dialog.isScanning() {
+			label += fmt.Sprintf(" · scanning %d/%d", scanned, total)
+		}
+		label += " "
+		labels = append(labels, label)
+	}
+	return labels
 }
 
 // resumeListTitle is the list panel's title: what the tab lists, how the
 // current search is going, and, on Import, whether the native scan is still
 // running.
 func resumeListTitle(dashboard *DashboardState, dialog *ResumeDialog, rows int, width int) chat.Line {
-	panic("unported: mj-tui/src/resume.rs resume_list_title")
+	spinner := dashboard.config.Get().Spinner
+	elapsed := uint64(time.Since(dialog.openedAt).Milliseconds())
+	spans := []chat.Span{chat.RawSpan(" ")}
+	_, wikiRefreshing := dialog.wikiSearch.(WikiSearchStateRefreshing)
+	_, liveRefreshing := dialog.liveSearch.(LiveSearchStateRefreshing)
+	_, wikiFailed := dialog.wikiSearch.(WikiSearchStateFailed)
+	_, liveFailed := dialog.liveSearch.(LiveSearchStateFailed)
+	_, syncLabelled := dialog.sync.Label()
+	refreshing := (wikiRefreshing || liveRefreshing) && !wikiFailed && !liveFailed && !syncLabelled
+	historyTab := dialog.tab == ResumeTabHel || dialog.tab == ResumeTabImport
+	var historyNotice []chat.Span
+	if historyTab {
+		switch history := dialog.history.(type) {
+		case HistoryLoadLoading:
+			historyNotice = []chat.Span{
+				chat.CompactSpan(spinner, elapsed),
+				chat.RawSpan(" Loading suspended sessions…"),
+			}
+		case HistoryLoadFailed:
+			historyNotice = []chat.Span{chat.RawSpan(fmt.Sprintf("Could not list suspended sessions: %s", history.Value))}
+		}
+	}
+	switch {
+	case historyNotice != nil:
+		spans = append(spans, historyNotice...)
+	case refreshing:
+		// The final read's status is appended below, just like sync
+		// progress.
+	case dialog.search.IsEmpty():
+		// A state filter replaces "every workspace": the list is still every
+		// workspace's, and what it is narrowed to is the news.
+		switch dialog.tab {
+		case ResumeTabLive:
+			if dialog.liveState != nil {
+				spans = append(spans, chat.RawSpan(fmt.Sprintf("Live sessions · %s · newest first", dialog.liveState.label())))
+			} else {
+				spans = append(spans, chat.RawSpan("Live sessions · every workspace · newest first"))
+			}
+		case ResumeTabHel:
+			spans = append(spans, chat.RawSpan("Mjolnir sessions · newest first"))
+		case ResumeTabImport:
+			spans = append(spans, chat.RawSpan("Importable sessions · newest first"))
+		case ResumeTabArchive:
+			spans = append(spans, chat.RawSpan("Archived sessions · newest first"))
+		}
+	case dialog.tab == ResumeTabLive:
+		spans = append(spans, chat.RawSpan(matchCount(rows)))
+		switch live := dialog.liveSearch.(type) {
+		case LiveSearchStatePending, LiveSearchStateRefreshing:
+			spans = append(spans, chat.CompactSpan(spinner, elapsed), chat.RawSpan(" Searching conversations…"))
+		case LiveSearchStateFailed:
+			spans = append(spans, chat.RawSpan(fmt.Sprintf(" · Conversation search failed: %s", live.Value)))
+		}
+	default:
+		switch wiki := dialog.wikiSearch.(type) {
+		case WikiSearchStatePending, WikiSearchStateRefreshing:
+			spans = append(spans, chat.CompactSpan(spinner, elapsed), chat.RawSpan(" Searching…"))
+		case WikiSearchStateFailed:
+			spans = append(spans, chat.RawSpan(fmt.Sprintf("Search failed: %s", wiki.Value)))
+		case WikiSearchStateAnswered:
+			spans = append(spans, chat.RawSpan(matchCount(rows)))
+		}
+	}
+	indexMismatch := false
+	switch wiki := dialog.wikiSearch.(type) {
+	case WikiSearchStateFailed:
+		if dialog.search.IsEmpty() {
+			spans = append(spans, chat.RawSpan(fmt.Sprintf(" · Search failed: %s", wiki.Value)))
+		}
+	case WikiSearchStateAnswered:
+		if wiki.Value.State == client.WikiIndexStateVersionMismatch {
+			indexMismatch = true
+			spans = append(spans, chat.RawSpan(" · index from a newer SessionWiki"))
+		}
+	}
+	var progress chat.Line
+	haveProgress := true
+	if refreshing {
+		progress = chat.LineFrom(chat.RawSpan("Searching…"))
+	} else {
+		progress, haveProgress = dialog.sync.Line(spinner)
+	}
+	if haveProgress {
+		if chat.LineFrom(spans...).Width()+progress.Width()+4 > max(width-2, 0) {
+			prefix := " "
+			_, historyFailed := dialog.history.(HistoryLoadFailed)
+			_, historyLoading := dialog.history.(HistoryLoadLoading)
+			if historyTab && historyFailed {
+				prefix += "History failed · Sync: "
+			} else if historyTab && historyLoading {
+				prefix += "Loading history · "
+			}
+			if indexMismatch {
+				prefix += "Index mismatch · "
+			}
+			room := max(width-(chat.RawSpan(prefix).Width()+3), 0)
+			var fitted chat.Line
+			fits := true
+			if refreshing {
+				fitted = progress
+			} else {
+				fitted, fits = dialog.sync.LineFitting(spinner, room)
+			}
+			if fits {
+				fitted.Spans = append(append([]chat.Span{chat.RawSpan(prefix)}, fitted.Spans...), chat.RawSpan(" "))
+				return fitted
+			}
+		}
+		if len(spans) > 1 {
+			spans = append(spans, chat.RawSpan(" · "))
+		}
+		spans = append(spans, progress.Spans...)
+	}
+	if dialog.tab == ResumeTabImport && dialog.isScanning() {
+		scanned, total := dialog.scanProgress()
+		spans = append(spans,
+			chat.RawSpan(" · "),
+			chat.CompactSpan(spinner, elapsed),
+			chat.RawSpan(fmt.Sprintf(" scanning %d/%d", scanned, total)),
+		)
+	}
+	spans = append(spans, chat.RawSpan(" "))
+	return chat.LineFrom(spans...)
 }
 
 // matchCount is how many rows the query matched, counted in the reader's own
@@ -1297,7 +2998,26 @@ func matchCount(rows int) string {
 // where the query's hits are, when they are on another tab. The dialog never
 // switches tabs by itself, so the message has to say where to look.
 func emptySearchMessage(dashboard *DashboardState, dialog *ResumeDialog) string {
-	panic("unported: mj-tui/src/resume.rs empty_search_message")
+	var elsewhere []string
+	for _, tab := range []struct {
+		tab  ResumeTab
+		name string
+	}{
+		{ResumeTabHel, "Mjolnir"},
+		{ResumeTabImport, "Import"},
+		{ResumeTabArchive, "Archived"},
+	} {
+		if hits := dashboard.resumeHitCount(tab.tab); tab.tab != dialog.tab && hits > 0 {
+			elsewhere = append(elsewhere, fmt.Sprintf("%d on %s", hits, tab.name))
+		}
+	}
+	if len(elsewhere) == 0 {
+		if dialog.tab == ResumeTabLive {
+			return "No matching live sessions"
+		}
+		return "No matching sessions"
+	}
+	return fmt.Sprintf("No matches here · %s", strings.Join(elsewhere, ", "))
 }
 
 // hitRoleLabel is the label and colour a matching message carries, in the
@@ -1327,7 +3047,50 @@ func omittedMarker(messages int) string {
 // straddles a newline is split across the lines it covers and only its first
 // line counts as the hit's position.
 func hitBlockLines(block *client.WikiHitBlock, lines *[]chat.Line, hitLines *[]int) {
-	panic("unported: mj-tui/src/resume.rs hit_block_lines")
+	hitStyle := chat.Style{}.Foreground(chat.ThemePalette().Accent).Bold()
+	var prefix *chat.Span
+	if label, color, ok := hitRoleLabel(block.Role); ok {
+		span := chat.StyledSpan(label, chat.Style{}.Foreground(color))
+		prefix = &span
+	}
+	start := 0
+	for _, text := range strings.Split(block.Text, "\n") {
+		end := start + len(text)
+		var spans []chat.Span
+		if prefix != nil {
+			spans = append(spans, *prefix)
+			prefix = nil
+		}
+		cursor := start
+		for _, hit := range block.Hits {
+			hitStart, hitEnd := hit[0], hit[1]
+			from := max(hitStart, cursor)
+			to := min(hitEnd, end)
+			if from >= to {
+				continue
+			}
+			if from > cursor {
+				spans = append(spans, chat.RawSpan(block.Text[cursor:from]))
+			}
+			if hitStart >= start {
+				*hitLines = append(*hitLines, len(*lines))
+			}
+			spans = append(spans, chat.StyledSpan(block.Text[from:to], hitStyle))
+			cursor = to
+		}
+		if cursor < end {
+			spans = append(spans, chat.RawSpan(block.Text[cursor:end]))
+		}
+		*lines = append(*lines, chat.LineFrom(spans...))
+		// Past the newline that ended this line.
+		start = end + 1
+	}
+	if block.Truncated {
+		*lines = append(*lines, chat.StyledLine(
+			"[… truncated …]",
+			chat.Style{}.Foreground(chat.ThemePalette().Muted),
+		))
+	}
 }
 
 // toolRole is the briefing's name for a tool message.
@@ -1341,7 +3104,39 @@ const toolRunLabel = "[tool calls]"
 // hitTranscriptLines is the matching passages as logical lines of spans,
 // with the logical line each hit starts on.
 func hitTranscriptLines(transcript *client.WikiHitTranscript) ([]chat.Line, []int) {
-	panic("unported: mj-tui/src/resume.rs hit_transcript_lines")
+	muted := chat.Style{}.Foreground(chat.ThemePalette().Muted)
+	if len(transcript.Blocks) == 0 {
+		return []chat.Line{chat.StyledLine("No matching passages", muted)}, nil
+	}
+	var lines []chat.Line
+	var hitLines []int
+	collapsingTools := false
+	for index := range transcript.Blocks {
+		block := &transcript.Blocks[index]
+		isTool := block.Role == toolRole
+		// A second tool message in the same run adds nothing to the one line
+		// already standing in for the run. A run does end at a group
+		// boundary, which the omitted marker announces.
+		if isTool && collapsingTools && block.OmittedBefore == 0 {
+			continue
+		}
+		if len(lines) > 0 {
+			lines = append(lines, chat.RawLine(""))
+		}
+		if block.OmittedBefore > 0 {
+			lines = append(lines, chat.StyledLine(omittedMarker(block.OmittedBefore), muted))
+		}
+		if isTool {
+			lines = append(lines, chat.StyledLine(toolRunLabel, muted))
+		} else {
+			hitBlockLines(block, &lines, &hitLines)
+		}
+		collapsingTools = isTool
+	}
+	if transcript.OmittedAfter > 0 {
+		lines = append(lines, chat.StyledLine(omittedMarker(transcript.OmittedAfter), muted))
+	}
+	return lines, hitLines
 }
 
 // wrapPreviewLines wraps preview lines to width cells, keeping each span's
@@ -1356,7 +3151,25 @@ func wrapPreviewLines(lines []chat.Line, width int) []chat.Line {
 }
 
 func resumeHeaderLine(layout *RowLayout, tab ResumeTab) chat.Line {
-	panic("unported: mj-tui/src/resume.rs resume_header_line")
+	style := chat.Style{}.Foreground(chat.ThemePalette().Muted).Bold()
+	originLabel := "TARGET"
+	if tab == ResumeTabLive {
+		originLabel = "WORKSPACE"
+	}
+	var spans []chat.Span
+	// A zero-width profile column means the tab has none; drop its cell and
+	// separator together so no stray gap opens at the left of every row.
+	if layout.profile > 0 {
+		spans = append(spans, chat.StyledSpan(paddedCell("PROFILE", layout.profile), style), chat.RawSpan("  "))
+	}
+	spans = append(spans,
+		chat.StyledSpan(paddedCell(originLabel, layout.origin), style),
+		chat.RawSpan("  "),
+		chat.StyledSpan(paddedCell("LAST ACTIVE", layout.activity), style),
+		chat.RawSpan("  "),
+		chat.StyledSpan(truncateToCells("SESSION", layout.title, TruncateSummary), style),
+	)
+	return chat.LineFrom(spans...)
 }
 
 func paddedCell(text string, width int) string {
@@ -1365,7 +3178,78 @@ func paddedCell(text string, width int) string {
 }
 
 func resumeRowLine(row *ResumeRow, layout *RowLayout, now time.Time) chat.Line {
-	panic("unported: mj-tui/src/resume.rs resume_row_line")
+	palette := chat.ThemePalette()
+	titleStyle := chat.Style{}.Foreground(palette.Warning)
+	if row.status.isRecoverable() {
+		titleStyle = chat.Style{}.Bold()
+	}
+	var origin chat.Span
+	if warning, ok := row.status.warning(); ok {
+		origin = chat.StyledSpan(
+			fmt.Sprintf("%-*s", layout.origin, warning),
+			chat.Style{}.Foreground(palette.Warning),
+		)
+	} else {
+		origin = chat.StyledSpan(
+			fmt.Sprintf("%-*s", layout.origin, truncateToCells(row.origin, layout.origin, TruncateSummary)),
+			chat.Style{}.Foreground(palette.Accent),
+		)
+	}
+	marks := ""
+	if row.unavailableReason != nil {
+		marks += "  [unavailable]"
+	}
+	if operation := row.moveRecovery; operation != nil {
+		if operation.QueueAdmissionStarted && !operation.QueueAdmissionFinished {
+			marks += "  [move queue needs retry]"
+		} else {
+			marks += "  [move needs recovery]"
+		}
+	}
+	var spans []chat.Span
+	// Matches the zero-width rule in resumeHeaderLine, so header and rows
+	// agree on the same layout.
+	if layout.profile > 0 {
+		spans = append(spans,
+			chat.StyledSpan(paddedCell(row.profileID, layout.profile), chat.Style{}.Foreground(palette.Secondary)),
+			chat.RawSpan("  "),
+		)
+	}
+	spans = append(spans,
+		origin,
+		chat.RawSpan("  "),
+		chat.StyledSpan(
+			paddedCell(formatLastActive(now, row.lastActivityMs), layout.activity),
+			chat.Style{}.Foreground(palette.Muted),
+		),
+		chat.RawSpan("  "),
+	)
+	marker := ""
+	if row.publication != nil {
+		switch *row.publication {
+		case core.PublicationStateUnpublished:
+			marker = "↑ "
+		case core.PublicationStateUnknown:
+			marker = "? "
+		}
+	}
+	if marker != "" {
+		spans = append(spans, chat.StyledSpan(marker, chat.Style{}.Foreground(palette.Warning)))
+	}
+	spans = append(spans,
+		// The marks are ASCII. The title gives up their cells so they always
+		// show in full.
+		chat.StyledSpan(
+			truncateToCells(
+				row.title,
+				max(layout.title-(len(marks)+utf8.RuneCountInString(marker)), 0),
+				TruncateSummary,
+			),
+			titleStyle,
+		),
+		chat.StyledSpan(marks, chat.Style{}.Foreground(palette.Muted)),
+	)
+	return chat.LineFrom(spans...)
 }
 
 // ResumeProfilePlaceholders is placeholder entries so every configured
@@ -1379,4 +3263,129 @@ func ResumeProfilePlaceholders(profiles iter.Seq2[string, core.HarnessKind]) []I
 		})
 	}
 	return placeholders
+}
+
+// maxChronoTimestampMs is the last instant chrono's
+// `DateTime::from_timestamp_millis` accepts (+262142-12-31T23:59:59.999Z).
+// A later activity time is unknown, as it is in Rust.
+var maxChronoTimestampMs = time.Date(262142, time.December, 31, 23, 59, 59, 999_000_000, time.UTC).UnixMilli()
+
+// resumeKeyModifiers is a key press's modifiers as crossterm reports them:
+// Caps Lock, Num Lock and Scroll Lock are key state there, not modifiers.
+func resumeKeyModifiers(modifiers tea.KeyMod) tea.KeyMod {
+	return modifiers &^ (tea.ModCapsLock | tea.ModNumLock | tea.ModScrollLock)
+}
+
+// sortResumeRowsNewestFirst orders rows newest first, with the key breaking
+// ties so the order holds still between rebuilds.
+func sortResumeRowsNewestFirst(rows []ResumeRow) {
+	slices.SortStableFunc(rows, func(left, right ResumeRow) int {
+		if order := cmp.Compare(right.lastActivityMs, left.lastActivityMs); order != 0 {
+			return order
+		}
+		return left.key.compare(right.key)
+	})
+}
+
+// resumeWikiRankKey is a row's place in the index's answer, with unranked
+// rows last (Rust's `wiki_rank.unwrap_or(usize::MAX)`).
+func resumeWikiRankKey(row *ResumeRow) int {
+	if row.wikiRank == nil {
+		return math.MaxInt
+	}
+	return *row.wikiRank
+}
+
+// resumeReviewViews iterates a session's review views for
+// client.AnyWorking.
+func resumeReviewViews(views []client.RuntimeReviewView) iter.Seq[*client.RuntimeReviewView] {
+	return func(yield func(*client.RuntimeReviewView) bool) {
+		for index := range views {
+			if !yield(&views[index]) {
+				return
+			}
+		}
+	}
+}
+
+// resumeHitCount is how many rows the current query matched on tab (Rust's
+// `resume_hit_counts[tab.index()]`); zero before the first rebuild.
+func (d *DashboardState) resumeHitCount(tab ResumeTab) int {
+	if tab.index() < len(d.resumeHitCounts) {
+		return d.resumeHitCounts[tab.index()]
+	}
+	return 0
+}
+
+// importProfileOptionEqual is Rust's derived PartialEq for
+// ImportProfileOption, where an empty and an absent session list are the
+// same Vec.
+func importProfileOptionEqual(left, right *ImportProfileOption) bool {
+	if left.ProfileID != right.ProfileID || left.HarnessKind != right.HarnessKind {
+		return false
+	}
+	if (left.ScanProgress == nil) != (right.ScanProgress == nil) ||
+		(left.ScanProgress != nil && *left.ScanProgress != *right.ScanProgress) {
+		return false
+	}
+	if (left.Error == nil) != (right.Error == nil) || (left.Error != nil && *left.Error != *right.Error) {
+		return false
+	}
+	return slices.EqualFunc(left.Sessions, right.Sessions, func(a, b ImportSessionOption) bool {
+		return reflect.DeepEqual(a, b)
+	})
+}
+
+// wikiRowsEqual is Rust's derived PartialEq over a page of search rows.
+func wikiRowsEqual(left, right []client.WikiRow) bool {
+	return slices.EqualFunc(left, right, func(a, b client.WikiRow) bool {
+		return reflect.DeepEqual(a, b)
+	})
+}
+
+// resumeStrLines is Rust's `str::lines`: split on `\n`, drop one `\r` before
+// each, and no final empty line for a trailing newline.
+func resumeStrLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for index, line := range lines {
+		lines[index] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
+}
+
+// resumePathComponents is a path's components as Rust's `Path::components`
+// yields them: the root, then the normal parts, with empty and `.` parts
+// dropped except a leading `.`.
+func resumePathComponents(path string) []string {
+	path = filepath.ToSlash(path)
+	var parts []string
+	if strings.HasPrefix(path, "/") {
+		parts = append(parts, "/")
+	}
+	for index, part := range strings.Split(path, "/") {
+		if part == "" || (part == "." && index > 0) {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// resumeJoinComponents is Rust's collecting components into a PathBuf.
+func resumeJoinComponents(parts []string) string {
+	separator := string(filepath.Separator)
+	if len(parts) > 0 && parts[0] == "/" {
+		return separator + strings.Join(parts[1:], separator)
+	}
+	return strings.Join(parts, separator)
+}
+
+// resumePathStartsWith is Rust's `Path::starts_with`: whether base is a
+// component prefix of path.
+func resumePathStartsWith(path, base string) bool {
+	left, right := resumePathComponents(path), resumePathComponents(base)
+	return len(right) <= len(left) && slices.Equal(left[:len(right)], right)
 }

@@ -124,9 +124,12 @@ func (r *ViewerMoveRecovery) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	for _, key := range keys {
+	for i, key := range keys {
 		if !slices.Contains(viewerMoveRecoveryFields, key) {
 			return fmt.Errorf("unknown field `%s`, expected one of %s", key, quotedFieldList(viewerMoveRecoveryFields))
+		}
+		if slices.Contains(keys[:i], key) {
+			return fmt.Errorf("duplicate field `%s`", key)
 		}
 	}
 	for _, name := range viewerMoveRecoveryRequired {
@@ -217,5 +220,117 @@ func (r ViewerMoveRecovery) WithPublicFailure(publicError *string) ViewerMoveRec
 // ViewerMoveRecoveryFromOperation is Rust's `ViewerMoveRecovery::from_operation`:
 // nil for a resolved Move.
 func ViewerMoveRecoveryFromOperation(operation *core.MoveOperation) *ViewerMoveRecovery {
-	panic("unported: mj-session-types/src/viewer_move_recovery.rs ViewerMoveRecoveryFromOperation")
+	if operation.IsResolved() {
+		return nil
+	}
+	selection := &operation.Selection
+	destinationProfileID := ""
+	if selection.ProfileID != nil {
+		destinationProfileID = *selection.ProfileID
+	}
+	destinationTargetTemplateID := ""
+	if selection.TargetTemplateID != nil {
+		destinationTargetTemplateID = *selection.TargetTemplateID
+	}
+	var destinationAdditionalMounts []core.AdditionalMount
+	if selection.AdditionalMounts != nil {
+		destinationAdditionalMounts = slices.Clone(*selection.AdditionalMounts)
+	} else {
+		destinationAdditionalMounts = slices.Clone(operation.InheritedAdditionalMounts)
+	}
+	var destinationResourceAllocation core.SessionResourceAllocation
+	if !selection.ClearResourceAllocation {
+		destinationResourceAllocation = selection.ResourceAllocation
+		if destinationResourceAllocation == nil {
+			destinationResourceAllocation = operation.InheritedResourceAllocation
+		}
+	}
+	return &ViewerMoveRecovery{
+		FailureNotice:                 nil,
+		Oracle:                        cloneBoolPointer(selection.Oracle),
+		OracleChoice:                  cloneSubagentChoicePointer(selection.OracleChoice),
+		OperationID:                   operation.OperationID,
+		SourceProfileID:               operation.SourceProfileID,
+		SourceTargetTemplateID:        operation.SourceTargetTemplateID,
+		DestinationProfileID:          destinationProfileID,
+		DestinationTargetTemplateID:   destinationTargetTemplateID,
+		Phase:                         viewerMovePhase(operation.Phase),
+		Queue:                         viewerMoveQueue(operation.Queue),
+		ClearResourceAllocation:       selection.ClearResourceAllocation,
+		SourceAdditionalMounts:        slices.Clone(operation.SourceAdditionalMounts),
+		SourceResourceAllocation:      operation.SourceResourceAllocation,
+		DestinationAdditionalMounts:   destinationAdditionalMounts,
+		DestinationResourceAllocation: destinationResourceAllocation,
+		CheckpointRetained:            operation.CheckpointRetained(),
+		EnvironmentRetained:           operation.HoldsSourceEnvironment(),
+		DestinationReady: operation.DestinationTarget != nil &&
+			operation.DestinationNativeSessionID != nil,
+		QueueAdmissionStarted:  operation.QueueAdmissionStarted,
+		QueueAdmissionFinished: operation.QueueAdmissionFinished,
+	}
+}
+
+// viewerMovePhase is the public name of each Move phase, spelled out as
+// Rust's exhaustive match does. Core rejects any other value when it
+// decodes a phase, so the last line only names a value built in memory.
+func viewerMovePhase(phase core.MovePhase) string {
+	switch phase {
+	case core.MovePhaseCapturing:
+		return "capturing"
+	case core.MovePhaseTransferring:
+		return "transferring"
+	case core.MovePhaseRestoring:
+		return "restoring"
+	case core.MovePhaseDestinationStarting:
+		return "destination_starting"
+	case core.MovePhaseDestinationOwns:
+		return "destination_owns"
+	case core.MovePhaseSourceRetired:
+		return "source_retired"
+	case core.MovePhaseQueueAdmitted:
+		return "queue_admitted"
+	case core.MovePhaseDispatchReleased:
+		return "dispatch_released"
+	case core.MovePhaseCompleted:
+		return "completed"
+	case core.MovePhaseFailed:
+		return "failed"
+	case core.MovePhaseCancelled:
+		return "cancelled"
+	}
+	return string(phase)
+}
+
+// viewerMoveQueue is the public name of a Move's queue disposition, as
+// Rust's exhaustive match spells it.
+func viewerMoveQueue(queue core.ResumeQueueDisposition) string {
+	switch queue {
+	case core.ResumeQueueDispositionStart:
+		return "start"
+	case core.ResumeQueueDispositionDiscard:
+		return "discard"
+	}
+	return string(queue)
+}
+
+// cloneBoolPointer is Rust's `Option<bool>::clone`.
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+// cloneSubagentChoicePointer is Rust's `Option<SubagentChoice>::clone`.
+func cloneSubagentChoicePointer(choice *core.SubagentChoice) *core.SubagentChoice {
+	if choice == nil {
+		return nil
+	}
+	copied := *choice
+	if choice.Effort != nil {
+		effort := *choice.Effort
+		copied.Effort = &effort
+	}
+	return &copied
 }

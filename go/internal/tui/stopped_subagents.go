@@ -31,7 +31,7 @@ type StoppedSubagentPane struct {
 // IsStoppedSubagent reports whether id is a Mjolnir sub-agent whose session
 // has stopped, so its conversation can only be read.
 func (d *DashboardState) IsStoppedSubagent(id string) bool {
-	panic("unported: mj-tui/src/stopped_subagents.rs DashboardState::is_stopped_subagent")
+	return d.state.Get().IsStoppedSubagent(id) && d.TransitionKind(id) == nil
 }
 
 // BeginStoppedSubagent starts showing a stopped sub-agent. It returns
@@ -73,11 +73,75 @@ func (d *DashboardState) SetStoppedSubagentTranscript(id string, session *core.M
 }
 
 func (d *DashboardState) renderStoppedSubagent(frame *chat.Frame, paneID PaneId, id string, transcriptArea uv.Rectangle, promptArea uv.Rectangle) {
-	panic("unported: mj-tui/src/stopped_subagents.rs DashboardState::render_stopped_subagent")
+	name := id
+	if session := d.state.Get().Sessions.GetShared(id); session != nil {
+		name = session.ListedTitle()
+	}
+	title := childPaneTitle(d, paneID, transcriptArea.Dx(), name, []string{"stopped"})
+	tools := chat.ToolDisplayFromConfig(&d.config.Get().Advanced)
+	pane, ok := d.stoppedSubagents[id]
+	if !ok {
+		return
+	}
+	block := chat.NewBlock().WithBorders(chat.BordersAll).WithTitle(title)
+	inner := block.Inner(transcriptArea)
+	frame.RenderWidget(block, transcriptArea)
+	switch {
+	case pane.errorText != nil:
+		frame.RenderWidget(
+			chat.NewParagraph(chat.RawText(
+				"Could not read this sub-agent's transcript: "+*pane.errorText+"\nOpen it again to retry.",
+			)).WithWrap(chat.Wrap{Trim: false}),
+			inner,
+		)
+	case pane.transcript == nil:
+		frame.RenderWidget(
+			chat.NewParagraph(chat.RawText("Loading this sub-agent's transcript"+chat.ThemeGlyphs().Ellipsis)),
+			inner,
+		)
+	case pane.empty:
+		frame.RenderWidget(chat.NewParagraph(chat.RawText("This sub-agent left no transcript.")), inner)
+	default:
+		lines, scroll := pane.transcript.RichTailScrolled(inner.Dx(), inner.Dy(), pane.scroll, tools)
+		pane.scroll = scroll
+		frame.RenderWidget(chat.NewParagraph(chat.TextFrom(lines...)), inner)
+	}
+	frame.RenderWidget(
+		chat.NewParagraph(chat.RawText(
+			"This sub-agent has stopped; its conversation is read-only.\n"+
+				"PgUp/PgDn: scroll · End: latest",
+		)).WithBlock(chat.NewBlock().WithBorders(chat.BordersAll).WithTitle(chat.RawLine("Stopped sub-agent"))),
+		promptArea,
+	)
 }
 
 // stoppedSubagentKey scrolls a stopped sub-agent's read-only conversation;
 // nil leaves every other key its ordinary meaning.
 func (d *DashboardState) stoppedSubagentKey(key tea.KeyMsg) DashboardAction {
-	panic("unported: mj-tui/src/stopped_subagents.rs DashboardState::stopped_subagent_key")
+	var id string
+	var ok bool
+	switch {
+	case d.focus == FocusSessions && *d.sessionsFilter.Get() == nil:
+		id, ok = d.SelectedSessionID()
+	case d.focus == FocusPrompt:
+		id, ok = d.CurrentSessionID()
+	}
+	if !ok {
+		return nil
+	}
+	pane, ok := d.stoppedSubagents[id]
+	if !ok {
+		return nil
+	}
+	switch key.Key().Code {
+	case tea.KeyPgUp:
+		pane.scroll += 20
+	case tea.KeyPgDown:
+		pane.scroll = max(pane.scroll-20, 0)
+	case tea.KeyEnd:
+		pane.scroll = 0
+	default:
+		return nil
+	}
+	return DashboardActionNone{}
 }

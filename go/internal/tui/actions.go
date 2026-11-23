@@ -17,6 +17,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -436,7 +437,10 @@ func alwaysReady(*DashboardState) Availability {
 }
 
 func operatorAwayAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs operator_away_available")
+	if _, returning := dashboard.operatorPresence.(OperatorPresenceReturning); returning {
+		return AvailabilityBlocked{Reason: "Waiting for the daemon to confirm your return"}
+	}
+	return AvailabilityReady{}
 }
 
 func spinnerAvailable(dashboard *DashboardState) Availability {
@@ -447,7 +451,10 @@ func spinnerAvailable(dashboard *DashboardState) Availability {
 }
 
 func activeWorkspaceReady(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs active_workspace_ready")
+	if _, ok := dashboard.ActiveWorkspaceID(); ok {
+		return AvailabilityReady{}
+	}
+	return AvailabilityBlocked{Reason: "No active workspace"}
 }
 
 // conversationPaneReady is the gate the conversation-pane commands share.
@@ -462,38 +469,86 @@ func conversationPaneReady(dashboard *DashboardState) Availability {
 }
 
 func selectedSessionReady(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs selected_session_ready")
+	if dashboard.commandSession() != nil {
+		return AvailabilityReady{}
+	}
+	return AvailabilityHidden{}
 }
 
 func dismissNotificationAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs dismiss_notification_available")
+	session := dashboard.commandSession()
+	if session == nil {
+		return AvailabilityHidden{}
+	}
+	return dismissNotificationAvailableFor(dashboard, session.ID)
 }
 
 // dismissNotificationAvailableFor is [dismissNotificationAvailable] for a
 // named session, so a menu on one row answers for that row and not for the
 // selected session.
 func dismissNotificationAvailableFor(dashboard *DashboardState, sessionID string) Availability {
-	panic("unported: mj-tui/src/actions.rs dismiss_notification_available_for")
+	if !dashboard.state.Get().Sessions.ContainsKey(sessionID) {
+		return AvailabilityHidden{}
+	}
+	// A child's open form is answered in the child, never dismissed here:
+	// Open sub-agent question takes this row's place.
+	if _, ok := dashboard.waitingChildOf(sessionID); ok {
+		return AvailabilityHidden{}
+	}
+	if dashboard.notificationDismissalPending(sessionID) {
+		return AvailabilityBlocked{Reason: "Dismissing notification"}
+	}
+	if _, ok := dashboard.notificationDismissalTarget(sessionID); !ok {
+		return AvailabilityBlocked{Reason: "No dismissible notification is active"}
+	}
+	return AvailabilityReady{}
 }
 
 func openWaitingQuestionAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs open_waiting_question_available")
+	if session := dashboard.commandSession(); session != nil {
+		if _, ok := dashboard.waitingChildOf(session.ID); ok {
+			return AvailabilityReady{}
+		}
+	}
+	return AvailabilityHidden{}
 }
 
 func ignoreNotificationsAvailable(dashboard *DashboardState) Availability {
 	// Always applies to a session: the row's label says which way it flips.
-	panic("unported: mj-tui/src/actions.rs ignore_notifications_available")
+	if dashboard.commandSession() != nil {
+		return AvailabilityReady{}
+	}
+	return AvailabilityHidden{}
 }
 
 func pinSessionAvailable(dashboard *DashboardState) Availability {
 	// The row flips with the pin state: it pins, or it unpins.
-	panic("unported: mj-tui/src/actions.rs pin_session_available")
+	if dashboard.commandSession() != nil {
+		return AvailabilityReady{}
+	}
+	return AvailabilityHidden{}
 }
 
 // sessionIdle is the gate the session commands share: there must be a
 // selected session, and it must not be in the middle of a launch or a stop.
 func sessionIdle(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs session_idle")
+	session := dashboard.commandSession()
+	if session == nil {
+		return AvailabilityHidden{}
+	}
+	if dashboard.verdict(session.ID).MoveQueueHeld {
+		return AvailabilityBlocked{Reason: "Move queue admission is incomplete; retry Move first"}
+	}
+	if dashboard.TransitionKind(session.ID) != nil {
+		return AvailabilityBlocked{Reason: "a session transition is in progress"}
+	}
+	if dashboard.TransitionFailureKind(session.ID) != nil {
+		return AvailabilityBlocked{Reason: "recover the failed transition first"}
+	}
+	if _, ok := dashboard.SessionOperationKind(session.ID); ok {
+		return AvailabilityBlocked{Reason: "an operation is in progress"}
+	}
+	return AvailabilityReady{}
 }
 
 func offer(offer client.SessionOffer) Availability {
@@ -526,7 +581,17 @@ func lifecycleOffer(
 	dashboard *DashboardState,
 	published func(client.SessionVerdict) client.SessionOffer,
 ) Availability {
-	panic("unported: mj-tui/src/actions.rs lifecycle_offer")
+	id, ok := dashboard.commandSessionID()
+	if !ok {
+		return AvailabilityHidden{}
+	}
+	availability := offer(published(dashboard.verdict(id)))
+	if availability == (AvailabilityReady{}) {
+		if _, pending := dashboard.pendingLocalSessionOperation(id); pending {
+			return AvailabilityBlocked{Reason: "an operation is in progress"}
+		}
+	}
+	return availability
 }
 
 func suspendSessionAvailable(dashboard *DashboardState) Availability {
@@ -550,15 +615,32 @@ func moveSessionAvailable(dashboard *DashboardState) Availability {
 // liveSession is a selected session whose target is running, which is what
 // reading its checkout needs.
 func liveSession(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs live_session")
+	session := dashboard.commandSession()
+	if session == nil {
+		return AvailabilityHidden{}
+	}
+	if session.State.IsActive() && session.Target != nil {
+		return AvailabilityReady{}
+	}
+	return AvailabilityBlocked{Reason: "the session's target is not running"}
 }
 
 func changeWorkspaceAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs change_workspace_available")
+	// The zero SessionOffer is its default, Hidden.
+	var published client.SessionOffer
+	if id, ok := dashboard.commandSessionID(); ok {
+		published = dashboard.verdict(id).ChangeWorkspace
+	}
+	return offer(published)
 }
 
 func containerSession(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs container_session")
+	// The zero SessionOffer is its default, Hidden.
+	var published client.SessionOffer
+	if id, ok := dashboard.commandSessionID(); ok {
+		published = dashboard.verdict(id).ContainerSettings
+	}
+	return offer(published)
 }
 
 func configPresent(dashboard *DashboardState) Availability {
@@ -569,7 +651,13 @@ func configPresent(dashboard *DashboardState) Availability {
 }
 
 func profilesPresent(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs profiles_present")
+	if dashboard.PaneSize(SupportPaneQuota) == core.PaneSizeMinimized {
+		return AvailabilityHidden{}
+	}
+	for range dashboard.config.Get().EnabledProfiles() {
+		return AvailabilityReady{}
+	}
+	return AvailabilityHidden{}
 }
 
 func targetsVisible(dashboard *DashboardState) Availability {
@@ -580,38 +668,81 @@ func targetsVisible(dashboard *DashboardState) Availability {
 }
 
 func supportPaneFocused(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs support_pane_focused")
+	if _, ok := dashboard.Focus().SupportPane(); ok {
+		return AvailabilityReady{}
+	}
+	return AvailabilityBlocked{Reason: "select Sessions, Targets, or Profiles first"}
 }
 
 func cancelFooter(dashboard *DashboardState) (string, bool) {
-	panic("unported: mj-tui/src/actions.rs cancel_footer")
+	session := dashboard.commandSession()
+	if session == nil {
+		return "", false
+	}
+	operation, ok := (*dashboard.sessionOperations.Get())[session.ID]
+	if !ok || !operation.cancellable {
+		return "", false
+	}
+	return "cancel " + strings.ToLower(operation.kind.Label()), true
 }
 
 // attentionFooter names the next-attention key only while something is
 // actually waiting, and carries the same badge as the tabs, so the hint is a
 // signal as well as a reminder of the key.
 func attentionFooter(dashboard *DashboardState) (string, bool) {
-	panic("unported: mj-tui/src/actions.rs attention_footer")
+	level, count, ok := dashboard.attentionBadgeSummary()
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("next (%s%d)", attentionGlyph(level), count), true
 }
 
 // subagentsAvailable: the selected session (or, from the composer, the
 // conversation's) must have sub-agents to show. With none, the command stays
 // listed and says why, so a search for "sub-agent" always finds it.
 func subagentsAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs subagents_available")
+	session, ok := dashboard.commandSessionID()
+	if !ok {
+		return AvailabilityHidden{}
+	}
+	if dashboard.SubagentCountFor(session) > 0 {
+		return AvailabilityReady{}
+	}
+	return AvailabilityBlocked{Reason: "this session has no sub-agents"}
 }
 
 // interruptAvailable keeps the command listed when there is no turn or user
 // shell to interrupt, so a search for "interrupt" always finds it.
 func interruptAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs interrupt_available")
+	session, ok := dashboard.commandSessionID()
+	if !ok {
+		return AvailabilityHidden{}
+	}
+	verdict := dashboard.verdict(session)
+	if verdict.Interrupt {
+		return AvailabilityReady{}
+	}
+	if verdict.InterruptShell {
+		if _, open := dashboard.PaneForSession(session); open {
+			return AvailabilityReady{}
+		}
+		return AvailabilityBlocked{Reason: "open the conversation to interrupt its shell"}
+	}
+	return AvailabilityBlocked{Reason: "no turn is running"}
 }
 
 // interruptAllAvailable: Interrupt all stays listed with its reason when
 // nothing in the session's tree is running, for the same reason Interrupt
 // turn does.
 func interruptAllAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs interrupt_all_available")
+	session, ok := dashboard.commandSessionID()
+	if !ok {
+		return AvailabilityHidden{}
+	}
+	if !dashboard.verdict(session).InterruptAll {
+		return AvailabilityBlocked{Reason: "no turn is running here or in its sub-agents"}
+	}
+	return AvailabilityReady{}
 }
 
 // subagentsFooter is named in the footer only while there are sub-agents to
@@ -792,7 +923,10 @@ func commandTable() []CommandSpec {
 			available: func(dashboard *DashboardState) Availability {
 				// Ready while the dashboard runs in fast-start (`mj go`) mode,
 				// otherwise Hidden.
-				panic("unported: mj-tui/src/actions.rs COMMANDS ChangeGoSetup available")
+				if dashboard.goMode != nil {
+					return AvailabilityReady{}
+				}
+				return AvailabilityHidden{}
 			},
 		},
 		{
@@ -1786,11 +1920,17 @@ func focusCycleFooter(dashboard *DashboardState) (string, bool) {
 }
 
 func notificationReplyAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs notification_reply_available")
+	if _, ok := dashboard.NotificationFormSession(); ok {
+		return AvailabilityHidden{}
+	}
+	return notificationAvailable(dashboard)
 }
 
 func notificationRestoreAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs notification_restore_available")
+	if _, ok := dashboard.NotificationFormSession(); !ok && dashboard.NotificationHasRecoverableReply() {
+		return AvailabilityReady{}
+	}
+	return AvailabilityHidden{}
 }
 
 func notificationNavigationAvailable(dashboard *DashboardState, command CommandId) Availability {
@@ -1801,7 +1941,15 @@ func notificationNavigationAvailable(dashboard *DashboardState, command CommandI
 }
 
 func notificationClearAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs notification_clear_available")
+	entries := dashboard.notificationEntries()
+	switch {
+	case len(entries) == 0:
+		return AvailabilityHidden{}
+	case entries[0].target != nil:
+		return AvailabilityReady{}
+	default:
+		return AvailabilityBlocked{Reason: "Answer this request in the session."}
+	}
 }
 
 // scopeApplies is whether a command in scope can be run while focus owns the
@@ -1862,7 +2010,39 @@ func paneCommandForKey(key tea.KeyPressMsg, focus Focus) (CommandId, bool) {
 // A non-nil scopeFilter asks for one group; nil asks for everything that
 // applies where the keyboard currently is, which is what the footer wants.
 func available(dashboard *DashboardState, scopeFilter *Scope) []CommandId {
-	panic("unported: mj-tui/src/actions.rs available")
+	ids := []CommandId{}
+	for i := range commands {
+		spec := &commands[i]
+		if scopeFilter != nil {
+			if spec.scope != *scopeFilter {
+				continue
+			}
+		} else if !scopeApplies(spec.scope, dashboard.focus) {
+			continue
+		}
+		if nativeAgentSessionCommand(spec.id) {
+			if id, ok := dashboard.commandSessionID(); ok && dashboard.IsNativeAgent(id) {
+				continue
+			}
+		}
+		if spec.available(dashboard) == (AvailabilityReady{}) {
+			ids = append(ids, spec.id)
+		}
+	}
+	return ids
+}
+
+// nativeAgentSessionCommand is whether available leaves id out while a
+// native agent is the command session: these act on a Mjolnir session's
+// record, which a native agent's parent owns.
+func nativeAgentSessionCommand(id CommandId) bool {
+	switch id {
+	case CommandIdRestartSession, CommandIdRenameSession, CommandIdContainerSettings,
+		CommandIdChangedFiles, CommandIdDismissNotification, CommandIdMoveSession,
+		CommandIdChangeWorkspace, CommandIdDestroySession:
+		return true
+	}
+	return false
 }
 
 // CommandAllowedNow is whether a bound command still answers with the current
@@ -1897,22 +2077,432 @@ func (d *DashboardState) CommandAllowedNow(id CommandId) bool {
 // point the key handler used to call directly, so the footer, the palette,
 // and the keyboard cannot disagree about what a command does.
 func (d *DashboardState) DispatchCommand(id CommandId) DashboardAction {
-	panic("unported: mj-tui/src/actions.rs DashboardState::dispatch_command")
+	saved := d.commandSessionOverride
+	// From the composer a session command acts on the conversation it
+	// writes to. With the pane still empty (a launch whose attach has not
+	// finished) there is no such conversation, so the command acts on the
+	// session selected in Sessions, as it would from there.
+	if spec(id).scope == ScopeSession && saved == nil && d.focus == FocusPrompt {
+		if session, ok := d.CurrentSessionID(); ok {
+			d.commandSessionOverride = &session
+		}
+	}
+	action := d.dispatchCommandInner(id)
+	d.commandSessionOverride = saved
+	return action
 }
 
 // rememberCommand puts a command at the head of the palette's Recent group.
 func (d *DashboardState) rememberCommand(id CommandId) {
-	panic("unported: mj-tui/src/actions.rs DashboardState::remember_command")
+	recent := make([]CommandId, 0, len(d.recentCommands)+1)
+	recent = append(recent, id)
+	for _, command := range d.recentCommands {
+		if command != id {
+			recent = append(recent, command)
+		}
+	}
+	if len(recent) > recentCommands {
+		recent = recent[:recentCommands]
+	}
+	d.recentCommands = recent
 }
 
 func (d *DashboardState) dispatchCommandInner(id CommandId) DashboardAction {
-	panic("unported: mj-tui/src/actions.rs DashboardState::dispatch_command_inner")
+	switch id {
+	case CommandIdResizePaneLeft, CommandIdResizePaneDown, CommandIdResizePaneUp, CommandIdResizePaneRight:
+	default:
+		d.resizeMode = false
+	}
+	if selected, ok := d.commandSessionID(); ok && d.IsNativeAgent(selected) {
+		switch id {
+		case CommandIdRestartSession, CommandIdRenameSession, CommandIdContainerSettings,
+			CommandIdChangedFiles, CommandIdDismissNotification, CommandIdMoveSession,
+			CommandIdChangeWorkspace, CommandIdSuspendSession, CommandIdDestroySession:
+			d.SetNotice("Native agents are owned by their parent session")
+			return DashboardActionNone{}
+		}
+	}
+	// Commands a person reaches for by name are worth remembering; the pane
+	// keys and the palette itself are not. The palette records whatever it
+	// runs itself, pane keys included.
+	if len(spec(id).paneKeys) == 0 && id != CommandIdPalette {
+		d.rememberCommand(id)
+	}
+	switch id {
+	case CommandIdSuspendSession, CommandIdRestartSession, CommandIdMoveSession,
+		CommandIdChangeWorkspace, CommandIdContainerSettings, CommandIdGoAfk:
+		switch availability := spec(id).available(d).(type) {
+		case AvailabilityHidden:
+			return DashboardActionNone{}
+		case AvailabilityBlocked:
+			d.SetNotice(availability.Reason)
+			return DashboardActionNone{}
+		}
+	}
+	switch id {
+	case CommandIdPinSession:
+		if sessionID, ok := d.commandSessionID(); ok {
+			if _, pinned := d.PinID(sessionID); pinned {
+				return DashboardActionUnpinSession{SessionID: sessionID}
+			}
+			d.beginPinMenu(sessionID)
+		}
+		return DashboardActionNone{}
+	case CommandIdOpenSession:
+		return d.openSelectedSession()
+	case CommandIdOpenSessionSplitRight:
+		return d.splitCommand(chat.DirectionHorizontal)
+	case CommandIdOpenSessionSplitBelow:
+		return d.splitCommand(chat.DirectionVertical)
+	case CommandIdClosePane:
+		return DashboardActionClosePane{Pane: d.FocusedPane()}
+	case CommandIdFocusPaneLeft:
+		return d.focusPaneCommand(NavDirectionLeft)
+	case CommandIdFocusPaneDown:
+		return d.focusPaneCommand(NavDirectionDown)
+	case CommandIdFocusPaneUp:
+		return d.focusPaneCommand(NavDirectionUp)
+	case CommandIdFocusPaneRight:
+		return d.focusPaneCommand(NavDirectionRight)
+	case CommandIdFocusLastPane:
+		return d.focusLastPaneCommand()
+	case CommandIdZoomPane:
+		return d.zoomPaneCommand()
+	case CommandIdResizeMode:
+		return d.beginResizeMode()
+	case CommandIdSwapPaneLeft:
+		return d.swapPaneCommand(NavDirectionLeft)
+	case CommandIdSwapPaneDown:
+		return d.swapPaneCommand(NavDirectionDown)
+	case CommandIdSwapPaneUp:
+		return d.swapPaneCommand(NavDirectionUp)
+	case CommandIdSwapPaneRight:
+		return d.swapPaneCommand(NavDirectionRight)
+	case CommandIdRenameWorkspace:
+		return d.beginWorkspaceCommand(false)
+	case CommandIdCloseWorkspace:
+		return d.beginWorkspaceCommand(true)
+	case CommandIdSuspendSession:
+		if session := d.selectedSession(); session != nil {
+			sessionID := session.ID
+			childrenNotHandedBack := d.subagentsNotHandedBack(sessionID)
+			interrupting := d.hasActiveWork(sessionID)
+			dialog := newConfirmDialog(ConfirmationSuspendSession{
+				SessionID:             sessionID,
+				ChildrenNotHandedBack: childrenNotHandedBack,
+				Interrupting:          interrupting,
+				Preflight:             nil,
+				Checking:              true,
+				ViewingAllUntracked:   false,
+			}).namingSession(sessionName(session))
+			d.mode = ModeConfirm{&dialog}
+			return DashboardActionSuspendPreflight{SessionID: sessionID}
+		}
+		return DashboardActionNone{}
+	case CommandIdResizePaneLeft:
+		return d.resizePaneCommand(NavDirectionLeft)
+	case CommandIdResizePaneDown:
+		return d.resizePaneCommand(NavDirectionDown)
+	case CommandIdResizePaneUp:
+		return d.resizePaneCommand(NavDirectionUp)
+	case CommandIdResizePaneRight:
+		return d.resizePaneCommand(NavDirectionRight)
+	case CommandIdNewSessionWizard:
+		return d.beginNew()
+	case CommandIdChangeGoSetup:
+		return d.changeGoSetup()
+	case CommandIdUpgradeContainer:
+		session := d.selectedSession()
+		if session == nil {
+			return DashboardActionNone{}
+		}
+		return DashboardActionPreviewContainerUpgrade{SessionID: session.ID, UpgradeOnly: true}
+	case CommandIdRestartSession:
+		session := d.selectedSession()
+		if session == nil {
+			return DashboardActionNone{}
+		}
+		sessionID, name := session.ID, sessionName(session)
+		if _, upgrade := d.containerUpgradeSessions[sessionID]; upgrade {
+			return DashboardActionPreviewContainerUpgrade{SessionID: sessionID, UpgradeOnly: false}
+		}
+		// Mid-turn work is lost by a restart, so that case asks first; an
+		// idle session restarts at once.
+		if d.hasActiveWork(sessionID) {
+			dialog := newConfirmDialog(ConfirmationInterruptWork{
+				SessionID: sessionID,
+				Restart:   true,
+			}).namingSession(name)
+			d.mode = ModeConfirm{&dialog}
+			return DashboardActionNone{}
+		}
+		return DashboardActionRestartSession{SessionID: sessionID, AcknowledgeContainerRecreation: false}
+	case CommandIdResumeDialog:
+		return DashboardActionOpenResumeDialog{}
+	case CommandIdPalette:
+		d.beginPalette()
+		return DashboardActionNone{}
+	case CommandIdCycleSpinner:
+		if d.spinnerSavePending {
+			return DashboardActionNone{}
+		}
+		style := d.config.Get().Spinner.Next()
+		d.spinnerSavePending = true
+		d.SetNotice(fmt.Sprintf("Saving %s spinner…", style))
+		return DashboardActionSaveSpinnerStyle{Style: style}
+	case CommandIdRenameSession:
+		d.beginRename()
+		return DashboardActionNone{}
+	case CommandIdContainerSettings:
+		d.beginContainerEdit()
+		return DashboardActionNone{}
+	case CommandIdChangeWorkspace:
+		d.beginChangeWorkspace()
+		return DashboardActionNone{}
+	case CommandIdChangedFiles:
+		return d.beginChangedFiles()
+	case CommandIdDismissNotification:
+		switch availability := dismissNotificationAvailable(d).(type) {
+		case AvailabilityReady:
+			return d.beginDismissNotification()
+		case AvailabilityBlocked:
+			d.SetNotice(sentence(availability.Reason))
+		}
+		return DashboardActionNone{}
+	case CommandIdOpenWaitingQuestion:
+		if session, ok := d.commandSessionID(); ok {
+			if child, waiting := d.waitingChildOf(session); waiting {
+				// The menu's session was the parent; from here the command
+				// moves the selection, and Open must read it.
+				d.commandSessionOverride = nil
+				return d.focusSessionFromCPUReport(child)
+			}
+		}
+		return DashboardActionNone{}
+	case CommandIdNotificationOpen, CommandIdNotificationSend, CommandIdNotificationRestore,
+		CommandIdNotificationDefault, CommandIdNotificationPreviousMessage, CommandIdNotificationNextMessage:
+		return d.notificationAction(id)
+	case CommandIdNotificationClear:
+		return d.notificationClear()
+	case CommandIdNotificationSkip:
+		return d.notificationSkip()
+	case CommandIdNotificationIgnoreSession:
+		return d.notificationAction(CommandIdNotificationIgnoreSession)
+	case CommandIdNotificationScrollUp:
+		d.scrollNotification(-1)
+		return DashboardActionNone{}
+	case CommandIdNotificationScrollDown:
+		d.scrollNotification(1)
+		return DashboardActionNone{}
+	case CommandIdIgnoreNotifications:
+		session := d.commandSession()
+		if session == nil {
+			return DashboardActionNone{}
+		}
+		return DashboardActionSetSessionNotificationsIgnored{SessionID: session.ID, Ignored: !session.NotificationsIgnored}
+	case CommandIdInterruptTurn:
+		switch availability := interruptAvailable(d).(type) {
+		case AvailabilityReady:
+			if sessionID, ok := d.commandSessionID(); ok {
+				return DashboardActionInterruptTurn{SessionID: sessionID}
+			}
+		case AvailabilityBlocked:
+			d.SetNotice(sentence(availability.Reason))
+		}
+		return DashboardActionNone{}
+	case CommandIdInterruptAll:
+		switch availability := interruptAllAvailable(d).(type) {
+		case AvailabilityReady:
+			if session := d.commandSession(); session != nil {
+				sessionID := session.ID
+				name := sessionName(session)
+				verdict := d.verdict(sessionID)
+				parentRunning := verdict.InterruptMember
+				subagentsRunning := verdict.InterruptCount
+				if parentRunning {
+					subagentsRunning = max(subagentsRunning-1, 0)
+				}
+				dialog := newConfirmDialog(ConfirmationInterruptAll{
+					SubagentsRunning: subagentsRunning,
+					ParentRunning:    parentRunning,
+					SessionID:        sessionID,
+				}).namingSession(name)
+				d.mode = ModeConfirm{&dialog}
+			}
+		case AvailabilityBlocked:
+			d.SetNotice(sentence(availability.Reason))
+		}
+		return DashboardActionNone{}
+	case CommandIdSessionActions:
+		if _, ok := d.commandSessionID(); ok {
+			d.beginSessionPalette()
+		}
+		return DashboardActionNone{}
+	case CommandIdOpenSubagents:
+		switch availability := subagentsAvailable(d).(type) {
+		case AvailabilityReady:
+			if parentID, ok := d.commandSessionID(); ok {
+				return DashboardActionOpenSubagents{ParentID: parentID}
+			}
+		case AvailabilityBlocked:
+			d.SetNotice(sentence(availability.Reason))
+		}
+		return DashboardActionNone{}
+	case CommandIdMoveSession:
+		return d.beginMove()
+	case CommandIdCopySessionId:
+		session := d.commandSession()
+		if session == nil {
+			return DashboardActionNone{}
+		}
+		return DashboardActionCopySessionId{SessionID: session.ID}
+	case CommandIdDestroySession:
+		session := d.selectedSession()
+		if session == nil {
+			return DashboardActionNone{}
+		}
+		dialog := newConfirmDialog(ConfirmationForceDestroy{SessionID: session.ID}).
+			namingSession(sessionName(session))
+		d.mode = ModeConfirm{&dialog}
+		return DashboardActionNone{}
+	case CommandIdGoAfk:
+		return DashboardActionSetOperatorAway{Away: true}
+	case CommandIdMarkAllRead:
+		return d.markAllRead()
+	case CommandIdFilterSessions:
+		d.beginSessionsFilter()
+		return DashboardActionNone{}
+	case CommandIdNextAttention:
+		return d.stepAttention(1)
+	case CommandIdPreviousAttention:
+		return d.stepAttention(-1)
+	case CommandIdCancelOperation:
+		// The target-actions dialog's running test is the one thing cancel
+		// reaches through a modal.
+		if action := d.cancelTargetTest(); action != nil {
+			return action
+		}
+		if session := d.selectedSession(); session != nil {
+			if kind, ok := d.SessionOperationKind(session.ID); ok {
+				return DashboardActionCancelOperation{SessionID: session.ID, Kind: kind}
+			}
+		}
+		// A key that does nothing silently reads as broken.
+		d.SetNotice("Nothing to cancel")
+		return DashboardActionNone{}
+	case CommandIdToggleProject:
+		d.toggleSelectedProject()
+		return DashboardActionNone{}
+	case CommandIdTargetActions:
+		if d.PaneSize(SupportPaneTargets) == core.PaneSizeMinimized {
+			return DashboardActionNone{}
+		}
+		d.beginTargetActions()
+		return DashboardActionNone{}
+	case CommandIdTargetDisks:
+		if d.PaneSize(SupportPaneTargets) == core.PaneSizeMinimized {
+			return DashboardActionNone{}
+		}
+		d.beginCapacityDisksMenu(d.capacityIndex)
+		return DashboardActionNone{}
+	case CommandIdToggleQuotaPool:
+		if d.PaneSize(SupportPaneQuota) != core.PaneSizeMinimized {
+			d.toggleQuotaPool()
+		}
+		return DashboardActionNone{}
+	case CommandIdEditProfile:
+		if d.PaneSize(SupportPaneQuota) == core.PaneSizeMinimized {
+			return DashboardActionNone{}
+		}
+		d.beginProfileRename()
+		return DashboardActionNone{}
+	case CommandIdRefresh:
+		d.quotaProviders.requestRefresh()
+		// Refreshing checks again what is available. It is allowed through
+		// an open modal (see CommandAllowedNow), so an open picker gets fresh
+		// answers.
+		clear(d.projectDirectoryChecks)
+		d.wantAvailabilityCheck()
+		return DashboardActionRefreshAll{}
+	case CommandIdManageProfiles:
+		d.beginSettingsSection("profiles", nil)
+		return DashboardActionNone{}
+	case CommandIdManageMachines:
+		d.beginSettingsSection("machines", nil)
+		return DashboardActionNone{}
+	case CommandIdManageTargets:
+		d.beginSettingsSection("targets", nil)
+		return DashboardActionNone{}
+	case CommandIdOpenConfig:
+		d.BeginSetup()
+		return DashboardActionNone{}
+	case CommandIdCycleFocus:
+		d.CycleFocus(false)
+		return DashboardActionNone{}
+	case CommandIdCycleFocusReverse:
+		d.CycleFocus(true)
+		return DashboardActionNone{}
+	case CommandIdCycleFocusedPaneSize:
+		d.CycleFocusedPaneSize()
+		return DashboardActionNone{}
+	case CommandIdTargetsMenu:
+		d.beginSupportPaneMenu(SupportPaneTargets)
+		return DashboardActionNone{}
+	case CommandIdProfilesMenu:
+		d.beginSupportPaneMenu(SupportPaneQuota)
+		return DashboardActionNone{}
+	case CommandIdTogglePanePreset:
+		d.TogglePanePreset()
+		return DashboardActionNone{}
+	case CommandIdWorkspaces:
+		return d.BeginWorkspaceManager()
+	case CommandIdFocusWorkspaces:
+		d.focus = FocusWorkspaces
+		d.workspaceControlFocus = WorkspaceControlFocusTabs
+		d.setSessionActionFocus(nil)
+		return DashboardActionNone{}
+	case CommandIdSwitchWorkspace:
+		// The numbered workspace keys carry an index, and a registry command
+		// carries no argument, so the router calls selectWorkspaceIndex
+		// directly.
+		return DashboardActionNone{}
+	case CommandIdToggleTranscriptRendering:
+		return DashboardActionToggleTranscriptRendering{}
+	case CommandIdToggleDictation:
+		return DashboardActionToggleDictation{}
+	case CommandIdSelectWorkspacePrevious:
+		return d.selectAdjacentWorkspace(-1)
+	case CommandIdSelectWorkspaceNext:
+		return d.selectAdjacentWorkspace(1)
+	case CommandIdWebViewer:
+		return d.OpenWebDialog()
+	case CommandIdRestartDaemon:
+		return DashboardActionRestartDaemon{}
+	case CommandIdSessionCpuReport:
+		dialog := newSessionCpuReportDialog()
+		d.mode = ModeSessionCpuReport{&dialog}
+		return DashboardActionNone{}
+	case CommandIdSessionUsageReport:
+		d.beginSessionUsageReport(nil)
+		return DashboardActionNone{}
+	case CommandIdNoticeLog:
+		d.beginNoticeLog()
+		return DashboardActionNone{}
+	case CommandIdQuitDetach:
+		return DashboardActionQuitDetach{}
+	}
+	panic(fmt.Sprintf("unknown CommandId %v", id))
 }
 
 // DispatchCommandResult runs one command. A command always consumes its
 // chord, whether or not it also hands the caller an action to execute.
 func (d *DashboardState) DispatchCommandResult(id CommandId) chat.EventResult[DashboardAction] {
-	panic("unported: mj-tui/src/actions.rs DashboardState::dispatch_command_result")
+	action := d.DispatchCommand(id)
+	result := chat.EventResult[DashboardAction]{Consumed: true}
+	if _, none := action.(DashboardActionNone); !none {
+		result.Action = action
+	}
+	return result
 }
 
 // sentence presents an availability reason, a fragment for notices and menu
@@ -1930,5 +2520,10 @@ func sentence(reason string) string {
 }
 
 func upgradeContainerAvailable(dashboard *DashboardState) Availability {
-	panic("unported: mj-tui/src/actions.rs upgrade_container_available")
+	if session := dashboard.commandSession(); session != nil {
+		if _, upgrade := dashboard.containerUpgradeSessions[session.ID]; upgrade {
+			return restartSessionAvailable(dashboard)
+		}
+	}
+	return AvailabilityHidden{}
 }

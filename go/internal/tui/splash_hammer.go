@@ -49,7 +49,21 @@ type Pose struct {
 // poseAt is the hammer's placement at scene time t, once it has appeared.
 // It falls under gravity while its spin unwinds, and lands upright.
 func poseAt(t float32) (Pose, bool) {
-	panic("unported: mj-tui/src/splash/hammer.rs Pose::at")
+	if t < descentStart {
+		return Pose{}, false
+	}
+	progress := min((t-descentStart)/(impact-descentStart), 1.0)
+	var y float32
+	if progress < 1.0 {
+		y = hammerDropFrom + (hammerRestY-hammerDropFrom)*progress*progress
+	} else {
+		since := t - impact
+		y = hammerRestY - 0.04*splashAbs(splashSin(since*30.0))*splashExp(-since*10.0)
+	}
+	return Pose{
+		origin: [2]float32{0.0, y},
+		angle:  hammerTurns * splashTau * splashPow(1.0-progress, 1.7),
+	}, true
 }
 
 func (p Pose) toWorld(local [2]float32) [2]float32 {
@@ -173,5 +187,62 @@ func shade(local [2]float32, distance float32, part Part, pose Pose, charge floa
 // with motion blur while it falls and a blue halo whose strength follows
 // charge.
 func hammerDraw(canvas *Canvas, view *View, t, charge float32) {
-	panic("unported: mj-tui/src/splash/hammer.rs draw")
+	blur := hammerBlur[:]
+	if t >= impact {
+		blur = hammerBlur[:1]
+	}
+	var poses []Pose
+	for _, delay := range blur {
+		if pose, ok := poseAt(t - delay); ok {
+			poses = append(poses, pose)
+		}
+	}
+	if len(poses) == 0 {
+		return
+	}
+	left := float32(math.MaxFloat32)
+	top := float32(math.MaxFloat32)
+	right := float32(-math.MaxFloat32)
+	bottom := float32(-math.MaxFloat32)
+	for _, pose := range poses {
+		centre := view.pixel(pose.toWorld(hammerPivot))
+		reach := hammerReach*view.scale + 2.0
+		left = min(left, centre[0]-reach)
+		top = min(top, centre[1]-reach)
+		right = max(right, centre[0]+reach)
+		bottom = max(bottom, centre[1]+reach)
+	}
+	columnStart, columnEnd := asUsize(max(left, 0.0)), min(asUsize(max(right, 0.0)), canvas.width)
+	rowStart, rowEnd := asUsize(max(top, 0.0)), min(asUsize(max(bottom, 0.0)), canvas.height)
+	samples := float32(len(poses))
+	for y := rowStart; y < rowEnd; y++ {
+		for x := columnStart; x < columnEnd; x++ {
+			point := view.scene(x, y)
+			var color Rgb
+			var coverage, halo float32
+			for index, pose := range poses {
+				local := pose.toLocal(point)
+				distance, part := sdf(local)
+				if index == 0 && distance > 0.0 {
+					halo = splashExp(-distance * 16.0)
+				}
+				cover := splashClamp(0.5-distance*view.scale, 0.0, 1.0)
+				if cover > 0.0 {
+					shaded := shade(local, distance, part, pose, charge)
+					for channel := range 3 {
+						color[channel] += shaded[channel] * cover
+					}
+					coverage += cover
+				}
+			}
+			alpha := coverage / samples
+			under := canvas.get(x, y)
+			glow := halo * charge * 0.5 * (1.0 - alpha)
+			var out Rgb
+			for channel := range 3 {
+				out[channel] = under[channel]*(1.0-alpha) + color[channel]/samples + hammerRim[channel]*glow
+			}
+			canvas.set(x, y, out)
+		}
+	}
 }

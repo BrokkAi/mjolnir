@@ -1200,7 +1200,7 @@ fn write_missing_private_file(
 
 /// Checks the destination and creates its parents, returning the path to
 /// write. Both the replacing and the missing-only writers start here.
-fn prepare_private_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
+pub(super) fn prepare_private_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
     ensure_no_symlink_ancestors(root, relative)?;

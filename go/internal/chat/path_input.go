@@ -5,6 +5,8 @@
 package chat
 
 import (
+	"slices"
+
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
@@ -41,6 +43,19 @@ func NewPathInput() PathInput {
 // From<String>/From<&str> conversions).
 func PathInputFromValue(value string) PathInput {
 	return PathInput{TextInput: TextInputFromValue(value)}
+}
+
+// Equal is Rust's derived PartialEq: the text editor and the completion
+// popup state both compare.
+func (p *PathInput) Equal(other *PathInput) bool {
+	if !p.TextInput.Equal(&other.TextInput) ||
+		!slices.Equal(p.completion.candidates, other.completion.candidates) ||
+		p.completion.selected != other.completion.selected ||
+		p.completion.truncated != other.completion.truncated ||
+		(p.completion.requested == nil) != (other.completion.requested == nil) {
+		return false
+	}
+	return p.completion.requested == nil || *p.completion.requested == *other.completion.requested
 }
 
 // Resolve expands the field's text against home, which may be absent.

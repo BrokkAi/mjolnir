@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -392,6 +393,77 @@ func (SnapshotRefusedUntrackedSubmoduleRegistration) refusedKind() string {
 	return "untracked_submodule_registration"
 }
 func (SnapshotRefusedTrackedKeepFiles) refusedKind() string { return "tracked_keep_files" }
+
+// SnapshotRefusedDebug is Rust's derived Debug of a refusal (`{:?}`), the
+// form suspend preflight reports a blocker's kind in.
+func SnapshotRefusedDebug(refused SnapshotRefused) string {
+	quote := core.RustDebugString
+	checkout := func(key CheckoutKey) string {
+		return "CheckoutKey { repository_id: " + quote(key.RepositoryID) + ", checkout_path: " + quote(key.CheckoutPath) + " }"
+	}
+	scoped := func(key CheckoutKey, value string) string {
+		return "Scoped { checkout: " + checkout(key) + ", value: " + value + " }"
+	}
+	scopedPaths := func(paths []Scoped[string]) string {
+		return rustDebugList(paths, func(path Scoped[string]) string { return scoped(path.Checkout, quote(path.Value)) })
+	}
+	option := func(value *string) string {
+		if value == nil {
+			return "None"
+		}
+		return "Some(" + quote(*value) + ")"
+	}
+	switch r := refused.(type) {
+	case SnapshotRefusedUntracked:
+		return "Untracked(" + rustDebugList([]UntrackedItem(r), func(item UntrackedItem) string {
+			if item.Kind == core.UntrackedItemStash {
+				return "Stash { checkout: " + checkout(item.Checkout) + ", commit: " + quote(item.Commit) +
+					", message: " + quote(item.Message) + " }"
+			}
+			return string(item.Kind) + " { checkout: " + checkout(item.Checkout) + ", path: " + quote(item.Path) +
+				", identity: FileIdentity(" + quote(item.Identity.AsStr()) + ") }"
+		}) + ")"
+	case SnapshotRefusedOperationInProgress:
+		return "OperationInProgress(GitOperation { checkout: " + checkout(r.Checkout) + ", kind: " + string(r.Kind) + " })"
+	case SnapshotRefusedDirtySubmodule:
+		return "DirtySubmodule(" + scoped(r.Checkout, quote(r.Value)) + ")"
+	case SnapshotRefusedMissingManagedOrigin:
+		return "MissingManagedOrigin(" + checkout(CheckoutKey(r)) + ")"
+	case SnapshotRefusedOriginRemovedByTeardown:
+		return "OriginRemovedByTeardown(" + rustDebugList([]Scoped[OriginDependency](r), func(origin Scoped[OriginDependency]) string {
+			value := origin.Value
+			return scoped(origin.Checkout, "OriginDependency { module_url_key: "+option(value.ModuleURLKey)+
+				", object_provider: "+option(value.ObjectProvider)+", route: "+quote(value.Route)+
+				", canonical_path: "+quote(value.CanonicalPath)+", target_is_removed: "+strconv.FormatBool(value.TargetIsRemoved)+" }")
+		}) + ")"
+	case SnapshotRefusedUnrepresentedGitState:
+		return "UnrepresentedGitState { directories: " + scopedPaths(r.Directories) + ", worktrees: " +
+			rustDebugList(r.Worktrees, func(worktree Scoped[UnrepresentedWorktree]) string {
+				value := worktree.Value
+				return scoped(worktree.Checkout, "UnrepresentedWorktree { locked: "+strconv.FormatBool(value.Locked)+
+					", can_move_inside: "+strconv.FormatBool(value.CanMoveInside)+", git_dir: "+quote(value.GitDir)+
+					", path: "+quote(value.Path)+" }")
+			}) + " }"
+	case SnapshotRefusedHiddenTrackedEdits:
+		return "HiddenTrackedEdits(" + scopedPaths(r) + ")"
+	case SnapshotRefusedIntentToAdd:
+		return "IntentToAdd(" + scopedPaths(r) + ")"
+	case SnapshotRefusedUntrackedSubmoduleRegistration:
+		return "UntrackedSubmoduleRegistration(" + scopedPaths(r) + ")"
+	case SnapshotRefusedTrackedKeepFiles:
+		return "TrackedKeepFiles { keep_dir: " + quote(r.KeepDir) + ", paths: " + scopedPaths(r.Paths) + " }"
+	}
+	return fmt.Sprintf("%#v", refused)
+}
+
+// rustDebugList is Rust's Debug of a Vec: `[a, b]`.
+func rustDebugList[T any](items []T, debug func(T) string) string {
+	parts := make([]string, len(items))
+	for index, item := range items {
+		parts[index] = debug(item)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
 
 func (r SnapshotRefusedUntracked) refusedDetail() any {
 	return snapshotNonNil([]UntrackedItem(r))
