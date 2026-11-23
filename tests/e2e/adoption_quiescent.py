@@ -116,7 +116,7 @@ with socket.socket(socket.AF_UNIX) as peer:
         hook = "adoption_orphan_before_serving"
         for suffix in ["reached", "continue"]:
             (self.hooks / f"{hook}.{suffix}").unlink(missing_ok=True)
-        status, response = self.request("POST", "/api/actions", {"action": "new", "workspace_id": workspace,
+        status, response = self.request("POST", "/api/v1/actions", {"action": "new", "workspace_id": workspace,
             "profile_id": "fake", "bundle_id": "fixture", "target_id": "podman", "title": title,
             "additional_mounts": [{"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}]}, timeout=WAIT)
         assert status == 202, response
@@ -162,7 +162,7 @@ with socket.socket(socket.AF_UNIX) as peer:
         self.command("workspaces", "create", "Adoption regression")
         self.authenticate()
         workspace = self.snapshot()["workspaces"][0]["id"]
-        status, response = self.request("POST", "/api/actions", {"action": "new", "workspace_id": workspace,
+        status, response = self.request("POST", "/api/v1/actions", {"action": "new", "workspace_id": workspace,
             "profile_id": "fake", "bundle_id": "fixture", "target_id": "podman",
             "title": "adoption-fixture", "additional_mounts": [{"source": str(self.runtime_root),
                 "destination": str(self.runtime_root), "access": "rw"}]}, timeout=WAIT)
@@ -183,7 +183,7 @@ with socket.socket(socket.AF_UNIX) as peer:
             elif isinstance(value, list): values = value
             else: return None
             return next((found for item in values if (found := question(item))), None)
-        pending = self.wait(lambda: question(self.request("GET", f"/api/conversations/{session}", timeout=WAIT)[1]), "live pending question")
+        pending = self.wait(lambda: question(self.request("GET", f"/api/v1/conversations/{session}", timeout=WAIT)[1]), "live pending question")
         following = self.submit(root, "queued before recovery")
         self.wait(lambda: self.state(root).get("acknowledged_through", 0) > 0
                   or self.state(root).get("retained_through", 0) > 0, "acknowledged history")
@@ -205,8 +205,8 @@ with socket.socket(socket.AF_UNIX) as peer:
         self.release("queued before recovery")
         assert adoption.wait(timeout=WAIT) == 0, (self.root / "adopted.stderr").read_text()
         self.wait(lambda: (self.state(root).get("active_prompt") or {}).get("command_id") == final, "post-cut turn")
-        self.wait(lambda: "after the recovery cut" in json.dumps(self.request("GET", f"/api/conversations/{session}", timeout=WAIT)[1]), "ordinary replay after the cut")
-        status, conversation = self.request("GET", f"/api/conversations/{session}", timeout=WAIT)
+        self.wait(lambda: "after the recovery cut" in json.dumps(self.request("GET", f"/api/v1/conversations/{session}", timeout=WAIT)[1]), "ordinary replay after the cut")
+        status, conversation = self.request("GET", f"/api/v1/conversations/{session}", timeout=WAIT)
         assert status == 200, conversation
         assert "History before recovery unavailable" in json.dumps(conversation)
         assert "after the recovery cut" in json.dumps(conversation)
@@ -279,8 +279,8 @@ with socket.socket(socket.AF_UNIX) as peer:
         rejected = self.start_adoption(session, "already-adopted")
         assert rejected.wait(timeout=WAIT) != 0
         assert (self.state(root).get("active_prompt") or {}).get("command_id") == active
-        self.wait(lambda: "genesis held turn" in json.dumps(self.request("GET", f"/api/conversations/{session}", timeout=WAIT)[1]), "ordinary replay from genesis")
-        status, conversation = self.request("GET", f"/api/conversations/{session}", timeout=WAIT)
+        self.wait(lambda: "genesis held turn" in json.dumps(self.request("GET", f"/api/v1/conversations/{session}", timeout=WAIT)[1]), "ordinary replay from genesis")
+        status, conversation = self.request("GET", f"/api/v1/conversations/{session}", timeout=WAIT)
         assert status == 200, conversation
         assert "History before recovery unavailable" not in json.dumps(conversation)
         self.release("genesis held turn")

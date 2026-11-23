@@ -52,7 +52,7 @@ def run(lab):
     code, _ = lab.wait_daemon_status(port)
     assert lab.request("POST", "/auth/session", {"code": code})[0] == 204
     workspace = lab.snapshot()["workspaces"][0]["id"]
-    created = lab.request("POST", "/api/actions", {
+    created = lab.request("POST", "/api/v1/actions", {
         "action": "new", "workspace_id": workspace, "profile_id": "fake",
         "bundle_id": "fixture", "target_id": "localhost", "title": "move-acceptance",
         "project_directory": str(lab.project),
@@ -81,7 +81,7 @@ def run(lab):
 
     def prompt(text):
         lab.wait_snapshot(lambda s: not (lab.session(s, session_id) or {}).get("operation"), "previous web action settled")
-        response = lab.request("POST", "/api/actions", {"action": "prompt", "session_id": session_id, "text": text})
+        response = lab.request("POST", "/api/v1/actions", {"action": "prompt", "session_id": session_id, "text": text})
         assert response[0] == 202, (text, response)
 
     def wait_queued(count):
@@ -238,7 +238,7 @@ def run(lab):
     # Same selections are an idempotent no-op, without checkpointing again.
     unchanged = json.loads(lab.command("move", "--session", session_id, "--profile", "destination", "--yes", "--json").stdout)
     assert unchanged["outcome"] == "unchanged", unchanged
-    assert lab.request("POST", "/api/actions", {
+    assert lab.request("POST", "/api/v1/actions", {
         "action": "suspend", "session_id": session_id,
         "acknowledge_unpublished_work": True,
     })[0] == 202

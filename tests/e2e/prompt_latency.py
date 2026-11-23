@@ -101,7 +101,7 @@ def measure(lab, session_id, surface, count):
         else:
             status, result = lab.request(
                 "POST",
-                "/api/actions",
+                "/api/v1/actions",
                 {
                     "action": "prompt",
                     "session_id": session_id,
@@ -115,7 +115,7 @@ def measure(lab, session_id, surface, count):
         accepted = time.monotonic()
         deadline = started + 30
         while time.monotonic() < deadline:
-            status, result = lab.request("GET", f"/api/conversations/{session_id}")
+            status, result = lab.request("GET", f"/api/v1/conversations/{session_id}")
             if status == 200 and any(
                 e.get("command_id") == command_id for e in result.get("entries", [])
             ):
@@ -243,7 +243,7 @@ def main():
         workspace = lab.snapshot()["workspaces"][0]["id"]
         status, created = lab.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {
                 "action": "new",
                 "workspace_id": workspace,

@@ -60,13 +60,13 @@ async function mount(page) {
   await page.route('**/*', async route => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (pathname === '/api/snapshot') {
+    if (pathname === '/api/v1/snapshot') {
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify(snapshot()) });
     }
-    if (pathname === '/api/events') {
+    if (pathname === '/api/v1/viewer/events') {
       return route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: ': fixture\n\n' });
     }
-    if (pathname.startsWith('/api/settings')) {
+    if (pathname.startsWith('/api/v1/settings')) {
       const body = request.method() === 'POST' ? request.postDataJSON() : null;
       const { draft, original, ...sent } = body || {};
       state.requests.push({ uri: pathname, request: body ? sent : null });
@@ -267,10 +267,10 @@ test('device notification enrollment starts from a tap and supports test and uns
     Object.defineProperty(navigator, 'serviceWorker', { value: Object.assign(new EventTarget(), { register: async () => registration, getRegistration: async () => registration }) });
   });
   const actions = [];
-  await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true, error: null } }));
-  await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
+  await page.route('**/api/v1/push/status?*', route => route.fulfill({ json: { subscribed: true, error: null } }));
+  await page.route('**/api/v1/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
   let rejectUnsubscribe = true;
-  await page.route('**/api/actions', route => {
+  await page.route('**/api/v1/actions', route => {
     const action = route.request().postDataJSON();
     actions.push(action);
     if (action.action === 'push-unsubscribe' && rejectUnsubscribe) {
@@ -295,7 +295,7 @@ test('device notification enrollment starts from a tap and supports test and uns
   expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe', 'push-unsubscribe']);
   let attentionRevision = 100;
   const states = { unknown: 'unknown', unreachable: 'unreachable', failed: 'failed', idle: 'idle', working: 'working' };
-  await page.route('**/api/snapshot', route => {
+  await page.route('**/api/v1/snapshot', route => {
     const next = snapshot();
     next.revision = attentionRevision;
     next.sessions = Object.entries(states).map(([id, attention]) => ({ id, title: id, workspace_id: WORKSPACE_ID, attention, active: true, is_idle: true, capabilities: {}, detail: false }));
@@ -378,9 +378,9 @@ test('device reconcile retries expiry and rotation and shares disable intent acr
   });
   const actions = [];
   let failRenew = false;
-  await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
-  await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true } }));
-  await page.route('**/api/actions', route => {
+  await page.route('**/api/v1/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
+  await page.route('**/api/v1/push/status?*', route => route.fulfill({ json: { subscribed: true } }));
+  await page.route('**/api/v1/actions', route => {
     const action = route.request().postDataJSON(); actions.push(action);
     return route.fulfill({ status: failRenew ? 401 : 200, json: { accepted: !failRenew } });
   });

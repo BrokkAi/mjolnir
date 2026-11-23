@@ -548,7 +548,7 @@ async fn background_task_stop_validates_the_snapshot_and_waits_for_acknowledgeme
         let cookie = cookie.clone();
         async move {
             app.oneshot(
-                Request::post("/api/sessions/session-1/background-tasks/stop")
+                Request::post("/api/v1/sessions/session-1/background-tasks/stop")
                     .header(COOKIE, cookie)
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -570,7 +570,7 @@ async fn background_task_stop_validates_the_snapshot_and_waits_for_acknowledgeme
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
-            Request::post("/api/sessions/session-1/background-tasks/stop")
+            Request::post("/api/v1/sessions/session-1/background-tasks/stop")
                 .header(COOKIE, cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -592,7 +592,7 @@ async fn background_task_stop_reports_provider_failure_without_leaking_details()
         let app = app.clone();
         async move {
             app.oneshot(
-                Request::post("/api/sessions/session-1/background-tasks/stop")
+                Request::post("/api/v1/sessions/session-1/background-tasks/stop")
                     .header(COOKIE, cookie)
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -624,7 +624,7 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
     let unauthorized = app
         .clone()
         .oneshot(
-            Request::post("/api/bundles")
+            Request::post("/api/v1/bundles")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"source":"example/app"}"#))
                 .unwrap(),
@@ -640,7 +640,7 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
         let cookie = cookie.clone();
         async move {
             app.oneshot(
-                Request::post("/api/bundles")
+                Request::post("/api/v1/bundles")
                     .header(CONTENT_TYPE, "application/json")
                     .header(COOKIE, cookie)
                     .body(Body::from(r#"{"source":"example/app"}"#))
@@ -666,7 +666,7 @@ async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
         let cookie = login_cookie(&app).await;
         let response = app
             .oneshot(
-                Request::post("/api/bundles")
+                Request::post("/api/v1/bundles")
                     .header(CONTENT_TYPE, "application/json")
                     .header(COOKIE, cookie)
                     .body(Body::from(
@@ -682,19 +682,27 @@ async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
 }
 
 #[tokio::test]
-async fn api_requires_a_valid_signed_cookie() {
+async fn viewer_snapshot_rejects_unauthenticated_requests_and_accepts_a_cookie() {
     let (app, _, _, _, _) = app();
     let unauthorized = app
         .clone()
-        .oneshot(Request::get("/api/snapshot").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/v1/snapshot")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthorized.headers()[api::API_VERSION_HEADER], "1");
+    assert_eq!(unauthorized.headers()[CACHE_CONTROL], "no-store");
+    let bytes = unauthorized.into_body().collect().await.unwrap().to_bytes();
+    assert!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"].is_string());
 
     let cookie = login_cookie(&app).await;
     let authorized = app
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -702,6 +710,24 @@ async fn api_requires_a_valid_signed_cookie() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn legacy_viewer_routes_are_gone_even_for_authenticated_requests() {
+    let (app, ..) = app();
+    let cookie = login_cookie(&app).await;
+    for builder in [
+        Request::get("/api/snapshot"),
+        Request::post("/api/actions"),
+        Request::get("/api/settings"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(builder.header(COOKIE, &cookie).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[test]
@@ -1038,7 +1064,7 @@ async fn notification_message_reads_only_the_current_form_identity() {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{query}"
+                    "/api/v1/sessions/session-1/notification-message?{query}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -1063,7 +1089,7 @@ async fn notification_message_reads_only_the_current_form_identity() {
                 .clone()
                 .oneshot(
                     Request::get(format!(
-                        "/api/sessions/session-1/notification-message?{stale}"
+                        "/api/v1/sessions/session-1/notification-message?{stale}"
                     ))
                     .header(COOKIE, &cookie)
                     .body(Body::empty())
@@ -1076,7 +1102,7 @@ async fn notification_message_reads_only_the_current_form_identity() {
         let missing = app
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/unknown-session/notification-message?{query}"
+                    "/api/v1/sessions/unknown-session/notification-message?{query}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -1094,7 +1120,7 @@ async fn elicitation_answer_is_typed_and_forwarded() {
     let cookie = login_cookie(&app).await;
     let response = mj_core::runtime::spawn(
         app.oneshot(
-            Request::post("/api/actions")
+            Request::post("/api/v1/actions")
                 .header(COOKIE, cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1125,7 +1151,7 @@ async fn elicitation_answer_for_an_unknown_request_is_refused_without_reaching_t
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
-            Request::post("/api/actions")
+            Request::post("/api/v1/actions")
                 .header(COOKIE, cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1367,14 +1393,14 @@ globalThis.fetch = async (url, sent) => {{
   assert(sent === options, 'request identity or steering target changed');
   return ++actions === 1 ? response(503, true) : response(200);
 }};
-assert((await upgradeAwareFetch('/api/actions', options)).ok, 'request did not complete');
+assert((await upgradeAwareFetch('/api/v1/actions', options)).ok, 'request did not complete');
 assert(actions === 2 && probes === 2, 'handoff did not wait for the replacement');
 globalThis.fetch = async () => {{ throw new Error('acknowledgement lost'); }};
 let failed = false;
-try {{ await upgradeAwareFetch('/api/actions', options); }} catch {{ failed = true; }}
+try {{ await upgradeAwareFetch('/api/v1/actions', options); }} catch {{ failed = true; }}
 assert(failed, 'an ambiguous mutation must not be replayed');
 globalThis.fetch = async () => response(503);
-assert((await upgradeAwareFetch('/api/actions', options)).status === 503,
+assert((await upgradeAwareFetch('/api/v1/actions', options)).status === 503,
   'unrelated service failures must not trigger an upgrade retry');
 "#
         ),
@@ -1812,6 +1838,10 @@ fn viewer_session_applies_a_resolved_source_without_publishing_it() {
 async fn actions_are_refused_when_their_capability_is_false() {
     for (body, capability) in [
         (
+            r#"{"action":"destroy","session_id":"session-1"}"#,
+            "typed destroy route",
+        ),
+        (
             r#"{"action":"interrupt-turn","session_id":"session-1"}"#,
             "cancel_turn",
         ),
@@ -1841,16 +1871,34 @@ async fn actions_are_refused_when_their_capability_is_false() {
         ),
     ] {
         let (app, mut actions, _, _, _) = app();
-        let response = post_action(app, cookie(), body.to_owned()).await;
-        assert!(
-            response.status().is_client_error(),
-            "{capability} was accepted while false: {}",
-            response.status()
-        );
-        assert!(
-            actions.try_recv().is_err(),
-            "{capability} reached the controller while false"
-        );
+        for (header, credential) in [
+            (COOKIE, cookie()),
+            (
+                axum::http::header::AUTHORIZATION,
+                "Bearer test-api-token".into(),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/actions")
+                        .header(header, credential)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_client_error(),
+                "{capability} was accepted: {}",
+                response.status()
+            );
+            assert!(
+                actions.try_recv().is_err(),
+                "{capability} reached the controller"
+            );
+        }
     }
 }
 
@@ -1967,7 +2015,7 @@ async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
         let response = app
             .clone()
             .oneshot(
-                Request::get("/api/sessions/session-1/row")
+                Request::get("/api/v1/sessions/session-1/row")
                     .header(COOKIE, cookie())
                     .body(Body::empty())
                     .unwrap(),
@@ -2128,7 +2176,7 @@ async fn an_oversized_draft_is_refused_with_a_stable_code() {
     let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
     let response = app
         .oneshot(
-            Request::put("/api/sessions/session-1/draft")
+            Request::put("/api/v1/sessions/session-1/draft")
                 .header(COOKIE, cookie())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2148,7 +2196,7 @@ async fn prompt_history_refuses_an_unknown_scope() {
     let (app, _, _, _, mut stored) = app();
     let response = app
         .oneshot(
-            Request::get("/api/sessions/session-1/history?q=ship&scope=everything")
+            Request::get("/api/v1/sessions/session-1/prompt-history?q=ship&scope=everything")
                 .header(COOKIE, cookie())
                 .body(Body::empty())
                 .unwrap(),
@@ -2191,8 +2239,8 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
     let (app, _, _, mut preflights, _) = app();
     let response = mj_core::runtime::spawn(
         app.oneshot(
-            Request::post("/api/preflight/new")
-                .header(COOKIE, cookie())
+            Request::post("/api/v1/preflight/new")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -2241,7 +2289,7 @@ async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
 /// to inspect a host or launch a session.
 #[tokio::test]
 async fn new_session_mount_boundaries_refuse_unsafe_and_unsupported_paths() {
-    for endpoint in ["/api/preflight/new", "/api/actions"] {
+    for endpoint in ["/api/v1/preflight/new", "/api/v1/actions"] {
         for (target, directory, mounts) in [
             (
                 "raw",
@@ -2278,7 +2326,7 @@ async fn new_session_mount_boundaries_refuse_unsafe_and_unsupported_paths() {
                 "profile_id": "codex-1", "bundle_id": "hel", "target_id": target,
                 "project_directory": directory, "additional_mounts": mounts,
             });
-            if endpoint == "/api/actions" {
+            if endpoint == "/api/v1/actions" {
                 body["action"] = "new".into();
             }
             let response = app
@@ -2315,7 +2363,7 @@ async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_contro
     let (app, _, _, mut preflights, _) = app();
     let response = app
         .oneshot(
-            Request::post("/api/preflight/resume")
+            Request::post("/api/v1/preflight/resume")
                 .header(COOKIE, cookie())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2333,7 +2381,7 @@ async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_contro
 async fn a_bare_preflight_validation_failure_is_actionable_without_its_details() {
     let (app, _, _, mut preflights, _) = app();
     let response = mj_core::runtime::spawn(app.oneshot(
-        Request::post("/api/preflight/new")
+        Request::post("/api/v1/preflight/new")
             .header(COOKIE, cookie())
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -2363,7 +2411,7 @@ async fn a_bundle_preflight_controller_failure_keeps_the_generic_service_error()
     let (app, _, _, mut preflights, _) = app();
     let response = mj_core::runtime::spawn(
         app.oneshot(
-            Request::post("/api/preflight/new")
+            Request::post("/api/v1/preflight/new")
                 .header(COOKIE, cookie())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2413,7 +2461,7 @@ async fn a_path_completion_rejects_unknown_targets_and_oversized_prefixes() {
         let (app, _, _, mut preflights, _) = app();
         let response = app
             .oneshot(
-                Request::post("/api/paths/complete")
+                Request::post("/api/v1/paths/complete")
                     .header(COOKIE, cookie())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(body))
@@ -2429,40 +2477,60 @@ async fn a_path_completion_rejects_unknown_targets_and_oversized_prefixes() {
     }
 }
 
-/// Completion lists directories on the controller's machines, so it lives
-/// behind the viewer cookie like every other controller question.
+/// Directory completion must authenticate the caller before asking the controller.
 #[tokio::test]
-async fn a_path_completion_requires_a_session() {
+async fn a_path_completion_requires_authentication_before_dispatch() {
     let (app, _, _, mut preflights, _) = app();
+    let request =
+        || Request::post("/api/v1/paths/complete").header(CONTENT_TYPE, "application/json");
+    let body = r#"{"prefix":"/srv/"}"#;
     let response = app
-        .oneshot(
-            Request::post("/api/paths/complete")
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"prefix":"/srv/"}"#))
-                .unwrap(),
-        )
+        .clone()
+        .oneshot(request().body(Body::from(body)).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(preflights.try_recv().is_err());
+
+    let response = mj_core::runtime::spawn(
+        app.oneshot(
+            request()
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    );
+    let PreflightRequest::CompletePath(request) = preflights.recv().await.unwrap() else {
+        panic!("expected path completion");
+    };
+    assert_eq!(request.prefix, "/srv/");
+    request.reply.send(Ok(Default::default())).unwrap();
+    assert_eq!(response.await.unwrap().unwrap().status(), StatusCode::OK);
 }
 
-/// Saving the Git author rewrites this host's global Git configuration, so it
-/// lives behind the viewer cookie. The body is one the handler would refuse,
-/// so a regression that exposed the route still could not touch the host.
+/// An invalid Git identity reaches validation only after authentication.
 #[tokio::test]
-async fn saving_the_git_identity_requires_a_session() {
-    let (app, _, _, _, _) = app();
+async fn saving_the_git_identity_validates_after_authentication() {
+    let (app, ..) = app();
+    let body = r#"{"name":"","email":""}"#;
+    let request = || Request::post("/api/v1/git-identity").header(CONTENT_TYPE, "application/json");
+    let response = app
+        .clone()
+        .oneshot(request().body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
     let response = app
         .oneshot(
-            Request::post("/api/git-identity")
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"name":"","email":""}"#))
+            request()
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
+                .body(Body::from(body))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 /// Everything an agent writes goes through the Markdown renderer, so the
@@ -2877,7 +2945,7 @@ fn image_capable(snapshot: &mut ViewerSnapshot) {
 
 async fn post_action(app: Router, cookie: String, body: String) -> Response<Body> {
     app.oneshot(
-        Request::post("/api/actions")
+        Request::post("/api/v1/actions")
             .header(COOKIE, cookie)
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body))
@@ -2919,25 +2987,34 @@ async fn browser_attachment_upload_returns_a_stored_reference_without_inline_byt
     let bytes = base64::engine::general_purpose::STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
         .unwrap();
-    let response = app
-        .oneshot(
-            Request::post("/api/sessions/session-1/attachments")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "image/png")
-                .body(Body::from(bytes))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let image: ViewerPromptImage = serde_json::from_slice(&body).unwrap();
-    assert!(image.data_base64.is_empty());
-    let reference = image.attachment.expect("upload should return a reference");
-    assert_eq!(reference.mime_type, "image/png");
-    assert_eq!(reference.width, 1);
-    assert_eq!(reference.height, 1);
-    assert!(reference.size <= 700 * 1024);
+    for (header, credential) in [
+        (COOKIE, cookie),
+        (
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-api-token".into(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/sessions/session-1/attachments")
+                    .header(header, credential)
+                    .header(CONTENT_TYPE, "image/png")
+                    .body(Body::from(bytes.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let image: ViewerPromptImage = serde_json::from_slice(&body).unwrap();
+        assert!(image.data_base64.is_empty());
+        let reference = image.attachment.expect("upload should return a reference");
+        assert_eq!(reference.mime_type, "image/png");
+        assert_eq!(reference.width, 1);
+        assert_eq!(reference.height, 1);
+        assert!(reference.size <= 700 * 1024);
+    }
 }
 
 /// Base64 inflates an upload by a third, so two ordinary photographs pass
@@ -3205,7 +3282,7 @@ async fn confirmed_move_action_forwards_the_fingerprinted_request() {
     let cookie = login_cookie(&app).await;
     let response = mj_core::runtime::spawn(
         app.oneshot(
-            Request::post("/api/actions")
+            Request::post("/api/v1/actions")
                 .header(COOKIE, cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -3784,7 +3861,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
 }
 
 /// Finding G-3: the login page used to learn it was signed out from a
-/// `GET /api/snapshot` 401, which every browser logs as a console error. The
+/// `GET /api/v1/snapshot` 401, which every browser logs as a console error. The
 /// page asks this route instead, which answers 200 either way.
 // Hard-won: 69a3c1d3: signed-out loads hit the protected snapshot and logged a 401.
 #[tokio::test]
@@ -3831,7 +3908,7 @@ async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed
         let response = app
             .clone()
             .oneshot(
-                Request::get("/api/snapshot")
+                Request::get("/api/v1/snapshot")
                     .header(COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -3859,7 +3936,7 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
     let snapshot_response = app
         .clone()
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -3892,7 +3969,7 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
     let detail_response = app
         .clone()
         .oneshot(
-            Request::get("/api/sessions/session-1/row")
+            Request::get("/api/v1/sessions/session-1/row")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -3918,7 +3995,7 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
 
     let missing = app
         .oneshot(
-            Request::get("/api/sessions/unknown-session/row")
+            Request::get("/api/v1/sessions/unknown-session/row")
                 .header(COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -3983,7 +4060,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/conversations/session-1?after_seq=3")
+            Request::get("/api/v1/conversations/session-1?after_seq=3")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -4001,7 +4078,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/conversations/session-1?after_seq=8&presentation_key=key-1")
+            Request::get("/api/v1/conversations/session-1?after_seq=8&presentation_key=key-1")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -4019,7 +4096,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
 
     let response = app
         .oneshot(
-            Request::get("/api/conversations/session-1?after_seq=8&presentation_key=stale-key")
+            Request::get("/api/v1/conversations/session-1?after_seq=8&presentation_key=stale-key")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -4070,7 +4147,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
-            Request::get("/api/conversations/session-1")
+            Request::get("/api/v1/conversations/session-1")
                 .header(COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -4090,7 +4167,7 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
     // queue behind it or be rejected for the occupied session slot.
     let prompt = mj_core::runtime::spawn(
         app.clone().oneshot(
-            Request::post("/api/actions")
+            Request::post("/api/v1/actions")
                 .header(COOKIE, cookie.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -4103,7 +4180,7 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
 
     let response = mj_core::runtime::spawn(
         app.oneshot(
-            Request::post("/api/conversations/session-1/read")
+            Request::post("/api/v1/conversations/session-1/read")
                 .header(COOKIE, cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"through":42}"#))
@@ -4180,7 +4257,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
         let cookie = login_cookie(&app).await;
         let response = mj_core::runtime::spawn(
             app.oneshot(
-                Request::post("/api/actions")
+                Request::post("/api/v1/actions")
                     .header(COOKIE, cookie)
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -4227,7 +4304,7 @@ async fn every_response_carries_the_security_headers() {
         "/viewer.js",
         "/viewer.css",
         "/manifest.webmanifest",
-        "/api/snapshot",
+        "/api/v1/snapshot",
     ] {
         let (app, _, _, _, _) = app();
         let response = app
@@ -4286,7 +4363,7 @@ async fn the_page_carries_no_inline_script_or_style() {
 /// service worker is what keeps a phone on a superseded application.
 #[tokio::test]
 async fn live_state_and_the_service_worker_are_never_stored() {
-    for path in ["/service-worker.js", "/api/snapshot"] {
+    for path in ["/service-worker.js", "/api/v1/snapshot"] {
         let (app, _, _, _, _) = app();
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
@@ -4418,7 +4495,7 @@ async fn viewer_responses_negotiate_fast_compression() {
     let raw = app
         .clone()
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -4432,7 +4509,7 @@ async fn viewer_responses_negotiate_fast_compression() {
         .to_bytes();
     let compressed = app
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, cookie)
                 .header("accept-encoding", "br")
                 .body(Body::empty())
@@ -4451,7 +4528,7 @@ async fn server_sent_events_stay_uncompressed_and_yield_the_first_event() {
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
-            Request::get("/api/events")
+            Request::get("/api/v1/viewer/events")
                 .header(COOKIE, cookie)
                 .header("accept-encoding", "gzip, br")
                 .body(Body::empty())
@@ -4673,7 +4750,7 @@ async fn bookmarked_qr_login_survives_restart_and_is_revoked_with_the_key() {
             .unwrap();
         let snapshot = app
             .oneshot(
-                Request::get("/api/snapshot")
+                Request::get("/api/v1/snapshot")
                     .header(COOKIE, cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -4698,7 +4775,7 @@ async fn bookmarked_qr_login_survives_restart_and_is_revoked_with_the_key() {
 #[tokio::test]
 async fn authenticated_requests_renew_cookies_without_changing_viewer_identity() {
     for ttl in [Duration::from_secs(3600), Duration::ZERO] {
-        for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for route in ["/api/v1/snapshot", "/api/v1/sessions"] {
             let mut options = detached_options();
             options.session_ttl = ttl;
             let key = options.cookie_key.clone();
@@ -4748,7 +4825,7 @@ async fn rejected_cookies_are_not_renewed_and_bearer_auth_does_not_mint_a_cookie
     let key = options.cookie_key.clone();
     options.set_api_token("test-bearer".into());
     let app = router(options);
-    for route in ["/api/snapshot", "/api/v1/sessions"] {
+    for route in ["/api/v1/snapshot", "/api/v1/sessions"] {
         for value in [
             None,
             Some("malformed".to_owned()),
@@ -4793,7 +4870,7 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
     let early = app
         .clone()
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -4809,7 +4886,7 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
         .to_owned();
     let pending = mj_core::runtime::spawn(
         app.clone().oneshot(
-            Request::post("/api/bundles")
+            Request::post("/api/v1/bundles")
                 .header(COOKIE, &cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"source":"owner/repo"}"#))
@@ -4843,7 +4920,7 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
         !late.headers().contains_key(SET_COOKIE),
         "a delayed response must not renew after logout"
     );
-    for route in ["/api/snapshot", "/api/v1/sessions"] {
+    for route in ["/api/v1/snapshot", "/api/v1/sessions"] {
         for revoked in [&cookie, &early_cookie] {
             let response = app
                 .clone()
@@ -4881,7 +4958,7 @@ async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
     let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
     let app = router(options);
     for value in [desktop, legacy] {
-        for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for route in ["/api/v1/snapshot", "/api/v1/sessions"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -4933,7 +5010,7 @@ async fn logout_survives_restart_without_revoking_the_bookmarked_login_url() {
     let mut restarted = detached_options();
     restarted.load_cookie_credentials(path).await.unwrap();
     let restarted = router(restarted);
-    for route in ["/api/snapshot", "/api/v1/sessions"] {
+    for route in ["/api/v1/snapshot", "/api/v1/sessions"] {
         let denied = restarted
             .clone()
             .oneshot(
@@ -4960,7 +5037,7 @@ async fn logout_survives_restart_without_revoking_the_bookmarked_login_url() {
         .unwrap();
     let accepted = restarted
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, new_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -5006,7 +5083,7 @@ async fn logout_reports_persistence_failure_and_revokes_in_memory() {
     let denied = app
         .clone()
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -5032,7 +5109,7 @@ async fn logout_reports_persistence_failure_and_revokes_in_memory() {
         .unwrap();
     let denied = router(restarted)
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -5082,7 +5159,7 @@ if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown'
 async fn project_discovery_returns_actionable_failures_and_closes_abandoned_replies() {
     let (app, _, _, mut preflights, _) = app();
     let make_request = || {
-        Request::post("/api/projects/discover")
+        Request::post("/api/v1/projects/discover")
             .header(COOKIE, cookie())
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"kind":"github","query":""}"#))
@@ -5123,7 +5200,7 @@ async fn bundle_endpoint_rejects_conflicting_empty_or_oversized_source_sets() {
         let (app, mut bundles) = app_with_bundle_receiver();
         let response = app
             .oneshot(
-                Request::post("/api/bundles")
+                Request::post("/api/v1/bundles")
                     .header(COOKIE, cookie())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(body.to_string()))
@@ -5160,7 +5237,7 @@ async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
             let cookie = login_cookie(&app).await;
             let response = app
                 .oneshot(
-                    Request::get(format!("/api/events?format={format}"))
+                    Request::get(format!("/api/v1/viewer/events?format={format}"))
                         .header(COOKIE, cookie)
                         .body(Body::empty())
                         .unwrap(),
@@ -5401,18 +5478,27 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         app_with_snapshot(move |snapshot| snapshot.profile_capabilities = capabilities.into());
     let cookie = login_cookie(&app).await;
 
-    // The agents' bearer token reaches `/api/v1`, never Settings.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/api/settings")
-                .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    for builder in [
+        Request::get("/api/v1/settings"),
+        Request::post("/api/v1/settings/page"),
+        Request::post("/api/v1/settings/edit"),
+        Request::post("/api/v1/settings/save"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                builder
+                    .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[api::API_VERSION_HEADER], "1");
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+    }
 
     let environments = |value: &serde_json::Value| {
         serde_json::json!({
@@ -5445,9 +5531,9 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         response
     };
 
-    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    let (status, body) = settings_request(&app, &cookie, "/api/v1/settings", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let opened = record("/api/settings", serde_json::Value::Null, status, &body);
+    let opened = record("/api/v1/settings", serde_json::Value::Null, status, &body);
     let original = opened["original"].clone();
     let mut draft = opened["draft"].clone();
     let original_file = std::fs::read(&path).unwrap();
@@ -5455,89 +5541,92 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     // The requests a browser makes, in its order: open a page, then edit on
     // it, and save from the page it is on. Each sends the draft the
     // previous answer returned.
-    let root = || ("/api/settings/page", serde_json::json!({"path": []}));
+    let root = || ("/api/v1/settings/page", serde_json::json!({"path": []}));
     let steps = [
         (
-            "/api/settings/page",
+            "/api/v1/settings/page",
             serde_json::json!({"path": ["profiles", "claude"]}),
         ),
         root(),
-        ("/api/settings/page", serde_json::json!({"path": ["phone"]})),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/page",
+            serde_json::json!({"path": ["phone"]}),
+        ),
+        (
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),
         ),
         root(),
         (
-            "/api/settings/page",
+            "/api/v1/settings/page",
             serde_json::json!({"path": ["subagents"]}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
         ),
         // Subtle is a list of pairs. Adding one and choosing a model, with
         // straightforward still empty, is the save the configuration refuses.
         (
-            "/api/settings/page",
+            "/api/v1/settings/page",
             serde_json::json!({"path": ["subagents", "subtle"]}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "subtle"], "edit": {"kind": "add", "path": ["subagents", "subtle"]}}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "subtle", "0"], "edit": {"kind": "set", "path": ["subagents", "subtle", "0", "model"], "choice": "opus"}}),
         ),
         (
-            "/api/settings/save",
+            "/api/v1/settings/save",
             serde_json::json!({"page": ["subagents", "subtle", "0"]}),
         ),
         (
-            "/api/settings/page",
+            "/api/v1/settings/page",
             serde_json::json!({"path": ["subagents"]}),
         ),
         (
-            "/api/settings/page",
+            "/api/v1/settings/page",
             serde_json::json!({"path": ["subagents", "straightforward"]}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "add", "path": ["subagents", "straightforward"]}}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "straightforward", "0"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "0", "model"], "choice": "opus"}}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "straightforward", "0"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "0", "effort"], "choice": "high"}}),
         ),
         // A second Straightforward pair on the same provider is refused, then
         // removed so the draft can save.
         (
-            "/api/settings/page",
+            "/api/v1/settings/page",
             serde_json::json!({"path": ["subagents", "straightforward"]}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "straightforward"], "edit": {"kind": "add", "path": ["subagents", "straightforward"]}}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "straightforward", "1"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "1", "model"], "choice": "sonnet"}}),
         ),
         (
-            "/api/settings/save",
+            "/api/v1/settings/save",
             serde_json::json!({"page": ["subagents", "straightforward", "1"]}),
         ),
         (
-            "/api/settings/edit",
+            "/api/v1/settings/edit",
             serde_json::json!({"page": ["subagents", "straightforward", "1"], "edit": {"kind": "remove", "path": ["subagents", "straightforward", "1"]}}),
         ),
         (
-            "/api/settings/save",
+            "/api/v1/settings/save",
             serde_json::json!({"page": ["subagents", "straightforward"]}),
         ),
     ];
@@ -5545,11 +5634,11 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     for (uri, sent) in steps {
         let mut request = sent.clone();
         request["draft"] = draft.clone();
-        if uri == "/api/settings/save" {
+        if uri == "/api/v1/settings/save" {
             request["original"] = original.clone();
         }
         let (status, body) = settings_request(&app, &cookie, uri, Some(&request)).await;
-        if uri == "/api/settings/save" {
+        if uri == "/api/v1/settings/save" {
             saves += 1;
             match saves {
                 1 => {
@@ -5654,14 +5743,14 @@ async fn settings_save_refuses_a_stale_draft_without_writing() {
     .unwrap();
     let (app, ..) = app();
     let cookie = login_cookie(&app).await;
-    let (_, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    let (_, body) = settings_request(&app, &cookie, "/api/v1/settings", None).await;
     let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
     let edit = serde_json::json!({
         "draft": opened["draft"],
         "page": ["phone"],
         "edit": {"kind": "set", "path": ["phone", "bind"], "text": "127.0.0.1:4000"},
     });
-    let (_, body) = settings_request(&app, &cookie, "/api/settings/edit", Some(&edit)).await;
+    let (_, body) = settings_request(&app, &cookie, "/api/v1/settings/edit", Some(&edit)).await;
     let edited: serde_json::Value = serde_json::from_str(&body).unwrap();
     let save = serde_json::json!({"original": opened["original"], "draft": edited["draft"]});
 
@@ -5671,7 +5760,8 @@ async fn settings_save_refuses_a_stale_draft_without_writing() {
     })
     .unwrap();
     let before = std::fs::read(&path).unwrap();
-    let (status, body) = settings_request(&app, &cookie, "/api/settings/save", Some(&save)).await;
+    let (status, body) =
+        settings_request(&app, &cookie, "/api/v1/settings/save", Some(&save)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body.contains("changed in another client"), "{body}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -5683,7 +5773,7 @@ async fn settings_save_refuses_a_stale_draft_without_writing() {
     let before = std::fs::read(&path).unwrap();
     let unrelated = serde_json::json!({"original": opened["original"], "draft": opened["draft"]});
     let (status, body) =
-        settings_request(&app, &cookie, "/api/settings/save", Some(&unrelated)).await;
+        settings_request(&app, &cookie, "/api/v1/settings/save", Some(&unrelated)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("hidden value of LAB_TOKEN"), "{body}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -5885,12 +5975,12 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
         Some(Arc::new(SettingsReviewBackend)),
     );
     let cookie = login_cookie(&app).await;
-    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    let (status, body) = settings_request(&app, &cookie, "/api/v1/settings", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
     let request = serde_json::json!({"draft": opened["draft"], "page": ["review"], "edit": {"kind": "action", "id": "review.autoconfigure"}});
     let (status, body) =
-        settings_request(&app, &cookie, "/api/settings/edit", Some(&request)).await;
+        settings_request(&app, &cookie, "/api/v1/settings/edit", Some(&request)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
@@ -5966,7 +6056,7 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
     let cookie = login_cookie(&app).await;
     let response = app
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -6117,7 +6207,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{query}"
+                    "/api/v1/sessions/session-1/notification-message?{query}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -6151,7 +6241,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/api/sessions/session-1/notification-message?{invalid}"
+                    "/api/v1/sessions/session-1/notification-message?{invalid}"
                 ))
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
@@ -6168,7 +6258,7 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
 
     let response = app
         .oneshot(
-            Request::get("/api/snapshot")
+            Request::get("/api/v1/snapshot")
                 .header(COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -6221,7 +6311,7 @@ assert.equal(fold.dataset.foldKey, 'tool-detail-tool:/edit');
 assert.deepEqual(calls, []);
 const first = open(fold);
 assert.match(fold.text(), /Loading tool details…/);
-assert.deepEqual(calls, ['/api/sessions/session%20one/items/tool%3A%2Fedit/detail']);
+assert.deepEqual(calls, ['/api/v1/sessions/session%20one/items/tool%3A%2Fedit/detail']);
 replies.shift().resolve({ status: 'unavailable', unavailable_reason: 'The spill is missing' });
 await first;
 assert.match(fold.text(), /The spill is missing/);

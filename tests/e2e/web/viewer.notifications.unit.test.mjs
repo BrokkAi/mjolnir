@@ -188,7 +188,7 @@ test('published stacks own visibility, paging, and whole-stack Clear', async () 
     notification_card: stack('needs_input', 32, [first, second]),
     subagent_parent_id: 'p',
   });
-  const path = '/api/sessions/a/notification-message';
+  const path = '/api/v1/sessions/a/notification-message';
   const view = screen([session, row('b', 'needs_input', 10, { notification_card: null }),
     row('c', 'important', 8, { notification_card: stack('important', 6, [first]) }),
     row('d', 'failed', 7, { notification_card: null })], {
@@ -238,7 +238,7 @@ test('paging past a pending read drops its late reply and allows a fresh read on
     notification_card: stack('important', 4, [message(1, 'important', 'none'), message(2, 'important', 'none')]),
   });
   let finish;
-  const path = '/api/sessions/a/notification-message';
+  const path = '/api/v1/sessions/a/notification-message';
   const view = screen([session], {
     texts: { [path]: () => new Promise(resolve => { finish = resolve; }) },
   });
@@ -451,7 +451,7 @@ test('Go to Session opens a pending form\'s holder and returns here on Back', ()
   view.nodes.open.onclick();
   assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
   view.nodes.previous.onclick();
-  assert.equal(view.requests.at(-1).url, '/api/sessions/parent/notification-message?through=2');
+  assert.equal(view.requests.at(-1).url, '/api/v1/sessions/parent/notification-message?through=2');
   view.nodes.open.onclick();
   assert.deepEqual(plain(view.nav).at(-1).sessionId, 'parent');
   // Both the history entry and the viewer's own back control follow the route.
@@ -461,13 +461,13 @@ test('Go to Session opens a pending form\'s holder and returns here on Back', ()
 
 test('the full message loads from the daemon: loading, text, and not available', async () => {
   const view = screen([row('a', 'needs_input', 3, { question_message: 'agent:1' })],
-    { texts: { '/api/sessions/a/notification-message': { session_id: 'a', text: 'Line one\n\nLine two' } } });
+    { texts: { '/api/v1/sessions/a/notification-message': { session_id: 'a', text: 'Line one\n\nLine two' } } });
   assert.equal(view.nodes.body.textContent, 'loading…');
   await settle();
   assert.equal(view.nodes.body.textContent, 'Line one\n\nLine two');
 
   const missing = screen([row('m', 'important', 3)],
-    { texts: { '/api/sessions/m/notification-message': { session_id: 'm', text: null } } });
+    { texts: { '/api/v1/sessions/m/notification-message': { session_id: 'm', text: null } } });
   await settle();
   assert.equal(missing.nodes.body.textContent, 'message not available');
 });
@@ -531,7 +531,7 @@ test('skip rotates through unique cards however many times it is pressed', () =>
 
 test('a failed message read is not cached: it retries when the card is shown again, not in a loop', async () => {
   const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)],
-    { texts: { '/api/sessions/a/notification-message': new Error('offline') } });
+    { texts: { '/api/v1/sessions/a/notification-message': new Error('offline') } });
   await settle();
   const reads = () => view.requests.filter(r => r.url.includes('/a/notification-message')).length;
   assert.equal(reads(), 1);
@@ -540,16 +540,16 @@ test('a failed message read is not cached: it retries when the card is shown aga
   view.render(); view.render();
   await settle();
   assert.equal(reads(), 1, 'rendering the same card again does not refetch');
-  view.answers.set('/api/sessions/a/notification-message', { text: 'back again' });
+  view.answers.set('/api/v1/sessions/a/notification-message', { text: 'back again' });
   view.nodes.retry.onclick();
   await settle();
   assert.equal(view.nodes.body.textContent, 'back again');
 
   // A failure is also retried on the next visit to the card.
   const other = screen([row('a', 'needs_input', 3)],
-    { texts: { '/api/sessions/a/notification-message': new Error('offline') } });
+    { texts: { '/api/v1/sessions/a/notification-message': new Error('offline') } });
   await settle();
-  other.answers.set('/api/sessions/a/notification-message', { text: 'recovered' });
+  other.answers.set('/api/v1/sessions/a/notification-message', { text: 'recovered' });
   other.read('inboxShownKey = null');
   other.render();
   await settle();
@@ -560,13 +560,13 @@ test('a new pending form, from the same or another holder, reads the message aga
   const parent = row('p', 'needs_input', 3, { form_holder: 'c1' });
   const child = (id, requests) => row(id, 'working', 1, { pending_elicitation_ids: requests, subagent_parent_id: 'p' });
   const view = screen([parent, child('c1', ['r1']), child('c2', [])]);
-  view.answers.set('/api/sessions/p/notification-message', { text: 'form r1' });
+  view.answers.set('/api/v1/sessions/p/notification-message', { text: 'form r1' });
   view.render();
   await settle();
   const reads = () => view.requests.filter(r => r.url.includes('/p/notification-message')).length;
   assert.equal(reads(), 1);
   view.context.viewerState.rows.get('c1').pending_elicitation_ids = ['r2'];
-  view.answers.set('/api/sessions/p/notification-message', { text: 'form r2' });
+  view.answers.set('/api/v1/sessions/p/notification-message', { text: 'form r2' });
   view.render();
   await settle();
   assert.equal(reads(), 2, 'a new request id from the same holder');
@@ -648,7 +648,7 @@ test('a gesture acts on the card it started on, even if a snapshot changes the f
 
 test('the message text node is replaced only when the text changes', async () => {
   const view = screen([row('a', 'needs_input', 3, { question_message: 'q' })],
-    { texts: { '/api/sessions/a/notification-message': { text: 'long message' } } });
+    { texts: { '/api/v1/sessions/a/notification-message': { text: 'long message' } } });
   let writes = 0;
   let current = view.nodes.body.textContent;
   Object.defineProperty(view.nodes.body, 'textContent', {
@@ -673,7 +673,7 @@ test('a new notification from a skipped session is not deferred', () => {
 
 // Hard-won: 759664d52: Back discarded a hand-off that was marked as already saved.
 test('Back saves an untouched slash command handed to an empty composer', async () => {
-  const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: '', through_event_ordinal: 0 } } });
+  const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/v1/sessions/a/client-state': { draft: '', through_event_ordinal: 0 } } });
   view.nodes.input.value = '/model fast';
   view.nodes.input.oninput();
   view.nodes.reply.onsubmit({ preventDefault() {} });
@@ -693,7 +693,7 @@ test('Back saves an untouched slash command handed to an empty composer', async 
 });
 
 test('a slash command never overwrites the conversation draft and keeps the quick reply', async () => {
-  const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: 'my unsent thoughts' } } });
+  const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/v1/sessions/a/client-state': { draft: 'my unsent thoughts' } } });
   view.nodes.input.value = '/model fast';
   view.nodes.input.oninput();
   view.nodes.reply.onsubmit({ preventDefault() {} });
@@ -706,7 +706,7 @@ test('a slash command never overwrites the conversation draft and keeps the quic
 });
 
 test('when the draft cannot be checked, or the composer is no longer empty, nothing is lost', async () => {
-  const failing = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': new Error('offline') } });
+  const failing = screen([row('a', 'needs_input', 3)], { texts: { '/api/v1/sessions/a/client-state': new Error('offline') } });
   failing.nodes.input.value = '/model fast';
   failing.nodes.input.oninput();
   failing.nodes.reply.onsubmit({ preventDefault() {} });
@@ -715,7 +715,7 @@ test('when the draft cannot be checked, or the composer is no longer empty, noth
   assert.equal(failing.nodes.input.value, '/model fast');
   assert.match(failing.nodes.cardError.textContent, /^Not sent: could not check/);
 
-  const typed = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: '' } } });
+  const typed = screen([row('a', 'needs_input', 3)], { texts: { '/api/v1/sessions/a/client-state': { draft: '' } } });
   typed.nodes.input.value = '/model fast';
   typed.nodes.input.oninput();
   typed.nodes.reply.onsubmit({ preventDefault() {} });
@@ -758,7 +758,7 @@ test('a new form request or holder after a skip is a new card, not deferred', ()
 /// A Quick reply whose refusal arrives after `act` has run; resolves with the view.
 async function refusedReply(act, { draft = '' } = {}) {
   const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)],
-    { texts: { '/api/sessions/a/client-state': { draft, through_event_ordinal: 0 } } });
+    { texts: { '/api/v1/sessions/a/client-state': { draft, through_event_ordinal: 0 } } });
   view.nodes.input.value = 'my reply, in full';
   view.nodes.input.oninput();
   let refuse;
@@ -834,7 +834,7 @@ test('when a card disappears, the refusal stays copyable and can be handed to an
   noticeButton(view, 'Hand to conversation').onclick();
   assert.equal(view.context.composer, 'already there', 'an already open, occupied composer keeps its text');
   view.read("setComposerText(''); saveDraft()");
-  view.answers.set('/api/sessions/a/client-state', { draft: '' });
+  view.answers.set('/api/v1/sessions/a/client-state', { draft: '' });
   noticeButton(view, 'Hand to conversation').onclick();
   await settle();
   assert.equal(view.context.composer, 'my reply, in full');

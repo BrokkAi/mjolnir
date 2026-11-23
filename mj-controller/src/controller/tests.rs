@@ -267,7 +267,7 @@ fn golden_path_completion() {
             .unwrap()
             .replace(escaped_root.trim_matches('"'), "/fixture");
         output.push_str(&format!(
-            "=== POST /api/paths/complete: {label} (JSON) ===\n{response}\n\n"
+            "=== POST /api/v1/paths/complete: {label} (JSON) ===\n{response}\n\n"
         ));
     }
     output.pop();
