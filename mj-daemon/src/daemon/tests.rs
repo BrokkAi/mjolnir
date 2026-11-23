@@ -17909,3 +17909,137 @@ async fn retired_harness_child_is_stopped_before_its_parent_suspends() {
         database::EnvironmentPhase::Active
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn retired_harness_stop_keeps_independent_descendants() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+    use mj_core::state::TargetLocator;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const TEST: &str = "retired_harness_stop_keeps_independent_descendants";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_INDEPENDENT_DESCENDANTS";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-independent-descendants")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+
+    for variant in ["supported", "retired"] {
+        let session = |role| {
+            let id = format!("{variant}-{role}");
+            let mut session = runtime_test_session(
+                &id,
+                mj_core::workspace::DEFAULT_WORKSPACE_ID,
+                SessionState::Running,
+            );
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: root.path().join(id),
+            }));
+            session
+        };
+        let parent = session("parent");
+        let child = session("borrower");
+        let bound = session("bound-grandchild");
+        let independent = session("independent-grandchild");
+        let worker_root = |id: &str| root.path().join(id);
+        for id in [&child.id, &independent.id] {
+            let dir = worker_root(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let worker = dir.join("hel");
+            std::fs::write(
+                &worker,
+                "#!/bin/sh\n[ \"$3\" != --help ] || exit 0\ntouch \"$4/stopped\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = worker_root(&independent.id).join("work");
+        std::fs::write(&data, b"independent work").unwrap();
+
+        database::save_session(&parent).unwrap();
+        let mut borrower = runtime_test_subagent(&child.id, &parent.id);
+        borrower.orchestrator = true;
+        database::save_subagent_session(&child, &borrower).unwrap();
+        database::save_subagent_session(&bound, &runtime_test_subagent(&bound.id, &child.id))
+            .unwrap();
+        database::register_subagent_with_startup(
+            &independent,
+            &runtime_test_subagent(&independent.id, &child.id),
+            Vec::new(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let shared = database::session_environment(&parent.id).unwrap().unwrap();
+        let before = database::session_environment(&independent.id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(before.id, shared.id);
+        test_fixtures::retire_test_harness(&child.id).unwrap();
+        test_fixtures::retire_test_harness(&bound.id).unwrap();
+        if variant == "retired" {
+            test_fixtures::retire_test_harness(&independent.id).unwrap();
+        }
+
+        let state = test_runtime_state_loading_the_store();
+        state
+            .stop_subagents_before_close(&parent.id, None)
+            .await
+            .unwrap();
+
+        assert!(worker_root(&child.id).join("stopped").exists());
+        assert!(database::session_environment(&child.id).unwrap().is_none());
+        assert!(
+            database::load_retired_harness_session(&child.id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            database::environment_workers(&shared.id)
+                .unwrap()
+                .iter()
+                .any(|lease| lease.session_id == child.id)
+        );
+        assert!(
+            database::load_retired_harness_session(&bound.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let after = database::session_environment(&independent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.phase, database::EnvironmentPhase::Active);
+        assert_eq!(
+            database::load_subagent(&independent.id)
+                .unwrap()
+                .unwrap()
+                .parent_session_id,
+            child.id
+        );
+        let independent_state = if variant == "retired" {
+            database::load_retired_harness_session(&independent.id)
+                .unwrap()
+                .unwrap()
+                .state
+        } else {
+            database::read_durable_session_record(&independent.id)
+                .unwrap()
+                .unwrap()
+                .state
+        };
+        assert_eq!(independent_state, SessionState::Running);
+        assert!(!worker_root(&independent.id).join("stopped").exists());
+        assert_eq!(std::fs::read(&data).unwrap(), b"independent work");
+    }
+}

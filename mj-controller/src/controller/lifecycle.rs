@@ -2974,6 +2974,12 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
     ) -> Result<DestroyOutcome> {
+        if !self.state.sessions.contains_key(session_id)
+            && crate::database::load_retired_harness_session(session_id)?.is_some()
+        {
+            self.destroy_retired_harness_session(session_id, executor, branch)?;
+            return Ok(DestroyOutcome::default());
+        }
         self.force_destroy_session_with(
             session_id,
             executor,
@@ -3037,17 +3043,7 @@ impl Controller {
                                 operation.granted_keys.clear();
                                 self.cleanup_prepared_move_destination(operation, executor)?;
                             }
-                            let checkpoint = crate::database::load_session_checkpoint(&id)?;
-                            super::checkpoint::remove_session_checkpoint_archives(
-                                &mj_core::config::sessions_dir(),
-                                &id,
-                                checkpoint.as_ref(),
-                            )?;
-                            mj_core::attachment::AttachmentStore::controller(&id)?
-                                .remove_session_data()
-                                .context("remove retired-harness session image attachments")?;
-                            crate::database::delete_retired_harness_session(&id)?;
-                            Ok(())
+                            finish_retired_session_destroy(&id)
                         })
                         .with_context(|| {
                             mj_core::refusal::Refusal::precondition(format!(
@@ -3058,6 +3054,36 @@ impl Controller {
                 Ok(())
             },
         )
+    }
+
+    fn stop_retired_borrower(
+        &self,
+        retired: &crate::database::RetiredHarnessSession,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let id = &retired.session_id;
+        crate::worker_lifecycle::run_blocking(id, "stop retired sub-agent", executor, || {
+            let environments = crate::database::worker_environments(id)?;
+            super::environment::stop_workers_in_environments(
+                id,
+                &self.config,
+                executor,
+                environments
+                    .iter()
+                    .filter(|environment| environment.owner_session_id != *id),
+            )?;
+            if crate::database::retain_stopped_retired_borrower(id)? {
+                return Ok(());
+            }
+            let operation = crate::database::load_move_operation(id)?;
+            self.revoke_retired_move_credentials(
+                retired,
+                &environments,
+                operation.as_ref(),
+                executor,
+            )?;
+            finish_retired_session_destroy(id)
+        })
     }
 
     fn revoke_retired_move_credentials(
@@ -3165,6 +3191,12 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<DestroyOutcome> {
+        if !self.state.sessions.contains_key(session_id)
+            && let Some(retired) = crate::database::load_retired_harness_session(session_id)?
+        {
+            self.stop_retired_borrower(&retired, executor)?;
+            return Ok(DestroyOutcome::default());
+        }
         self.destroy_session_with_cleanup(
             session_id,
             executor,
@@ -3182,12 +3214,6 @@ impl Controller {
         delete: impl Fn(&str) -> Result<()>,
         cleanup: DestroyCleanup,
     ) -> Result<DestroyOutcome> {
-        if !self.state.sessions.contains_key(session_id)
-            && crate::database::load_retired_harness_session(session_id)?.is_some()
-        {
-            self.destroy_retired_harness_session(session_id, executor, branch)?;
-            return Ok(DestroyOutcome::default());
-        }
         let result =
             self.force_destroy_session_steps(session_id, executor, branch, delete, cleanup);
         if result.is_err() {
@@ -3454,6 +3480,20 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
         | SessionState::Stopped
         | SessionState::DestroyedWithDataLoss => false,
     }
+}
+
+fn finish_retired_session_destroy(session_id: &str) -> Result<()> {
+    let checkpoint = crate::database::load_session_checkpoint(session_id)?;
+    super::checkpoint::remove_session_checkpoint_archives(
+        &mj_core::config::sessions_dir(),
+        session_id,
+        checkpoint.as_ref(),
+    )?;
+    mj_core::attachment::AttachmentStore::controller(session_id)?
+        .remove_session_data()
+        .context("remove retired-harness session image attachments")?;
+    crate::database::delete_retired_harness_session(session_id)?;
+    Ok(())
 }
 
 /// Stop access to a placed environment and report whether retirement was deferred.

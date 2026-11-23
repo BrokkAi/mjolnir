@@ -305,8 +305,17 @@ pub(super) fn stop_borrower(
     config: &Config,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    let permit = crate::worker_lifecycle::require(session_id)?;
     let environments = database::worker_environments(session_id)?;
+    stop_workers_in_environments(session_id, config, executor, &environments)
+}
+
+pub(super) fn stop_workers_in_environments<'a>(
+    session_id: &str,
+    config: &Config,
+    executor: &impl CommandExecutor,
+    environments: impl IntoIterator<Item = &'a EnvironmentRecord>,
+) -> Result<()> {
+    let permit = crate::worker_lifecycle::require(session_id)?;
     for environment in environments
         .into_iter()
         .filter(|environment| environment.phase != EnvironmentPhase::Reclaimed)

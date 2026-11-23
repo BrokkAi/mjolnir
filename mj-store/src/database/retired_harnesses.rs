@@ -130,6 +130,39 @@ fn destroy_order_with(connection: &Connection, session_id: &str) -> Result<Vec<S
     Ok(order)
 }
 
+fn owns_unreclaimed_environment(connection: &Connection, id: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM environments WHERE owner_session_id=?1 AND phase<>'reclaimed')",
+        [id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Retain a stopped retired borrower when its row still owns resources or is
+/// needed by an independent child. Unbind it without removing worker leases,
+/// which remain the shared environment owner's cleanup responsibility.
+pub fn retain_stopped_retired_borrower(session_id: &str) -> Result<bool> {
+    let id = session_id.to_owned();
+    submit_database_write("settle stopped retired borrower", move |connection| {
+        let transaction = connection.transaction()?;
+        ensure!(
+            harness_is_retired(&transaction, &id)?,
+            "session {id} is not retired"
+        );
+        let retain = !children(&transaction, &id)?.is_empty()
+            || owns_unreclaimed_environment(&transaction, &id)?;
+        if retain {
+            transaction.execute(
+                "DELETE FROM environment_bindings WHERE session_id=?1 AND environment_id IN
+                 (SELECT environment_id FROM environments WHERE owner_session_id<>?1)",
+                [&id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(retain)
+    })
+}
+
 pub fn delete_retired_harness_session(session_id: &str) -> Result<bool> {
     let session_id = session_id.to_owned();
     submit_database_write("delete retired-harness session", move |connection| {
@@ -150,13 +183,8 @@ fn remove_session_with(connection: &mut Connection, path: &Path, id: &str) -> Re
         "cannot delete retired-harness session {id} while it has child sessions: {}",
         children.join(", ")
     );
-    let owns_environment: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM environments WHERE owner_session_id=?1 AND phase<>'reclaimed')",
-        [id],
-        |row| row.get(0),
-    )?;
     ensure!(
-        !owns_environment,
+        !owns_unreclaimed_environment(&transaction, id)?,
         "retired-harness session {id} still owns an unreclaimed environment"
     );
     transaction.execute("DELETE FROM sessions WHERE session_id=?1", [id])?;

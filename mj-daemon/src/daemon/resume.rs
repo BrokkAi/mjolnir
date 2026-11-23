@@ -982,12 +982,25 @@ impl RuntimeState {
                         accepted.send_replace(Some(Ok(())));
                         return Ok(DaemonLifecycleResult::Done);
                     }
-                    if retired {
+                    if retired && kind != LifecycleKind::StopSubagent {
                         accepted.send_replace(Some(Ok(())));
                     } else {
                         let children = blocking({
                             let session_id = session_id.clone();
                             move || {
+                                if retired {
+                                    let peers =
+                                        mj_controller::database::bound_environment_member_ids(
+                                            &session_id,
+                                        )?;
+                                    return Ok(mj_controller::database::list_subagents_among(
+                                        &session_id,
+                                        &peers,
+                                    )?
+                                    .into_iter()
+                                    .map(|child| child.child_session_id)
+                                    .collect());
+                                }
                                 let mut children =
                                     mj_controller::database::begin_session_destroy(&session_id)?;
                                 if kind == LifecycleKind::StopSubagent {
@@ -1002,24 +1015,26 @@ impl RuntimeState {
                         })
                         .await?;
                         accepted.send_replace(Some(Ok(())));
-                        if index {
+                        if index && !retired {
                             state.index_before_destroy(&session_id).await;
                         }
                         state
                             .stop_subagents(children, kind, Some(&requested_session_id))
                             .await?;
-                        let exists = blocking({
-                            let session_id = session_id.clone();
-                            move || {
-                                Ok(mj_controller::database::read_durable_session_record(
-                                    &session_id,
-                                )?
-                                .is_some())
+                        if !retired {
+                            let exists = blocking({
+                                let session_id = session_id.clone();
+                                move || {
+                                    Ok(mj_controller::database::read_durable_session_record(
+                                        &session_id,
+                                    )?
+                                    .is_some())
+                                }
+                            })
+                            .await?;
+                            if !exists {
+                                return Ok(DaemonLifecycleResult::Done);
                             }
-                        })
-                        .await?;
-                        if !exists {
-                            return Ok(DaemonLifecycleResult::Done);
                         }
                     }
 
