@@ -256,6 +256,13 @@ fn tool_label(value: &Value) -> String {
     label
 }
 
+fn is_review_handoff_system_item(stable_id: &str, text: &str) -> bool {
+    stable_id.starts_with("system:mailbox:delivered:push-review:")
+        || (stable_id.starts_with("system:mailbox:delivered:")
+            && text.contains("\nReview finished; this is the final result."))
+        || stable_id.starts_with("system:notice:push-review-override-notice-")
+}
+
 impl TranscriptSummary {
     pub fn from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Self {
         Self::from_snapshot_keeping(snapshot, FULL_TOOL_CALLS)
@@ -297,6 +304,11 @@ impl TranscriptSummary {
                     mj_core::mailbox::render_mailbox_event(event),
                     None,
                 ),
+                CanonicalTranscriptBody::System { text }
+                    if is_review_handoff_system_item(&item.stable_id, text) =>
+                {
+                    (SummaryRole::Message, text.clone(), None)
+                }
                 CanonicalTranscriptBody::Agent { chunks, .. } => (
                     SummaryRole::Assistant,
                     materialized_chunks_text(chunks),
@@ -390,6 +402,11 @@ impl TranscriptSummary {
                     mj_core::mailbox::render_mailbox_event(event),
                     None,
                 ),
+                TranscriptBody::System { text }
+                    if is_review_handoff_system_item(&item.stable_id, text) =>
+                {
+                    (SummaryRole::Message, text.clone(), None)
+                }
                 TranscriptBody::Agent { chunks, .. } => (
                     SummaryRole::Assistant,
                     materialized_chunks_text(chunks),
@@ -870,6 +887,64 @@ mod tests {
             .status(ToolCallStatus::Completed)
             .raw_input(json!({"command": format!("cargo test --marker=ARGUMENT_{n}")}))
             .raw_output(json!({"exit_code": n, "formatted_output": format!("OUTPUT_{n}")}))
+    }
+
+    // Hard-won: #1111: delivered review verdicts and override notices disappeared from handoffs.
+    #[test]
+    fn review_deliveries_survive_both_transcript_projections() {
+        let reviews = [
+            (
+                "system:mailbox:delivered:push-review:one",
+                "Standalone verdict",
+            ),
+            (
+                "system:mailbox:delivered:session-message:one",
+                "Batched message\nReview finished; this is the final result.\nBatched verdict",
+            ),
+            (
+                "system:notice:push-review-override-notice-one",
+                "Review overridden",
+            ),
+        ];
+        let other = [
+            ("system:harness-started", "harness session started"),
+            ("system:notice:effort", "effort set to high"),
+            ("system:notice:quota", "quota notice"),
+            (
+                "system:mailbox:delivered:push-review-partial:one",
+                "Partial review",
+            ),
+            (
+                "system:mailbox:delivered:session-message:two",
+                "Unrelated delivery",
+            ),
+        ];
+        let mut session = MaterializedSession::empty("summary-test");
+        for (index, (id, text)) in reviews.into_iter().chain(other).enumerate() {
+            session.transcript.push(Arc::new(TranscriptItem {
+                stable_id: id.into(),
+                position: index as u64 + 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: TranscriptBody::System { text: text.into() },
+            }));
+        }
+        let snapshot = crate::projection::canonical_session_from_materialized(&session).unwrap();
+        for summary in [
+            TranscriptSummary::from_snapshot(&snapshot),
+            TranscriptSummary::from_materialized(&session),
+        ] {
+            let actual = summary
+                .entries
+                .iter()
+                .map(|entry| {
+                    assert_eq!(entry.role, SummaryRole::Message);
+                    (entry.id.as_str(), entry.text.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reviews);
+        }
     }
 
     #[test]

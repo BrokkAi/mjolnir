@@ -2321,8 +2321,12 @@ pub(super) fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
     let tx = connection.transaction()?;
     delete_session_in_tx(&tx, session_id)?;
     tx.commit()?;
-    tool_details::unlink_deleted_sessions(path, &[session_id]);
+    remove_deleted_session_tool_details(path, session_id);
     Ok(())
+}
+
+pub(super) fn remove_deleted_session_tool_details(path: &Path, session_id: &str) {
+    tool_details::unlink_deleted_sessions(path, &[session_id]);
 }
 
 fn delete_session_in_tx(tx: &Transaction<'_>, session_id: &str) -> Result<()> {

@@ -458,7 +458,10 @@ impl RuntimeState {
                     .state
                     .active_borrowers(&parent_session_id)
                     .iter()
-                    .filter(|id| peers.contains(id))
+                    // A supported borrower under a retired parent has no
+                    // typed relation. The durable walk below finds its parent
+                    // and StopSubagent recurses to the borrower.
+                    .filter(|id| peers.contains(id) && controller.state.subagents.contains_key(*id))
                     .map(|child_id| {
                         let child_liveness = liveness
                             .get(child_id)
@@ -498,33 +501,50 @@ impl RuntimeState {
                         &announced,
                     )?;
                 }
-                let active: BTreeSet<_> = stopped
+                let mut parents: BTreeMap<_, _> = stopped
                     .iter()
-                    .map(|child| &child.child_session_id)
-                    .collect();
-                let children = active
-                    .iter()
-                    .filter(|id| {
-                        controller
-                            .state
-                            .subagents
-                            .get(**id)
-                            .is_some_and(|child| !active.contains(&child.parent_session_id))
+                    .map(|child| {
+                        let id = &child.child_session_id;
+                        (
+                            id.clone(),
+                            controller.state.subagents[id].parent_session_id.clone(),
+                        )
                     })
-                    .map(|id| (*id).clone())
+                    .collect();
+                // Retired workers still have durable bindings and relations,
+                // even though they have no typed record for the parent notice.
+                let mut frontier = vec![parent_session_id.clone()];
+                let mut seen = BTreeSet::from([parent_session_id.clone()]);
+                while let Some(current) = frontier.pop() {
+                    for relation in mj_controller::database::list_subagents_among(&current, &peers)?
+                    {
+                        let child_id = relation.child_session_id;
+                        if !seen.insert(child_id.clone()) {
+                            continue;
+                        }
+                        if !controller.state.sessions.contains_key(&child_id) {
+                            parents.insert(child_id.clone(), current.clone());
+                        }
+                        frontier.push(child_id);
+                    }
+                }
+                let children: Vec<_> = parents
+                    .iter()
+                    .filter(|(_, parent)| !parents.contains_key(*parent))
+                    .map(|(id, _)| id.clone())
                     .collect();
                 Ok((stopped, children))
             }
         })
         .await
         .context("list the sub-agents this suspend stops")?;
-        if stopped.is_empty() {
+        if children.is_empty() {
             return Ok(());
         }
         let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
         tracing::info!(
             session_id = %parent_session_id,
-            stopped = stopped.len(),
+            child_roots = children.len(),
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );

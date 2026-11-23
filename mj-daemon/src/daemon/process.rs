@@ -176,10 +176,25 @@ pub(super) async fn run_daemon_runtime(
     mj_controller::controller::reconcile_managed_checkpoint_archives()?;
 
     let loading = Instant::now();
-    let controller = mj_core::runtime::spawn_blocking(|| {
+    let (controller, retired_ids) = mj_core::runtime::spawn_blocking(|| {
+        use mj_controller::database::{EnvironmentPhase, load_retired_harness_sessions};
         let mut controller = Controller::load()?;
         controller.prepare_persisted_sessions()?;
-        Ok::<_, anyhow::Error>(controller)
+        let retired = load_retired_harness_sessions()?;
+        let outstanding = retired.iter()
+            .filter(|session| session.owned_environment.as_ref().is_some_and(|environment|
+                environment.phase != EnvironmentPhase::Reclaimed))
+            .map(|session| format!("{} ({})", session.session_id, session.harness_kind))
+            .collect::<Vec<_>>();
+        if !outstanding.is_empty() {
+            tracing::warn!(
+                count = outstanding.len(),
+                sessions = %outstanding.join(", "),
+                "retired-harness sessions still own environments; run `mj doctor` for details or `mj destroy --session <id>` to remove one"
+            );
+        }
+        let retired_ids = retired.into_iter().map(|session| session.session_id).collect::<BTreeSet<_>>();
+        Ok::<_, anyhow::Error>((controller, retired_ids))
     })
     .await
     .context("prepare persisted daemon sessions")??;
@@ -316,18 +331,20 @@ pub(super) async fn run_daemon_runtime(
     // are shut down before the process-level writer can be closed.
     let bootstrapping = Instant::now();
     let bootstrap = async {
-        let (move_operations, close_operations) =
+        let (mut move_operations, close_operations) =
             blocking(mj_controller::database::load_move_recovery).await?;
+        move_operations.retain(|op| !retired_ids.contains(&op.selection.session_id));
         let moves = move_operations.len();
         let move_sessions = move_operations
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
         let move_owners = state
-            .recover_moves(move_operations, &close_operations)
+            .recover_moves(move_operations, &close_operations, &retired_ids)
             .await?;
         let mut lifecycle_owned = move_owners.moves;
-        let restart_intents = blocking(mj_controller::database::load_session_restarts).await?;
+        let mut restart_intents = blocking(mj_controller::database::load_session_restarts).await?;
+        restart_intents.retain(|intent| !retired_ids.contains(&intent.session_id));
         let restarts = restart_intents.len();
         lifecycle_owned.extend(
             restart_intents
@@ -335,7 +352,9 @@ pub(super) async fn run_daemon_runtime(
                 .map(|intent| intent.session_id.clone()),
         );
         lifecycle_owned.extend(state.recover_restarts(restart_intents).await?);
-        let create_intents = blocking(mj_controller::database::load_session_create_intents).await?;
+        let mut create_intents =
+            blocking(mj_controller::database::load_session_create_intents).await?;
+        create_intents.retain(|intent| !retired_ids.contains(&intent.session_id));
         let creates = create_intents.len();
         lifecycle_owned.extend(state.recover_creates(create_intents).await?);
         let (retained_cleanups, startup_cleanups) = {

@@ -1618,6 +1618,7 @@ mod tests {
             },
         };
         let mut committed = mj_controller::database::CommittedState {
+            retired_container_allocations: Default::default(),
             sequence: 1,
             state: Default::default(),
             moves: Default::default(),

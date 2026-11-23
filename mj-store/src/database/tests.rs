@@ -6634,7 +6634,7 @@ pub(super) fn register_test_subagent(
     Ok(())
 }
 
-fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
+pub(super) fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     let parent = session("11111111111111111111111111111111", "bundle-1");
     let mut child = session("22222222222222222222222222222222", "bundle-1");
     child.title = "child session".into();

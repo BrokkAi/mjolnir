@@ -212,18 +212,16 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     ] {
         std::fs::write(directory.path().join(name), b"test").unwrap();
     }
-    let mut state = State::default();
-    let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(Box::new(CheckpointMetadata {
+    let checkpoint = CheckpointMetadata {
         archive_path: directory.path().join(&referenced_name),
         sha256: "c".repeat(64),
         created_at: "2026-08-12T00:00:00Z".into(),
         event_frontier: 7,
-    }));
-    state.sessions.insert(session_id.into(), session);
+    };
 
     assert_eq!(
-        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[], &[], &[]).unwrap(),
+        reconcile_managed_checkpoint_archives_in(directory.path(), [&checkpoint], &[], &[], &[])
+            .unwrap(),
         1
     );
     assert!(directory.path().join(referenced_name).exists());

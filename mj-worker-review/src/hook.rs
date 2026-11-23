@@ -13,9 +13,83 @@ const SCRIPT: &str = r#"#!/bin/sh
 # mj-review-gate
 hooks_dir=$(dirname "$0")
 tmp=$(mktemp "${TMPDIR:-/tmp}/mj-review-gate.XXXXXXXXXX") || exit 1
-trap 'rm -f "$tmp"' 0
+trap 'rm -f "$tmp" "$tmp.bases" "$tmp.diff"' 0
 trap 'exit 1' HUP INT TERM
 cat > "$tmp" || exit 1
+# Let Git match paths, including names containing whitespace or newlines.
+# Disable renames so moving code to a documentation name still exposes its deletion.
+documentation_only() {
+  # Agent instructions and configuration remain configuration even in Markdown.
+  git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- \
+    ':(top,glob)**/AGENTS.md' ':(top,glob)**/AGENTS.override.md' \
+    ':(top,glob)**/CLAUDE.md' ':(top,glob)**/CLAUDE.local.md' \
+    ':(top,glob)**/GEMINI.md' ':(top,glob)**/SKILL.md' \
+    ':(top,glob)**/*.instructions.md' ':(top,glob)**/*.prompt.md' \
+    ':(top,glob)**/.agents/*.md' ':(top,glob)**/.agents/skills/**' \
+    ':(top,glob)**/.github/**' ':(top,glob)**/.claude/**' \
+    ':(top,glob)**/.codex/**' ':(top,glob)**/.gemini/**' \
+    ':(top,glob)**/.cursor/**' ':(top,glob)**/.opencode/**' || return 1
+  # A character class prevents Git treating an exact name as a directory prefix.
+  git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- ':(top)**' \
+    ':(top,exclude,glob)**/*.md' ':(top,exclude,glob)**/*.markdown' \
+    ':(top,exclude,glob)**/*.rst' ':(top,exclude,glob)**/*.adoc' \
+    ':(top,exclude,glob)**/*.asciidoc' \
+    ':(top,exclude,glob)READM[E]' ':(top,exclude,glob)LICENS[E]' \
+    ':(top,exclude,glob)COPYIN[G]' ':(top,exclude,glob)AUTHOR[S]' \
+    ':(top,exclude,glob)CONTRIBUTOR[S]' ':(top,exclude,glob)CHANGELO[G]' \
+    ':(top,exclude,glob)NEW[S]' || return 1
+  # File format alone cannot distinguish documentation from embedded runtime prompts.
+  # Require a conventional documentation location or filename as well.
+  git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- ':(top)**' \
+    ':(top,exclude,glob)**/docs/**' ':(top,exclude,glob)**/doc/**' \
+    ':(top,exclude,glob)**/.agents/plans/**' \
+    ':(top,exclude,glob)**/READM[E]*' ':(top,exclude,glob)**/LICENS[E]*' \
+    ':(top,exclude,glob)**/COPYIN[G]*' ':(top,exclude,glob)**/AUTHOR[S]*' \
+    ':(top,exclude,glob)**/CONTRIBUTOR[S]*' ':(top,exclude,glob)**/CHANGELO[G]*' \
+    ':(top,exclude,glob)**/NEW[S]*' ':(top,exclude,glob)**/CONTRIBUTIN[G]*' \
+    ':(top,exclude,glob)**/CODE_OF_CONDUC[T]*' ':(top,exclude,glob)**/SECURIT[Y]*' || return 1
+  # A documentation extension cannot exempt executables, links, or binary data.
+  git diff --raw --numstat --no-abbrev --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- > "$tmp.diff" || return 1
+  awk '
+    /^:/ && ($1 !~ /^:(000000|100644)$/ || $2 !~ /^(000000|100644)$/) { exit 1 }
+    $1 == "-" || $2 == "-" { exit 1 }
+  ' "$tmp.diff"
+}
+documentation_only_push() {
+  case "$2" in
+    *[!0]*)
+      documentation_only "$2" "$1" && return 0
+      # A reviewed comparison point must cover the destination's existing history.
+      git for-each-ref --merged="$1" --contains="$2" --format='%(objectname)' \
+        refs/mj/reviewed/ refs/mj/overridden/ > "$tmp.bases" || return 1
+      ;;
+    *)
+      # A new branch can build on published history or a reviewed ancestor.
+      git for-each-ref --merged="$1" --format='%(objectname)' \
+        refs/mj/reviewed/ refs/mj/overridden/ > "$tmp.bases" || return 1
+      # Fetch history describes the push destination only when their URLs agree.
+      if fetch_url=$(git remote get-url "$3" 2>/dev/null) && [ "$fetch_url" = "$4" ]; then
+        git for-each-ref --merged="$1" --format='%(objectname)' \
+          "refs/remotes/$3/" >> "$tmp.bases" || return 1
+      fi
+      ;;
+  esac
+  # Compare whole trees, never just the tip commit, to include earlier code edits.
+  while read -r base; do
+    documentation_only "$base" "$1" && return 0
+  done < "$tmp.bases"
+  # A repository containing only documentation needs no initial code review.
+  case "$2" in
+    *[!0]*) return 1 ;;
+  esac
+  [ ! -s "$tmp.bases" ] || return 1
+  empty_tree=$(git hash-object -w -t tree --stdin < /dev/null) || return 1
+  documentation_only "$empty_tree" "$1"
+}
 if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
   while read -r local_ref local_sha remote_ref remote_sha; do
     case "$local_sha" in
@@ -24,6 +98,10 @@ if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
     esac
     tree=$(git rev-parse --verify "$local_sha^{tree}") || exit 1
     if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree" && ! git show-ref --verify --quiet "refs/mj/overridden/$tree"; then
+      if documentation_only_push "$local_sha" "$remote_sha" "$1" "$2"; then
+        echo "mj: $local_ref changes only plain documentation; review is not required." >&2
+        continue
+      fi
       echo "mj: $local_ref (tree $tree) has not been reviewed." >&2
       echo "mj: call the mj-review request_review tool for the worktree \"$(git rev-parse --show-toplevel)\", wait for the verdict message, then push again." >&2
       exit 1
@@ -197,6 +275,255 @@ mod tests {
         record_reviewed_tree(&SystemGit, root, &tree, &head).unwrap();
     }
 
+    fn commit_file(root: &Path, path: &str, contents: &[u8]) {
+        fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+        fs::write(root.join(path), contents).unwrap();
+        git(root, &["add", "--", path]);
+        git(root, &["commit", "-qm", "change a file"]);
+    }
+
+    #[test]
+    fn hook_exempts_documentation_after_published_or_reviewed_work() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        for path in [
+            "README.md",
+            "docs/notes with\na newline.rst",
+            "LICENSE",
+            ".agents/docs/context.md",
+            ".agents/plans/feature.md",
+        ] {
+            commit_file(&root, path, b"Plain documentation\n");
+        }
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+        commit_file(&root, "docs/guide.adoc", b"More documentation\n");
+        git(&root, &["mv", "docs/guide.adoc", "docs/renamed.markdown"]);
+        git(&root, &["rm", "docs/notes with\na newline.rst"]);
+        git(&root, &["commit", "-qm", "rename and delete documentation"]);
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
+        // The code has been reviewed but has never been published.
+        commit(&root, "reviewed code");
+        reviewed(&root);
+        commit_file(&root, "README.md", b"Updated documentation\n");
+        assert_eq!(
+            push(&root, true, &["HEAD:refs/heads/reviewed-docs"]).status,
+            0
+        );
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+        // Documentation exemptions must not manufacture review approval refs.
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+        assert!(!git(&root, &["for-each-ref", "refs/mj/reviewed/"]).contains(&tree));
+    }
+
+    #[test]
+    fn hook_exempts_documentation_roots_but_not_replacing_code_with_them() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        git(&root, &["checkout", "--orphan", "documentation"]);
+        git(&root, &["rm", "-rf", "."]);
+        commit_file(
+            &root,
+            "README.md",
+            b"An independent documentation history\n",
+        );
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
+        // Another published branch is no license to delete the destination's code.
+        assert_ne!(push(&root, true, &["+HEAD:refs/heads/main"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_cannot_revert_published_code_to_a_reviewed_ancestor() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        reviewed(&root);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        commit(&root, "newer published code");
+        assert_eq!(push(&root, false, &["HEAD:refs/heads/main"]).status, 0);
+        git(&root, &["reset", "--hard", &reviewed]);
+        commit_file(
+            &root,
+            "README.md",
+            b"Documentation after the older reviewed code\n",
+        );
+        assert_ne!(push(&root, true, &["+HEAD:refs/heads/main"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_includes_ignored_submodule_updates() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        let first = git(&root, &["rev-parse", "HEAD"]);
+        commit_file(
+            &root,
+            ".gitmodules",
+            b"[submodule \"vendor\"]\n\tpath = vendor\n\turl = /unused\n",
+        );
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                &first,
+                "vendor",
+            ],
+        );
+        git(&root, &["commit", "-qm", "add a submodule"]);
+        let second = git(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(push(&root, false, &["HEAD:refs/heads/main"]).status, 0);
+        git(
+            &root,
+            &["update-index", "--cacheinfo", "160000", &second, "vendor"],
+        );
+        git(&root, &["commit", "-qm", "update the dependency code"]);
+        commit_file(
+            &root,
+            "README.md",
+            b"Documentation beside a submodule update\n",
+        );
+        for setting in ["diff.ignoreSubmodules", "submodule.vendor.ignore"] {
+            git(&root, &["config", setting, "all"]);
+            assert_ne!(
+                push(&root, true, &["HEAD:refs/heads/main"]).status,
+                0,
+                "{setting}"
+            );
+            assert_ne!(
+                push(&root, true, &["HEAD:refs/heads/new"]).status,
+                0,
+                "{setting}"
+            );
+            git(&root, &["config", "--unset", setting]);
+        }
+    }
+
+    #[test]
+    fn hook_documentation_exemption_keeps_code_and_non_plain_files_gated() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        let base = git(&root, &["rev-parse", "HEAD"]);
+        for path in [
+            "main.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+            "build.sh",
+            "page.mdx",
+            "requirements.txt",
+            "code\nwith a newline.rs",
+            "AGENTS.md",
+            ".agents/PLANS.md",
+            "nested/CLAUDE.md",
+            "assets/skills/mj/SKILL.md",
+            ".github/instructions/code.instructions.md",
+            ".claude/rules/conventions.md",
+            "assets/instructions/review_rubric.md",
+            "src/guardian/policy.md",
+            "README/build.sh",
+            "LICENSE/main.rs",
+            "nested.md/main.rs",
+        ] {
+            commit_file(&root, path, b"Needs review\n");
+            commit_file(&root, "README.md", b"Documentation on top of code\n");
+            assert_ne!(
+                push(&root, true, &["HEAD:refs/heads/main"]).status,
+                0,
+                "{path}"
+            );
+            assert_ne!(
+                push(&root, true, &["HEAD:refs/heads/new"]).status,
+                0,
+                "{path}"
+            );
+            git(&root, &["reset", "--hard", &base]);
+        }
+        commit_file(&root, "docs/binary.md", b"binary\0data\n");
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+        git(&root, &["reset", "--hard", &base]);
+        commit_file(&root, "docs/executable.md", b"#!/bin/sh\nexit 0\n");
+        git(&root, &["update-index", "--chmod=+x", "docs/executable.md"]);
+        git(&root, &["commit", "-qm", "make documentation executable"]);
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+        git(&root, &["reset", "--hard", &base]);
+        fs::create_dir_all(root.join("docs")).unwrap();
+        std::os::unix::fs::symlink("../tracked.txt", root.join("docs/link.md")).unwrap();
+        git(&root, &["add", "docs/link.md"]);
+        git(&root, &["commit", "-qm", "add a symbolic link"]);
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+        git(&root, &["reset", "--hard", &base]);
+        git(&root, &["mv", "tracked.txt", "renamed.md"]);
+        git(&root, &["commit", "-qm", "rename code as documentation"]);
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_does_not_use_fetch_history_for_another_push_url() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let destination = temp.path().join("different-origin.git");
+        git(
+            temp.path(),
+            &["init", "--bare", "-q", destination.to_str().unwrap()],
+        );
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                destination.to_str().unwrap(),
+            ],
+        );
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(
+            &root,
+            "README.md",
+            b"Documentation after code from another repository\n",
+        );
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_checks_all_refs_and_preserves_user_hooks() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        fs::write(
+            root.join(".git/hooks/pre-push"),
+            "#!/bin/sh\ncat > hook-input\nexit 23\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            root.join(".git/hooks/pre-push"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(&root, "README.md", b"Documentation\n");
+        // An exempt push still runs the user's hook and obeys its refusal.
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
+        assert!(root.join("hook-input").exists());
+        fs::remove_file(root.join("hook-input")).unwrap();
+        let docs = git(&root, &["rev-parse", "HEAD"]);
+        commit(&root, "unreviewed code");
+        assert_ne!(
+            push(
+                &root,
+                true,
+                &[&format!("{docs}:refs/heads/docs"), "HEAD:refs/heads/code"]
+            )
+            .status,
+            0
+        );
+        assert!(!root.join("hook-input").exists());
+    }
+
     #[test]
     fn hook_gates_pushes_by_tree_allows_deletion_and_is_idempotent() {
         let temp = repository();
@@ -232,10 +559,12 @@ mod tests {
         let root = temp.path().join("checkout").canonicalize().unwrap();
         install_pre_push_hook(&SystemGit, &root).unwrap();
         let hook = root.join(".git/hooks/pre-push");
-        let old = SCRIPT.replace(
-            " && ! git show-ref --verify --quiet \"refs/mj/overridden/$tree\"",
-            "",
-        );
+        let old = SCRIPT
+            .replace(
+                " && ! git show-ref --verify --quiet \"refs/mj/overridden/$tree\"",
+                "",
+            )
+            .replace("refs/mj/reviewed/ refs/mj/overridden/", "refs/mj/reviewed/");
         assert_ne!(old, SCRIPT);
         fs::write(&hook, &old).unwrap();
         let head = commit(&root, "overridden");

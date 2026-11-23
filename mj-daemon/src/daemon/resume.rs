@@ -926,8 +926,7 @@ impl RuntimeState {
                     kind,
                     requested_session_id,
                     false,
-                    // This teardown continues its already accepted parent
-                    // close/review; it is not a new automatic policy attempt.
+                    // This child continues its parent's accepted teardown.
                     DestroyRequest::Accepted,
                 )
                 .await?;
@@ -945,8 +944,11 @@ impl RuntimeState {
         index: bool,
         request: DestroyRequest,
     ) -> Result<StartedLifecycle> {
-        let key =
-            serde_json::to_string(&(kind.label(), matches!(branch, BranchDisposition::Delete)))?;
+        let key = serde_json::to_string(&(
+            kind.label(),
+            matches!(branch, BranchDisposition::Delete),
+            matches!(request, DestroyRequest::Recovery),
+        ))?;
         if let Some(started) = self.join_lifecycle(&session_id, kind, &key)? {
             return Ok(started);
         }
@@ -966,41 +968,74 @@ impl RuntimeState {
                 Some(acceptance),
                 move |state, session_id, cancelled, _session_admission| async move {
                     let _accepted_work = accepted_work;
-                    let children = blocking({
-                        let session_id = session_id.clone();
-                        move || {
-                            let mut children =
-                                mj_controller::database::begin_session_destroy(&session_id)?;
-                            if kind == LifecycleKind::StopSubagent {
-                                let peers = mj_controller::database::bound_environment_member_ids(
-                                    &session_id,
-                                )?;
-                                children.retain(|id| peers.contains(id));
-                            }
-                            Ok(children)
-                        }
-                    })
-                    .await?;
-                    accepted.send_replace(Some(Ok(())));
-                    if index {
-                        state.index_before_destroy(&session_id).await;
-                    }
-                    state
-                        .stop_subagents(children, kind, Some(&requested_session_id))
-                        .await?;
-
-                    let exists = blocking({
+                    let retired = blocking({
                         let session_id = session_id.clone();
                         move || {
                             Ok(
-                                mj_controller::database::read_durable_session_record(&session_id)?
+                                mj_controller::database::load_retired_harness_session(&session_id)?
                                     .is_some(),
                             )
                         }
                     })
                     .await?;
-                    if !exists {
+                    if retired && matches!(request, DestroyRequest::Recovery) {
+                        accepted.send_replace(Some(Ok(())));
                         return Ok(DaemonLifecycleResult::Done);
+                    }
+                    if retired && kind != LifecycleKind::StopSubagent {
+                        accepted.send_replace(Some(Ok(())));
+                    } else {
+                        let children = blocking({
+                            let session_id = session_id.clone();
+                            move || {
+                                if retired {
+                                    let peers =
+                                        mj_controller::database::bound_environment_member_ids(
+                                            &session_id,
+                                        )?;
+                                    return Ok(mj_controller::database::list_subagents_among(
+                                        &session_id,
+                                        &peers,
+                                    )?
+                                    .into_iter()
+                                    .map(|child| child.child_session_id)
+                                    .collect());
+                                }
+                                let mut children =
+                                    mj_controller::database::begin_session_destroy(&session_id)?;
+                                if kind == LifecycleKind::StopSubagent {
+                                    let peers =
+                                        mj_controller::database::bound_environment_member_ids(
+                                            &session_id,
+                                        )?;
+                                    children.retain(|id| peers.contains(id));
+                                }
+                                Ok(children)
+                            }
+                        })
+                        .await?;
+                        accepted.send_replace(Some(Ok(())));
+                        if index && !retired {
+                            state.index_before_destroy(&session_id).await;
+                        }
+                        state
+                            .stop_subagents(children, kind, Some(&requested_session_id))
+                            .await?;
+                        if !retired {
+                            let exists = blocking({
+                                let session_id = session_id.clone();
+                                move || {
+                                    Ok(mj_controller::database::read_durable_session_record(
+                                        &session_id,
+                                    )?
+                                    .is_some())
+                                }
+                            })
+                            .await?;
+                            if !exists {
+                                return Ok(DaemonLifecycleResult::Done);
+                            }
+                        }
                     }
 
                     blocking({

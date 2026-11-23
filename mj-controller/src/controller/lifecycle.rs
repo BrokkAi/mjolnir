@@ -2999,12 +2999,199 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
     ) -> Result<DestroyOutcome> {
+        if !self.state.sessions.contains_key(session_id)
+            && crate::database::load_retired_harness_session(session_id)?.is_some()
+        {
+            self.destroy_retired_harness_session(session_id, executor, branch)?;
+            return Ok(DestroyOutcome::default());
+        }
         self.force_destroy_session_with(
             session_id,
             executor,
             branch,
             crate::database::delete_session,
         )
+    }
+
+    fn destroy_retired_harness_session(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        branch: BranchDisposition,
+    ) -> Result<()> {
+        use crate::worker_lifecycle::{WorkerPermit, require, run_blocking};
+        run_blocking(
+            session_id,
+            "destroy retired-harness session",
+            executor,
+            || {
+                let order = crate::database::retired_harness_destroy_order(session_id)?;
+                let owner = require(session_id)?;
+                let (gate, _) = owner.admission().gate_and_session();
+                for id in order {
+                    let permit = if id == session_id {
+                        owner.clone()
+                    } else {
+                        let admission = futures::executor::block_on(gate.enter_foreground(
+                            &id,
+                            "destroy retired-harness descendant",
+                            crate::recovery_gate::LifecycleOrigin::Person,
+                            &std::sync::atomic::AtomicBool::new(false),
+                            executor,
+                        ))?;
+                        WorkerPermit::acquire(&id, &admission)?
+                    };
+                    permit
+                        .scope_blocking(|| -> Result<()> {
+                            let Some(retired) = crate::database::load_retired_harness_session(&id)? else {
+                                return Ok(());
+                            };
+                            let environments = crate::database::worker_environments(&id)?;
+                            let mut operation = crate::database::load_move_operation(&id)?;
+                            self.revoke_retired_move_credentials(&retired, &environments, operation.as_ref(), executor)?;
+                            for environment in environments {
+                                if environment.owner_session_id == id
+                                    && environment.phase
+                                        != crate::database::EnvironmentPhase::Reclaimed
+                                {
+                                    super::environment::retire_owned_environment(
+                                        environment,
+                                        &self.config,
+                                        executor,
+                                        if id == session_id { branch } else { BranchDisposition::Keep },
+                                        CheckoutDisposition::Remove,
+                                    )?;
+                                }
+                            }
+                            super::environment::stop_borrower(&id, &self.config, executor)?;
+                            if let Some(operation) = &mut operation {
+                                operation.granted_keys.clear();
+                                self.cleanup_prepared_move_destination(operation, executor)?;
+                            }
+                            finish_retired_session_destroy(&id)
+                        })
+                        .with_context(|| {
+                            mj_core::refusal::Refusal::precondition(format!(
+                                "Cleanup of retired-harness session {id} is incomplete. Retry with `mj destroy --session {session_id}`."
+                            ))
+                        })?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    fn stop_retired_borrower(
+        &self,
+        retired: &crate::database::RetiredHarnessSession,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let id = &retired.session_id;
+        crate::worker_lifecycle::run_blocking(id, "stop retired sub-agent", executor, || {
+            let environments = crate::database::worker_environments(id)?;
+            super::environment::stop_workers_in_environments(
+                id,
+                &self.config,
+                executor,
+                environments
+                    .iter()
+                    .filter(|environment| environment.owner_session_id != *id),
+            )?;
+            if crate::database::retain_stopped_retired_borrower(id)? {
+                return Ok(());
+            }
+            let operation = crate::database::load_move_operation(id)?;
+            self.revoke_retired_move_credentials(
+                retired,
+                &environments,
+                operation.as_ref(),
+                executor,
+            )?;
+            finish_retired_session_destroy(id)
+        })
+    }
+
+    fn revoke_retired_move_credentials(
+        &self,
+        retired: &crate::database::RetiredHarnessSession,
+        environments: &[crate::database::EnvironmentRecord],
+        operation: Option<&mj_core::state::MoveOperation>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let id = &retired.session_id;
+        let Some((operation_id, granted_keys)) = crate::database::load_move_granted_keys(id)?
+        else {
+            return Ok(());
+        };
+        if granted_keys.is_empty() {
+            return Ok(());
+        }
+
+        let resolve = |target, template, runtime| {
+            super::backend::recorded_backend_locator(target, id, template, runtime, &self.config)
+                .inspect_err(|error| {
+                    tracing::debug!(session_id = id, %error, "could not resolve a candidate Move credential host");
+                })
+                .ok()
+        };
+        let mut candidates: Vec<_> = environments
+            .iter()
+            .filter_map(|environment| {
+                let placement = &environment.placement;
+                resolve(
+                    placement.target.as_ref()?,
+                    &placement.target_template_id,
+                    placement.runtime.as_ref(),
+                )
+            })
+            .collect();
+        if let Some(operation) = operation {
+            if let Some(source) = &operation.source_target {
+                candidates.extend(resolve(
+                    source,
+                    &operation.source_target_template_id,
+                    operation
+                        .recovery_session
+                        .as_ref()
+                        .and_then(|session| session.target_runtime.as_deref()),
+                ));
+            }
+            let prepared = operation.prepared_destination.as_ref();
+            if let Some(destination) = operation
+                .destination_target
+                .as_ref()
+                .or_else(|| prepared.and_then(|destination| destination.target()))
+            {
+                candidates.extend(resolve(
+                    destination,
+                    operation
+                        .selection
+                        .target_template_id
+                        .as_deref()
+                        .unwrap_or(&retired.target_template_id),
+                    prepared.map(|destination| &destination.runtime),
+                ));
+            }
+        }
+        let refs = candidates.iter().collect::<Vec<_>>();
+        let remaining = super::move_session::transport::cleanup_interrupted_move_credentials(
+            &operation_id,
+            &granted_keys,
+            &refs,
+            executor,
+        );
+        let revoked = granted_keys
+            .into_iter()
+            .filter(|key| !remaining.contains(key))
+            .collect::<Vec<_>>();
+        // Commit successful revocations before retiring hosts. A later teardown
+        // retry may no longer be able to reach them.
+        crate::database::remove_revoked_move_granted_keys(id, &revoked, &now())?;
+        ensure!(
+            remaining.is_empty(),
+            "could not revoke all temporary Move SSH credentials for session {id}"
+        );
+        Ok(())
     }
 
     fn force_destroy_session_with(
@@ -3029,6 +3216,12 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<DestroyOutcome> {
+        if !self.state.sessions.contains_key(session_id)
+            && let Some(retired) = crate::database::load_retired_harness_session(session_id)?
+        {
+            self.stop_retired_borrower(&retired, executor)?;
+            return Ok(DestroyOutcome::default());
+        }
         self.destroy_session_with_cleanup(
             session_id,
             executor,
@@ -3335,6 +3528,20 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
         | SessionState::Stopped
         | SessionState::DestroyedWithDataLoss => false,
     }
+}
+
+fn finish_retired_session_destroy(session_id: &str) -> Result<()> {
+    let checkpoint = crate::database::load_session_checkpoint(session_id)?;
+    super::checkpoint::remove_session_checkpoint_archives(
+        &mj_core::config::sessions_dir(),
+        session_id,
+        checkpoint.as_ref(),
+    )?;
+    mj_core::attachment::AttachmentStore::controller(session_id)?
+        .remove_session_data()
+        .context("remove retired-harness session image attachments")?;
+    crate::database::delete_retired_harness_session(session_id)?;
+    Ok(())
 }
 
 /// Stop access to a placed environment and report whether retirement was deferred.

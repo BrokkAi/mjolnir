@@ -1202,6 +1202,7 @@ mod tests {
             let mut moves = mj_core::snapshot_map::SnapshotMap::new();
             moves.insert(LATCH_RELAY_SESSION.into(), op.clone());
             Arc::new(mj_controller::database::CommittedState {
+                retired_container_allocations: Default::default(),
                 sequence: seq,
                 state: state.clone(),
                 moves,
