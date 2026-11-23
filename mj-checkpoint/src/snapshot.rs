@@ -7563,6 +7563,7 @@ mod tests {
                 CaptureConsent {
                     untracked: UntrackedConsent::Any,
                     operations: OperationConsent::None,
+                    move_keep: None,
                 },
             )]),
         };
