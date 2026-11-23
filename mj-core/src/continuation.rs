@@ -310,6 +310,27 @@ generated_prompts! {
 }
 
 impl GeneratedPrompt {
+    /// Whether this producer submits Mjolnir control text rather than a message.
+    pub const fn is_harness_prompt(self) -> bool {
+        match self {
+            Self::AutoContinue
+            | Self::QuotaRetry
+            | Self::AuthenticationRetry
+            | Self::Archive
+            | Self::Subagent
+            | Self::MailboxWake
+            | Self::HandbackReminder
+            | Self::HoldWake
+            | Self::HoldGiveUp
+            | Self::ServerRetry
+            | Self::CapacityRetry => true,
+            Self::ReviewForward
+            | Self::SubagentSpawn
+            | Self::SubagentInput
+            | Self::SessionMessageTurn => false,
+        }
+    }
+
     /// The command id this producer gives a prompt: its prefix and `suffix`.
     pub fn command_id(self, suffix: impl std::fmt::Display) -> String {
         format!("{}{suffix}", self.prefix())
@@ -374,6 +395,13 @@ impl GeneratedPrompt {
 
 pub fn is_generated_prompt(command_id: &str) -> bool {
     GeneratedPrompt::of(command_id).is_some()
+}
+
+/// Whether a user-role transcript item carries Mjolnir's harness instructions.
+pub fn is_harness_prompt_item(stable_id: &str, text: &str) -> bool {
+    is_generated_prompt_text(text)
+        || GeneratedPrompt::of(stable_id.strip_prefix("user:").unwrap_or(stable_id))
+            .is_some_and(GeneratedPrompt::is_harness_prompt)
 }
 
 /// Whether a user-role transcript item is a message the person wrote. This is
