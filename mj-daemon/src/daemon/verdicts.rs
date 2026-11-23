@@ -116,6 +116,14 @@ fn turn_interrupt_command(
     live: Option<&mj_core::relay::RelayOperationalState>,
 ) -> Result<RelayCommand> {
     let command = live.and_then(|live| live.turn_controls.as_ref()?.interrupt.as_ref());
+    if let Some(live) = live.filter(|live| live.publishes_interrupt_targets()) {
+        return command.cloned().with_context(|| {
+            live.turn_controls
+                .as_ref()
+                .and_then(|controls| controls.message.clone())
+                .unwrap_or_else(|| "this turn cannot be interrupted right now".into())
+        });
+    }
     // A raw cancel can hit a newly started prompt after autonomous
     // goal work settles between capture and worker admission.
     ensure!(
@@ -266,7 +274,9 @@ fn own_verdict(
             // Retained turn facts still inform interrupt and work ownership.
             || live.is_some_and(|state| state.activity_state().has_work_in_flight()));
     let can_interrupt = !queue_held && !form && state.has_live_worker();
-    let turn_targetable = !queue_held && unfinished_turn && turn_interrupt_command(live).is_ok();
+    let turn_targetable = can_interrupt
+        && live.is_some_and(|live| live.publishes_interrupt_targets() || running)
+        && turn_interrupt_command(live).is_ok();
     let failed_first_launch = runtime.metadata.failed_launch_retries.contains(id);
     let resume = if failed_first_launch && operation == Ready {
         Ready
@@ -302,10 +312,10 @@ fn own_verdict(
             }) || subagent_waiting_for_background(runtime, committed, id, live)),
         active_work,
         unfinished: unfinished_turn || active_work,
-        interrupt: can_interrupt && running && turn_targetable,
+        interrupt: turn_targetable,
         interrupt_shell: can_interrupt
             && live.is_some_and(|live| !live.active_user_shells.is_empty()),
-        interrupt_member: !queue_held && unfinished_turn && (question || turn_targetable),
+        interrupt_member: turn_targetable || (!queue_held && unfinished_turn && question),
         stop: if state.is_active() {
             if operation == TransitionFailed {
                 Ready
@@ -584,6 +594,7 @@ pub(super) enum InterruptTargetKey {
     HarnessTurn {
         started_at_ms: i64,
     },
+    TurnTarget(mj_core::relay::TurnInterruptTarget),
     DismissQuestion {
         command: RelayCommand,
     },
@@ -600,6 +611,18 @@ impl InterruptTargetKey {
         live: Option<&mj_core::relay::RelayOperationalState>,
         command: &RelayCommand,
     ) -> Self {
+        if let RelayCommand::CancelTurnTarget { target } = command {
+            return match target {
+                mj_core::relay::TurnInterruptTarget::ActivePrompt { command_id }
+                | mj_core::relay::TurnInterruptTarget::QueuedRestart { command_id }
+                | mj_core::relay::TurnInterruptTarget::CapacityRetry { command_id } => {
+                    Self::ActivePrompt {
+                        prompt_id: command_id.clone(),
+                    }
+                }
+                _ => Self::TurnTarget(target.clone()),
+            };
+        }
         if matches!(command, RelayCommand::DismissQuestion { .. }) {
             return Self::DismissQuestion {
                 command: command.clone(),
@@ -1223,6 +1246,93 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn nonprompt_interrupt_uses_the_current_worker_offer() {
+        use mj_core::relay::{TurnControlStatus, TurnControls, TurnInterruptTarget};
+
+        for target in [
+            TurnInterruptTarget::QueuedRestart {
+                command_id: "auto-continue-restart-1-prompt-1".into(),
+            },
+            TurnInterruptTarget::CapacityRetry {
+                command_id: "server-retry-12".into(),
+            },
+            TurnInterruptTarget::QuotaRecovery {
+                completed_command_id: "previous-prompt".into(),
+            },
+            TurnInterruptTarget::GoalResume {
+                command_id: "resume-goal".into(),
+            },
+        ] {
+            let mut manager = super::super::tests::TestRemoteManager::for_session("child").await;
+            let runtime = super::super::tests::test_runtime_state_with_manager(&manager);
+            let mut capture = RuntimeProjection::default();
+            let command = RelayCommand::CancelTurnTarget { target };
+            insert_active_prompt_session(
+                &mut capture,
+                "child",
+                "unused",
+                TurnControls {
+                    status: TurnControlStatus::Ready,
+                    primary: None,
+                    interrupt: Some(command.clone()),
+                    message: None,
+                },
+            );
+            let live = capture
+                .sessions
+                .get_mut("child")
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap();
+            live.active_prompt = None;
+            live.relay_protocol_version = Some(86);
+            project(&mut capture, &Default::default(), None, None);
+            assert!(capture.verdicts["child"].interrupt);
+            assert!(capture.verdicts["child"].interrupt_member);
+            let (outcome, commands) = tokio::join!(
+                runtime.submit_turn_interrupt(&capture, "child", false),
+                manager.answer_submissions(Vec::new()),
+            );
+            outcome.unwrap();
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].2, command);
+
+            let before = capture.clone();
+            let live = capture
+                .sessions
+                .get_mut("child")
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap();
+            live.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+                command_id: "next-prompt".into(),
+                created_at_ms: 1,
+                started_at_ms: 1,
+            });
+            live.turn_controls = None;
+            project(&mut capture, &before, None, None);
+            assert!(!capture.verdicts["child"].interrupt);
+            let before = capture.clone();
+            let live = capture
+                .sessions
+                .get_mut("child")
+                .unwrap()
+                .operational
+                .as_mut()
+                .unwrap();
+            live.relay_protocol_version = Some(85);
+            assert_eq!(
+                turn_interrupt_command(Some(live)).unwrap(),
+                RelayCommand::CancelTurn
+            );
+            project(&mut capture, &before, None, None);
+            assert!(capture.verdicts["child"].interrupt);
+        }
+    }
+
     // Hard-won: #1624: Pending turn_controls with interrupt: None fell back to raw CancelTurn.
     #[tokio::test]
     async fn pending_cancellation_with_active_prompt_never_falls_back_to_raw_cancel() {
@@ -1305,8 +1415,10 @@ mod tests {
             view.operational = Some(live.into());
             capture.sessions.insert(id.into(), view);
         }
-        let cancel_p1 = RelayCommand::CancelTurnFor {
-            active_prompt_id: "p1".into(),
+        let cancel_p1 = RelayCommand::CancelTurnTarget {
+            target: mj_core::relay::TurnInterruptTarget::ActivePrompt {
+                command_id: "p1".into(),
+            },
         };
         insert_active_prompt_session(
             &mut capture,
@@ -1319,6 +1431,14 @@ mod tests {
                 message: None,
             },
         );
+        capture
+            .sessions
+            .get_mut("child")
+            .unwrap()
+            .operational
+            .as_mut()
+            .unwrap()
+            .relay_protocol_version = Some(mj_core::relay::RELAY_CANCEL_TURN_TARGET_PROTOCOL);
         insert_subagent_link(&mut capture, "grandparent", "parent");
         insert_subagent_link(&mut capture, "parent", "child");
         project(&mut capture, &Default::default(), None, None);
@@ -1353,8 +1473,10 @@ mod tests {
 
         // Once the child advances to a new turn (p2), a fresh Interrupt All is admitted.
         let before = capture.clone();
-        let cancel_p2 = RelayCommand::CancelTurnFor {
-            active_prompt_id: "p2".into(),
+        let cancel_p2 = RelayCommand::CancelTurnTarget {
+            target: mj_core::relay::TurnInterruptTarget::ActivePrompt {
+                command_id: "p2".into(),
+            },
         };
         let child_live = capture
             .sessions

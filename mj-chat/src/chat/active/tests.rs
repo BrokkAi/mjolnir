@@ -1628,7 +1628,7 @@ fn the_ascii_symbol_set_reaches_the_composers_own_footer_hints() {
 }
 /// A phase alone is not evidence of an interruptible turn.
 #[tokio::test]
-async fn escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
+async fn legacy_escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
     for harness_started in [false, true] {
         let mut fixture =
             mj_client::session::replacement_session_test_fixture("goal-interrupt", 12);
@@ -1651,6 +1651,7 @@ async fn escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
         let mut view = managed_view(materialized);
         let operational = &mut view.snapshot.as_mut().unwrap().operational;
         operational.goal = goal;
+        operational.relay_protocol_version = Some(85);
         operational.execution = mj_core::relay::RelayExecutionState::Running;
         if harness_started {
             operational.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
@@ -1678,6 +1679,67 @@ async fn escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
         chat.state.session_activity.harness_turn_started_at_ms = None;
         assert!(!chat.state.turn_interruptible());
         assert!(prompt_bottom_queue_control(&chat.state).is_none());
+    }
+}
+
+#[tokio::test]
+async fn escape_uses_the_worker_target_without_an_active_prompt() {
+    use mj_core::relay::{
+        RelayCommand, TurnControlAction, TurnControlKind, TurnControlStatus, TurnControls,
+        TurnInterruptTarget,
+    };
+
+    for target in [
+        TurnInterruptTarget::QueuedRestart {
+            command_id: "auto-continue-restart-1-prompt-1".into(),
+        },
+        TurnInterruptTarget::Autonomous { start_ordinal: 1 },
+    ] {
+        let mut fixture =
+            mj_client::session::replacement_session_test_fixture("exact-interrupt", 12);
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        let mut view = managed_view(MaterializedSession::empty("exact-interrupt"));
+        let command = RelayCommand::CancelTurnTarget { target };
+        let operational = &mut view.snapshot.as_mut().unwrap().operational;
+        operational.relay_protocol_version = Some(86);
+        operational.turn_controls = Some(TurnControls {
+            status: TurnControlStatus::Ready,
+            primary: Some(TurnControlAction {
+                kind: TurnControlKind::Interrupt,
+                command: command.clone(),
+            }),
+            interrupt: Some(command.clone()),
+            message: None,
+        });
+        apply_session_view(&mut chat.state, Ok(view.clone()));
+        assert!(!chat.state.prompt_in_flight());
+        assert!(
+            prompt_bottom_queue_control(&chat.state)
+                .unwrap()
+                .to_string()
+                .contains("Esc interrupts")
+        );
+        chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), fixture.submitted.recv())
+                .await
+                .unwrap(),
+            Some(command),
+        );
+        let operational = &mut view.snapshot.as_mut().unwrap().operational;
+        operational.turn_controls = None;
+        operational.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        apply_session_view(&mut chat.state, Ok(view));
+        assert!(prompt_bottom_queue_control(&chat.state).is_none());
+        assert!(chat.state.escape_command().is_none());
     }
 }
 

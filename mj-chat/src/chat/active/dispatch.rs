@@ -318,13 +318,19 @@ impl ActiveChat {
                     return ChatEventOutcome::Handled;
                 };
                 self.state.turn_control_submitting = true;
-                if let RelayCommand::CancelTurnFor { active_prompt_id }
-                | RelayCommand::ApplyQueuedFor {
-                    active_prompt_id, ..
-                } = &command
-                {
-                    self.state.turn_control_target = Some(active_prompt_id.clone());
-                    self.state.turn_control_awaiting_state = Some(command_id.clone());
+                match &command {
+                    RelayCommand::CancelTurnTarget { target } => {
+                        self.state.turn_control_awaiting_state =
+                            Some((command_id.clone(), Some(target.clone())));
+                    }
+                    RelayCommand::CancelTurnFor { active_prompt_id }
+                    | RelayCommand::ApplyQueuedFor {
+                        active_prompt_id, ..
+                    } => {
+                        self.state.turn_control_target = Some(active_prompt_id.clone());
+                        self.state.turn_control_awaiting_state = Some((command_id.clone(), None));
+                    }
+                    _ => {}
                 }
                 queue_chat_remote_operation(
                     self.remote.operations(),
@@ -356,11 +362,16 @@ impl ActiveChat {
                 self.state.turn_control_submitting = true;
                 self.state.turn_control_error = None;
                 self.state.turn_control_target = self.state.active_prompt_id.clone();
-                self.state.turn_control_awaiting_state = self
-                    .state
-                    .active_prompt_id
-                    .as_ref()
-                    .map(|_| command_id.clone());
+                self.state.turn_control_awaiting_state = match &command {
+                    Some(RelayCommand::CancelTurnTarget { target }) => {
+                        Some((command_id.clone(), Some(target.clone())))
+                    }
+                    _ => self
+                        .state
+                        .active_prompt_id
+                        .as_ref()
+                        .map(|_| (command_id.clone(), None)),
+                };
 
                 queue_chat_remote_operation(
                     self.remote.operations(),
@@ -497,6 +508,9 @@ impl ActiveChat {
             return false;
         }
         let action = self.state.interrupt_action();
+        if action == ChatAction::None && !self.state.turn_control_dialog_open {
+            return false;
+        }
         let _ = self.dispatch(action);
         true
     }

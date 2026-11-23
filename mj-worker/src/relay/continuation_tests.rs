@@ -439,6 +439,57 @@ fn a_second_self_started_turn_clears_a_waiting_recovery_and_its_end_can_schedule
     );
 }
 
+#[test]
+fn waiting_quota_interrupt_completes_locally_even_after_restart() {
+    for crash_after_acceptance in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = open(root.path());
+        submit_relay(&mut relay, "user-request", prompt("Implement"));
+        completed(&mut relay, "user-request");
+        let schedule = quota_schedule(&mut relay, Some(epoch_millis() + 3_600_000));
+        submit_relay(&mut relay, "quota-schedule", schedule);
+        let command = relay
+            .operational_state()
+            .turn_controls
+            .unwrap()
+            .interrupt
+            .unwrap();
+        assert_eq!(
+            command,
+            RelayCommand::CancelTurnTarget {
+                target: TurnInterruptTarget::QuotaRecovery {
+                    completed_command_id: "user-request".into()
+                },
+            }
+        );
+        if crash_after_acceptance {
+            relay
+                .append_relay_event(
+                    Some("interrupt-quota"),
+                    RelayObservation::CommandQueued {
+                        command_id: "interrupt-quota".into(),
+                        command,
+                        created_at_ms: 1,
+                        insert_at_front: false,
+                    },
+                )
+                .unwrap();
+            drop(relay);
+            relay = open(root.path());
+        } else {
+            submit_relay(&mut relay, "interrupt-quota", command);
+        }
+        assert!(relay.snapshot.continuation.quota_recovery.is_none());
+        assert!(relay.snapshot.continuation.quota_suppressed);
+        assert!(relay.snapshot.continuation.withdrawn_ordinal.is_some());
+        assert_eq!(
+            relay.snapshot.handled_commands["interrupt-quota"].outcome,
+            Some(RelayCommandOutcome::Cancelled)
+        );
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    }
+}
+
 fn limited_goal(relay: &mut DurableRelay, reason: &str) {
     relay.snapshot.goal.capability = Some(mj_core::goal::GoalCapability {
         version: 1,
@@ -507,9 +558,30 @@ fn a_users_own_goal_resume_still_takes_over_from_automation() {
     // A user's native resume may remain in flight for its entire turn.
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed[0].command_id, "goal-resume-by-user");
-    submit_relay(&mut relay, "cancel-explicit-resume", RelayCommand::Cancel);
+    let command = relay
+        .operational_state()
+        .turn_controls
+        .unwrap()
+        .interrupt
+        .unwrap();
+    let target = TurnInterruptTarget::GoalResume {
+        command_id: "goal-resume-by-user".into(),
+    };
+    assert_eq!(
+        command,
+        RelayCommand::CancelTurnTarget {
+            target: target.clone()
+        }
+    );
+    submit_relay(&mut relay, "cancel-explicit-resume", command.clone());
     let cancel = relay.claim_pending_commands(true).unwrap();
     assert_eq!(cancel[0].command_id, "cancel-explicit-resume");
+    assert_eq!(cancel[0].command, command);
+    assert!(relay.owns_unprompted_interrupt(&target));
+    relay
+        .record_command_completed("goal-resume-by-user", RelayCommandOutcome::GoalControlled)
+        .unwrap();
+    assert!(!relay.owns_unprompted_interrupt(&target));
 }
 
 fn handback_request(relay: &DurableRelay) -> RelayCommand {
