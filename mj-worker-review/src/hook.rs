@@ -19,15 +19,26 @@ cat > "$tmp" || exit 1
 # Let Git match paths, including names containing whitespace or newlines.
 # Disable renames so moving code to a documentation name still exposes its deletion.
 documentation_only() {
+  # Agent instructions and configuration remain configuration even in Markdown.
+  git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- \
+    ':(top,glob)**/AGENTS.md' ':(top,glob)**/AGENTS.override.md' \
+    ':(top,glob)**/CLAUDE.md' ':(top,glob)**/CLAUDE.local.md' \
+    ':(top,glob)**/GEMINI.md' ':(top,glob)**/SKILL.md' \
+    ':(top,glob)**/*.instructions.md' ':(top,glob)**/*.prompt.md' \
+    ':(top,glob)**/.github/**' ':(top,glob)**/.claude/**' \
+    ':(top,glob)**/.codex/**' ':(top,glob)**/.gemini/**' \
+    ':(top,glob)**/.cursor/**' ':(top,glob)**/.opencode/**' || return 1
+  # A character class prevents Git treating an exact name as a directory prefix.
   git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
     "$1" "$2" -- ':(top)**' \
     ':(top,exclude,glob)**/*.md' ':(top,exclude,glob)**/*.markdown' \
     ':(top,exclude,glob)**/*.rst' ':(top,exclude,glob)**/*.adoc' \
     ':(top,exclude,glob)**/*.asciidoc' \
-    ':(top,exclude,literal)README' ':(top,exclude,literal)LICENSE' \
-    ':(top,exclude,literal)COPYING' ':(top,exclude,literal)AUTHORS' \
-    ':(top,exclude,literal)CONTRIBUTORS' ':(top,exclude,literal)CHANGELOG' \
-    ':(top,exclude,literal)NEWS' || return 1
+    ':(top,exclude,glob)READM[E]' ':(top,exclude,glob)LICENS[E]' \
+    ':(top,exclude,glob)COPYIN[G]' ':(top,exclude,glob)AUTHOR[S]' \
+    ':(top,exclude,glob)CONTRIBUTOR[S]' ':(top,exclude,glob)CHANGELO[G]' \
+    ':(top,exclude,glob)NEW[S]' || return 1
   # A documentation extension cannot exempt executables, links, or binary data.
   git diff --raw --numstat --no-abbrev --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
     "$1" "$2" -- > "$tmp.diff" || return 1
@@ -47,7 +58,12 @@ documentation_only_push() {
     *)
       # A new branch can build on published history or a reviewed ancestor.
       git for-each-ref --merged="$1" --format='%(objectname)' \
-        refs/mj/reviewed/ refs/mj/overridden/ "refs/remotes/$3/" > "$tmp.bases" || return 1
+        refs/mj/reviewed/ refs/mj/overridden/ > "$tmp.bases" || return 1
+      # Fetch history describes the push destination only when their URLs agree.
+      if fetch_url=$(git remote get-url "$3" 2>/dev/null) && [ "$fetch_url" = "$4" ]; then
+        git for-each-ref --merged="$1" --format='%(objectname)' \
+          "refs/remotes/$3/" >> "$tmp.bases" || return 1
+      fi
       ;;
   esac
   # Compare whole trees, never just the tip commit, to include earlier code edits.
@@ -70,7 +86,7 @@ if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
     esac
     tree=$(git rev-parse --verify "$local_sha^{tree}") || exit 1
     if ! git show-ref --verify --quiet "refs/mj/reviewed/$tree" && ! git show-ref --verify --quiet "refs/mj/overridden/$tree"; then
-      if documentation_only_push "$local_sha" "$remote_sha" "$1"; then
+      if documentation_only_push "$local_sha" "$remote_sha" "$1" "$2"; then
         echo "mj: $local_ref changes only plain documentation; review is not required." >&2
         continue
       fi
@@ -248,6 +264,7 @@ mod tests {
     }
 
     fn commit_file(root: &Path, path: &str, contents: &[u8]) {
+        fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
         fs::write(root.join(path), contents).unwrap();
         git(root, &["add", "--", path]);
         git(root, &["commit", "-qm", "change a file"]);
@@ -382,6 +399,14 @@ mod tests {
             "page.mdx",
             "requirements.txt",
             "code\nwith a newline.rs",
+            "AGENTS.md",
+            "nested/CLAUDE.md",
+            "assets/skills/mj/SKILL.md",
+            ".github/instructions/code.instructions.md",
+            ".claude/rules/conventions.md",
+            "README/build.sh",
+            "LICENSE/main.rs",
+            "nested.md/main.rs",
         ] {
             commit_file(&root, path, b"Needs review\n");
             commit_file(&root, "README.md", b"Documentation on top of code\n");
@@ -413,6 +438,34 @@ mod tests {
         git(&root, &["mv", "tracked.txt", "renamed.md"]);
         git(&root, &["commit", "-qm", "rename code as documentation"]);
         assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_does_not_use_fetch_history_for_another_push_url() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        let destination = temp.path().join("different-origin.git");
+        git(
+            temp.path(),
+            &["init", "--bare", "-q", destination.to_str().unwrap()],
+        );
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                destination.to_str().unwrap(),
+            ],
+        );
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        commit_file(
+            &root,
+            "README.md",
+            b"Documentation after code from another repository\n",
+        );
+        assert_ne!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
     }
 
     #[test]
