@@ -51,7 +51,7 @@ test('navigation starts B while A is pending and A cannot consume B reload', asy
   h.requests[1].resolve({ entries: ['new'], latest_seq: 0 });
   await b;
   assert.equal(h.requests.length, 3);
-  assert.equal(h.requests[2].url, '/api/conversations/B');
+  assert.equal(h.requests[2].url, '/api/v1/conversations/B');
   assert.deepEqual(h.rendered, [['new']]);
   h.requests[2].resolve({ entries: ['latest'], latest_seq: 0 });
 });
@@ -77,7 +77,7 @@ test('draft writers drain newest edits and clears independently per session', as
   assert.deepEqual(requests.map(x => x.draft), ['old', 'other']);
   requests[0].resolve(); await new Promise(setImmediate);
   assert.deepEqual(requests.map(x => x.draft), ['old', 'other', '']);
-  assert.equal(requests[2].url, '/api/sessions/A/draft');
+  assert.equal(requests[2].url, '/api/v1/sessions/A/draft');
   requests[1].resolve(); requests[2].resolve();
   await Promise.all([first, second]);
 });
@@ -120,7 +120,7 @@ test('navigation captures outgoing text before clearing the composer', async () 
   vm.runInContext(extract('// A session owns its desired draft', '\n/// Put back'), context);
   vm.runInContext(extract('function leaveConversation()', "\ndocument.querySelector('#login-form')"), context);
   vm.runInContext('leaveConversation()', context);
-  assert.deepEqual(requests, [{ url: '/api/sessions/A/draft', draft: 'leaving draft' }]);
+  assert.deepEqual(requests, [{ url: '/api/v1/sessions/A/draft', draft: 'leaving draft' }]);
   assert.equal(context.currentSession, null);
   assert.equal(context.draft, '');
 });

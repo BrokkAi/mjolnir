@@ -23,7 +23,7 @@ use axum::http::{HeaderMap, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::{get, post, put};
+use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
@@ -406,7 +406,6 @@ use assets::*;
 mod config_view;
 pub use config_view::*;
 mod settings;
-use settings::*;
 
 #[cfg(test)]
 mod tests;

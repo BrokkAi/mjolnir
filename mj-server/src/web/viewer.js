@@ -227,7 +227,7 @@ async function drainBody(response) {
 /// it impossible to accidentally base64 an image back into the prompt.
 async function uploadAttachment(sessionId, file, signal) {
   const response = await upgradeAwareFetch(
-    `/api/sessions/${encodeURIComponent(sessionId)}/attachments`,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
     {
       method: 'POST',
       body: file,
@@ -642,7 +642,7 @@ function scheduleSettingsDiscovery() {
     settingsState.discoveryTimer = null;
     if (route.name !== 'settings' || !settingsState.page || !settingsDiscovering()) return;
     enqueueSettings(async () => {
-      const reply = await request('/api/settings/page', {
+      const reply = await request('/api/v1/settings/page', {
         method: 'POST',
         body: JSON.stringify({ draft: settingsState.draft, path: settingsState.page.path }),
       });
@@ -684,11 +684,11 @@ function forgetSettings() {
 /// the draft as they are when its turn comes.
 function syncSettingsRoute() {
   enqueueSettings(async () => {
-    if (!settingsState.draft) adoptSettingsDocument(await request('/api/settings'));
+    if (!settingsState.draft) adoptSettingsDocument(await request('/api/v1/settings'));
     if (route.name !== 'settings' || settingsKey(settingsState.page?.path) === settingsKey(route.path)) {
       return;
     }
-    const reply = await request('/api/settings/page', {
+    const reply = await request('/api/v1/settings/page', {
       method: 'POST',
       body: JSON.stringify({ draft: settingsState.draft, path: route.path || [] }),
     });
@@ -703,7 +703,7 @@ function syncSettingsRoute() {
 /// Send one edit made on the page `pagePath`.
 function editSettings(pagePath, edit) {
   return enqueueSettings(async () => {
-    const reply = await request('/api/settings/edit', {
+    const reply = await request('/api/v1/settings/edit', {
       method: 'POST',
       body: JSON.stringify({ draft: settingsState.draft, page: pagePath, edit }),
     });
@@ -734,7 +734,7 @@ function saveSettings() {
     settingsState.saving = true;
     settingsChanged();
     try {
-      const document = await request('/api/settings/save', {
+      const document = await request('/api/v1/settings/save', {
         method: 'POST',
         body: JSON.stringify({
           original: settingsState.original,
@@ -1231,7 +1231,7 @@ async function sendNotificationDismissal(identity) {
     dismissedNotifications.set(id, dismissal);
   }
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({ action: 'dismiss-notification', ...identity }),
     });
@@ -1436,7 +1436,7 @@ function inboxText(row, key, item) {
     inboxTexts.delete(key);
     return false;
   }
-  request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message?${query}`)
+  request(`/api/v1/sessions/${encodeURIComponent(row.id)}/notification-message?${query}`)
     .then(answer => {
       if (!isCurrent()) return;
       entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
@@ -1665,7 +1665,7 @@ async function inboxReportFailure(card, submission, status, text, refused) {
     let known = true;
     try {
       draft = draftWriters.get(destination)?.desired
-        ?? (await request(`/api/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
+        ?? (await request(`/api/v1/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
     } catch {
       known = false;
     }
@@ -1760,7 +1760,7 @@ async function inboxSend(card) {
     let draft;
     try {
       draft = draftWriters.get(destination)?.desired
-        ?? (await request(`/api/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
+        ?? (await request(`/api/v1/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
     } catch (error) {
       inboxError = { key: card.key, text: `Not sent: could not check the conversation's draft: ${error.message}` };
       renderInbox();
@@ -3040,7 +3040,7 @@ function abortPendingNewPreflight() {
 
 async function requestAvailabilityCheck() {
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({ action: 'check-availability' }),
     });
@@ -3908,11 +3908,11 @@ async function refreshProjectCatalog(draft, retry = false) {
   draft.catalogController = controller;
   draft.catalogStatus = { state: 'refreshing' };
   try {
-    let view = await request(`/api/projects${retry ? '?retry=true' : ''}`, { method: 'POST', signal: controller.signal });
+    let view = await request(`/api/v1/projects${retry ? '?retry=true' : ''}`, { method: 'POST', signal: controller.signal });
     while (view.status.state === 'refreshing') {
       await new Promise(resolve => setTimeout(resolve, 250));
       if (controller.signal.aborted) return;
-      view = await request('/api/projects', { signal: controller.signal });
+      view = await request('/api/v1/projects', { signal: controller.signal });
     }
     if (newDraft !== draft || controller.signal.aborted) return;
     draft.catalogStatus = view.status;
@@ -4247,7 +4247,7 @@ async function discoverProjects() {
   const current = () => newDraft === draft && draft.projectPicker === picker && picker.controller === controller && !controller.signal.aborted;
   renderNewForm();
   try {
-    const result = await request(remote ? '/api/paths/complete' : '/api/projects/discover', {
+    const result = await request(remote ? '/api/v1/paths/complete' : '/api/v1/projects/discover', {
       method: 'POST', signal: controller.signal, body: JSON.stringify(body),
     });
     if (!current()) return;
@@ -4289,7 +4289,7 @@ async function createNewProject(sources) {
   newError.textContent = '';
   renderNewForm();
   try {
-    const result = await request('/api/bundles', { method: 'POST', signal: controller.signal, body: JSON.stringify({ sources }) });
+    const result = await request('/api/v1/bundles', { method: 'POST', signal: controller.signal, body: JSON.stringify({ sources }) });
     if (!current()) return;
     draft.bundleId = result.bundle_id;
     draft.createdBundleId = result.bundle_id;
@@ -4416,7 +4416,7 @@ function attachPathSuggestions(input, complete) {
     state.controller = controller;
     let answer;
     try {
-      answer = await request('/api/paths/complete', {
+      answer = await request('/api/v1/paths/complete', {
         method: 'POST',
         signal: controller.signal,
         body: JSON.stringify({ target_id: host, prefix, kind: state.complete.kind }),
@@ -4507,7 +4507,7 @@ async function preflightNew() {
     let remoteRepairs = [];
     let answer;
     while (true) {
-      answer = await request('/api/preflight/new', {
+      answer = await request('/api/v1/preflight/new', {
         method: 'POST',
         signal: controller.signal,
         body: JSON.stringify({
@@ -4641,7 +4641,7 @@ async function commitNew() {
   draft.committing = true;
   renderNewForm();
   try {
-    await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    await request('/api/v1/actions', { method: 'POST', body: JSON.stringify(body) });
     if (newDraft !== draft) return;
     await refresh();
     if (newDraft !== draft) return;
@@ -5365,7 +5365,7 @@ function ensureResumeConversionPreflight(session) {
   }
   if (draft.conversion && draft.conversion.targetId === targetId) return;
   draft.conversion = { targetId, status: 'checking', preview: null, detail: '', acknowledged: false };
-  request('/api/preflight/resume', {
+  request('/api/v1/preflight/resume', {
     method: 'POST',
     body: JSON.stringify({ session_id: session.id, target_id: targetId }),
   }).then(answer => {
@@ -6007,7 +6007,7 @@ async function prepareMove() {
   moveError.textContent = '';
   renderMoveForm();
   try {
-    draft.preparation = await request('/api/moves/prepare', {
+    draft.preparation = await request('/api/v1/moves/prepare', {
       method: 'POST',
       body: JSON.stringify({
         workspace: draft.workspaceSelection,
@@ -6027,7 +6027,7 @@ async function prepareMove() {
       const preview = draft.preparation.container_upgrade;
       draft.preparation = null;
       if (await confirmContainerUpgrade(preview, true)) {
-        await applyContainerSettingsReplacement(preview);
+        await applyContainerUpgrade(preview);
         await refresh();
         announce('Container settings replacement pending');
         navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
@@ -6059,7 +6059,7 @@ async function commitMove() {
   moveError.textContent = '';
   renderMoveForm();
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({
         action: 'move',
@@ -6426,7 +6426,7 @@ async function runRefresh(target, errorNode) {
   if (errorNode) errorNode.textContent = '';
   target.disabled = true;
   try {
-    await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    await request('/api/v1/actions', { method: 'POST', body: JSON.stringify(body) });
     await refresh();
   } catch (err) {
     if (errorNode) errorNode.textContent = err.message;
@@ -6638,7 +6638,7 @@ async function ensureSessionDetail(id) {
     const promise = (async () => {
       let result;
       try {
-        result = await request(`/api/sessions/${encodeURIComponent(id)}/row`);
+        result = await request(`/api/v1/sessions/${encodeURIComponent(id)}/row`);
       } catch (error) {
         if (sessionById(id) !== current) return;
         throw error;
@@ -6696,7 +6696,7 @@ function startEvents(since = viewerState.cursor) {
   const query = new URLSearchParams({ format: 'changes' });
   const cursor = runtimeCursorText(since);
   if (cursor) query.set('since', cursor);
-  eventSource = new EventSource(`/api/events?${query}`);
+  eventSource = new EventSource(`/api/v1/viewer/events?${query}`);
   const source = eventSource;
   let runtimeFrameApplied = false;
   eventSource.addEventListener('open', () => {
@@ -6825,11 +6825,11 @@ function reconcileLifecycleActions() {
   }
 }
 
-function applyContainerSettingsReplacement(preview) {
-  return request('/api/actions', { method: 'POST', body: JSON.stringify({
-    action: 'upgrade-container',
-    request: { selection: preview, acknowledge_writable_layer_loss: true },
-  }) });
+function applyContainerUpgrade(preview) {
+  return request(`/api/v1/sessions/${encodeURIComponent(preview.session_id)}/container-upgrade`, {
+    method: 'POST',
+    body: JSON.stringify({ selection: preview, acknowledge_writable_layer_loss: true }),
+  });
 }
 
 function confirmContainerUpgrade(preview, upgradeOnly) {
@@ -7103,7 +7103,7 @@ function openChangeWorkspace(session) {
     confirm.disabled = true;
     error.textContent = '';
     try {
-      await request('/api/actions', {
+      await request('/api/v1/actions', {
         method: 'POST',
         body: JSON.stringify({ action: 'change-workspace', session_id: session.id, workspace_id: select.value }),
       });
@@ -7291,7 +7291,7 @@ function openContainerSettings(session) {
     confirm.disabled = true;
     error.textContent = '';
     try {
-      const preview = await request('/api/actions', {
+      const preview = await request('/api/v1/actions', {
         method: 'POST',
         body: JSON.stringify({
           action: 'set-container-settings',
@@ -7302,7 +7302,7 @@ function openContainerSettings(session) {
       });
       if (preview) {
         if (!await confirmContainerUpgrade(preview, true)) { confirm.disabled = false; return; }
-        await applyContainerSettingsReplacement(preview);
+        await applyContainerUpgrade(preview);
         announce('Container settings replacement pending');
       } else {
         announce('Container settings saved for next creation');
@@ -7326,7 +7326,7 @@ let gitIdentityAsked = false;
 function offerGitIdentitySetup() {
   if (gitIdentityAsked) return;
   gitIdentityAsked = true;
-  request('/api/git-identity').then(identity => {
+  request('/api/v1/git-identity').then(identity => {
     // Someone who left the form before the answer came is asked next time.
     if (route.name !== 'new') {
       gitIdentityAsked = false;
@@ -7390,7 +7390,7 @@ function openGitIdentitySetup(identity) {
     confirm.disabled = true;
     error.textContent = '';
     try {
-      const saved = await request('/api/git-identity', {
+      const saved = await request('/api/v1/git-identity', {
         method: 'POST',
         body: JSON.stringify({ name: nameInput.value, email: emailInput.value }),
       });
@@ -7515,7 +7515,7 @@ function presentSnapshot(detailChangedIds = []) {
 
 async function refresh() {
   try {
-    const value = await request('/api/snapshot');
+    const value = await request('/api/v1/snapshot');
     if (eventSource) eventSource.close();
     eventSource = undefined;
     clearTimeout(eventReconnectTimer);
@@ -7741,7 +7741,7 @@ async function stopBackgroundTask(taskId) {
   renderQueue(session);
   try {
     await request(
-      `/api/sessions/${encodeURIComponent(session.id)}/background-tasks/stop`,
+      `/api/v1/sessions/${encodeURIComponent(session.id)}/background-tasks/stop`,
       {
         method: 'POST',
         body: JSON.stringify({ background_task_id: task.id }),
@@ -8264,7 +8264,7 @@ async function submitElicitation(sessionId, elicitationId, response, surface = '
   };
   rerender();
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({
         action: 'respond-elicitation',
@@ -8668,7 +8668,7 @@ function queueDraftSave(sessionId, draft) {
         if (draftWriters.get(sessionId) !== writer) break;
         const version = writer.version;
         try {
-          await request(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
+          await request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/draft`, {
             method: 'PUT',
             body: JSON.stringify({ draft: writer.desired }),
           });
@@ -8699,7 +8699,7 @@ const composerHandoffs = new Map();
 async function restoreDraft(sessionId, generation) {
   const revision = composerGeneration;
   try {
-    const stored = await request(`/api/sessions/${encodeURIComponent(sessionId)}/client-state`);
+    const stored = await request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/client-state`);
     if (generation !== conversationGeneration) return;
     // Anything typed while the request was in flight belongs to the person,
     // not to the server.
@@ -8743,7 +8743,7 @@ async function searchHistory(query) {
   historyRequest = operation;
   try {
     const found = await request(
-      `/api/sessions/${encodeURIComponent(currentSession)}/history?q=${encodeURIComponent(query)}&scope=project`,
+      `/api/v1/sessions/${encodeURIComponent(currentSession)}/prompt-history?q=${encodeURIComponent(query)}&scope=project`,
       { signal: operation.controller.signal },
     );
     if (historyRequest !== operation || operation.generation !== conversationGeneration || !historyOpen) return;
@@ -9129,7 +9129,7 @@ async function runLocalCommand(text) {
         setComposerText('');
         saveDraft();
         await sendSubmission({ action: 'prompt', session_id: sessionId, text: argument, images: [] }, [], async () => {
-          await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'set-plan-mode', session_id: sessionId, active }) });
+          await request('/api/v1/actions', { method: 'POST', body: JSON.stringify({ action: 'set-plan-mode', session_id: sessionId, active }) });
         }, text);
       } else {
         await sendAction({ action: 'set-plan-mode', session_id: currentSession, active });
@@ -9149,7 +9149,7 @@ async function sendAction(body) {
   const sessionId = body.session_id;
   const submittedGeneration = composerGeneration;
   try {
-    await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    await request('/api/v1/actions', { method: 'POST', body: JSON.stringify(body) });
     // Do not let an action that completed after navigation clear the next
     // conversation's draft or error state.
     if ((!sessionId || currentSession === sessionId) && composerGeneration === submittedGeneration) {
@@ -9233,7 +9233,7 @@ async function sendSubmission(body, images = [], prerequisite = null, recoveryTe
     pending.status = 'Sending…';
     renderPendingSubmissions();
     submissionStarted = true;
-    await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    await request('/api/v1/actions', { method: 'POST', body: JSON.stringify(body) });
     pending.finished = true;
     pending.status = 'Queued';
     // An accepted /clear has no user message to reconcile with: the browser
@@ -9448,7 +9448,7 @@ function toolDetailFold(sessionId, stableId, version) {
     }
     if (!load) {
       load = { version };
-      load.pending = request(`/api/sessions/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(stableId)}/detail`)
+      load.pending = request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(stableId)}/detail`)
         .catch(error => ({ status: 'unavailable', unavailable_reason: error.message }))
         .then(result => {
           load.result = result;
@@ -9747,7 +9747,7 @@ async function persistVisibleConversationRead() {
     || receipt.inFlight) return;
   receipt.inFlight = true;
   try {
-    await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
+    await request(`/api/v1/conversations/${encodeURIComponent(sessionId)}/read`, {
       method: 'POST', body: JSON.stringify({ through }),
     });
     receipt.through = Math.max(receipt.through, through);
@@ -9795,7 +9795,7 @@ async function loadConversation(delta = false) {
     }
     const suffix = query.toString() ? `?${query.toString()}` : '';
     const result = await request(
-      `/api/conversations/${encodeURIComponent(sessionId)}${suffix}`,
+      `/api/v1/conversations/${encodeURIComponent(sessionId)}${suffix}`,
       { signal: operation.controller.signal },
     );
     const latest = sessionById(sessionId);
@@ -9992,7 +9992,7 @@ function openSessionSettings(session, focusKey = null) {
         for (const item of selects) item.disabled = true;
         error.textContent = '';
         try {
-          await request('/api/actions', {
+          await request('/api/v1/actions', {
             method: 'POST',
             body: JSON.stringify({
               action: 'set-config',
@@ -10061,7 +10061,7 @@ async function submitModelChange(session, value) {
   const error = document.querySelector('#conversation-error');
   modelSelect.disabled = true;
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({ action: 'set-config', session_id: session.id, key: 'model', value }),
     });
@@ -10112,7 +10112,7 @@ async function submitTurnControl(session, command) {
   dismissedTurnControls.delete(session.id);
   renderTurnControl(session);
   try {
-    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'turn-control', session_id: session.id, command }) });
+    await request('/api/v1/actions', { method: 'POST', body: JSON.stringify({ action: 'turn-control', session_id: session.id, command }) });
     await refresh();
   } catch (error) {
     failedTurnControls.set(session.id, { message: error.message, activePromptId: command.data?.active_prompt_id });
@@ -10388,7 +10388,7 @@ async function sendOperatorActivitySignal() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({ action: 'record-operator-activity' }),
       signal: controller.signal,
@@ -10440,7 +10440,7 @@ async function setOperatorAway(away) {
   operatorAwayError.classList.add('hidden');
   renderOperatorAway();
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({ action: 'set-operator-away', away }),
     });
@@ -10658,7 +10658,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     const upgradeOnly = dataset.action === 'upgrade-container';
     let preview = null;
     if (sessionById(dataset.id)?.container_upgrade_supported) {
-      try { preview = await request(`/api/sessions/${dataset.id}/container-upgrade`); }
+      try { preview = await request(`/api/v1/sessions/${encodeURIComponent(dataset.id)}/container-upgrade`); }
       catch (error) { if (upgradeOnly) { errorNode.textContent = error.message; return false; } }
     }
     if (preview?.available) {
@@ -10666,7 +10666,7 @@ async function runSessionAction(dataset, errorNode, extra) {
       if (!choice) return false;
       if (choice === 'upgrade') {
         try {
-          await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'upgrade-container', request: { selection: preview, acknowledge_writable_layer_loss: true } }) });
+          await applyContainerUpgrade(preview);
           errorNode.textContent = '';
           await refresh();
           return true;
@@ -10739,7 +10739,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     } else if (dataset.action === 'dismiss-notification') {
       await sendNotificationDismissal({ session_id: body.session_id, target: body.target });
     } else {
-      await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+      await request('/api/v1/actions', { method: 'POST', body: JSON.stringify(body) });
     }
     errorNode.textContent = '';
     await refresh();
@@ -11058,7 +11058,7 @@ queue.onclick = async e => {
   const queued = session?.queued_prompts?.find(prompt => prompt.id === id);
   const error = document.querySelector('#conversation-error');
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({
         action: 'remove-queued-prompt',
@@ -11085,7 +11085,7 @@ shells.onclick = async e => {
   const button = e.target.closest('button[data-shell-id]');
   if (!button) return;
   try {
-    await request('/api/actions', {
+    await request('/api/v1/actions', {
       method: 'POST',
       body: JSON.stringify({
         action: 'cancel-shell',
@@ -11327,7 +11327,7 @@ async function refreshDeviceNotifications() {
   }
   try {
     const subscription = await (await pushRegistration()).pushManager.getSubscription();
-    const status = subscription ? await request(`/api/push/status?endpoint=${encodeURIComponent(subscription.endpoint)}`) : null;
+    const status = subscription ? await request(`/api/v1/push/status?endpoint=${encodeURIComponent(subscription.endpoint)}`) : null;
     notificationState.textContent = status?.error ? `Notification delivery: ${status.error}` : status?.subscribed ? 'Enabled on this device' : `Not enabled (permission: ${Notification.permission})`;
     notificationEnable.disabled = !!status?.subscribed && !status?.error;
     notificationDisable.disabled = notificationTest.disabled = !subscription;
@@ -11353,7 +11353,7 @@ notificationTest.onclick = async () => {
   try {
     const subscription = await (await pushRegistration()).pushManager.getSubscription();
     if (!subscription) throw new Error('Enable notifications first.');
-    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-test', endpoint: subscription.endpoint }) });
+    await request('/api/v1/actions', { method: 'POST', body: JSON.stringify({ action: 'push-test', endpoint: subscription.endpoint }) });
     notificationState.textContent = 'Test notification requested';
   } catch (error) { notificationState.textContent = error.message; }
 };

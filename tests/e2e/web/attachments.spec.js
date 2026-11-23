@@ -105,34 +105,34 @@ async function mockViewer(page, uploadHandler) {
     return route.fulfill({ path: asset });
   });
   const state = { snapshot: snapshot(), actions: [], draft: '' };
-  await page.route('**/api/snapshot', route => route.fulfill({
+  await page.route('**/api/v1/snapshot', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify(viewerWireSnapshot(state.snapshot)),
   }));
-  await page.route('**/api/events', route => route.fulfill({
+  await page.route('**/api/v1/viewer/events', route => route.fulfill({
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
     body: ': mocked event stream\n\n',
   }));
-  await page.route(`**/api/conversations/${SESSION_ID}/read`, route => route.fulfill({ status: 204, body: '' }));
-  await page.route(`**/api/conversations/${SESSION_ID}*`, route => route.fulfill({
+  await page.route(`**/api/v1/conversations/${SESSION_ID}/read`, route => route.fulfill({ status: 204, body: '' }));
+  await page.route(`**/api/v1/conversations/${SESSION_ID}*`, route => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify({ latest_seq: 0, window_start_seq: 0, reset: false, entries: [] }),
   }));
-  await page.route(`**/api/sessions/${SESSION_ID}/client-state`, route => route.fulfill({
+  await page.route(`**/api/v1/sessions/${SESSION_ID}/client-state`, route => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify({ draft: state.draft, through_event_ordinal: 0 }),
   }));
-  await page.route(`**/api/sessions/${SESSION_ID}/draft`, async route => {
+  await page.route(`**/api/v1/sessions/${SESSION_ID}/draft`, async route => {
     const body = JSON.parse(route.request().postData() || '{}');
     state.draft = body.draft || '';
     await route.fulfill({ status: 204, body: '' });
   });
-  await page.route(`**/api/sessions/${SESSION_ID}/attachments`, uploadHandler);
-  await page.route('**/api/actions', async route => {
+  await page.route(`**/api/v1/sessions/${SESSION_ID}/attachments`, uploadHandler);
+  await page.route('**/api/v1/actions', async route => {
     const body = JSON.parse(route.request().postData() || '{}');
     state.actions.push(body);
     await route.fulfill({ status: 202, body: '' });

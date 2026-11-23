@@ -133,14 +133,14 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
   await page.route('**/*', async route => {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
-    if (pathname === '/api/snapshot') {
+    if (pathname === '/api/v1/snapshot') {
       state.snapshots += 1;
       const wire = viewerWireSnapshot(state.snapshot);
       state.lastWireSnapshot = wire;
       state.streamInternedKeys = new Set(Object.keys(wire.interned));
       return json(wire);
     }
-    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    const detailPath = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/row$/);
     if (detailPath) {
       const id = decodeURIComponent(detailPath[1]);
       state.detailRequests.push(id);
@@ -148,13 +148,13 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
       const detail = viewerDetailResponse(state.snapshot, id);
       return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
-    const message = pathname.match(/^\/api\/sessions\/([^/]+)\/notification-message$/);
+    const message = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/notification-message$/);
     if (message) {
       const id = decodeURIComponent(message[1]);
       state.messageRequests = [...(state.messageRequests || []), id];
       return json({ session_id: id, text: state.notificationMessages?.[id] ?? `The full message from ${id}.\n\nSecond paragraph.` });
     }
-    if (pathname === '/api/events') {
+    if (pathname === '/api/v1/viewer/events') {
       return route.fulfill({
         status: 200,
         headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
@@ -186,7 +186,7 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
       if (state.failAction?.action === body.action) return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: state.failAction.error }) });
       return route.fulfill({ status: 202, body: '' });
     }
-    if (pathname === '/api/actions') {
+    if (pathname === '/api/v1/actions') {
       const body = route.request().postDataJSON();
       if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
       state.actions.push(body);
@@ -201,7 +201,7 @@ async function mount(page, sessions, holdDetail = null, initialHash = `#workspac
     }
     if (pathname.endsWith('/client-state')) return json({ draft: '', through_event_ordinal: 0 });
     if (pathname.endsWith('/draft')) return route.fulfill({ status: 204, body: '' });
-    if (pathname.startsWith('/api/conversations/')) {
+    if (pathname.startsWith('/api/v1/conversations/')) {
       if (route.request().method() === 'GET') {
         state.conversationRequests += 1;
         if (state.holdConversation) {
@@ -1474,7 +1474,7 @@ test('earlier messages page backwards, retry errors, and preserve the live draft
       items: [{ position: 0, stable_id: 'user:101', role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
     } : { items: [{ position: -1, stable_id: 'agent:1', role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
   });
-  await page.route('**/api/conversations/history*', route => route.fulfill({
+  await page.route('**/api/v1/conversations/history*', route => route.fulfill({
     contentType: 'application/json', body: JSON.stringify(transcript('Live answer\n\n'.repeat(100))),
   }));
   await card(page, 'history').click();
@@ -1507,7 +1507,7 @@ test('inline history leaves live rows intact and continues pages without visible
   const live = transcript('Newest live answer');
   live.entries[0].id = 30;
   live.entries.unshift({ ...live.entries[0], id: 20, lines: ['Complete live row'] });
-  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  await page.route('**/api/v1/conversations/history*', route => route.fulfill({ json: live }));
   const queries = [];
   await page.route('**/api/v1/sessions/history/history*', route => {
     queries.push(new URL(route.request().url()).search);
@@ -1542,7 +1542,7 @@ test('inline history fills an advancing live window and keeps older paging', asy
   const live = transcript('Row 200');
   live.entries[0].id = 200;
   live.entries.unshift({ ...live.entries[0], id: 100, lines: ['Row 100'] });
-  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  await page.route('**/api/v1/conversations/history*', route => route.fulfill({ json: live }));
   const queries = [];
   const item = position => ({ position, stable_id: `agent:${position}`, role: 'agent', text: `Row ${position}` });
   await page.route('**/api/v1/sessions/history/history*', route => {
@@ -1574,7 +1574,7 @@ test('replacing the live window keeps a mid-feed live row in place', async ({ pa
   const live = transcript('Row 0');
   const base = live.entries[0];
   live.entries = Array.from({ length: 60 }, (_, n) => ({ ...base, id: 10 + n, updated_seq: 10 + n, lines: [`Row ${10 + n}`, 'second line'] }));
-  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  await page.route('**/api/v1/conversations/history*', route => route.fulfill({ json: live }));
   await page.route('**/api/v1/sessions/history/history*', route => route.fulfill({ json: { items: [], before: null } }));
   await card(page, 'history').click();
   const reader = page.locator('#conversation-feed');

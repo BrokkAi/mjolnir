@@ -76,7 +76,7 @@ test('folder filtering uses controller discovery while target browsing uses host
   picker.path = '/controller';
   picker.filter = 'omitted';
   const local = run('discoverProjects()');
-  assert.equal(requests[0].url, '/api/projects/discover');
+  assert.equal(requests[0].url, '/api/v1/projects/discover');
   assert.deepEqual(requests[0].body, { kind: 'directory', path: '/controller', filter: 'omitted' });
   requests[0].resolve({ entries: [], directory: '/controller', parent: '/', truncated: false });
   await local;
@@ -84,7 +84,7 @@ test('folder filtering uses controller discovery while target browsing uses host
   picker.path = 'C:\\work\\';
   picker.filter = 'api';
   const remote = run('discoverProjects()');
-  assert.equal(requests[1].url, '/api/paths/complete');
+  assert.equal(requests[1].url, '/api/v1/paths/complete');
   assert.deepEqual(requests[1].body, { target_id: 'remote', prefix: 'C:/work/api', kind: 'directories' });
   requests[1].resolve({ candidates: ['C:/work/api/'], truncated: true });
   await remote;
@@ -99,7 +99,7 @@ test('one source creates exact repository membership once and proceeds with the 
   const pending = run('selectProjectRepository()');
   await run('selectProjectRepository()');
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, '/api/bundles');
+  assert.equal(requests[0].url, '/api/v1/bundles');
   assert.deepEqual(requests[0].body, { sources: ['example/app'] });
   requests[0].resolve({ bundle_id: 'exact-project' });
   await pending;
@@ -137,7 +137,7 @@ test('catalog refresh ignores superseded replies, reports partial failures, and 
   await current;
   assert.equal(context.newDraft.catalogStatus.errors[0], 'Missing historical checkout');
   const retry = run('refreshProjectCatalog(newDraft, true)');
-  assert.equal(requests[2].url, '/api/projects?retry=true');
+  assert.equal(requests[2].url, '/api/v1/projects?retry=true');
   requests[2].resolve({ status: { state: 'ready' } });
   await retry;
   assert.equal(context.newDraft.catalogStatus.state, 'ready');

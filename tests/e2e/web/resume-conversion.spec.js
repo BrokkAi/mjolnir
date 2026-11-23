@@ -75,22 +75,22 @@ async function mount(page, { answer = { kind: 'converting-raw-checkout', preview
   await page.route('**/*', async route => {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
-    if (pathname === '/api/snapshot') {
+    if (pathname === '/api/v1/snapshot') {
       state.snapshots += 1;
       return json(viewerWireSnapshot(state.snapshot));
     }
-    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    const detailPath = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/row$/);
     if (detailPath) {
       const detail = viewerDetailResponse(state.snapshot, decodeURIComponent(detailPath[1]));
       return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
-    if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
-    if (pathname === '/api/preflight/resume') {
+    if (pathname === '/api/v1/viewer/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
+    if (pathname === '/api/v1/preflight/resume') {
       state.preflights.push(route.request().postDataJSON());
       if (state.holdPreflight) await state.holdPreflight;
       return json(state.answer);
     }
-    if (pathname === '/api/actions') {
+    if (pathname === '/api/v1/actions') {
       const body = route.request().postDataJSON();
       if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
       state.actions.push(body);

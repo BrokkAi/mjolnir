@@ -1,15 +1,61 @@
 use super::*;
+use crate::server::{BackgroundTaskStopFailure, BackgroundTaskStopRequest};
 
-/// Share the viewer's admission and worker acknowledgement path. The route
-/// layer supplies API bearer authentication and the versioned error contract.
+/// Ask the live session actor to stop one task the current projection still
+/// shows. The snapshot check is intentionally repeated at admission time:
+/// a task may have completed, or lost its provider stop capability, between
+/// the browser rendering its button and the POST arriving.
 pub(super) async fn stop_background_task(
-    state: State<ServerState>,
-    session_id: Path<String>,
-    request: Json<StopBackgroundTaskRequest>,
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<StopBackgroundTaskRequest>,
 ) -> Result<StatusCode, ApiFailure> {
-    super::super::stop_background_task(state, session_id, request)
+    crate::server::validate_public_id(&session_id)?;
+    // Task ids are opaque provider ids (the worker currently uses values such
+    // as `terminal:<id>`), so they do not use the config id alphabet. The
+    // request is still bounded and must name a task in the current snapshot.
+    if request.background_task_id.is_empty() || request.background_task_id.len() > 256 {
+        return Err(ApiFailure::bad_request("invalid background task id"));
+    }
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        let task = session
+            .background_tasks
+            .iter()
+            .find(|task| task.id == request.background_task_id)
+            .ok_or_else(|| ApiFailure::conflict("background task is no longer running"))?;
+        if !task.can_stop {
+            return Err(ApiFailure::conflict("background task cannot be stopped"));
+        }
+    }
+
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .background_task_stop_tx
+        .send(BackgroundTaskStopRequest {
+            session_id,
+            background_task_id: request.background_task_id,
+            reply,
+        })
         .await
-        .map_err(Into::into)
+        .map_err(|_| ApiError::controller_unavailable())?;
+    match result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+    {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(BackgroundTaskStopFailure::SessionUnavailable) => Err(ApiFailure::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the live session is unavailable",
+        )),
+        Err(BackgroundTaskStopFailure::Provider | BackgroundTaskStopFailure::Internal) => {
+            Err(ApiFailure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the provider could not stop this background task",
+            ))
+        }
+    }
 }
 
 pub(super) async fn list_sessions(

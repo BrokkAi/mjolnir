@@ -1,17 +1,12 @@
 //! The documented HTTP API an orchestrating agent drives sessions with.
 //!
-//! The web viewer's own `/api/...` routes exist for the browser: they are
-//! undocumented, cookie-only, and shaped around what a phone renders. These
-//! `/api/v1/...` routes are the stable surface instead. They authenticate with
-//! a bearer token from a file the same user can read, answer with a version
-//! header so a client can tell which contract it reached, and — the point of
-//! the whole module — let a caller block until one specific prompt finishes and
-//! read a structured outcome for it.
+//! The web viewer and other API clients share the `/api/v1` router. Clients
+//! authenticate with a bearer token from an owner-readable file or a signed
+//! viewer cookie. Settings routes require the viewer cookie. Responses carry
+//! a version header so clients can identify the contract they reached.
 //!
-//! Everything that needs the daemon's live session actors or its SQLite store
-//! reaches them through [`SubagentBackend`]. The daemon implements it in
-//! `server_runtime::api`; the route tests implement it with a hand-written fake,
-//! so the HTTP contract is tested without a running daemon.
+//! Session operations reach live actors and SQLite through [`SubagentBackend`]
+//! and controller request channels implemented by the daemon runtime.
 //!
 //! # The artifact routes are contract
 //!

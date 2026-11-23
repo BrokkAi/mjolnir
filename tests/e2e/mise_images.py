@@ -179,7 +179,7 @@ class Images(Lab):
         code, _ = self.wait_daemon_status(0)
         assert self.request("POST", "/auth/session", {"code": code})[0] == 204
         workspace = self.snapshot()["workspaces"][0]["id"]
-        response, body = self.request("POST", "/api/actions", {
+        response, body = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "fixture", "target_id": "podman", "title": "mise-image-assignment",
             "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3},
@@ -202,7 +202,7 @@ class Images(Lab):
         self.record_action("session-uses-recorded-image", session=snapshot["id"], image=expected)
         response, preview = self.request("GET", f"/api/v1/sessions/{snapshot['id']}/container-upgrade")
         assert response == 200 and preview["target_image"] == expected, preview
-        response, body = self.request("POST", "/api/actions", {
+        response, body = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "other", "target_id": "podman", "title": "mise-image-fallback",
             "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3},

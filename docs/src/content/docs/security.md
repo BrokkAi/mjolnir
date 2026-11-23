@@ -279,10 +279,9 @@ session already runs with your account's authority: it can read your files,
 your credentials, and Mjolnir's data directory directly, so a narrower API token
 would not contain it. Each worker's control socket follows the same rule: any
 process running as the same user on the worker's machine can connect to it and
-use every method it serves. No `/api/v1` route edits Mjolnir's configuration:
-profiles, targets, and the other settings in `config.toml` change only through
-the dashboard, the cookie-authenticated web viewer settings, or the file
-itself.
+use every method it serves. The `/api/v1/settings` routes require a signed web
+viewer cookie. Profiles, targets, and other settings in `config.toml` can be
+changed through the dashboard, web viewer settings, or the file itself.
 
 Sessions in containers and on remote targets are not given the `api-token`
 file, but do not rely on that as a boundary. The `fetch` tool can copy any file

@@ -13,9 +13,8 @@ The `mj` subcommands in the [CLI reference](/cli-reference/#drive-a-session-from
 are thin clients for these routes. Use them when you can; use the routes
 directly when your caller is not a shell.
 
-The web viewer's own `/api/...` routes are a different thing: they serve the
-browser, they are cookie-only, and they change whenever the browser needs
-something new. Only `/api/v1/...` is documented and stable.
+The web viewer shares the `/api/v1` router and uses a signed viewer cookie.
+The routes documented here are the stable API contract.
 
 ## Find the URL and the token
 
@@ -1410,7 +1409,7 @@ on reconnect and does not promise replay of intermediate states. Slow readers ar
 buffered within fixed limits and cannot block session execution. Keepalive
 comments carry no application event. A storage
 failure may send an unnumbered `stream_error` frame and end the stream; reconnect
-from the last processed ID. The viewer's existing `/api/events` route is separate.
+from the last processed ID. The web viewer subscribes to snapshot updates on `/api/v1/viewer/events`.
 
 ```sh
 mj events --session SESSION --after-seq 0
