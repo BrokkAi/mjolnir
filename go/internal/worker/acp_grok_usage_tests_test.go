@@ -44,6 +44,7 @@ func spec(command string, environment map[string]string, cwd string) LaunchSpec 
 		StepClock:            &core.StepClock{},
 		ToolsInFlight:        &core.ToolsInFlight{},
 		TurnContext:          &transcript.TurnContext{},
+		LoginIdentity:        &ClaudeLoginIdentity{},
 		Verdict:              VerdictSourceDisabled{},
 	}
 }

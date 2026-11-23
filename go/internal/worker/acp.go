@@ -1014,7 +1014,9 @@ func runBridge(ctx context.Context, spec *LaunchSpec, requests <-chan CommandReq
 	// Like the terminals, the guardian's reviewer outlives the protocol
 	// driver: it is stopped below, after this bridge's own teardown, on every
 	// exit path, so the next bridge never starts beside a live reviewer.
-	guardian := guardianForLaunch(&launch)
+	// The daemon guardian endpoint arrives with run_with_guardian in the sync
+	// pass; until then the guardian runs without one, as at 4273087e6.
+	guardian := guardianForLaunch(&launch, nil)
 	type driven struct {
 		restart SessionRestart
 		err     error

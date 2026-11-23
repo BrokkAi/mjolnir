@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
 // NativeSessionStartupTimeout is the observed harness startup allowance:
@@ -498,8 +500,11 @@ func (s *RestoredRelaySeed) Validate() error {
 		}
 	}
 	if len(s.AssessmentState) > 0 && string(s.AssessmentState) != "null" {
-		var value any
-		if err := json.Unmarshal(s.AssessmentState, &value); err != nil {
+		// jsonvalue keeps integers exact, as serde_json::Value does; a
+		// float64 round trip re-encodes them as "N.0", which the checkpoint's
+		// integer fields refuse.
+		value, err := jsonvalue.Parse(s.AssessmentState)
+		if err != nil {
 			return err
 		}
 		if _, err := CheckpointDecode(value); err != nil {

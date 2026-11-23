@@ -44,6 +44,7 @@ func acpFeaturesSpec(command string, args []string, environment map[string]strin
 		StepClock:            &core.StepClock{},
 		ToolsInFlight:        &core.ToolsInFlight{},
 		TurnContext:          &transcript.TurnContext{},
+		LoginIdentity:        &ClaudeLoginIdentity{},
 		Verdict:              VerdictSourceDisabled{},
 	}
 }

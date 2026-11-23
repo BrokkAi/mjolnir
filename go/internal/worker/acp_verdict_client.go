@@ -642,6 +642,15 @@ func (c VerdictClient) newAttempt(diagnostic *core.Attempt, session string, gene
 	}
 }
 
+// verdictElapsedError is tokio's Elapsed: the handback check ran out of its
+// time. Callers tell a timeout from other failures with errors.Is(err,
+// context.DeadlineExceeded), as Rust looks for Elapsed in the error chain.
+type verdictElapsedError struct{}
+
+func (verdictElapsedError) Error() string { return "deadline has elapsed" }
+
+func (verdictElapsedError) Is(target error) bool { return target == context.DeadlineExceeded }
+
 func (c VerdictClient) askHandbackLogged(ctx context.Context, session string, generation uint64, evidence *core.TurnEvidence) (*VerdictAttempt, core.HandbackProbabilities, error) {
 	var diagnostic *core.Attempt
 	if c.log != nil {
@@ -699,7 +708,7 @@ func (c VerdictClient) askHandbackLogged(ctx context.Context, session string, ge
 		return core.HandbackProbabilitiesParse(distribution)
 	}()
 	if err != nil && errors.Is(deadline.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		err = errors.New("deadline has elapsed")
+		err = verdictElapsedError{}
 	}
 	if diagnostic != nil {
 		if err == nil {

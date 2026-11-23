@@ -29,7 +29,6 @@ import (
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
-	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
 // SubagentSocket is the worker root's sub-agent MCP socket.
@@ -1220,11 +1219,11 @@ func (e *SubagentEndpoint) checkHandback(ctx context.Context, request *core.Suba
 		if client == nil {
 			return nil, nil
 		}
-		session, generation, evidence, err := owner.prepareHandbackCheck(handback.Message)
-		if err != nil || evidence == nil {
+		check, err := owner.prepareHandbackCheck(handback.Message)
+		if err != nil || check == nil {
 			return nil, err
 		}
-		return &preparedCheck{client: client, session: session, generation: generation, evidence: evidence}, nil
+		return &preparedCheck{client: client, session: check.SessionID, generation: check.Generation, evidence: &check.Evidence}, nil
 	}()
 	if err != nil || prepared == nil {
 		return nil, err
@@ -1251,67 +1250,6 @@ func (e *SubagentEndpoint) checkHandback(ctx context.Context, request *core.Suba
 	}
 	attempt.finish("delivered", "handback_accepted")
 	return nil, nil
-}
-
-// prepareHandbackCheck is mj-worker/src/relay/verdict.rs
-// DurableRelay::prepare_handback_check, ported here because the sub-agent
-// handback check is its only caller. The delivery events own assignment
-// identity. Reminders and provider retries do not replace it, so all their
-// handbacks consume the original assignment. A nil evidence is Rust's None.
-func (r *DurableRelay) prepareHandbackCheck(report string) (string, uint64, *core.TurnEvidence, error) {
-	if core.DisabledByEnvironment() {
-		return "", 0, nil, nil
-	}
-	if r.verdictHarness == nil {
-		return "", 0, nil, nil
-	}
-	harness := *r.verdictHarness
-	checks := &r.snapshot.HandbackChecks
-	if checks.AssignmentID == nil {
-		return "", 0, nil, nil
-	}
-	assignmentID := *checks.AssignmentID
-	if slices.Contains(checks.Checked, assignmentID) {
-		return "", 0, nil, nil
-	}
-	if checks.Context == nil {
-		return "", 0, nil, nil
-	}
-	history := *checks.Context
-	history.Messages = slices.Clone(history.Messages)
-	if history.SetAsideThrough != nil {
-		through := *history.SetAsideThrough
-		history.SetAsideThrough = &through
-	}
-	history.OpenAssistantID = nil
-	reportID := "handback-report"
-	history.Assistant(&reportID, r.snapshot.LatestOrdinal, report)
-	facts := r.ActivityFacts()
-	evidence := r.turnContext.Evidence(harness, core.TurnPhaseReplied, &facts, core.EpochMillis())
-	// The report goes whole into the authorization history above; the tail
-	// field keeps the bound every classifier route enforces.
-	evidence.AssistantTextTail = transcript.Tail(report, core.AssistantTextBytes)
-	evidence.FinalToolCalls = nil
-	evidence.ToolsInFlight = nil
-	completion := core.CompletionEvidenceBounded("end_turn", nil)
-	evidence.Completion = &completion
-	// The whole history goes in; only GLiDE's own size refusal shrinks it,
-	// and the client refuses to shrink away the parent's instructions.
-	// Authorization is historical context. Only the turn owner supplies the
-	// current reply; an older question must not become this turn's answer.
-	evidence.Authorization = &history
-	evidence.TranscriptSummary = ""
-	// GLiDE judges the report against the parent's instructions. When they
-	// did not arrive whole (a non-text block), there is nothing to judge
-	// against: deliver unchecked and leave the check unspent.
-	if !history.AuthorizationComplete {
-		return "", 0, nil, nil
-	}
-	// Journal before HTTP: a crash or cancelled socket consumes the attempt.
-	if _, err := r.RecordObservation(core.RelayObservationHandbackCheckStarted{AssignmentID: assignmentID}); err != nil {
-		return "", 0, nil, err
-	}
-	return r.snapshot.SessionID, r.snapshot.LatestOrdinal, &evidence, nil
 }
 
 func (e *SubagentEndpoint) cachedResult(requestID string) (*core.SubagentToolResult, error) {

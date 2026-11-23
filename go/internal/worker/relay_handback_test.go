@@ -62,11 +62,14 @@ func handbackRecord(t *testing.T, relay *DurableRelay, observation core.RelayObs
 // handbackPrepare is prepare_handback_check(..).unwrap().
 func handbackPrepare(t *testing.T, relay *DurableRelay, report string) (PreparedHandbackCheck, bool) {
 	t.Helper()
-	prepared, ok, err := relay.prepareHandbackCheck(report)
+	prepared, err := relay.prepareHandbackCheck(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return prepared, ok
+	if prepared == nil {
+		return PreparedHandbackCheck{}, false
+	}
+	return *prepared, true
 }
 
 func handbackAssignmentID(t *testing.T, event core.MailboxEvent) string {

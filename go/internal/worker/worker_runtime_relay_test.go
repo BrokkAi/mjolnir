@@ -2663,9 +2663,7 @@ func runtimeRelayNoCommandWithin(t *testing.T, commands *commandChannel, limit t
 // runtimeRelayQueuedCommands is how many commands wait in the channel for
 // the receiver (Rust: Receiver::len).
 func runtimeRelayQueuedCommands(commands *commandChannel) int {
-	commands.mu.Lock()
-	defer commands.mu.Unlock()
-	return len(commands.queue)
+	return len(commands.out)
 }
 
 func runtimeRelayCancelID(command CommandRequest) (string, bool) {

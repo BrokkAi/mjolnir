@@ -161,6 +161,11 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 	// The coordinator owns the receiving side of the dispatch wakes: once it
 	// stops, a sender sees the closed channel.
 	defer dispatchWakes.closeReceiver()
+	// Rust moves the user shell registry into the coordinator, so it drops
+	// (cancels the shells still running) when the coordinator returns.
+	if userShells != nil {
+		defer userShells.Close()
+	}
 	if verdict != nil {
 		guard := relay.Lock()
 		log, ok := guard.TurnContext().DecisionLog()
@@ -1144,6 +1149,7 @@ func recordRuntimeEventLocked(relay *RelayGuard, inFlight map[string]core.RelayC
 		return observe(core.RelayObservationNativeAgent{Event: event.Event})
 	case core.RuntimeEventNativeGoalResumeSent:
 		relay.nativeGoalResumeSent(event.ResumeID, event.Goal)
+		event.Applied.Acknowledge()
 	case core.RuntimeEventNativeGoalResumeRejected:
 		relay.nativeGoalResumeRejected(event.ResumeID)
 	case core.RuntimeEventSessionUpdate:

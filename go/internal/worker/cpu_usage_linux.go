@@ -211,7 +211,7 @@ func discoverCgroupCpu() (cgroupCpu, error) {
 // resolveCgroupCpu finds the counter for the cgroup named in membership
 // (/proc/self/cgroup) under a mount in mounts (/proc/self/mountinfo).
 func resolveCgroupCpu(membership string, mounts string) (cgroupCpu, error) {
-	for _, line := range rustLines(membership) {
+	for _, line := range cpuUsageRustLines(membership) {
 		fields := strings.SplitN(line, ":", 3)
 		if len(fields) < 2 {
 			return cgroupCpu{}, errors.New("missing cgroup controllers")
@@ -232,7 +232,7 @@ func resolveCgroupCpu(membership string, mounts string) (cgroupCpu, error) {
 		if unified {
 			filesystem, counter = "cgroup2", "cpu.stat"
 		}
-		for _, mount := range rustLines(mounts) {
+		for _, mount := range cpuUsageRustLines(mounts) {
 			left, right, ok := strings.Cut(mount, " - ")
 			if !ok {
 				continue
@@ -264,9 +264,9 @@ func resolveCgroupCpu(membership string, mounts string) (cgroupCpu, error) {
 	return cgroupCpu{}, errors.New("no visible CPU accounting mount for worker cgroup")
 }
 
-// rustLines is str::lines: lines split at "\n", each without a trailing
+// cpuUsageRustLines is str::lines: lines split at "\n", each without a trailing
 // "\r", and no final empty line after a trailing newline.
-func rustLines(text string) []string {
+func cpuUsageRustLines(text string) []string {
 	if text == "" {
 		return nil
 	}
@@ -308,7 +308,7 @@ func (c cgroupCpu) read() (time.Duration, error) {
 		}
 		return time.Duration(nanos), nil
 	}
-	for _, line := range rustLines(string(text)) {
+	for _, line := range cpuUsageRustLines(string(text)) {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && fields[0] == "usage_usec" {
 			micros, err := strconv.ParseUint(fields[1], 10, 64)

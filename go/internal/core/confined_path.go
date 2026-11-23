@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"unicode/utf8"
 )
 
 // RejectSymlinks refuses `relative` below `root` when `root`, or any part of
@@ -291,10 +292,12 @@ func (d *ConfinedDir) ReadToString(name string) (*string, error) {
 	if err != nil || content == nil {
 		return nil, err
 	}
-	text, err := decodeUTF8(content, fmt.Sprintf("read %s", rustPathPush(d.path, name)))
-	if err != nil {
-		return nil, err
+	// Rust's File::read_to_string fails with io::Error InvalidData, not
+	// String::from_utf8's Utf8Error.
+	if !utf8.Valid(content) {
+		return nil, fmt.Errorf("read %s: stream did not contain valid UTF-8", rustPathPush(d.path, name))
 	}
+	text := string(content)
 	return &text, nil
 }
 
