@@ -1029,7 +1029,7 @@ async fn probe_daemon_release(metadata: &DaemonMetadata) -> Result<DaemonRelease
     Ok(
         match container::probe_container_daemon(record.runtime, &record.container_id).await {
             container::ContainerDaemonStatus::Running => DaemonRelease::StillOwned,
-            container::ContainerDaemonStatus::Exited => DaemonRelease::Exited,
+            container::ContainerDaemonStatus::Exited { .. } => DaemonRelease::Exited,
             container::ContainerDaemonStatus::Unknown(reason) => DaemonRelease::Unknown(reason),
         },
     )
@@ -1323,7 +1323,7 @@ async fn request_daemon_identity(client: &mut DaemonClient) -> Result<DaemonIden
 async fn container_daemon_may_be_alive(runtime: DaemonRuntime, id: &str) -> bool {
     !matches!(
         container::probe_container_daemon(runtime, id).await,
-        container::ContainerDaemonStatus::Exited
+        container::ContainerDaemonStatus::Exited { .. }
     )
 }
 
@@ -1334,7 +1334,7 @@ enum ContainerAdoption {
 
 async fn adopt_container_daemon(record: &ContainerDaemonRecord) -> Result<ContainerAdoption> {
     match container::probe_container_daemon(record.runtime, &record.container_id).await {
-        container::ContainerDaemonStatus::Exited => {
+        container::ContainerDaemonStatus::Exited { .. } => {
             return Ok(ContainerAdoption::Exited);
         }
         container::ContainerDaemonStatus::Unknown(reason) => bail!("{reason}"),
@@ -1454,8 +1454,18 @@ async fn stop_pending_container(
     force: bool,
 ) -> Result<bool> {
     match container::probe_container_daemon(record.runtime, &record.container_id).await {
-        container::ContainerDaemonStatus::Exited => {
+        container::ContainerDaemonStatus::Exited {
+            container_running: false,
+        } => {
+            // A stopped or absent container cannot start a delayed exec.
             remove_container_owner_if_matching(record.address, &record.token)?;
+            Ok(false)
+        }
+        container::ContainerDaemonStatus::Exited {
+            container_running: true,
+        } => {
+            // Keep credentials while the container runs so a delayed exec remains
+            // discoverable and any same-target retry reuses the same token.
             Ok(false)
         }
         container::ContainerDaemonStatus::Unknown(reason) => Err(anyhow!(reason)),
@@ -2917,8 +2927,15 @@ esac
             assert!(!metadata_path().exists());
             assert_eq!(
                 container::probe_container_daemon(RUNTIME, CONTAINER_ID).await,
-                container::ContainerDaemonStatus::Exited
+                container::ContainerDaemonStatus::Exited {
+                    container_running: true
+                }
             );
+            // Stopping an apparently exited pending launch while the container
+            // still runs must keep its credentials so a delayed exec cannot
+            // become orphaned or split from a retry.
+            assert!(!stop_instance(false).await.unwrap());
+            assert_eq!(read_container_owner().unwrap().as_ref(), Some(&prior));
 
             let peer = async {
                 let (mut stream, _) = listener.accept().await.unwrap();

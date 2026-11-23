@@ -63,8 +63,8 @@ After completing this plan, the daemon launch and discovery code is measurably s
   Rationale: Fixes Flaws F2 and F3 so a subsequent launcher can adopt an unpublished in-flight container daemon instead of stranding it or launching over it. Cuts `probe-store-lock`, launch tickets (`MJ_DAEMON_REQUIRE_TICKET`, `ticket_armed`), `MJ_DAEMON_GENERATION` / `instance_id` coupling, `published`, `token_sha256`, `OwnerPlacement::Host`, and `volume`/`image` fields.
   Date/Author: 2026-11-23 / Coordinator (incorporating MJ Advisor review)
 
-- Decision: Keep the unpublished owner record when a startup process probe reports exit. Reuse its token if the retry targets the same engine, full container ID, and published loopback address. Clear the record when the retry switches targets or the user explicitly stops an exited pending container.
-  Rationale: A detached engine exec can reach the store after the launcher's death and after the next client's process check. The volume store guard admits one daemon, and sharing the token lets the client authenticate to whichever exec wins.
+- Decision: Keep the unpublished owner record when a startup process probe reports exit. Reuse its token if the retry targets the same engine, full container ID, and published loopback address. Clear the record when the retry switches targets, when `mj daemon stop` observes that the container itself is stopped or absent, or when `mj daemon stop --force` stops the container.
+  Rationale: A detached engine exec can reach the store after the launcher's death and after the next client's process check while the container still runs. The volume store guard admits one daemon, and sharing the token lets the client authenticate to whichever exec wins.
   Date/Author: 2026-11-23 / Milestone 2 review
 
 - Decision: Require a readable container owner record before requesting stop or handoff from a legacy container with a published endpoint. Allow explicit force recovery to clear an unreadable record after an unreachable legacy endpoint has been checked, or when there is no published endpoint.

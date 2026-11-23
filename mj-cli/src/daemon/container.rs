@@ -162,7 +162,7 @@ fn daemon_metadata(
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ContainerDaemonStatus {
     Running,
-    Exited,
+    Exited { container_running: bool },
     Unknown(String),
 }
 
@@ -279,14 +279,21 @@ pub(super) async fn probe_container_daemon(
         if !ids.lines().any(|id| id.trim() == container_id)
             || !container_is_running(program, container_id).await?
         {
-            return Ok(false);
+            return Ok(ContainerDaemonStatus::Exited {
+                container_running: false,
+            });
         }
         let top = container_top(program, container_id, "args").await?;
-        Ok::<_, anyhow::Error>(top_output_has_daemon_run(&top))
+        Ok::<_, anyhow::Error>(if top_output_has_daemon_run(&top) {
+            ContainerDaemonStatus::Running
+        } else {
+            ContainerDaemonStatus::Exited {
+                container_running: true,
+            }
+        })
     };
     match probe.await {
-        Ok(true) => ContainerDaemonStatus::Running,
-        Ok(false) => ContainerDaemonStatus::Exited,
+        Ok(status) => status,
         Err(error) => ContainerDaemonStatus::Unknown(format!("{error:#}")),
     }
 }
@@ -856,10 +863,20 @@ mod tests {
             was_running.unwrap(),
             "the placeholder must still be running"
         );
-        assert_eq!(live, ContainerDaemonStatus::Exited);
+        assert_eq!(
+            live,
+            ContainerDaemonStatus::Exited {
+                container_running: true
+            }
+        );
         stopped.unwrap();
         assert!(!is_running.unwrap());
-        assert_eq!(after_stop, ContainerDaemonStatus::Exited);
+        assert_eq!(
+            after_stop,
+            ContainerDaemonStatus::Exited {
+                container_running: false
+            }
+        );
     }
 
     fn spec(mounts: Vec<PathBuf>) -> ContainerSpec {
