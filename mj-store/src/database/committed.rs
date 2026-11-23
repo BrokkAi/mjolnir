@@ -63,6 +63,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("startup_steps", "startup", "session_id"),
         ("subagent_handbacks", "report", "child_session_id"),
         ("materialized_sessions", "turn", "session_id"),
+        ("materialized_queued_prompts", "turn", "session_id"),
         ("api_events", "turn", "session_id"),
     ] {
         // Observe tables that exist; opening a connection must not depend on
@@ -100,7 +101,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
                 .collect::<String>();
             let condition = if table == "api_events" {
                 " WHEN json_extract(NEW.body, '$.type') IN ('input_required', 'input_resolved')"
-            } else if kind == "turn" && event == "UPDATE" {
+            } else if table == "materialized_sessions" && event == "UPDATE" {
                 " WHEN OLD.session_id IS NOT NEW.session_id
                    OR OLD.execution_state IS NOT NEW.execution_state
                    OR OLD.running_started_at_ms IS NOT NEW.running_started_at_ms
@@ -153,6 +154,7 @@ pub struct CommittedState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommittedTurn {
     pub state: materialized::MaterializedTurnState,
+    pub queued_command_ids: Vec<String>,
     /// Read once when a failed turn changes, never on each observation.
     pub failed_message: Option<String>,
     pub pending_form_times: BTreeMap<String, i64>,
@@ -212,6 +214,7 @@ impl CommittedTurn {
         }
         Ok(Some(Self {
             state,
+            queued_command_ids: materialized::read_materialized_queued_command_ids(connection, id)?,
             failed_message,
             pending_form_times,
         }))
@@ -797,9 +800,99 @@ mod tests {
             &second,
             &running.turns.get_shared("second").unwrap()
         ));
+        let interrupted = mj_core::state::MaterializedTurnOutcome {
+            command_id: "prompt-first".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(2),
+            completed_ordinal: 3,
+            completed_at_ms: 11,
+            outcome: mj_core::state::TurnOutcomeKind::Interrupted {
+                reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
+                message: "worker restarted".into(),
+            },
+            answered_through: None,
+            usage: None,
+            diagnostic: None,
+            work_facts: None,
+        };
+        let continuation = mj_core::continuation::restart_continuation_id(&interrupted.command_id);
+        let interrupted_json = serialize_turn_outcome(&interrupted).unwrap();
+        owner
+            .writer
+            .execute("record interruption", move |connection| {
+                connection.execute(
+                    "UPDATE materialized_sessions
+                     SET execution_state='idle', running_started_at_ms=NULL, last_turn_outcome_json=?1
+                     WHERE session_id='first'",
+                    [interrupted_json],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let before_queue = owner.writer.committed_state().unwrap();
+        let command_id = continuation.clone();
+        owner
+            .writer
+            .execute("queue continuation only", move |connection| {
+                connection.execute(
+                    "INSERT INTO materialized_queued_prompts
+                     (session_id, ordinal, command_id, content_json, queued_at_ms, accepted_ordinal)
+                     VALUES ('first', 0, ?1, '[]', 11, 1)",
+                    [command_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let queued = owner.writer.committed_state().unwrap();
+        assert_eq!(
+            queued.turns["first"].state,
+            before_queue.turns["first"].state
+        );
+        assert_eq!(
+            queued.turns["first"].queued_command_ids,
+            std::slice::from_ref(&continuation)
+        );
+        assert!(queued.wait_revisions["first"] > before_queue.wait_revisions["first"]);
+        assert_eq!(
+            queued.wait_revisions.get("second"),
+            before_queue.wait_revisions.get("second")
+        );
+
         owner.shutdown().unwrap();
+        assert_eq!(
+            materialized::load_materialized_turn_with_queue_from(&path, "first").unwrap(),
+            Some((
+                (
+                    mj_core::state::MaterializedExecutionState::Idle,
+                    None,
+                    Some(interrupted)
+                ),
+                vec![continuation],
+            ))
+        );
         let owner = start_database_writer_at(&path, false).unwrap();
-        assert_eq!(owner.writer.committed_state().unwrap().turns, running.turns);
+        let reopened = owner.writer.committed_state().unwrap();
+        assert_eq!(reopened.turns, queued.turns);
+        owner
+            .writer
+            .execute("drop continuation only", |connection| {
+                connection.execute(
+                    "DELETE FROM materialized_queued_prompts WHERE session_id='first'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let dropped = owner.writer.committed_state().unwrap();
+        assert_eq!(dropped.turns, before_queue.turns);
+        assert_ne!(
+            dropped.wait_revisions.get("first"),
+            reopened.wait_revisions.get("first")
+        );
+        assert_eq!(
+            dropped.wait_revisions.get("second"),
+            reopened.wait_revisions.get("second")
+        );
         owner
             .writer
             .execute("delete projection", |connection| {
