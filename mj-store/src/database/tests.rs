@@ -9500,3 +9500,56 @@ fn interrupted_spill_leaves_inline_body_and_retry_commits_durable_detail() {
     delete_session_from(&path, session_id).unwrap();
     assert!(!detail_path.exists());
 }
+
+#[test]
+fn unsettled_fallback_terminal_defers_spilling_settled_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "session-fallback-defer";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+    let mut projection = MaterializedSession::empty(session_id);
+    projection.applied_event_ordinal = 10;
+    projection.applied_event_digest = event_digest(10);
+
+    let fallback = Arc::new(TranscriptItem {
+        stable_id: "tool:hel-terminal:term-1".into(),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1_000,
+        last_changed_at_ms: 1_000,
+        body: TranscriptBody::Tool {
+            call: serde_json::to_value(mj_core::acp::fallback_terminal_tool_call(
+                "term-1",
+                "cargo test".into(),
+            ))
+            .unwrap()
+            .into(),
+            terminal_outputs: Vec::new(),
+            terminal_refs: vec!["term-1".into()],
+            presentation: None,
+        },
+    });
+    let provider_tool = tool_item(4, "source.rs", "old\n", "new\n");
+    projection.transcript = vec![Arc::clone(&fallback), Arc::clone(&provider_tool)];
+    save_materialized_session_to(&path, &projection).unwrap();
+
+    // While the fallback terminal tool is unsettled, settled tools stay inline so
+    // raw-result matching can claim the fallback when the terminal closes.
+    assert!(
+        spill_and_trim_settled_tools_through_from(&path, session_id, 10)
+            .unwrap()
+            .is_empty()
+    );
+    let loaded = load_materialized_session_from(&path, session_id)
+        .unwrap()
+        .unwrap();
+    assert!(!loaded.transcript[1].body.detail_trimmed());
+
+    // Once the fallback terminal is consumed and removed, the settled tool spills cleanly.
+    projection.transcript = vec![Arc::clone(&provider_tool)];
+    save_materialized_session_to(&path, &projection).unwrap();
+    let spilled = spill_and_trim_settled_tools_through_from(&path, session_id, 10).unwrap();
+    assert_eq!(spilled.len(), 1);
+    assert_eq!(spilled[0].0, provider_tool.stable_id);
+    assert!(spilled[0].1.detail_trimmed());
+}

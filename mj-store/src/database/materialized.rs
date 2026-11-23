@@ -1186,6 +1186,20 @@ fn spill_tool_detail_batch(
         [session_id],
         |row| row.get(0),
     )?;
+    // A still-open fallback terminal tool (`tool:hel-terminal:...`) may yet be
+    // claimed on close by a completed provider tool whose rawOutput matches
+    // (e.g. Kimi Bash). Defer spilling until that fallback terminal finishes.
+    if unsettled_tool
+        && transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+             WHERE session_id = ?1 AND settled = 0 AND item_kind = 'tool'
+               AND stable_id LIKE 'tool:hel-terminal:%')",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(SpilledToolBatch::default());
+    }
     let mut candidates = {
         let (after_position, after_id) = after.map_or((0, ""), |(pos, id)| (*pos, id.as_str()));
         let mut query = transaction.prepare(&format!(
