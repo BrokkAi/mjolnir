@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resume repairs failed parents while real children use their retained environments.
+"""Exercise resume with retained environments and OriginDelta checkpoints.
 
 Uses the container-upgrade lab's deterministic ACP fixture. Build mj with
 --features test-hooks; pass a compatible portable worker and a local image.
@@ -16,6 +16,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import urllib.request
+import zipfile
 
 import container_upgrades
 from container_upgrades import Regression, WAIT
@@ -23,6 +24,51 @@ from reliability_lab import ScenarioFailure, process_is_running
 
 
 class ResumeRegression(Regression):
+    # Hard-won: 67aa58a8: Resume looked for a legacy Git bundle in an OriginDelta checkpoint.
+    def origin_delta_regression(self):
+        self.prepare_container_fixture(self.args.image)
+        self.cli("workspaces", "create", "OriginDelta resume")
+        self.authenticate()
+        workspace = self.snapshot()["workspaces"][0]["id"]
+        mounts = [{"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}]
+        size = {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3}
+        session = self.create_session(workspace, mounts, "origin-delta-resume", size)
+        record = self.record(session)
+        container = self.container(session)
+        original_container_id = self.inspect(session)["Id"]
+        checkout = record["container_workspace"] + "/fixture"
+        tracked = self.git_output(["ls-files"], self.project).splitlines()[0]
+        original = self.podman("exec", container, "cat", "--", f"{checkout}/{tracked}")
+        self.podman("exec", container, "sh", "-c",
+                    'printf "staged work\\n" > "$2" && git -C "$1" add -- "$3" && printf "unstaged work\\n" >> "$2"',
+                    "sh", checkout, f"{checkout}/{tracked}", tracked)
+        self.cli("suspend", "--session", session)
+        self.wait(lambda: any(row["id"] == session and row["state"] == "suspended"
+                              and row["capabilities"]["resume"] for row in self.snapshot()["sessions"]),
+                  "OriginDelta fixture suspended and ready to resume")
+        checkpoint = self.record(session)["checkpoint"]
+        with zipfile.ZipFile(checkpoint["archive_path"]) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        repository, = manifest["repositories"]
+        delta = repository["origin_delta"]
+        assert delta["origin_url"].startswith("git://") and delta["prerequisites"]
+        assert delta["working_state"] and repository.get("origin_delta_pack_path")
+
+        self.cli("resume", "--session", session)
+        self.wait(lambda: self.record(session)["state"] == "running", "OriginDelta fixture resumed")
+        restored = self.record(session)
+        new_container = self.container(session)
+        assert self.inspect(session)["Id"] != original_container_id
+        restored_checkout = restored["container_workspace"] + "/fixture"
+        assert self.podman("exec", new_container, "git", "-C", restored_checkout,
+                           "show", f"HEAD:{tracked}") == original
+        assert self.podman("exec", new_container, "git", "-C", restored_checkout,
+                           "show", f":{tracked}") == "staged work\n"
+        assert self.podman("exec", new_container, "cat", "--",
+                           f"{restored_checkout}/{tracked}") == "staged work\nunstaged work\n"
+        print(json.dumps({"result": "passed", "scenario": "origin-delta-resume",
+                          "instance": self.instance, "artifacts": str(self.root)}), flush=True)
+
     def save_recovery_point(self, session):
         # A live bundle export saves the archive before deciding whether the
         # repository has new commits to export. Fresh fixtures have none.
@@ -539,14 +585,18 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
     parser.add_argument("--instance", required=True)
-    parser.add_argument("--bare-only", action="store_true", help="rerun the bare-runtime recovery regression")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--bare-only", action="store_true", help="rerun the bare-runtime recovery regression")
+    selection.add_argument("--origin-delta-only", action="store_true", help="run the OriginDelta suspend and resume regression")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
     container_upgrades.OLD_IMAGE = args.image
     regression = ResumeRegression(args)
     try:
-        if args.bare_only:
+        if args.origin_delta_only:
+            regression.origin_delta_regression()
+        elif args.bare_only:
             parent, child = regression.bare_regression(regression.prepare_resume_fixture())
             print(json.dumps({"result": "passed", "scenario": "bare-runtime", "instance": args.instance,
                               "parent": parent, "child": child, "artifacts": str(regression.root)}), flush=True)
