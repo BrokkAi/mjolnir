@@ -1664,6 +1664,7 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move {
             Ok(mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: SPAWNED_CHILD.to_owned(),
@@ -3348,6 +3349,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
         &backend,
         "codex-1",
         &mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         },
@@ -6607,6 +6609,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
             snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             };
@@ -8079,6 +8082,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
     let child = mj_store::database::test_fixtures::checkpoint_test_session("review-child");
     mj_store::database::save_session(&parent).unwrap();
     let relation = mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: None,
         child_session_id: child.id.clone(),

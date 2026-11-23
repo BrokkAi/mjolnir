@@ -35,6 +35,7 @@ pub(super) fn install_captured_records(
 ) {
     controller.state.sessions = runtime.records.clone();
     controller.state.subagents = runtime.subagents.clone();
+    controller.state.environment_owners = runtime.environment_owners.clone();
     controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies.clone();
     controller.state.operator_presence = runtime.metadata.operator_presence;
     controller.state.container_sizes = runtime.metadata.container_sizes.clone();

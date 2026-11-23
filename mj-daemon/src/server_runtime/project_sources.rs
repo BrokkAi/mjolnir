@@ -15,7 +15,7 @@ impl ProjectSourceKey {
         let Some(session) = state.sessions.get(id) else {
             return false;
         };
-        state.project_identity_session(session).id == id
+        state.owns_environment(id) == Some(true)
             && state.checkout(id).is_ok_and(|checkout| {
                 checkout.project_directory().is_some()
                     && *self == Self::of(session, &checkout, &controller.config)
@@ -62,15 +62,14 @@ pub(super) struct ProjectSourceResolved {
 /// and cancelled when their inputs disappear or the server shuts down.
 ///
 /// Entries are kept per project identity session
-/// ([`State::project_identity_session`]): a Mjolnir sub-agent works in its
-/// parent's checkout and shares the parent's entry. Probing the child's own
-/// directory failed once the parent's suspend removed that checkout (R11-2).
+/// ([`State::project_identity_session`]). Borrowers share the environment
+/// owner's entry, so they do not probe a copied checkout path after suspend.
 #[derive(Default)]
 pub(super) struct PhoneProjectSources {
     pub(super) entries: std::collections::BTreeMap<String, ProjectSourceEntry>,
     pub(super) jobs: tokio::task::JoinSet<ProjectSourceResolved>,
     records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    relations: mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
+    environment_owners: mj_core::snapshot_map::SnapshotMap<String, String>,
     config: Option<Config>,
     pending: std::collections::BTreeSet<String>,
     retries: std::collections::BTreeSet<(Instant, String)>,
@@ -79,16 +78,14 @@ pub(super) struct PhoneProjectSources {
 impl PhoneProjectSources {
     pub(super) fn synchronize(&mut self, controller: &Controller) {
         let state = &controller.state;
-        let own_identity =
-            |session: &SessionRecord| state.project_identity_session(session).id == session.id;
         let mut changed = self
             .records
             .changes(&state.sessions)
             .map(|(id, _)| id.clone())
             .collect::<std::collections::BTreeSet<_>>();
         changed.extend(
-            self.relations
-                .changes(&state.subagents)
+            self.environment_owners
+                .changes(&state.environment_owners)
                 .map(|(id, _)| id.clone()),
         );
         if self.config.as_ref() != Some(&controller.config) {
@@ -96,7 +93,7 @@ impl PhoneProjectSources {
         }
         for id in changed {
             let key = state.sessions.get(&id).and_then(|session| {
-                if !own_identity(session) {
+                if state.owns_environment(&id) != Some(true) {
                     return None;
                 }
                 let checkout = state.checkout(&id).ok()?;
@@ -135,7 +132,7 @@ impl PhoneProjectSources {
             }
         }
         self.records = state.sessions.clone();
-        self.relations = state.subagents.clone();
+        self.environment_owners = state.environment_owners.clone();
         if self.config.as_ref() != Some(&controller.config) {
             self.config = Some(controller.config.clone());
         }
@@ -181,14 +178,14 @@ impl PhoneProjectSources {
                     cancelled: cancelled.clone(),
                 },
             );
+            let mut source_state = State::default();
+            source_state.sessions.copy_entry(&state.sessions, &id, true);
+            source_state
+                .environment_owners
+                .copy_entry(&state.environment_owners, &id, true);
             let source_controller = Controller {
                 config: controller.config.clone(),
-                state: State {
-                    sessions: [(session.id.clone(), session.clone())]
-                        .into_iter()
-                        .collect(),
-                    ..State::default()
-                },
+                state: source_state,
             };
             let session_id = session.id.clone();
             self.jobs.spawn_blocking(move || {

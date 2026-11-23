@@ -118,7 +118,6 @@ pub use mj_client::daemon::GitIdentity;
 pub use mj_session_runtime::host_git_config::{
     controller_git_identity, set_controller_git_identity,
 };
-pub use provisioning::CreateKind;
 pub use worker_binary::{
     ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
@@ -1289,6 +1288,7 @@ impl Controller {
                     .insert(profile_id.to_owned(), record.supervisors);
             }
         }
+        self.state.environment_owners.insert(id.clone(), id.clone());
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {
             self.state.remember_container_size(&host, size);

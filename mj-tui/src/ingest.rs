@@ -726,6 +726,13 @@ impl DashboardState {
             .map(|(id, _)| self.session_notice_name(id))
             .collect::<Vec<_>>();
         self.durable_records = state.sessions.clone();
+        for (id, _) in self
+            .state
+            .environment_owners
+            .changes(&state.environment_owners)
+        {
+            self.project_sources.remove(id);
+        }
         let mut rows = self.state.sessions.clone();
         for (id, record) in &changed {
             if let Some(record) = record {

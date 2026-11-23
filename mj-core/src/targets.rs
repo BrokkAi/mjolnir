@@ -973,8 +973,8 @@ pub trait CommandExecutor {
     /// failure: the work continues, and the user is told what changed.
     fn notify_notice(&self, _notice: &str) {}
 
-    /// Stop the source's children only once destination preparation has succeeded.
-    fn before_move_source_stop(
+    /// Stop workers sharing the environment before its owner quiesces.
+    fn stop_borrowed_workers_before_quiesce(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })

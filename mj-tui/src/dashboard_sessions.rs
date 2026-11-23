@@ -738,7 +738,7 @@ impl DashboardState {
     }
 
     pub fn set_project_source(&mut self, session_id: &str, source: ProjectSourceIdentity) {
-        if self.state.sessions.contains_key(session_id) {
+        if self.state.owns_environment(session_id) == Some(true) {
             self.project_sources.insert(session_id.to_owned(), source);
             self.clamp_selections();
         }
@@ -804,6 +804,7 @@ impl DashboardState {
         let mut children = self
             .managed_active_child_ids(parent_id)
             .into_iter()
+            .filter(|id| self.state.owns_environment(id) != Some(true))
             .chain(
                 self.native_by_parent
                     .get(parent_id)

@@ -4444,6 +4444,7 @@ mod tests {
             effort: None,
         }];
         let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };
@@ -4482,6 +4483,7 @@ mod tests {
         config.subagents.subtle = vec![choice];
         catalog.sync(&config);
         let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         };

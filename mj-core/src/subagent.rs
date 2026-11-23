@@ -17,6 +17,8 @@ pub enum SubagentPolicy {
         straightforward: Option<Box<crate::config::SubagentChoice>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         subtle: Option<Box<crate::config::SubagentChoice>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        orchestrators: bool,
     },
     None,
 }
@@ -32,6 +34,8 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
                 straightforward: Option<Box<crate::config::SubagentChoice>>,
                 #[serde(default)]
                 subtle: Option<Box<crate::config::SubagentChoice>>,
+                #[serde(default)]
+                orchestrators: bool,
                 // b4374cb29 briefly stored one flattened choice for both types.
                 #[serde(default)]
                 model: Option<String>,
@@ -47,6 +51,7 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
             Wire::Mjolnir {
                 straightforward,
                 subtle,
+                orchestrators,
                 model,
                 effort,
             } => {
@@ -72,11 +77,13 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
                 Self::Mjolnir {
                     straightforward: straightforward.or_else(|| legacy.clone()),
                     subtle: subtle.or(legacy),
+                    orchestrators,
                 }
             }
             Wire::LegacyMjolnir => Self::Mjolnir {
                 straightforward: None,
                 subtle: None,
+                orchestrators: false,
             },
             Wire::None => Self::None,
         })
@@ -119,6 +126,7 @@ impl SubagentPolicy {
             Self::Mjolnir {
                 straightforward,
                 subtle,
+                ..
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
@@ -161,7 +169,11 @@ impl SubagentPolicy {
             Self::Native
         } else if let Some(record) = subagent {
             if record.supervisor {
-                self.clone()
+                let mut policy = self.clone();
+                if let Self::Mjolnir { orchestrators, .. } = &mut policy {
+                    *orchestrators = false;
+                }
+                policy
             } else {
                 Self::None
             }
@@ -185,6 +197,7 @@ pub fn deserialize_optional_policy<'de, D: serde::Deserializer<'de>>(
     Ok(
         Option::<Stored>::deserialize(deserializer)?.map(|stored| match stored {
             Stored::Legacy(true) => SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -930,6 +943,9 @@ pub struct SubagentRecord {
     /// depth-2 non-supervisor workers.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supervisor: bool,
+    /// The parent suspended this child and should resume it with its own worker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume_with_parent: bool,
 }
 
 /// Relationship and lifecycle metadata published to control surfaces.
@@ -1014,6 +1030,7 @@ impl SubagentMetadata {
     /// Build a `SubagentRecord` view for shared validation and launch helpers.
     pub fn to_record_view(&self) -> SubagentRecord {
         SubagentRecord {
+            resume_with_parent: false,
             kind: self.kind,
             reviewer_launch: None,
             child_session_id: self.child_session_id.clone(),
@@ -2239,6 +2256,7 @@ mod tests {
             (
                 r#"{"mjolnir_subagents":true}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2250,6 +2268,7 @@ mod tests {
             (
                 r#"{"subagents":{"mode":"all_models"}}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2257,6 +2276,7 @@ mod tests {
             (
                 r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"adaptive"}}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2264,6 +2284,7 @@ mod tests {
             (
                 r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"high"}}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2277,6 +2298,7 @@ mod tests {
         }
         assert!(serde_json::from_str::<SubagentPolicy>("true").is_err());
         let fixed = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(crate::config::SubagentChoice {
                 model: "gpt-6-luna".into(),
                 effort: Some("max".into()),
@@ -2288,6 +2310,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             })
@@ -2299,6 +2322,7 @@ mod tests {
             serde_json::json!({"mode":"mjolnir", "straightforward":{"model":"gpt-6-luna", "effort":"max"}, "subtle":{"model":"gpt-6-sol"}})
         );
         let default_effort = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(crate::config::SubagentChoice {
                 model: "gpt-6-luna".into(),
                 effort: None,
@@ -2327,6 +2351,7 @@ mod tests {
         assert_eq!(
             old_flat,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(duplicated.clone())),
                 subtle: Some(Box::new(duplicated))
             }
@@ -2338,6 +2363,7 @@ mod tests {
             crate::config::HarnessKind::OpenCode,
         ] {
             let worker = SubagentRecord {
+                resume_with_parent: false,
                 kind: SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: "child".into(),
@@ -2357,9 +2383,23 @@ mod tests {
             };
             let mut supervisor = worker.clone();
             supervisor.supervisor = true;
+            let enabled = SubagentPolicy::Mjolnir {
+                orchestrators: true,
+                straightforward: None,
+                subtle: None,
+            };
+            assert_eq!(enabled.for_launch(harness, None), enabled);
+            assert!(matches!(
+                enabled.for_launch(harness, Some(&supervisor)),
+                SubagentPolicy::Mjolnir {
+                    orchestrators: false,
+                    ..
+                }
+            ));
             for policy in [
                 SubagentPolicy::Native,
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },

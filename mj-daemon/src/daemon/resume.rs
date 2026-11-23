@@ -1,5 +1,27 @@
 use super::*;
 
+fn archive_protects_owned_sessions(
+    state: &mj_core::state::State,
+    session_id: &str,
+) -> Result<bool> {
+    if state.owns_environment(session_id).is_none() {
+        return Ok(true);
+    }
+    if state.owns_environment(session_id) == Some(true)
+        && mj_controller::database::load_subagent(session_id)?
+            .is_some_and(|child| child.resume_with_parent)
+    {
+        return Ok(true);
+    }
+    let peers = mj_controller::database::bound_environment_member_ids(session_id)?;
+    // Any child outside this environment is not deleted by the parent's archive
+    // teardown, so its `subagent_sessions.parent_session_id` FK still requires
+    // the parent row to remain intact until that child is removed first.
+    Ok(mj_controller::database::list_subagents(session_id)?
+        .into_iter()
+        .any(|child| !peers.contains(&child.child_session_id)))
+}
+
 impl RuntimeState {
     /// Reserve the host resources a resume would create before its potentially
     /// long preflight begins. The lease lives until the daemon has published
@@ -46,165 +68,294 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub(crate) async fn start_resume_session(
+    pub(crate) fn start_resume_session(
         self: &Arc<Self>,
         request: ResumeSessionRequest,
         control: LifecycleControl,
-    ) -> Result<StartedLifecycle> {
-        let _admission = tokio::select! {
-            biased;
-            () = mj_controller::recovery_gate::wait_until_cancelled(&control.cancelled) => {
-                bail!("Resume cancelled before workspace admission");
-            }
-            guard = self.workspace_resume_gate(&request.workspace_id).read_owned() => guard,
-        };
-        let retry = blocking({
-            let id = request.session_id.clone();
-            move || mj_controller::database::read_failed_launch_record(&id)
-        })
-        .await?;
-        if let Some(record) = retry {
-            if request.workspace_id != record.workspace_id
-                || request.profile_id != record.last_profile
-                || request.target_template_id != record.target_template_id
-                || request
-                    .additional_mounts
-                    .as_ref()
-                    .is_some_and(|mounts| *mounts != record.additional_mounts)
-                || request
-                    .resource_allocation
-                    .as_ref()
-                    .is_some_and(|allocation| {
-                        Some(allocation) != record.resource_allocation.as_ref()
-                    })
-                || request.repository_preflight.is_some()
-                || request.discard_queue
-            {
-                return Err(Refusal::precondition(
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StartedLifecycle>> + Send + '_>>
+    {
+        self.start_resume_session_inner(request, control, false)
+    }
+
+    fn start_resume_session_inner(
+        self: &Arc<Self>,
+        request: ResumeSessionRequest,
+        control: LifecycleControl,
+        from_parent: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StartedLifecycle>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let _admission = tokio::select! {
+                biased;
+                () = mj_controller::recovery_gate::wait_until_cancelled(&control.cancelled) => {
+                    bail!("Resume cancelled before workspace admission");
+                }
+                guard = self.workspace_resume_gate(&request.workspace_id).read_owned() => guard,
+            };
+            let retry = blocking({
+                let id = request.session_id.clone();
+                move || mj_controller::database::read_failed_launch_record(&id)
+            })
+            .await?;
+            if let Some(record) = retry {
+                if request.workspace_id != record.workspace_id
+                    || request.profile_id != record.last_profile
+                    || request.target_template_id != record.target_template_id
+                    || request
+                        .additional_mounts
+                        .as_ref()
+                        .is_some_and(|mounts| *mounts != record.additional_mounts)
+                    || request
+                        .resource_allocation
+                        .as_ref()
+                        .is_some_and(|allocation| {
+                            Some(allocation) != record.resource_allocation.as_ref()
+                        })
+                    || request.repository_preflight.is_some()
+                    || request.discard_queue
+                {
+                    return Err(Refusal::precondition(
                     "Retry launch uses the session's stored launch request. Retry without changing its settings.",
                 ).into());
+                }
+                return self
+                    .start_failed_launch_retry(record, serde_json::to_string(&request)?, control)
+                    .await;
             }
-            return self
-                .start_failed_launch_retry(record, serde_json::to_string(&request)?, control)
-                .await;
-        }
-        let session_id = request.session_id.clone();
-        let profile_id = request.profile_id.clone();
-        let target_template_id = request.target_template_id.clone();
-        let workspace_id = request.workspace_id.clone();
-        let rebind_workspace_id = workspace_id.clone();
-        let operation_session_id = session_id.clone();
-        let key = serde_json::to_string(&request)?;
-        let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        let result = self
-            .admit_prepared_lifecycle(
-                session_id,
-                LifecycleKind::Resume,
-                super::lifecycle::LifecycleStart::request(key, Some(workspace_id), Some(control)),
-                Some(acceptance),
-                move |state, session_id, cancelled, _session_admission| async move {
-                    let _admission = _admission;
-                    let session = blocking({
-                        let session_id = session_id.clone();
-                        move || mj_controller::database::read_durable_session_record(&session_id)
-                    })
-                    .await?;
-                    if session
-                        .as_ref()
-                        .is_some_and(|session| session.state == SessionState::Running)
-                    {
-                        accepted.send_replace(Some(Ok(())));
-                        return Ok(DaemonLifecycleResult::Done);
-                    }
-                    // Suspend may have produced this stopped placement while
-                    // Resume waited. The admitted owner finishes its cleanup;
-                    // a second lifecycle cannot acquire this session now.
-                    if session.as_ref().is_some_and(|session| {
-                        session.state == SessionState::Stopped && session.target.is_some()
-                    }) {
-                        blocking({
-                            let state = state.clone();
+            let session_id = request.session_id.clone();
+            let profile_id = request.profile_id.clone();
+            let target_template_id = request.target_template_id.clone();
+            let workspace_id = request.workspace_id.clone();
+            let rebind_workspace_id = workspace_id.clone();
+            let operation_session_id = session_id.clone();
+            let key = if from_parent {
+                serde_json::to_string(&(&request, from_parent))?
+            } else {
+                serde_json::to_string(&request)?
+            };
+            let (accepted, acceptance) = tokio::sync::watch::channel(None);
+            let result = self
+                .admit_prepared_lifecycle(
+                    session_id,
+                    LifecycleKind::Resume,
+                    super::lifecycle::LifecycleStart::request(
+                        key,
+                        Some(workspace_id),
+                        Some(control),
+                    ),
+                    Some(acceptance),
+                    move |state, session_id, cancelled, _session_admission| async move {
+                        let _admission = _admission;
+                        let session = blocking({
                             let session_id = session_id.clone();
-                            let cancelled = cancelled.clone();
                             move || {
-                                let mut controller = Controller::load()?;
-                                let executor = DaemonStageReportingExecutor::new(
-                                    CancellableProcessExecutor::new(cancelled),
-                                    state,
-                                    session_id.clone(),
-                                );
-                                controller.cleanup_stopped_target(&session_id, &executor)
+                                mj_controller::database::read_durable_session_record(&session_id)
                             }
                         })
                         .await?;
-                        state.reload_controller().await?;
-                    }
-                    let _capacity_reservation =
-                        state.reserve_resume_container_capacity(&request).await?;
-                    blocking({
-                        let session_id = session_id.clone();
-                        move || {
-                            mj_controller::database::reassign_resumable_session_workspace(
-                                &session_id,
-                                &rebind_workspace_id,
-                            )
-                        }
-                    })
-                    .await?;
-                    let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
-                        .await
-                        .context("load controller for daemon resume task")??;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state.clone(),
-                        session_id.clone(),
-                    );
-                    let materialized = controller
-                        .resume_session_controlled_with_repository_preflight_and_admission(
-                            &session_id,
-                            &request.profile_id,
-                            &request.target_template_id,
-                            SessionResumeOptions {
-                                additional_mounts: request.additional_mounts,
-                                resource_allocation: request.resource_allocation,
-                                discard_queue: request.discard_queue,
-                            },
-                            request.repository_preflight,
-                            &executor,
-                            move || {
+                        if from_parent {
+                            let id = session_id.clone();
+                            let scheduled = blocking(move || {
+                                Ok(mj_controller::database::load_subagent(&id)?
+                                    .is_some_and(|child| child.resume_with_parent))
+                            })
+                            .await?;
+                            if !scheduled
+                                || session
+                                    .as_ref()
+                                    .is_none_or(|record| record.state != SessionState::Stopped)
+                            {
                                 accepted.send_replace(Some(Ok(())));
-                            },
-                        )
-                        .await?;
-                    // The projection stays where it was written. A viewer reads
-                    // it from the store; shipping it back through the daemon
-                    // reply put a whole transcript in one IPC frame.
-                    let _ = materialized;
-                    blocking(move || {
-                        if let Some(mut operation) =
-                            mj_controller::database::load_move_operation(&session_id)?
-                            && !operation.queue_admission_started
-                        {
-                            operation.phase = mj_core::state::MovePhase::Cancelled;
-                            operation.queue_admission_finished = true;
-                            operation.updated_at = chrono::Utc::now().to_rfc3339();
-                            operation.error =
-                                Some("Recovered through an explicit Resume operation".into());
-                            mj_controller::database::save_move_operation(&operation)?;
+                                return Ok(DaemonLifecycleResult::Done);
+                            }
                         }
-                        Ok(())
-                    })
-                    .await?;
-                    Ok(DaemonLifecycleResult::Done)
-                },
-            )
-            .await?;
-        self.set_lifecycle_resume_destination(
-            &operation_session_id,
-            profile_id,
-            target_template_id,
+                        if session
+                            .as_ref()
+                            .is_some_and(|session| session.state == SessionState::Running)
+                        {
+                            accepted.send_replace(Some(Ok(())));
+                            state.resume_owned_children(&session_id, &cancelled).await?;
+                            return Ok(DaemonLifecycleResult::Done);
+                        }
+                        // Suspend may have produced this stopped placement while
+                        // Resume waited. The admitted owner finishes its cleanup;
+                        // a second lifecycle cannot acquire this session now.
+                        if session.as_ref().is_some_and(|session| {
+                            session.state == SessionState::Stopped && session.target.is_some()
+                        }) {
+                            blocking({
+                                let state = state.clone();
+                                let session_id = session_id.clone();
+                                let cancelled = cancelled.clone();
+                                move || {
+                                    let mut controller = Controller::load()?;
+                                    let executor = DaemonStageReportingExecutor::new(
+                                        CancellableProcessExecutor::new(cancelled),
+                                        state,
+                                        session_id.clone(),
+                                    );
+                                    controller.cleanup_stopped_target(&session_id, &executor)
+                                }
+                            })
+                            .await?;
+                            state.reload_controller().await?;
+                        }
+                        let _capacity_reservation =
+                            state.reserve_resume_container_capacity(&request).await?;
+                        blocking({
+                            let session_id = session_id.clone();
+                            move || {
+                                mj_controller::database::reassign_resumable_session_workspace(
+                                    &session_id,
+                                    &rebind_workspace_id,
+                                )
+                            }
+                        })
+                        .await?;
+                        let mut controller = mj_core::runtime::spawn_blocking(Controller::load)
+                            .await
+                            .context("load controller for daemon resume task")??;
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(cancelled.clone()),
+                            state.clone(),
+                            session_id.clone(),
+                        );
+                        let materialized = controller
+                            .resume_session_controlled_with_repository_preflight_and_admission(
+                                &session_id,
+                                &request.profile_id,
+                                &request.target_template_id,
+                                SessionResumeOptions {
+                                    additional_mounts: request.additional_mounts,
+                                    resource_allocation: request.resource_allocation,
+                                    discard_queue: request.discard_queue,
+                                },
+                                request.repository_preflight,
+                                &executor,
+                                move || {
+                                    accepted.send_replace(Some(Ok(())));
+                                },
+                            )
+                            .await?;
+                        // The projection stays where it was written. A viewer reads
+                        // it from the store; shipping it back through the daemon
+                        // reply put a whole transcript in one IPC frame.
+                        let _ = materialized;
+                        let resumed = session_id.clone();
+                        blocking(move || {
+                            let session_id = resumed;
+                            if mj_controller::database::load_subagent(&session_id)?
+                                .is_some_and(|relation| relation.resume_with_parent)
+                            {
+                                mj_controller::database::set_subagent_resume_with_parent(
+                                    &session_id,
+                                    false,
+                                )?;
+                            }
+                            if let Some(mut operation) =
+                                mj_controller::database::load_move_operation(&session_id)?
+                                && !operation.queue_admission_started
+                            {
+                                operation.phase = mj_core::state::MovePhase::Cancelled;
+                                operation.queue_admission_finished = true;
+                                operation.updated_at = chrono::Utc::now().to_rfc3339();
+                                operation.error =
+                                    Some("Recovered through an explicit Resume operation".into());
+                                mj_controller::database::save_move_operation(&operation)?;
+                            }
+                            Ok(())
+                        })
+                        .await?;
+                        if !from_parent {
+                            state.resume_owned_children(&session_id, &cancelled).await?;
+                        }
+                        Ok(DaemonLifecycleResult::Done)
+                    },
+                )
+                .await?;
+            self.set_lifecycle_resume_destination(
+                &operation_session_id,
+                profile_id,
+                target_template_id,
+            );
+            Ok(result)
+        })
+    }
+
+    async fn resume_owned_children(
+        self: &Arc<Self>,
+        parent_id: &str,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        let children = blocking({
+            let parent_id = parent_id.to_owned();
+            move || {
+                let controller = Controller::load()?;
+                let state = &controller.state;
+                let mut requests = std::collections::BTreeMap::new();
+                for relation in mj_controller::database::list_subagents(&parent_id)? {
+                    let id = relation.child_session_id;
+                    if relation.resume_with_parent
+                        && state.owns_environment(&id) == Some(true)
+                        && state.sessions[&id].state == SessionState::Stopped
+                    {
+                        let record = &state.sessions[&id];
+                        requests.insert(
+                            id.clone(),
+                            ResumeSessionRequest {
+                                session_id: id,
+                                workspace_id: record.workspace_id.clone(),
+                                profile_id: record.last_profile.clone(),
+                                target_template_id: record.target_template_id.clone(),
+                                additional_mounts: None,
+                                resource_allocation: None,
+                                discard_queue: false,
+                                repository_preflight: None,
+                            },
+                        );
+                    }
+                }
+                Ok(requests)
+            }
+        })
+        .await?;
+        if children.is_empty() {
+            return Ok(());
+        }
+        let executor = DaemonStageReportingExecutor::new(
+            CancellableProcessExecutor::new(cancelled.clone()),
+            self.clone(),
+            parent_id.to_owned(),
         );
-        Ok(result)
+        executor.begin_resumable_work()?;
+        let failures = super::close_workspace::pmap_sessions(
+            children.keys().cloned().collect(),
+            |id| {
+                let state = self.clone();
+                let request = children[&id].clone();
+                async move {
+                    let started = state
+                        .start_resume_session_inner(request, LifecycleControl::default(), true)
+                        .await?;
+                    Self::wait_lifecycle_result(started.result).await?;
+                    Ok(())
+                }
+            },
+            || {},
+            std::future::pending(),
+        )
+        .await;
+        executor.end_resumable_work("finish parent resume after children")?;
+        if !failures.is_empty() {
+            self.push_public_notice(
+                parent_id,
+                format!(
+                    "Some child sessions could not resume. {}",
+                    failures.join("; ")
+                ),
+            );
+        }
+        Ok(())
     }
 
     pub(super) async fn start_destroy_stopped_session(
@@ -400,14 +551,21 @@ impl RuntimeState {
         }
         let (candidates, children) = blocking(move || {
             let controller = Controller::load()?;
-            let candidates = mj_controller::sessionwiki::sessions_ready_to_archive_from_state(
+            let mut candidates = mj_controller::sessionwiki::sessions_ready_to_archive_from_state(
                 &controller.state,
                 chrono::Utc::now(),
                 older_than_days,
             );
+            let mut eligible = Vec::new();
+            for id in candidates.drain(..) {
+                if !archive_protects_owned_sessions(&controller.state, &id)? {
+                    eligible.push(id);
+                }
+            }
+            let candidates = eligible;
             let children: std::collections::BTreeSet<String> = candidates
                 .iter()
-                .filter(|id| controller.state.is_subagent_session(id))
+                .filter(|id| controller.state.owns_environment(id) == Some(false))
                 .cloned()
                 .collect();
             Ok((candidates, children))
@@ -468,7 +626,10 @@ impl RuntimeState {
     /// goes only when another branch already contains all of its commits.
     /// A top-level conversation stays searchable and restorable through
     /// SessionWiki; child conversations are excluded.
-    async fn archive_stopped_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+    pub(super) async fn archive_stopped_session(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<()> {
         self.tear_down_stopped_session(
             session_id,
             LifecycleKind::ArchiveStopped,
@@ -493,10 +654,24 @@ impl RuntimeState {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
-                Ok(mj_controller::database::list_subagents(&session_id)?
-                    .into_iter()
-                    .map(|child| child.child_session_id)
-                    .collect::<Vec<_>>())
+                if kind == LifecycleKind::ArchiveStopped {
+                    let controller = Controller::load()?;
+                    ensure!(
+                        !archive_protects_owned_sessions(&controller.state, &session_id)?,
+                        "stopped session has an owning child to preserve"
+                    );
+                    let peers = mj_controller::database::bound_environment_member_ids(&session_id)?;
+                    Ok(mj_controller::database::list_subagents(&session_id)?
+                        .into_iter()
+                        .map(|relation| relation.child_session_id)
+                        .filter(|child| peers.contains(child))
+                        .collect())
+                } else {
+                    Ok(mj_controller::database::list_subagents(&session_id)?
+                        .into_iter()
+                        .map(|child| child.child_session_id)
+                        .collect::<Vec<_>>())
+                }
             }
         })
         .await?;
@@ -517,6 +692,12 @@ impl RuntimeState {
             let retained = retained.clone();
             move |state, session_id, cancelled, _session_admission| async move {
                 let mut controller = Controller::load()?;
+                if kind == LifecycleKind::ArchiveStopped {
+                    ensure!(
+                        !archive_protects_owned_sessions(&controller.state, &session_id)?,
+                        "stopped session has an owning child to preserve"
+                    );
+                }
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
                     state,
@@ -787,7 +968,17 @@ impl RuntimeState {
                     let _accepted_work = accepted_work;
                     let children = blocking({
                         let session_id = session_id.clone();
-                        move || mj_controller::database::begin_session_destroy(&session_id)
+                        move || {
+                            let mut children =
+                                mj_controller::database::begin_session_destroy(&session_id)?;
+                            if kind == LifecycleKind::StopSubagent {
+                                let peers = mj_controller::database::bound_environment_member_ids(
+                                    &session_id,
+                                )?;
+                                children.retain(|id| peers.contains(id));
+                            }
+                            Ok(children)
+                        }
                     })
                     .await?;
                     accepted.send_replace(Some(Ok(())));

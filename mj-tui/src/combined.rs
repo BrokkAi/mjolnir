@@ -2779,6 +2779,7 @@ mod tests {
                 project_directory: None,
                 create_managed_worktree: Some(false),
                 subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),

@@ -24,7 +24,7 @@ use mj_controller::recovery_gate::{
 use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_core::config::Config;
-use mj_core::state::{SessionRecord, SessionState, State};
+use mj_core::state::{SessionRecord, SessionState};
 
 /// How long a failed upgrade waits before it is tried again, doubling per
 /// consecutive failure. The daemon periodically reobserves quiet sessions, so
@@ -139,8 +139,11 @@ impl WorkerUpgradeCoordinator {
                                 let Some(session) = mj_controller::recovery_gate::current_background_session(&observation.session)
                                     .map_err(|error| format!("read current upgrade placement: {error:#}"))?
                                 else { return Ok((Ok(WorkerUpgradeOutcome::Deferred), None)); };
-                                let mut state = State::default();
-                                state.sessions.insert(task_session_id.clone(), session);
+                                let state = mj_controller::database::load_state()
+                                    .map_err(|error| format!("load worker upgrade ownership: {error:#}"))?;
+                                if state.sessions.get(&task_session_id) != Some(&session) {
+                                    return Ok((Ok(WorkerUpgradeOutcome::Deferred), None));
+                                }
                                 let controller = Controller {
                                     config: (*observation.config).clone(),
                                     state,

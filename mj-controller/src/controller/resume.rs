@@ -979,6 +979,10 @@ impl Controller {
                     }
                 }
             }
+            {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                self.prepare_subagent_report_dir(session_id, &backend, syncing)?;
+            }
             if retain_native {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
                 self.prepare_worker_files_for(

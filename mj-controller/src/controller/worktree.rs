@@ -463,6 +463,7 @@ impl Controller {
         }))
     }
 
+    #[cfg(test)]
     pub(super) fn cleanup_new_session_worktree_after_failure(
         &self,
         session_id: &str,
