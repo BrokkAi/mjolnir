@@ -3198,7 +3198,6 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
 
     let selection = mj_core::state::MoveSelection {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),

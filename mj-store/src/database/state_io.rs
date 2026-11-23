@@ -164,15 +164,6 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         let (profile_id, enabled) = row?;
         state.last_oracle_choices.insert(profile_id, enabled);
     }
-    let mut statement = connection
-        .prepare("SELECT profile_id, enabled FROM supervisor_preference ORDER BY profile_id")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
-    })?;
-    for row in rows {
-        let (profile_id, enabled) = row?;
-        state.last_supervisor_choices.insert(profile_id, enabled);
-    }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
     let mut interns = SessionInterns::default();
     let rows = statement.query_map([], |row| decode_session(row, &mut interns))?;
@@ -630,15 +621,6 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
     insert_session_with_parent(tx, session, None)
 }
 
-fn stored_session_policy(session: &SessionRecord) -> serde_json::Result<Option<String>> {
-    // Milestone 3 removes this bridge when the policy owns the setting.
-    let mut policy = session.subagents.clone();
-    if let Some(mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. }) = &mut policy {
-        *orchestrators = session.supervisors;
-    }
-    policy.as_ref().map(serde_json::to_string).transpose()
-}
-
 pub(super) fn insert_session_with_parent(
     tx: &Transaction<'_>,
     session: &SessionRecord,
@@ -687,8 +669,8 @@ pub(super) fn insert_session_with_parent(
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
              review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials,
-             notifications_ignored, supervisors
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
+             notifications_ignored
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -725,8 +707,7 @@ pub(super) fn insert_session_with_parent(
              oracle = excluded.oracle,
              oracle_choice = excluded.oracle_choice,
              no_github_credentials = excluded.no_github_credentials,
-             notifications_ignored = excluded.notifications_ignored,
-             supervisors = excluded.supervisors",
+             notifications_ignored = excluded.notifications_ignored",
         params![
             session.id,
             session.title,
@@ -758,7 +739,7 @@ pub(super) fn insert_session_with_parent(
             session.archived,
             session.draft_input,
             session.create_managed_worktree,
-            stored_session_policy(session)?,
+            session.subagents.as_ref().map(serde_json::to_string).transpose()?,
             session
                 .container_workspace
                 .as_ref()
@@ -781,7 +762,6 @@ pub(super) fn insert_session_with_parent(
             session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
             session.no_github_credentials,
             session.notifications_ignored,
-            session.supervisors,
         ],
     )?;
     tx.execute(
@@ -814,7 +794,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     // Fields bound to `_` have explicit writers, such as container settings.
     let SessionRecord {
         oracle_choice,
-        supervisors,
         target_runtime,
         id,
         title,
@@ -883,7 +862,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              project_json = coalesce(?16,project_json),
              oracle = ?17,
              oracle_choice = ?18,
-             supervisors = ?19,
              closing_consent = CASE WHEN ?6 = 'closing' THEN closing_consent ELSE NULL END
          WHERE session_id = ?1",
         params![
@@ -912,14 +890,17 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            stored_session_policy(session)?,
+            session
+                .subagents
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
             project.as_ref().map(serde_json::to_string).transpose()?,
             oracle,
             oracle_choice
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            supervisors,
         ],
     )?;
     if changed != 1 {
@@ -1453,7 +1434,7 @@ const SESSION_QUERY: &str =
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
                 s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
-                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation, s.supervisors
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(
@@ -1483,7 +1464,6 @@ fn decode_session(
             })
             .transpose()?,
         oracle: row.get(34)?,
-        supervisors: row.get(40)?,
         project: decode_shared(row, 30, &mut interns.projects)?,
         target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
         harness_kind,

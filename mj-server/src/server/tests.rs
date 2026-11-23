@@ -135,18 +135,18 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
     };
     let state = AppState {
         last_oracle_choices: Default::default(),
-        last_supervisor_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
-        environment_owners: Default::default(),
+        environment_owners: [("session-1".into(), "session-1".into())]
+            .into_iter()
+            .collect(),
         version: STATE_VERSION,
         sessions: [(
             "session-1".into(),
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -864,7 +864,7 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             }
             .into(),
         );
@@ -3217,7 +3217,6 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -3278,7 +3277,6 @@ fn container_target_missing_or_invalid_bundle_id_names_field() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |bundle_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -3364,7 +3362,6 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
@@ -3621,7 +3618,6 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),

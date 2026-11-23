@@ -213,7 +213,6 @@ impl RuntimeState {
                 MoveSelection {
                     oracle: None,
                     oracle_choice: None,
-                    supervisors: None,
                     session_id: session_id.to_owned(),
                     profile_id: Some(profile_id.to_owned()),
                     target_template_id: None,

@@ -1682,9 +1682,6 @@ pub struct SessionRecord {
     /// Records written before the choice existed allow it.
     #[serde(default = "default_oracle_enabled")]
     pub oracle: bool,
-    /// Whether this top-level session may spawn depth-1 supervisors.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub supervisors: bool,
     /// This session's own oracle model (`--subagent-oracle`), overriding
     /// `[subagents.oracle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2647,9 +2644,6 @@ pub struct State {
     /// The most recent Oracle choice for each profile.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_oracle_choices: BTreeMap<String, bool>,
-    /// The most recent Supervisors choice for each profile.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub last_supervisor_choices: BTreeMap<String, bool>,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub sessions: SnapshotMap<String, SessionRecord>,
@@ -2675,7 +2669,6 @@ impl Default for State {
             operator_presence: OperatorPresence::default(),
             last_subagent_policies: Default::default(),
             last_oracle_choices: Default::default(),
-            last_supervisor_choices: Default::default(),
             sessions: SnapshotMap::new(),
             environment_owners: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
@@ -2710,14 +2703,6 @@ impl State {
             .copied()
             .unwrap_or(true)
     }
-    /// The remembered Supervisors choice for a profile; disabled when it has none.
-    pub fn last_supervisor_choice_for(&self, profile_id: &str) -> bool {
-        self.last_supervisor_choices
-            .get(profile_id)
-            .copied()
-            .unwrap_or(false)
-    }
-
     /// Ordinary workers share the review choice of their environment owner.
     /// Oracles and reviewers retain the choice on their own record.
     fn review_owner(
@@ -3188,12 +3173,13 @@ impl State {
                 noticed_turn: parent.noticed_turn,
                 reported_finish: parent.reported_finish.clone(),
                 handback_tool: parent.handback_tool,
-                supervisor: parent.supervisor,
+                orchestrator: parent.orchestrator,
             });
         crate::subagent::validate_subagent_parent(
             parent_subagent.as_ref(),
+            self.owns_environment(&subagent.parent_session_id) == Some(true),
             subagent.kind,
-            subagent.supervisor,
+            subagent.orchestrator,
         )?;
         // Reviewer relations may nest. Validate the logical graph separately
         // from the environment ledger, whose owners can outlive their rows.

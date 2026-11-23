@@ -121,7 +121,6 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

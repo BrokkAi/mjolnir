@@ -808,7 +808,6 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         skip_remembering_subagent_policy: false,
@@ -894,7 +893,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: true,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.clone(),
             task_name: "without credentials".into(),
@@ -1287,7 +1286,6 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.to_uppercase()),
                 branch: Some("town/run-1".into()),
@@ -1325,7 +1323,6 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit with base",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 base: Some("v1.0".into()),
@@ -1380,7 +1377,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             no_later_history: true,
             ..launch_options(Vec::new())
@@ -1391,7 +1387,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             at: Some(at.into()),
             base: Some("origin/main".into()),
@@ -1403,7 +1398,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
 
     let id = register(SessionLaunchOptions {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         at: Some(at.to_uppercase()),
         base: Some(base.to_uppercase()),
@@ -1447,7 +1441,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             "without later history",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 no_later_history: true,
@@ -2172,7 +2165,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2333,7 +2326,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2705,7 +2698,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2928,7 +2921,6 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             "durable target",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 // Set at creation, since a lifecycle transition does not own
                 // this column (see `update_lifecycle_fields`); this test
@@ -2998,7 +2990,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: id.clone(),
             task_name: "child".into(),
@@ -3457,7 +3449,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
-        supervisor: false,
+        orchestrator: false,
         reviewer_launch: Some(launch.clone()),
         parent_session_id: parent_id.into(),
         task_name: "review".into(),
@@ -3533,7 +3525,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "oracle".into(),
@@ -3605,7 +3597,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: muse_parent_id.into(),
             task_name: "oracle".into(),
@@ -3657,7 +3649,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "ordinary child".into(),
@@ -3706,7 +3698,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
-        supervisor: false,
+        orchestrator: false,
         reviewer_launch: Some(launch),
         parent_session_id: worker.child_session_id.clone(),
         task_name: "child's review".into(),
@@ -3733,7 +3725,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             ..request
         })
@@ -3811,7 +3803,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
             .register_subagent(RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
-                supervisor: false,
+                orchestrator: false,
                 reviewer_launch: None,
                 parent_session_id: parent_id.into(),
                 task_name: request_key.into(),

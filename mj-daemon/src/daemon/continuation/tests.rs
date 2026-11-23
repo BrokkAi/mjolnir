@@ -2873,7 +2873,7 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );

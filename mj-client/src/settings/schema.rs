@@ -39,7 +39,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"primary":[],"straightforward":[],"subtle":[],"oracle":[]})
+            json!({"max_concurrent":mj_core::config::SubagentConfig::default().max_concurrent,"primary":[],"straightforward":[],"subtle":[],"oracle":[]})
         }
         "subagents"
             if path.len() == 3
@@ -299,7 +299,7 @@ pub fn label(key: &str) -> String {
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
-        "primary" => "Primary and supervisor",
+        "primary" => "Primary and orchestrator",
         "straightforward" => "Straightforward",
         "subtle" => "Subtle",
         "oracle" => "Oracle",
@@ -1069,7 +1069,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "subagents" => {
             "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents."
         }
-        "primary" => "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+        "primary" => "Optional. Top-level primary sessions (bare `mj new`) and orchestrators.",
         "straightforward" => "Work with a clear method. Add one or more (model, effort) pairs.",
         "subtle" => {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."

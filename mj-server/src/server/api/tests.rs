@@ -1680,7 +1680,7 @@ impl SubagentBackend for FakeBackend {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             })
         })
     }
@@ -3172,7 +3172,6 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         request.action,
         ControllerAction::New {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
@@ -6437,7 +6436,6 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
         failure_notice: None,
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
@@ -6507,7 +6505,7 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                             noticed_turn: None,
                             reported_finish: None,
                             handback_tool: false,
-                            supervisor: false,
+                            orchestrator: false,
                         },
                     );
                 }
@@ -8098,7 +8096,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-        supervisor: false,
+        orchestrator: false,
     };
     mj_store::database::save_subagent_session(&child, &relation).unwrap();
     let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});

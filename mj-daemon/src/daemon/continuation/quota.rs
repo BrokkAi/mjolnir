@@ -438,14 +438,14 @@ pub(super) async fn prepare(
                 mj_core::config::ExecutionPolicy::ConfiguredApprovals
             };
             let placement = if owned_child {
-                mj_controller::profile_scheduler::Placement::Supervisor
+                mj_controller::profile_scheduler::Placement::Orchestrator
             } else if child {
                 mj_controller::profile_scheduler::Placement::Child
             } else {
                 mj_controller::profile_scheduler::Placement::TopLevel
             };
             let category: &'static str = if owned_child {
-                "supervisor"
+                "orchestrator"
             } else if child {
                 match state
                     .owner()

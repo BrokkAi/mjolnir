@@ -1713,7 +1713,6 @@ pub(crate) fn runtime_test_session(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -1758,7 +1757,7 @@ pub(crate) fn runtime_test_session(
     }
 }
 
-pub(super) fn runtime_test_subagent(
+pub(crate) fn runtime_test_subagent(
     child_session_id: &str,
     parent_session_id: &str,
 ) -> SubagentRecord {
@@ -1779,7 +1778,7 @@ pub(super) fn runtime_test_subagent(
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     }
 }
 
@@ -1816,7 +1815,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
 }
 
 #[test]
-fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
+fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_orchestrator() {
     let primary = runtime_test_session("primary", "workspace", SessionState::Running);
     let parked_sup = runtime_test_session("parked-sup", "workspace", SessionState::Parked);
     let mut live_d2 = runtime_test_session("live-d2", "workspace", SessionState::Running);
@@ -1831,7 +1830,7 @@ fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
         ..mj_core::state::State::default()
     };
     let mut sup_record = runtime_test_subagent(&parked_sup.id, &primary.id);
-    sup_record.supervisor = true;
+    sup_record.orchestrator = true;
     let d2_record = runtime_test_subagent(&live_d2.id, &parked_sup.id);
     state.subagents = [sup_record, d2_record]
         .into_iter()
@@ -1846,11 +1845,11 @@ fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
     let children = state.active_child_session_ids(&primary.id);
     assert!(
         children.contains(&"live-d2".to_owned()),
-        "active_child_session_ids must include live depth-2 worker under parked supervisor: {children:?}"
+        "active_child_session_ids must include live depth-2 worker under parked orchestrator: {children:?}"
     );
     assert!(
         state.subagents_occupy_container(&primary.id),
-        "live depth-2 worker under parked supervisor occupies the primary's container"
+        "live depth-2 worker under parked orchestrator occupies the primary's container"
     );
 }
 
@@ -7597,7 +7596,6 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: true,
             remember_container_size: true,
@@ -8660,7 +8658,6 @@ esac
                 resource_allocation: None,
                 subagents: None,
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
             },
             source_profile_id: source.last_profile.clone(),
@@ -12383,7 +12380,6 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         operation_id: "retained-move".into(),
         selection: MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -13764,7 +13760,6 @@ pub(super) fn retained_startup_test_move(
         operation_id: "startup-durable-move".into(),
         selection: MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -14706,7 +14701,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
     let request = |kind, request_key: &str| mj_controller::controller::RegisterSubagentRequest {
         no_github_credentials: false,
         kind,
-        supervisor: false,
+        orchestrator: false,
         reviewer_launch: None,
         parent_session_id: parent_id.into(),
         task_name: "task".into(),
@@ -17550,6 +17545,133 @@ async fn interrupted_parent_suspend_recovery_cascades_to_owned_children_and_keep
             "{id} should preserve resume_with_parent after recovery"
         );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_orchestrator_checks_destination_and_persists_only_explicit_repository_bundles() {
+    use mj_core::config::{Config, TargetTemplate};
+    use mj_core::subagent::{SubagentPolicy, SubagentToolAction, SubagentToolRequest};
+
+    const NAME: &str =
+        "spawn_orchestrator_checks_destination_and_persists_only_explicit_repository_bundles";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    for id in ["container", "disabled"] {
+        config.targets.insert(
+            id.into(),
+            serde_json::from_value(serde_json::json!({"kind": "local-podman"})).unwrap(),
+        );
+    }
+    config.disabled_targets.insert("disabled".into());
+    config.save().unwrap();
+    let workspace = mj_controller::database::create_workspace("Orchestrator placement").unwrap();
+    let parent_id = "11111111111111111111111111111111";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: true,
+        straightforward: None,
+        subtle: None,
+    });
+    mj_controller::database::save_session(&parent).unwrap();
+    let runtime = test_runtime_state_loading_the_store();
+    let urls = vec!["https://github.com/example/p1.git".into()];
+    for (target, repos, error) in [
+        (Some("unknown"), None, "unknown target"),
+        (Some("disabled"), None, "turned off"),
+        (
+            None,
+            Some(urls.clone()),
+            "use container target \"container\"",
+        ),
+        (Some("container"), None, "no cloneable project bundle"),
+        (
+            Some("container"),
+            Some(Vec::new()),
+            "at least one repository URL",
+        ),
+        // Reaching selection with no attached backend proves both project
+        // creation and duplicate resolution ran on the explicit container.
+        (
+            Some("container"),
+            Some(urls.clone()),
+            "placement backend is unavailable",
+        ),
+        (
+            Some("container"),
+            Some(urls),
+            "placement backend is unavailable",
+        ),
+    ] {
+        let request = SubagentToolRequest {
+            request_id: "spawn-orchestrator-preflight".into(),
+            originating_command_id: None,
+            created_at_ms: 0,
+            action: SubagentToolAction::SpawnOrchestrator {
+                task_name: "orchestrate".into(),
+                instructions: "coordinate".into(),
+                target: target.map(str::to_owned),
+                repos,
+                no_github_credentials: false,
+            },
+        };
+        let failure = runtime
+            .start_orchestrator_session(parent_id.into(), request, None)
+            .await
+            .unwrap_err();
+        assert!(format!("{failure:#}").contains(error), "{failure:#}");
+    }
+    assert_eq!(
+        mj_controller::database::read_project_catalog()
+            .unwrap()
+            .projects
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_orchestrator_close_clears_resume_for_an_already_stopped_owner() {
+    const NAME: &str = "spawn_orchestrator_close_clears_resume_for_an_already_stopped_owner";
+    if !in_isolated_parked_test(NAME) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Explicit child close").unwrap();
+    let parent_id = "11111111111111111111111111111111";
+    let child_id = "22222222222222222222222222222222";
+    let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    mj_controller::database::save_session(&parent).unwrap();
+    let child = runtime_test_session(child_id, &workspace.id, SessionState::Stopped);
+    let mut relation = runtime_test_subagent(child_id, parent_id);
+    relation.orchestrator = true;
+    relation.resume_with_parent = true;
+    mj_controller::database::register_subagent_with_startup(
+        &child,
+        &relation,
+        vec![],
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let runtime = test_runtime_state_loading_the_store();
+    let response = runtime.close_orchestrator(child_id.into()).await.unwrap();
+    assert_eq!(response["closed"], true);
+    assert_eq!(response["status"], "already_stopped");
+    assert!(
+        !mj_controller::database::load_subagent(child_id)
+            .unwrap()
+            .unwrap()
+            .resume_with_parent
+    );
 }
 
 #[cfg(unix)]

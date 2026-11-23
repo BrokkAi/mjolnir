@@ -175,12 +175,19 @@ fn finish_worker_restart_with(
     Ok(())
 }
 
-/// A proved dead wake releases its boot and becomes retryable atomically.
+pub enum SubagentUnparkFailure<'a> {
+    Retryable {
+        detail: &'a str,
+        evidence: Option<&'a mj_core::subagent::WakeFailure>,
+    },
+    WorkingDirectoryUnavailable(&'a str),
+}
+
+/// Settle a failed wake and its boot intent in one transaction.
 pub fn fail_subagent_unpark(
     session_id: &str,
     operation_id: &str,
-    detail: &str,
-    evidence: Option<&mj_core::subagent::WakeFailure>,
+    failure: SubagentUnparkFailure<'_>,
 ) -> Result<()> {
     let owner = crate::worker_lifecycle::require(session_id)?;
     ensure!(
@@ -189,18 +196,26 @@ pub fn fail_subagent_unpark(
     );
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
-    let failure = match evidence {
-        Some(evidence) => evidence.encode(detail)?,
-        None => detail.to_owned(),
+    let (state, detail) = match failure {
+        SubagentUnparkFailure::Retryable { detail, evidence } => (
+            SessionState::Parked,
+            match evidence {
+                Some(evidence) => evidence.encode(detail)?,
+                None => detail.to_owned(),
+            },
+        ),
+        SubagentUnparkFailure::WorkingDirectoryUnavailable(detail) => {
+            (SessionState::Error, detail.to_owned())
+        }
     };
     submit_database_write("fail_subagent_unpark", move |connection| {
         let tx = connection.transaction()?;
         ensure!(tx.execute(
-            "UPDATE sessions SET state='parked', last_error=?3, updated_at=?4
+            "UPDATE sessions SET state=?5, last_error=?3, updated_at=?4
              WHERE session_id=?1 AND state='running'
              AND EXISTS (SELECT 1 FROM worker_restart_intents WHERE session_id=?1 AND operation_id=?2)
              AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
-            params![session_id, operation_id, failure, chrono::Utc::now().to_rfc3339()],
+            params![session_id, operation_id, detail, chrono::Utc::now().to_rfc3339(), state.as_str()],
         )? == 1, "failed wake no longer owns the running child");
         finish_worker_restart_with(&tx, &session_id, &operation_id)?;
         tx.commit()?;
@@ -238,7 +253,7 @@ mod tests {
         let mut owned = session("owned-session", "project");
         owned.state = SessionState::Parked;
         let mut owned_relation = test_subagent(&parent.id, &owned.id);
-        owned_relation.supervisor = true;
+        owned_relation.orchestrator = true;
         register_subagent_with_startup(&owned, &owned_relation, Vec::new(), None, None, true)
             .unwrap();
         let mut borrowed = session("borrowed", "project");

@@ -43,10 +43,6 @@ pub(super) fn install_captured_records(
         .state
         .last_oracle_choices
         .clone_from(&runtime.metadata.last_oracle_choices);
-    controller
-        .state
-        .last_supervisor_choices
-        .clone_from(&runtime.metadata.last_supervisor_choices);
     controller.state.mount_history = runtime.metadata.mount_history.clone();
 }
 

@@ -151,9 +151,9 @@ pub(crate) struct NewArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
-    /// Supervisor sub-agent availability for this session (requires Mjolnir delegation).
-    #[arg(long, value_parser = ["enabled", "disabled"])]
-    supervisors: Option<String>,
+    /// Enable orchestrators (requires Mjolnir delegation).
+    #[arg(long)]
+    orchestrators: bool,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -1154,6 +1154,7 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
         args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
+        args.orchestrators,
     )
 }
 
@@ -1180,6 +1181,7 @@ pub(crate) fn oracle_override(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn subagent_policy(
     mode: Option<&str>,
     straightforward: Option<&str>,
@@ -1188,6 +1190,7 @@ pub(crate) fn subagent_policy(
     subtle_effort: Option<&str>,
     retired_model: Option<&str>,
     retired_effort: Option<&str>,
+    orchestrators: bool,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
     const REMEDY: &str = "Configure [subagents.straightforward] and optionally [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
@@ -1205,14 +1208,17 @@ pub(crate) fn subagent_policy(
     if straightforward_effort == Some("adaptive") || subtle_effort == Some("adaptive") {
         bail!("adaptive sub-agent effort is not supported");
     }
-    if straightforward.is_some() || subtle.is_some() {
+    if orchestrators && matches!(mode, Some("native" | "none")) {
+        bail!("--orchestrators requires Mjolnir delegation (--subagents mjolnir)");
+    }
+    if straightforward.is_some() || subtle.is_some() || orchestrators && mode.is_none() {
         if mode.is_some_and(|mode| mode != "mjolnir") {
             bail!(
                 "per-type sub-agent overrides require --subagents mjolnir or an omitted --subagents"
             );
         }
         return Ok(Some(SubagentPolicy::Mjolnir {
-            orchestrators: false,
+            orchestrators,
             straightforward: straightforward.map(|model| {
                 Box::new(mj_core::config::SubagentChoice {
                     model: model.to_owned(),
@@ -1230,7 +1236,7 @@ pub(crate) fn subagent_policy(
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
         Some("mjolnir") => Some(SubagentPolicy::Mjolnir {
-            orchestrators: false,
+            orchestrators,
             straightforward: None,
             subtle: None,
         }),
@@ -1302,6 +1308,7 @@ pub(crate) fn session_review(
 
 /// Create a session and deliver its optional first prompt.
 pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<String>) -> Result<()> {
+    let subagents = new_subagent_policy(&args)?;
     let prompt = read_prompt(args.prompt.clone(), args.prompt_file.clone())?;
     let (client, workspace_id, target_id, project_directory, options) =
         infer_new_session_inputs(&args, requested_workspace.as_deref()).await?;
@@ -1316,12 +1323,8 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     .await?;
     let request = StartSessionRequest {
         remember_container_size: false,
-        subagents: new_subagent_policy(&args)?,
+        subagents,
         oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
-        supervisors: args
-            .supervisors
-            .as_deref()
-            .map(|choice| choice == "enabled"),
         oracle_choice: oracle_override(
             args.subagent_oracle.as_deref(),
             args.subagent_oracle_effort.as_deref(),
@@ -4654,12 +4657,28 @@ mod tests {
                     args.subagent_subtle_effort.as_deref(),
                     args.subagent_model.as_deref(),
                     args.subagent_effort.as_deref(),
+                    args.orchestrators,
                 ),
                 _ => panic!("new or move command"),
             }
         };
         for command in ["new", "move"] {
             let parse = |extra: &[&str]| parse_command(command, extra);
+            assert!(
+                parse(&["--orchestrators"])
+                    .unwrap()
+                    .unwrap()
+                    .orchestrators_enabled()
+            );
+            assert!(
+                parse(&["--subagents", "mjolnir", "--orchestrators"])
+                    .unwrap()
+                    .unwrap()
+                    .orchestrators_enabled()
+            );
+            assert!(parse(&["--subagents", "native", "--orchestrators"]).is_err());
+            assert!(parse(&["--subagents", "none", "--orchestrators"]).is_err());
+            assert!(parse(&["--supervisors", "enabled"]).is_err());
             let oracle = |extra: &[&str]| {
                 let mut argv = vec!["mj", command, "--profile", "codex", "--target", "raw"];
                 if command == "new" {

@@ -1,5 +1,7 @@
 //! Move intent uses the same guarded writer as session lifecycle transitions.
 
+use std::borrow::Cow;
+
 use super::*;
 use mj_core::state::{
     LegacyMoveOperation, MoveOperation, MovePhase, MoveSelection, StoredMoveOperation,
@@ -249,7 +251,7 @@ pub(super) fn load_move_operation_with(
             |row| row.get(0),
         )
         .optional()?;
-    Ok(json.and_then(|json| decode_move_operation(session_id, &json)))
+    Ok(json.and_then(|json| decode_move_operation(connection, session_id, &json)))
 }
 
 /// Release only the cancelled Move's restore authority. Placement ownership
@@ -287,8 +289,14 @@ pub(super) fn resolve_cancelled_move_for_close_with(
 /// names a removed harness cannot be acted on, so all readers treat the row as
 /// absent with a warning rather than failing the operation that asked, whether
 /// that is daemon startup, a stop, a checkpoint, or a new move.
-fn decode_move_operation(session_id: &str, json: &str) -> Option<MoveOperation> {
-    match serde_json::from_str::<MoveOperation>(json) {
+fn decode_move_operation(
+    connection: &Connection,
+    session_id: &str,
+    json: &str,
+) -> Option<MoveOperation> {
+    match normalize_stored_move(connection, session_id, json)
+        .and_then(|json| Ok(serde_json::from_str::<MoveOperation>(&json)?))
+    {
         Ok(operation) => Some(operation),
         Err(error) => {
             tracing::warn!(
@@ -299,6 +307,75 @@ fn decode_move_operation(session_id: &str, json: &str) -> Option<MoveOperation> 
             None
         }
     }
+}
+
+/// Older Move intents can hold the opt-in in the sealed selection, its
+/// preparation receipt, and the rollback snapshot. Translate those stored
+/// fields at the reader boundary so strict public requests keep one policy.
+fn normalize_stored_move<'a>(
+    connection: &Connection,
+    session_id: &str,
+    json: &'a str,
+) -> Result<Cow<'a, str>> {
+    if !json.contains(r#""supervisors""#) {
+        return Ok(Cow::Borrowed(json));
+    }
+
+    fn fold_orchestrators(
+        record: &mut serde_json::Value,
+        source_policy: &serde_json::Value,
+    ) -> Result<()> {
+        let Some(record) = record.as_object_mut() else {
+            return Ok(());
+        };
+        let Some(enabled) = record
+            .remove("supervisors")
+            .filter(|value| !value.is_null())
+        else {
+            return Ok(());
+        };
+        let enabled = serde_json::from_value::<bool>(enabled)?;
+        let policy = record
+            .get("subagents")
+            .filter(|policy| !policy.is_null())
+            .unwrap_or(source_policy);
+        if policy.is_null() {
+            return Ok(());
+        }
+        let mut policy = mj_core::subagent::parse_stored_policy(&policy.to_string())?;
+        if let mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. } = &mut policy {
+            *orchestrators = enabled;
+            record.insert("subagents".into(), serde_json::to_value(policy)?);
+        }
+        Ok(())
+    }
+
+    let mut intent: serde_json::Value = serde_json::from_str(json)?;
+    if let Some(snapshot) = intent.get_mut("recovery_session") {
+        fold_orchestrators(snapshot, &serde_json::Value::Null)?;
+    }
+    let source_policy = match intent.pointer("/recovery_session/subagents") {
+        Some(policy) if !policy.is_null() => policy.clone(),
+        _ => {
+            let policy: Option<String> = connection
+                .query_row(
+                    "SELECT subagents FROM sessions WHERE session_id=?1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            policy.map_or(Ok(serde_json::Value::Null), |policy| {
+                serde_json::from_str(&policy)
+            })?
+        }
+    };
+    for path in ["/selection", "/accepted_preparation/selection"] {
+        if let Some(selection) = intent.pointer_mut(path) {
+            fold_orchestrators(selection, &source_policy)?;
+        }
+    }
+    Ok(Cow::Owned(serde_json::to_string(&intent)?))
 }
 
 pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
@@ -322,7 +399,9 @@ pub fn load_legacy_move_operations() -> Result<Vec<(String, LegacyMoveOperation)
     let mut legacy = Vec::new();
     for row in rows {
         let (session_id, json) = row?;
-        if let Ok(StoredMoveOperation::Legacy(op)) = StoredMoveOperation::decode_json(&json) {
+        let stored = normalize_stored_move(&connection, &session_id, &json)
+            .and_then(|json| StoredMoveOperation::decode_json(&json));
+        if let Ok(StoredMoveOperation::Legacy(op)) = stored {
             legacy.push((session_id, *op));
         }
     }
@@ -426,7 +505,7 @@ pub fn load_move_recovery() -> Result<(Vec<MoveOperation>, BTreeSet<String>)> {
     let mut closes = BTreeSet::new();
     for row in rows {
         let (session_id, operation_id, json, close_id) = row?;
-        if let Some(operation) = decode_move_operation(&session_id, &json) {
+        if let Some(operation) = decode_move_operation(&connection, &session_id, &json) {
             if exact_move_close_intent(&operation.operation_id, &operation_id, close_id.as_deref())
             {
                 closes.insert(operation_id);
@@ -449,7 +528,7 @@ pub(super) fn load_move_operations_with(connection: &Connection) -> Result<Vec<M
     let mut operations = Vec::new();
     for row in rows {
         let (session_id, json) = row?;
-        if let Some(operation) = decode_move_operation(&session_id, &json) {
+        if let Some(operation) = decode_move_operation(connection, &session_id, &json) {
             operations.push(operation);
         }
     }
@@ -614,6 +693,64 @@ mod tests {
     use super::*;
     use mj_core::state::{MovePhase, MoveSelection, ResumeQueueDisposition};
 
+    #[test]
+    fn schema_preserves_legacy_move_orchestrator_choices() {
+        use mj_core::subagent::SubagentPolicy;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-move.sqlite");
+        let mut source = super::super::tests::session("source", "project");
+        source.subagents = Some(SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(mj_core::config::SubagentChoice {
+                model: "my-worker-model".into(),
+                effort: None,
+            })),
+            subtle: None,
+            orchestrators: true,
+        });
+        let mut connection = open(&path).unwrap();
+        let tx = connection.transaction().unwrap();
+        insert_session(&tx, &source).unwrap();
+        tx.commit().unwrap();
+
+        let mut intent = serde_json::to_value(operation(&source)).unwrap();
+        intent["selection"]["supervisors"] = false.into();
+        intent["recovery_session"]["supervisors"] = true.into();
+        intent["recovery_session"]["subagents"]
+            .as_object_mut()
+            .unwrap()
+            .remove("orchestrators");
+        connection.execute(
+            "INSERT INTO session_moves(session_id, operation_id, operation_json) VALUES (?1, ?2, ?3)",
+            params![source.id, intent["operation_id"].as_str().unwrap(), intent.to_string()],
+        ).unwrap();
+        let restored = load_move_operation_with(&connection, &source.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.recovery_session.unwrap().subagents,
+            source.subagents
+        );
+        assert!(matches!(restored.selection.subagents.as_ref(),
+            Some(SubagentPolicy::Mjolnir { orchestrators: false, straightforward: Some(choice), .. })
+                if choice.model == "my-worker-model"
+        ));
+        let canonical = serde_json::to_string(&restored.selection).unwrap();
+        assert!(!canonical.contains("supervisors"));
+
+        intent["recovery_session"] = serde_json::Value::Null;
+        connection
+            .execute(
+                "UPDATE session_moves SET operation_json=?2 WHERE session_id=?1",
+                params![source.id, intent.to_string()],
+            )
+            .unwrap();
+        let without_snapshot = load_move_operation_with(&connection, &source.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(without_snapshot.selection, restored.selection);
+    }
+
     fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
             quota_stop_reason: None,
@@ -637,7 +774,6 @@ mod tests {
             operation_id: "move-one".into(),
             selection: MoveSelection {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 consent: Default::default(),

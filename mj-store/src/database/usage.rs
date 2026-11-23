@@ -519,7 +519,7 @@ const OBSERVED_CATEGORIES: &[&str] = &[
     "reviewer",
     "brief_writer",
     "oracle",
-    "supervisor",
+    "orchestrator",
     "primary",
 ];
 
@@ -617,7 +617,8 @@ fn category_burn_observations(
          WHERE s.state IN ('stopped', 'error', 'lost')
            AND EXISTS (
                SELECT 1 FROM session_turn_selections sts
-               WHERE sts.session_id = s.session_id AND sts.category = ?1
+               WHERE sts.session_id = s.session_id
+                 AND (sts.category = ?1 OR (?1 = 'orchestrator' AND sts.category = 'supervisor'))
            )
          ORDER BY sc.created_at DESC
          LIMIT ?2",

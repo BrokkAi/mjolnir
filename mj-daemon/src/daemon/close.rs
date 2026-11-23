@@ -730,6 +730,72 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub(crate) async fn close_orchestrator(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<serde_json::Value> {
+        let before = blocking({
+            let session_id = session_id.clone();
+            move || {
+                mj_controller::database::read_durable_session_record(&session_id)?
+                    .context("unknown orchestrator")
+            }
+        })
+        .await?;
+        let consent = mj_core::suspend_consent::SuspendConsent {
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            ..Default::default()
+        };
+        let started = self
+            .start_suspend_session(session_id.clone(), consent)
+            .await?;
+        let result = Self::wait_lifecycle_result(started.result).await?;
+        let deferred = matches!(result, DaemonLifecycleResult::DeferredCleanup);
+        let after = blocking({
+            let session_id = session_id.clone();
+            move || {
+                mj_controller::database::read_durable_session_record(&session_id)?
+                    .context("closed orchestrator disappeared")
+            }
+        })
+        .await?;
+        let dropped_untracked = if let Some(checkpoint) = after.checkpoint
+            && before.checkpoint.as_ref() != Some(&checkpoint)
+        {
+            blocking(move || {
+                let manifest =
+                    mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path)?;
+                let prefix = mj_checkpoint::snapshot::DROPPED_UNTRACKED_NOTICE_PREFIX;
+                let dropped = manifest
+                    .repositories
+                    .into_iter()
+                    .filter_map(|repo| {
+                        let metadata = repo.metadata;
+                        let notice = metadata
+                            .origin_delta?
+                            .notices
+                            .into_iter()
+                            .find(|notice| notice.starts_with(prefix))?;
+                        Some(format!("{}: {notice}", metadata.id))
+                    })
+                    .collect::<Vec<_>>();
+                Ok(dropped)
+            })
+            .await?
+        } else {
+            Vec::new()
+        };
+        let mut response = serde_json::json!({
+            "child_session_id": session_id,
+            "closed": !deferred && after.state == SessionState::Stopped,
+            "status": if deferred { "cleanup_pending" } else if before.state == SessionState::Stopped { "already_stopped" } else { "closed" },
+        });
+        if !dropped_untracked.is_empty() {
+            response["dropped_untracked"] = serde_json::json!(dropped_untracked);
+        }
+        Ok(response)
+    }
+
     /// A parent's close request, admitted once per (parent, request) so a
     /// replay after a daemon restart joins the close already in flight
     /// instead of starting another.

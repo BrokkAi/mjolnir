@@ -1066,7 +1066,6 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -1997,7 +1996,7 @@ async fn a_child_hands_back_one_report_per_turn() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         },
     )
     .unwrap();
@@ -3483,7 +3482,7 @@ fn store_parent_and_child(child_id: &str) {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         },
     )
     .unwrap();
@@ -4741,7 +4740,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-                supervisor: false,
+                orchestrator: false,
             },
         )
         .unwrap();
@@ -8375,7 +8374,7 @@ impl ExportRuntime for OracleExports {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-                supervisor: false,
+                orchestrator: false,
             };
             let mut session = parent_record(&id, &request.profile_id);
             session.oracle = false;
@@ -8643,7 +8642,7 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
         .await;
     assert!(from_child.is_error);
     assert!(
-        from_child.message.contains("top-level"),
+        from_child.message.contains("workspace owners"),
         "{}",
         from_child.message
     );
@@ -8675,6 +8674,41 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
         );
     }
     assert!(exports.requests().is_empty());
+}
+
+#[tokio::test]
+async fn ask_oracle_starts_an_advisor_for_an_owning_orchestrator() {
+    if !isolated_parked_test("ask_oracle_starts_an_advisor_for_an_owning_orchestrator") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let root = parent_record("root-agents", "parent");
+    mj_controller::database::save_session(&root).unwrap();
+    let exports = OracleExports::new();
+    let owner = exports.session_record("parent-1").unwrap();
+    let mut relation = crate::daemon::tests::runtime_test_subagent(&owner.id, &root.id);
+    relation.orchestrator = true;
+    mj_controller::database::register_subagent_with_startup(
+        &owner,
+        &relation,
+        vec![],
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let backend = oracle_backend(exports.clone()).await;
+    let answer = backend
+        .execute_subagent_tool(
+            owner.id.clone(),
+            ask_oracle_request("owner-question", "What are the tradeoffs?"),
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let requests = exports.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].parent_session_id, owner.id);
+    assert_eq!(requests[0].kind, mj_core::subagent::SubagentKind::Oracle);
 }
 
 #[test]
@@ -8952,9 +8986,15 @@ async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_bud
     parent.target_template_id = "nitro".into();
     projection.records.insert(parent.id.clone(), parent.clone());
     let denied = run_listing(projection.clone(), SubagentToolAction::ListTargets).await;
-    assert!(denied.is_error && denied.message.contains("requires supervisors enabled"));
+    assert!(denied.is_error && denied.message.contains("requires orchestrators enabled"));
 
-    parent.supervisors = true;
+    if let Some(mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. }) =
+        &mut parent.subagents
+    {
+        *orchestrators = true;
+    } else {
+        panic!("fixture requires Mjolnir delegation");
+    }
     projection.records.insert(parent.id.clone(), parent);
     let mut parked = parent_record("parked", "helper");
     parked.target_template_id = "nitro".into();
@@ -9064,7 +9104,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
     let mut child = parent_record("child-1", "new-profile");
     child.target_template_id = "ec2-builder".into();
     mj_controller::database::save_session(&child).unwrap();
-    for (id, parent, state, category, supervisor) in [
+    for (id, parent, state, category, orchestrator) in [
         (
             "child-2",
             "parent-1",
@@ -9118,7 +9158,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
                 request_key: id.into(),
                 model: Some("spawn-model".into()),
                 effort: Some("low".into()),
-                supervisor,
+                orchestrator,
                 ..original.clone()
             },
             Vec::new(),

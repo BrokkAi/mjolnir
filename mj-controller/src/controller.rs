@@ -140,7 +140,7 @@ pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,
 };
-pub use subagents::{RegisterSubagentRequest, stopped_subagent};
+pub use subagents::{OrchestratorPlacement, RegisterSubagentRequest, stopped_subagent};
 pub use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
@@ -739,7 +739,6 @@ pub struct SessionLaunchOptions {
     pub no_later_history: bool,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     pub oracle: Option<bool>,
-    pub supervisors: Option<bool>,
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Turn review for this session; `None` follows `[review]`.
     pub review: Option<mj_core::config::SessionReview>,
@@ -1025,7 +1024,6 @@ impl Controller {
             no_later_history,
             subagents,
             oracle,
-            supervisors,
             mut oracle_choice,
             review,
             no_project_memory,
@@ -1177,17 +1175,6 @@ impl Controller {
         let now = now();
         let subagents = subagents
             .unwrap_or_else(|| mj_core::subagent::SubagentPolicy::default_for(profile.kind));
-        let mut supervisors_enabled =
-            supervisors.unwrap_or_else(|| self.state.last_supervisor_choice_for(profile_id));
-        if supervisors_enabled && !subagents.uses_mjolnir() {
-            if supervisors == Some(true) {
-                return Err(mj_core::refusal::Refusal::precondition(
-                    "supervisors require Mjolnir delegation (--subagents mjolnir)",
-                )
-                .into());
-            }
-            supervisors_enabled = false;
-        }
         let mut oracle_enabled = oracle.unwrap_or_else(|| {
             oracle_choice.is_some() || self.state.last_oracle_choice_for(profile_id)
         });
@@ -1208,7 +1195,6 @@ impl Controller {
         let record = SessionRecord {
             oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
-            supervisors: supervisors_enabled,
             notifications_ignored,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
@@ -1278,15 +1264,6 @@ impl Controller {
             self.state
                 .last_oracle_choices
                 .insert(profile_id.to_owned(), record.oracle);
-            if record
-                .subagents
-                .as_ref()
-                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir)
-            {
-                self.state
-                    .last_supervisor_choices
-                    .insert(profile_id.to_owned(), record.supervisors);
-            }
         }
         self.state.environment_owners.insert(id.clone(), id.clone());
         self.state.sessions.insert(id.clone(), record);
@@ -1465,11 +1442,6 @@ impl Controller {
             self.state
                 .last_oracle_choices
                 .insert(new_id.to_owned(), oracle);
-        }
-        if let Some(supervisors) = self.state.last_supervisor_choices.remove(old_id) {
-            self.state
-                .last_supervisor_choices
-                .insert(new_id.to_owned(), supervisors);
         }
         if let Some(policy) = self.state.last_subagent_policies.remove(old_id) {
             self.state

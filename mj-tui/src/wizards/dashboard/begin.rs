@@ -117,7 +117,6 @@ impl DashboardState {
         let target = self.offered_target_index_or_first(
             recent.map_or("localhost", |session| session.target_template_id.as_str()),
         );
-        let target_id = nth_key(&self.config.targets, target);
         let profile_id = self
             .new_wizard_profile_id(profile)
             .expect("an offered profile was checked above");
@@ -126,12 +125,9 @@ impl DashboardState {
         let mut delegation = subagents::SubagentDraft::default();
         delegation.refresh_create(
             profile_id,
-            &target_id,
             &self.config,
-            &self.profile_capabilities,
             remembered.as_ref(),
             self.state.last_oracle_choice_for(profile_id),
-            self.state.last_supervisor_choice_for(profile_id),
         );
         let mut expanded_providers = std::collections::BTreeSet::new();
         if let Some(provider) = NewWizard::provider_for_profile(self, profile) {
@@ -243,8 +239,7 @@ impl DashboardState {
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
-                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned())
-                    .with_supervisors(session.supervisors),
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
             ),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
@@ -372,8 +367,7 @@ impl DashboardState {
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
-                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned())
-                    .with_supervisors(session.supervisors),
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
             ),
             session_id: session.id.clone(),
             source: ResumeSource::Session,

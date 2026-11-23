@@ -205,6 +205,22 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent creation is unavailable") })
     }
 
+    fn spawn_orchestrator(
+        self: Arc<Self>,
+        _parent: String,
+        _request: mj_core::subagent::SubagentToolRequest,
+        _prepared: Option<mj_controller::database::PreparedDelegation>,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async { anyhow::bail!("orchestrator creation is unavailable") })
+    }
+
+    fn close_orchestrator(
+        self: Arc<Self>,
+        _session_id: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value>> {
+        Box::pin(async { anyhow::bail!("orchestrator close is unavailable") })
+    }
+
     fn close_subagent_request(
         self: Arc<Self>,
         _session_id: String,
@@ -502,6 +518,25 @@ impl ExportRuntime for RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move { self.start_subagent_session(request).await })
+    }
+
+    fn spawn_orchestrator(
+        self: Arc<Self>,
+        parent: String,
+        request: mj_core::subagent::SubagentToolRequest,
+        prepared: Option<mj_controller::database::PreparedDelegation>,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async move {
+            self.start_orchestrator_session(parent, request, prepared)
+                .await
+        })
+    }
+
+    fn close_orchestrator(
+        self: Arc<Self>,
+        session_id: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value>> {
+        Box::pin(async move { RuntimeState::close_orchestrator(&self, session_id).await })
     }
 
     fn close_subagent_request(
@@ -1342,8 +1377,8 @@ impl ApiBackend {
                             .exports
                             .session_record(parent_session_id)
                             .context("parent session disappeared")?;
-                        let requested_supervisor =
-                            *task_type == mj_core::subagent::SubagentTaskType::Supervisor;
+                        let requested_orchestrator =
+                            *task_type == mj_core::subagent::SubagentTaskType::Orchestrator;
                         let parent_subagent = blocking("load parent subagent record", {
                             let parent_id = parent_session_id.to_owned();
                             move || mj_controller::database::load_subagent(&parent_id)
@@ -1351,20 +1386,16 @@ impl ApiBackend {
                         .await?;
                         mj_core::subagent::validate_subagent_parent(
                             parent_subagent.as_ref(),
+                            false,
                             mj_core::subagent::SubagentKind::Worker,
-                            requested_supervisor,
+                            requested_orchestrator,
                         )?;
-                        if requested_supervisor {
+                        if requested_orchestrator {
                             ensure!(
-                                parent.supervisors,
-                                "supervisors are not enabled for this session"
-                            );
-                            ensure!(
-                                parent
-                                    .subagents
-                                    .as_ref()
-                                    .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
-                                "supervisors require Mjolnir delegation"
+                                parent.subagents.as_ref().is_some_and(
+                                    mj_core::subagent::SubagentPolicy::orchestrators_enabled
+                                ),
+                                "orchestrators are not enabled for this session"
                             );
                         }
                         let execution_policy =
@@ -1435,7 +1466,8 @@ impl ApiBackend {
                     .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                         no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
-                        supervisor: *task_type == mj_core::subagent::SubagentTaskType::Supervisor,
+                        orchestrator: *task_type
+                            == mj_core::subagent::SubagentTaskType::Orchestrator,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
                         task_name: task_name.clone(),
@@ -1473,6 +1505,23 @@ impl ApiBackend {
                     "model":relation.model,
                     "effort":relation.effort,
                     "report_dir":report_dir,
+                }))
+            }
+            SubagentToolAction::SpawnOrchestrator { .. } => {
+                let relation = Arc::clone(&self.exports)
+                    .spawn_orchestrator(
+                        parent_session_id.to_owned(),
+                        request.clone(),
+                        prepared.cloned(),
+                    )
+                    .await?;
+                Ok(serde_json::json!({
+                    "child_session_id": relation.child_session_id,
+                    "task_name": relation.task_name,
+                    "name": relation.task_name,
+                    "profile_id": relation.profile_id,
+                    "model": relation.model,
+                    "effort": relation.effort,
                 }))
             }
             SubagentToolAction::ListTargets => {
@@ -1536,7 +1585,7 @@ impl ApiBackend {
                             .map_or((None, &unknown), |(summary, progress)| {
                                 (summary.as_ref(), progress)
                             });
-                        let (state, _, _) = inputs.status(
+                        let (state, output, _) = inputs.status(
                             &relation.child_session_id,
                             record.as_ref(),
                             subagent_status(
@@ -1560,10 +1609,25 @@ impl ApiBackend {
                             "state":state,
                             "active_children": active_children.get(relation.child_session_id.as_str()).copied().unwrap_or(0),
                         });
+                        if relation.orchestrator
+                            && projection.as_ref().is_some_and(|projection| {
+                                projection.environment_owners.get(&relation.child_session_id)
+                                    == Some(&relation.child_session_id)
+                            })
+                            && let Some(report_dir) = &progress.report_dir
+                        {
+                            entry["report_dir"] = report_dir.clone().into();
+                        }
                         let selection = live_agent_selection(projection.as_ref(), &detail);
                         entry["model"] = serde_json::json!(selection.model);
                         entry["effort"] = serde_json::json!(selection.effort);
                         inputs.annotate(&relation.child_session_id, &mut entry);
+                        if state == "error"
+                            && let Some(cause) = output
+                        {
+                            entry["error"] = cause.into();
+                            entry["next_action"] = mj_core::subagent::FAILED_CHILD_CLOSE_GUIDANCE.into();
+                        }
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
                         if let ReportState::Held {
@@ -1598,46 +1662,21 @@ impl ApiBackend {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
                 let delivery = self
-                    .deliver_subagent_input(child_session_id, message, request)
+                    .deliver_to_own_child(
+                        child_session_id.clone(),
+                        message.clone(),
+                        request.request_id.clone(),
+                        request_created_at_ms,
+                    )
                     .await?;
-                let via = delivery.via();
-                let mailbox_delivery = if via == "mailbox" {
-                    self.published_mailbox_delivery(child_session_id).await
-                } else {
-                    None
-                };
-                let note = subagent_input::mailbox_delivery_note(mailbox_delivery.as_ref());
-                match delivery {
-                    subagent_input::SubagentInputDelivery::Mailbox => {
-                        let mut result = serde_json::json!({
-                            "child_session_id":child_session_id,
-                            "status":"queued",
-                            "via":via
-                        });
-                        if let Some(mode) = mailbox_delivery {
-                            result["mailbox_delivery"] = serde_json::to_value(mode)?;
-                        }
-                        if let Some(note) = note {
-                            result["note"] = note.into();
-                        }
-                        Ok(result)
-                    }
-                    subagent_input::SubagentInputDelivery::Turn { ordinal } => {
-                        blocking("record sub-agent prompt", {
-                            let child_id = child_session_id.clone();
-                            move || {
-                                mj_controller::database::record_subagent_prompt(&child_id, ordinal)
-                            }
-                        })
-                        .await?;
-                        Ok(serde_json::json!({
-                            "child_session_id":child_session_id,
-                            "turn_id":ordinal,
-                            "status":"submitted",
-                            "via":via
-                        }))
-                    }
+                if let Some(ordinal) = delivery.turn_id {
+                    blocking("record legacy sub-agent prompt", {
+                        let child = delivery.session_id.clone();
+                        move || mj_controller::database::record_subagent_prompt(&child, ordinal)
+                    })
+                    .await?;
                 }
+                subagent_message_result(delivery)
             }
             SubagentToolAction::SendMessage {
                 child_session_id,
@@ -1652,42 +1691,7 @@ impl ApiBackend {
                         request_created_at_ms,
                     )
                     .await?;
-                let status = if delivery.via == "mailbox" || delivery.via == "queued" {
-                    "queued"
-                } else {
-                    "submitted"
-                };
-                if delivery.managed_child {
-                    let mut result = serde_json::json!({
-                        "child_session_id": delivery.session_id,
-                        "status": status,
-                        "via": delivery.via,
-                    });
-                    if let Some(mode) = delivery.mailbox_delivery {
-                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
-                    }
-                    if let Some(note) = delivery.note {
-                        result["note"] = note.into();
-                    }
-                    if let Some(turn_id) = delivery.turn_id {
-                        result["turn_id"] = turn_id.into();
-                    }
-                    Ok(result)
-                } else {
-                    let mut result = serde_json::json!({
-                        "session_id": delivery.session_id,
-                        "status": status,
-                        "via": delivery.via,
-                        "turn_id": delivery.turn_id,
-                    });
-                    if let Some(mode) = delivery.mailbox_delivery {
-                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
-                    }
-                    if let Some(note) = delivery.note {
-                        result["note"] = note.into();
-                    }
-                    Ok(result)
-                }
+                subagent_message_result(delivery)
             }
             SubagentToolAction::LegacyWaitAgents | SubagentToolAction::LegacyAwaitChildren => {
                 Ok(serde_json::json!({
@@ -1702,6 +1706,16 @@ impl ApiBackend {
                 let child_session_id = self
                     .resolve_owned_child(parent_session_id, child_session_id)
                     .await?;
+                let owns_environment = blocking("read child environment ownership", {
+                    let child_session_id = child_session_id.clone();
+                    move || mj_controller::database::session_owns_environment(&child_session_id)
+                })
+                .await?;
+                if owns_environment {
+                    return Arc::clone(&self.exports)
+                        .close_orchestrator(child_session_id)
+                        .await;
+                }
                 if prepared.is_some() {
                     Arc::clone(&self.exports)
                         .close_subagent_request(
@@ -1744,8 +1758,8 @@ impl ApiBackend {
                         ),
                         crate::daemon::ChildReview::Closed => {}
                     }
-                    if record.supervisor {
-                        let active = self.supervisor_active_children(&child_id).await?;
+                    if record.orchestrator {
+                        let active = self.orchestrator_active_children(&child_id).await?;
                         if !active.is_empty() {
                             let list = active
                                 .iter()
@@ -1828,8 +1842,7 @@ impl ApiBackend {
     /// Start a parked child's worker again and wait until its session can
     /// take a prompt. Returns whether there was a park to wait for or undo; a
     /// running child with no park in progress needs nothing and returns
-    /// false. A proved dead wake returns its failure and leaves the child
-    /// parked for another send; uncertain liveness remains recoverable.
+    /// false. A failed wake reports the outcome of the lifecycle operation.
     async fn unpark_child(&self, child_id: &str) -> Result<bool> {
         let parked = self
             .exports
@@ -1847,23 +1860,21 @@ impl ApiBackend {
                 .subagents
                 .get(&child)
                 .context("child relationship no longer exists")?;
-            controller.ensure_subagent_slot_available_for(
-                &relation.parent_session_id,
-                Some(&child),
-                relation.supervisor,
-            )
+            controller.ensure_subagent_slot_available(&relation.parent_session_id, Some(&child))
         })
         .await?;
         Arc::clone(&self.exports)
             .unpark_subagent(child_id.to_owned())
             .await
             .map_err(|error| {
-                let detail = if self.exports.session_record(child_id)
-                    .is_some_and(|record| record.state == SessionState::Parked)
-                {
-                    "could not start the parked sub-agent again; it is still parked, so you can retry"
-                } else {
-                    "could not finish starting the sub-agent; an accepted wake remains recoverable"
+                let detail = match self.exports.session_record(child_id).map(|record| record.state) {
+                    Some(SessionState::Parked) => {
+                        "could not start the parked sub-agent again; it is still parked, so you can retry"
+                    }
+                    Some(SessionState::Running) => {
+                        "could not finish starting the sub-agent; an accepted wake remains recoverable"
+                    }
+                    _ => "could not start the parked sub-agent again",
                 };
                 error.context(detail)
             })?;
@@ -2356,12 +2367,12 @@ pub(crate) struct ActiveChildSummary {
     pub task_name: String,
 }
 
-pub(crate) fn supervisor_active_children_sync(
-    supervisor_id: &str,
+pub(crate) fn orchestrator_active_children_sync(
+    orchestrator_id: &str,
 ) -> Result<Vec<ActiveChildSummary>> {
-    let children = mj_controller::database::list_subagents(supervisor_id)?;
+    let children = mj_controller::database::list_subagents(orchestrator_id)?;
     let pending_finished =
-        mj_controller::database::pending_subagent_finished_children(supervisor_id)?;
+        mj_controller::database::pending_subagent_finished_children(orchestrator_id)?;
     let state = mj_controller::database::load_state()?;
     let mut active = Vec::new();
     for child in children {
@@ -2384,13 +2395,13 @@ pub(crate) fn supervisor_active_children_sync(
 }
 
 impl ApiBackend {
-    pub(crate) async fn supervisor_active_children(
+    pub(crate) async fn orchestrator_active_children(
         &self,
-        supervisor_id: &str,
+        orchestrator_id: &str,
     ) -> Result<Vec<ActiveChildSummary>> {
-        let supervisor_id = supervisor_id.to_owned();
-        blocking("load supervisor active children", move || {
-            supervisor_active_children_sync(&supervisor_id)
+        let orchestrator_id = orchestrator_id.to_owned();
+        blocking("load orchestrator active children", move || {
+            orchestrator_active_children_sync(&orchestrator_id)
         })
         .await
     }
@@ -2425,10 +2436,10 @@ impl ApiBackend {
                 // A child whose review is open is still pending: it may end
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
-            } else if child.relation.supervisor
-                && !self.supervisor_active_children(&id).await?.is_empty()
+            } else if child.relation.orchestrator
+                && !self.orchestrator_active_children(&id).await?.is_empty()
             {
-                ChildDisposition::NotNews("the supervisor awaits its sub-agents")
+                ChildDisposition::NotNews("the orchestrator awaits its sub-agents")
             } else {
                 if inputs.queue_known() {
                     for failed in inputs.failed_deliveries(&id) {
@@ -3583,13 +3594,12 @@ fn list_targets(
         .get(parent_id)
         .context("parent session disappeared")?;
     ensure!(
-        parent.supervisors
-            && parent
-                .subagents
-                .as_ref()
-                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir)
+        parent
+            .subagents
+            .as_ref()
+            .is_some_and(mj_core::subagent::SubagentPolicy::orchestrators_enabled)
             && !projection.subagents.contains_key(parent_id),
-        "list_targets requires supervisors enabled on a parent using Mjolnir delegation"
+        "list_targets requires orchestrators enabled on a parent using Mjolnir delegation"
     );
     let metadata = &projection.metadata;
     let config = &metadata.config;
@@ -3661,7 +3671,7 @@ fn listed_agent_role(
     relation: &mj_core::subagent::SubagentRecord,
     category: Option<&str>,
 ) -> &'static str {
-    if relation.supervisor || matches!(category, Some("supervisor" | "orchestrator")) {
+    if relation.orchestrator || matches!(category, Some("supervisor" | "orchestrator")) {
         "orchestrator"
     } else if category == Some("subtle") {
         "subtle"
@@ -5198,6 +5208,33 @@ where
         None => choices,
     };
     Ok((choices, default))
+}
+
+fn subagent_message_result(
+    delivery: crate::server::api::SessionMessageResponse,
+) -> Result<serde_json::Value> {
+    let status = if matches!(delivery.via.as_str(), "mailbox" | "queued") {
+        "queued"
+    } else {
+        "submitted"
+    };
+    let mut result = serde_json::json!({"status": status, "via": delivery.via});
+    if delivery.managed_child {
+        result["child_session_id"] = delivery.session_id.into();
+        if let Some(turn_id) = delivery.turn_id {
+            result["turn_id"] = turn_id.into();
+        }
+    } else {
+        result["session_id"] = delivery.session_id.into();
+        result["turn_id"] = serde_json::json!(delivery.turn_id);
+    }
+    if let Some(mode) = delivery.mailbox_delivery {
+        result["mailbox_delivery"] = serde_json::to_value(mode)?;
+    }
+    if let Some(note) = delivery.note {
+        result["note"] = note.into();
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -213,7 +213,6 @@ mod tests {
             operation_id: "move-purge".into(),
             selection: MoveSelection {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 subagents: None,
                 consent: Default::default(),

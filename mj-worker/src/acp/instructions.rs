@@ -51,6 +51,7 @@ pub(super) async fn compose(
             .map(|socket| mj_core::session_instructions::AgentTools {
                 role: socket.role,
                 review_tools: socket.review_tools,
+                orchestrators_enabled: socket.orchestrators_enabled,
             }),
         history_tools: mcp_available
             && spec
@@ -170,7 +171,8 @@ mod tests {
                 } else {
                     SubagentMcpRole::Child
                 },
-                agent_mailboxes_enabled: true,
+                oracle: false,
+                orchestrators_enabled: role.is_none(),
                 subtle_subagents: true,
                 review_tools: role.is_none(),
                 profile_registration: false,
