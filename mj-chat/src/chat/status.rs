@@ -194,6 +194,15 @@ impl ChatState {
     /// Whether Esc (or the host's Interrupt turn command) has a turn to
     /// interrupt, including autonomous harness and native goal turns.
     pub(crate) fn turn_interruptible(&self) -> bool {
+        self.agent_turn_interruptible() || !self.active_user_shells.is_empty()
+    }
+
+    pub(super) fn agent_turn_interruptible(&self) -> bool {
+        if self.publishes_interrupt_targets {
+            return self.turn_controls.as_ref().is_some_and(|controls| {
+                controls.primary.is_some() || controls.interrupt.is_some()
+            });
+        }
         self.prompt_in_flight
             || self.harness_turn_stoppable()
             || matches!(
@@ -202,7 +211,6 @@ impl ChatState {
             )
             || (self.session_activity.capacity_retry.is_some()
                 || self.session_activity.quota_recovery.is_some())
-            || !self.active_user_shells.is_empty()
     }
 
     /// Whether a turn-control request is already on its way, when a second

@@ -9,17 +9,20 @@ pub struct WorkerRestartIntent {
 }
 
 pub fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
-    begin_worker_restart_for(session_id, intent, false, None)
+    begin_worker_restart_for(session_id, intent, false, None, None)
 }
 
 /// The wake and its boot owner become visible together. Recovery must never
 /// see a still-parked child whose worker has already accepted launch.
+/// A refresh supplies `Some(profile)`, including `Some(None)` to clear the pin.
+/// An unchanged staged profile supplies `None`.
 pub fn begin_subagent_unpark(
     session_id: &str,
     intent: &WorkerRestartIntent,
     profile_change: Option<(&str, &str)>,
+    staged_aws_profile: Option<Option<&str>>,
 ) -> Result<()> {
-    begin_worker_restart_for(session_id, intent, true, profile_change)
+    begin_worker_restart_for(session_id, intent, true, profile_change, staged_aws_profile)
 }
 
 fn begin_worker_restart_for(
@@ -27,8 +30,16 @@ fn begin_worker_restart_for(
     intent: &WorkerRestartIntent,
     unpark: bool,
     profile_change: Option<(&str, &str)>,
+    staged_aws_profile: Option<Option<&str>>,
 ) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
+    ensure!(
+        staged_aws_profile
+            .flatten()
+            .is_none_or(mj_core::aws_credentials::valid_profile_name),
+        "invalid staged AWS profile name"
+    );
+    let staged_aws_profile = staged_aws_profile.map(|profile| profile.map(str::to_owned));
     let session_id = session_id.to_owned();
     let intent = intent.clone();
     let profile_change =
@@ -46,9 +57,9 @@ fn begin_worker_restart_for(
             super::session_restart::ensure_no_peer_container_upgrade(&tx, &session_id)?;
         }
         let claimed = tx.execute(
-            "INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase)
-             VALUES (?1,?2,?3,?4,'prepared') ON CONFLICT(session_id) DO NOTHING",
-            params![session_id, intent.operation_id, serde_json::to_string(&intent.target)?, intent.desired_build],
+            "INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase,staged_aws_profile)
+             VALUES (?1,?2,?3,?4,'prepared',?5) ON CONFLICT(session_id) DO NOTHING",
+            params![session_id, intent.operation_id, serde_json::to_string(&intent.target)?, intent.desired_build, staged_aws_profile.as_ref().map(|name| name.as_deref().unwrap_or(""))],
         )?;
         ensure!(
             claimed == 1,
@@ -67,7 +78,7 @@ fn begin_worker_restart_for(
                      WHERE session_id=?1 AND state='parked'
                        AND (?4 IS NULL OR last_profile=?4)
                        AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
-                    params![session_id, chrono::Utc::now().to_rfc3339(), next, previous],
+                    params![session_id, chrono::Utc::now().to_rfc3339(), next, previous,],
                 )? == 1,
                 "only a parked sub-agent can accept a wake"
             );
@@ -152,6 +163,70 @@ fn load_worker_restart_with(
         })
     })
     .transpose()
+}
+
+/// Bind staged files to the existing boot owner before sending the start command.
+pub fn record_worker_restart_aws_profile(
+    session_id: &str,
+    operation_id: &str,
+    profile: Option<&str>,
+) -> Result<()> {
+    let owner = crate::worker_lifecycle::require(session_id)?;
+    ensure!(
+        owner.operation_id() == operation_id,
+        "worker boot ownership changed"
+    );
+    ensure!(
+        profile.is_none_or(mj_core::aws_credentials::valid_profile_name),
+        "invalid staged AWS profile name"
+    );
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    let profile = profile.unwrap_or("").to_owned();
+    submit_database_write("record_worker_restart_aws_profile", move |connection| {
+        ensure!(
+            connection.execute(
+                "UPDATE worker_restart_intents SET staged_aws_profile=?3
+             WHERE session_id=?1 AND operation_id=?2 AND phase='swapping'",
+                params![session_id, operation_id, profile],
+            )? == 1,
+            "worker boot no longer owns staged AWS profile"
+        );
+        Ok(())
+    })
+}
+
+/// The worker has reached readiness. Publish the staged AWS profile and
+/// retire its intent in the same transaction. NULL means no restaging,
+/// while an empty name means the activation clears a previous selection.
+pub fn activate_worker_restart(session_id: &str, operation_id: &str) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    submit_database_write("activate_worker_restart", move |connection| {
+        let tx = connection.transaction()?;
+        publish_worker_restart_aws_profile(&tx, &session_id, &operation_id)?;
+        finish_worker_restart_with(&tx, &session_id, &operation_id)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+pub(super) fn publish_worker_restart_aws_profile(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    operation_id: &str,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE sessions
+         SET staged_aws_profile=(SELECT NULLIF(staged_aws_profile, '') FROM worker_restart_intents
+                                 WHERE session_id=?1 AND operation_id=?2)
+         WHERE session_id=?1 AND EXISTS (
+             SELECT 1 FROM worker_restart_intents
+             WHERE session_id=?1 AND operation_id=?2 AND staged_aws_profile IS NOT NULL)",
+        params![session_id, operation_id],
+    )?;
+    Ok(())
 }
 
 pub fn finish_worker_restart(session_id: &str, operation_id: &str) -> Result<()> {
@@ -286,11 +361,11 @@ mod tests {
             };
             permit.scope_blocking(|| {
                 if unpark {
-                    begin_subagent_unpark(&record.id, &intent, None)?;
+                    begin_subagent_unpark(&record.id, &intent, None, Some(Some("team")))?;
                 } else {
                     begin_worker_restart(&record.id, &intent)?;
                 }
-                finish_worker_restart(&record.id, &intent.operation_id)
+                activate_worker_restart(&record.id, &intent.operation_id)
             })
         };
 
@@ -300,6 +375,12 @@ mod tests {
         // A parked worker may wake before commit. The resulting running peer
         // prevents the upgrade from crossing into recreation.
         restart(&borrowed, true).unwrap();
+        assert_eq!(
+            load_state().unwrap().sessions[&borrowed.id]
+                .staged_aws_profile
+                .as_deref(),
+            Some("team")
+        );
         assert!(!commit_upgrade(&parent));
         save_session(&borrowed).unwrap();
         assert!(commit_upgrade(&parent));

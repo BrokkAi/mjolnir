@@ -117,7 +117,7 @@ func projectToolCall(
 	if claimed {
 		return nil
 	}
-	stableID := "tool:" + string(call.ToolCallID)
+	stableID := ToolItemID(string(call.ToolCallID))
 	value, err := projectionJSON(call)
 	if err != nil {
 		return err
@@ -180,7 +180,7 @@ func projectToolCallUpdate(
 	update *schema.ToolCallUpdate,
 	mutation *core.MaterializedSessionMutation,
 ) error {
-	stableID := "tool:" + string(update.ToolCallID)
+	stableID := ToolItemID(string(update.ToolCallID))
 	existing := index.get(stableID)
 	if existing == nil {
 		// Codex may finish dispatching a historical tool update after
@@ -211,7 +211,10 @@ func projectToolCallUpdate(
 	}
 	presentationChanged := ToolCallUpdateChangesPresentation(&materializedCall, &fields)
 	UpdateToolCall(&materializedCall, &fields)
-	if presentationChanged || body.Presentation == nil || body.Presentation.SummaryVersion < ToolSummaryVersion {
+	status := toolCallStatus(&materializedCall)
+	if presentationChanged || body.Presentation == nil || body.Presentation.SummaryVersion < ToolSummaryVersion ||
+		(body.Presentation.OutputLineCount != nil &&
+			(status == acp.ToolCallStatusPending || status == acp.ToolCallStatusInProgress)) {
 		presentation := ToolCallPresentation(&materializedCall)
 		body.Presentation = &presentation
 	}
@@ -495,6 +498,7 @@ func pushSystemWithID(mutation *core.MaterializedSessionMutation, event *core.Re
 }
 
 func upsert(mutation *core.MaterializedSessionMutation, item core.TranscriptItem) {
+	enrichSettledTool(&item.Body)
 	for i, candidate := range mutation.Transcript {
 		if current, ok := candidate.(core.TranscriptMutationUpsert); ok && current.Item.StableID == item.StableID {
 			mutation.Transcript[i] = core.TranscriptMutationUpsert{Item: item}

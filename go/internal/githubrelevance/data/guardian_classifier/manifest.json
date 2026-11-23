@@ -1,0 +1,26 @@
+{
+  "repository": "patronus-studio/wolf-defender-jev",
+  "revision": "8cd431a3b997cce58d67e3512257ded01258000f",
+  "files": [
+    {
+      "name": "config.json",
+      "bytes": 437,
+      "sha256": "01acd271147e8d5f32482223659a1c0c2d7d6a6355954eee16b56c1906ddcadf"
+    },
+    {
+      "name": "tokenizer.json",
+      "bytes": 17525329,
+      "sha256": "197d4cc5406ee12cc50c8b5511f2393cc32d9db321545979ce041c1199178356"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "bytes": 46440,
+      "sha256": "ea349495764b24570b4560fe2e4a557e5c0a47e6bce782c2409b1d6445cf8633"
+    },
+    {
+      "name": "onnx/onnx_fp32/model.onnx",
+      "bytes": 615977854,
+      "sha256": "8b39675fc5fb44beb4b30112f610731a545c96cd25df1b0af97b9873482699e8"
+    }
+  ]
+}

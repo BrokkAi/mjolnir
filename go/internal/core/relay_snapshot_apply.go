@@ -825,6 +825,17 @@ func applyCommandQueued(snapshot *RelaySnapshot, event *RelayEvent, queued *Rela
 		snapshot.Continuation.QuotaSuppressed = true
 		snapshot.Continuation.WithdrawnOrdinal = &ordinal
 	}
+	// Another session's message delivered as a turn, by a mailbox wake or,
+	// for workers without mailbox delivery, as a prompt. A wake is known by
+	// its ID, as the projection knows it: restored from a checkpoint it is a
+	// plain prompt under that ID.
+	deliveredMessageTurn := func() bool {
+		if CarriesMailboxWake(commandID) {
+			return true
+		}
+		producer, ok := GeneratedPromptOf(commandID)
+		return ok && producer == GeneratedPromptSessionMessageTurn
+	}
 	switch command := command.(type) {
 	// Legacy protocol-39 journals still replay this command.
 	case RelayCommandSetSubagentWait:
@@ -843,17 +854,17 @@ func applyCommandQueued(snapshot *RelaySnapshot, event *RelayEvent, queued *Rela
 				QuotaSuppressed:  context,
 				WithdrawnOrdinal: withdrawn,
 			}
-		} else if producer, ok := GeneratedPromptOf(commandID); ok && producer == GeneratedPromptSessionMessageTurn {
+		} else if deliveredMessageTurn() {
 			beginDeliveredMessageTurn(&snapshot.Continuation, commandID)
 		}
 	case RelayCommandContinueAuthorizedWork:
 		snapshot.Continuation.Attempts = command.Attempt
 		snapshot.Continuation.CompletedCommandID = nil
 		snapshot.Continuation.HarnessTurn = nil
-	// Another session's message delivered as a turn, by a mailbox wake or,
-	// for workers without mailbox delivery, as a prompt.
 	case RelayCommandMailboxWake:
-		beginDeliveredMessageTurn(&snapshot.Continuation, commandID)
+		if deliveredMessageTurn() {
+			beginDeliveredMessageTurn(&snapshot.Continuation, commandID)
+		}
 	case RelayCommandInstallPromptContext:
 		switch context := snapshot.PendingPromptContext; {
 		case context == nil:
@@ -965,11 +976,16 @@ func applyCommandQueued(snapshot *RelaySnapshot, event *RelayEvent, queued *Rela
 		payload = StoredQueuedRelayPayloadSetConfig{Key: setConfig.Key, Value: setConfig.Value}
 	}
 	if payload != nil {
-		snapshot.QueuedPrompts = append(snapshot.QueuedPrompts, StoredQueuedRelayCommand{
+		entry := StoredQueuedRelayCommand{
 			CommandID:   commandID,
 			Payload:     payload,
 			CreatedAtMs: queued.CreatedAtMs,
-		})
+		}
+		if queued.InsertAtFront {
+			snapshot.QueuedPrompts = slices.Insert(snapshot.QueuedPrompts, 0, entry)
+		} else {
+			snapshot.QueuedPrompts = append(snapshot.QueuedPrompts, entry)
+		}
 	}
 	switch command := command.(type) {
 	case RelayCommandRunUserShell:
@@ -2044,6 +2060,13 @@ func applyAssessmentContext(snapshot *RelaySnapshot, event *RelayEvent) {
 			recordHandbackMailboxAssignments(snapshot, slices.Clone(wake.Events))
 		}
 		if prompt, ok := relayDispatchPrompt(snapshot, id); ok {
+			// The initial assignment can be queued before the worker records
+			// that it is managed. Establish its quota frontier on dispatch.
+			producer, generated := GeneratedPromptOf(id)
+			if snapshot.ManagedSubagent &&
+				(GeneratedPromptIsSubagentAssignment(id) || (generated && producer == GeneratedPromptQuotaRetry)) {
+				beginDeliveredMessageTurn(&snapshot.Continuation, id)
+			}
 			if GeneratedPromptIsSubagentAssignment(id) {
 				assignmentID := id
 				snapshot.HandbackChecks.AssignmentID = &assignmentID

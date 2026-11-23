@@ -440,11 +440,12 @@ pub(super) fn build_observation(
             .clone_from(&snapshot.materialized.pending_elicitations);
         observation.observe_worker_turn(snapshot);
     } else if let Some(durable) = durable {
-        observation.execution = durable.execution;
-        observation.active_turn = durable.active_turn.clone();
-        observation
-            .last_turn_outcome
-            .clone_from(&durable.last_turn_outcome);
+        observation.observe_turn(
+            durable.execution,
+            durable.active_turn.clone(),
+            durable.last_turn_outcome.clone(),
+            durable.queued_command_ids.clone(),
+        );
     }
     observation
 }

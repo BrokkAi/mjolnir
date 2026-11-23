@@ -1,0 +1,197 @@
+=== AFK (100x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default ?2                         ≡ ││                     ✦  M J O L N I R                     │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
+│  ? Exp  │                                                                              │         │
+│  Quest  │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │  ───────╯
+│  │ Cho  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │  ───────╮
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │  en.    │
+╰───────  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  ───────╯
+╭ Target  │                                                                              │   ▁   ▄ ╮
+│  Host   │   While you are away, an agent that asks a question or needs permission is   │         │
+╰───────  │  told that you are away and asked to do other useful work first. If it asks  │  ───────╯
+╭ Profil  │               the same thing again, the request waits for you.               │   ▁   ▄ ╮
+│ANTHROP  │                                                                              │         │
+│  claud  │                             Waiting for you:                                 │         │
+│OPENAI   │                               Explicit question                              │         │
+│  codex  │                               Classifier failure                             │         │
+│  codex  │                               Classifier question                            │         │
+╰───────  │                                                                              │  ───────╯
+╭ Notifi  │                        Close this window to come back.                       │   ▄   □ ╮
+│? Class  │                                                                              │         │
+│         │                                                                              │         │
+│ I need  ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                  │
+│                                                                                                  │
+│Quick reply:                                                                                 Send │
+│ Go to Session   Clear & Next   Skip   Ignore Session                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
+=== AFK classifier intervention only (100x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                     ✦  M J O L N I R                     │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
+│  ○ Exp  │                                                                              │         │
+│  Idle   │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │  ───────╯
+│  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │  ───────╮
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │  en.    │
+╰───────  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │  ───────╯
+╭ Target  │                                                                              │   ▁   ▄ ╮
+│  Host   │   While you are away, an agent that asks a question or needs permission is   │         │
+╰───────  │  told that you are away and asked to do other useful work first. If it asks  │  ───────╯
+╭ Profil  │               the same thing again, the request waits for you.               │   ▁   ▄ ╮
+│ANTHROP  │                                                                              │         │
+│  claud  │                             Waiting for you:                                 │         │
+│OPENAI   │                               Classifier failure                             │         │
+│  codex  │                               Classifier question                            │         │
+│  codex  │                                                                              │         │
+╰───────  │                        Close this window to come back.                       │  ───────╯
+╭ Notifi  │                                                                              │   ▄   □ ╮
+│? Class  │                                                                              │         │
+│         │                                                                              │         │
+│ I need  ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                  │
+│                                                                                                  │
+│Quick reply:                                                                                 Send │
+│ Go to Session   Clear & Next   Skip   Ignore Session                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
+=== AFK waiting requests cleared (100x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
+│  ○ Exp  │                                                                              │         │
+│  Idle   │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
+│  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
+│  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
+│         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
+│  ○ Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
+│  Idle   │                                                                              │         │
+│  │ I n  │   While you are away, an agent that asks a question or needs permission is   │  ───────╯
+│  │      │  told that you are away and asked to do other useful work first. If it asks  │  ───────╮
+│         │               the same thing again, the request waits for you.               │         │
+│  ○ Ord  │                                                                              │  en.    │
+╰───────  │                       No sessions are waiting for you.                       │  ───────╯
+╭ Target  │                                                                              │   ▁   ▄ ╮
+│  Host   │                        Close this window to come back.                       │         │
+╰───────  │                                                                              │  ───────╯
+╭ Profil  │                                                                              │   ▁   ▄ ╮
+│ANTHROP  │                                                                              │         │
+│  claud  │                                                                              │         │
+│OPENAI   │                                                                              │         │
+│  codex  ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│  codex                                                                                           │
+╰───────                                                                                    ───────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
+=== AFK ASCII (100x32) ===
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation -------------------------- +   .---+
+| default ?2                         = ||                     *  M J O L N I R                     |
++--------------------------------------+|                                                          |
++ Sessio                                                                                           |
+| Create                                                                                           |
+|hel ---  + x  AFK  ---------------------------------------------------------------------+         |
+|  ? Exp  |                                                                              |         |
+|  Quest  |                    .=====.  /####\  ######  ##   ##     //                   |  -------+
+|  | Cho  |                    '==+=='  ##  ##  ##      ##  ##     //                    |  -------+
+|  |      |                       |     ######  #####   #####     /==                    |         |
+|         |                       |     ##  ##  ##      ##  ##     //                    |  en.    |
++-------  |                      [_]    ##  ##  ##      ##   ##   //                     |  -------+
++ Target  |                                                                              |   -   = +
+|  Host   |   While you are away, an agent that asks a question or needs permission is   |         |
++-------  |  told that you are away and asked to do other useful work first. If it asks  |  -------+
++ Profil  |               the same thing again, the request waits for you.               |   -   = +
+|ANTHROP  |                                                                              |         |
+|  claud  |                             Waiting for you:                                 |         |
+|OPENAI   |                               Explicit question                              |         |
+|  codex  |                               Classifier failure                             |         |
+|  codex  |                               Classifier question                            |         |
++-------  |                                                                              |  -------+
++ Notifi  |                        Close this window to come back.                       |   =   + +
+|? Class  |                                                                              |         |
+|         |                                                                              |         |
+| I need  +------------------------------------------------------------------------------+         |
+|                                                                                                  |
+|                                                                                                  |
+|Quick reply:                                                                                 Send |
+| Go to Session   Clear & Next   Skip   Ignore Session                                             |
++--------------------------------------------------------------------------------------------------+
+/ search (filter a/b/w/i/d) - Tab pane | ctrl+b then c create - g sessions - a read - : / ? palette
+=== AFK small (32x12) ===
+
+
+   ╭ ×  AFK  ──────────────╮
+   │                       │
+   │          AFK          │
+   │                       │
+   │  While you are away,  │
+   │ an agent that asks a  │
+   │   question or needs   │
+   ╰───────────────────────╯
+
+
+=== AFK small scrolled (32x12) ===
+
+
+   ╭ ×  AFK  ──────────────╮
+   │  Waiting for you:     │
+   │    Explicit question  │
+   │    and 2 more         │
+   │                       │
+   │ Close this window to  │
+   │      come back.       │
+   ╰───────────────────────╯
+
+
+=== AFK tall narrow (56x32) ===
+                   Terminal too small
+                Need at least 60 columns.
+                   Current width: 56.
+
+
+      ╭ ×  AFK  ─────────────────────────────────╮
+      │                                          │
+      │                    AFK                   │
+      │                                          │
+      │ While you are away, an agent that asks a │
+      │   question or needs permission is told   │
+      │  that you are away and asked to do other │
+      │  useful work first. If it asks the same  │
+      │  thing again, the request waits for you. │
+      │                                          │
+      │           Waiting for you:               │
+      │             Explicit question            │
+      │             Classifier failure           │
+      │             Classifier question          │
+      │                                          │
+      │      Close this window to come back.     │
+      │                                          │
+      │                                          │
+      │                                          │
+      │                                          │
+      ╰──────────────────────────────────────────╯
+
+
+
+
+
+
+=== AFK tiny (10x5) ===
+╭ ×  AFK ╮
+│        │
+│   AFK  │
+│        │
+╰────────╯

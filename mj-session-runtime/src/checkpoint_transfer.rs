@@ -254,17 +254,13 @@ fn cleanup_transfer_staging(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     validate_remote_path(staging)?;
-    let command = match locator {
-        TargetLocator::SshPodman { ssh, .. }
-        | TargetLocator::SshDocker { ssh, .. }
-        | TargetLocator::SshAppleContainer { ssh, .. }
-        | TargetLocator::SshNitro { ssh, .. } => Some(
+    if let Some(ssh) = locator
+        .container_endpoint()
+        .and_then(|endpoint| endpoint.ssh)
+    {
+        let command =
             crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["rm", "-f", "--", staging])
-                .purpose("remove remote checkpoint staging"),
-        ),
-        _ => None,
-    };
-    if let Some(command) = command {
+                .purpose("remove remote checkpoint staging");
         let output = executor.execute(&command)?;
         if output.status != 0 {
             bail!(
@@ -293,50 +289,9 @@ pub fn transfer_plan(
     );
     worker_root(locator, session_id)?;
     let local = local_temporary.to_string_lossy().into_owned();
-    let mut commands = match locator {
-        TargetLocator::LocalBare { .. } => vec![
-            CommandSpec::new("cp", ["--", remote_archive, local.as_str()])
-                .purpose("copy local bare checkpoint"),
-        ],
-        TargetLocator::LocalPodman { container_id, .. } => vec![
-            CommandSpec::new(
-                "podman",
-                ["cp", &format!("{container_id}:{remote_archive}"), &local],
-            )
-            .purpose("download checkpoint from local Podman"),
-        ],
-        TargetLocator::LocalDocker { container_id, .. } => vec![
-            CommandSpec::new(
-                "docker",
-                ["cp", &format!("{container_id}:{remote_archive}"), &local],
-            )
-            .purpose("download checkpoint from local Docker"),
-        ],
-        TargetLocator::AppleContainer { container_id, .. } => vec![
-            CommandSpec::new(
-                "container",
-                ["cp", &format!("{container_id}:{remote_archive}"), &local],
-            )
-            .purpose("download checkpoint from Apple container"),
-        ],
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            vec![
-                crate::targets::scp_download(ssh, remote_archive, &local)
-                    .purpose("download checkpoint over SSH"),
-            ]
-        }
-        TargetLocator::SshPodman {
-            ssh, container_id, ..
-        }
-        | TargetLocator::SshDocker {
-            ssh, container_id, ..
-        }
-        | TargetLocator::SshAppleContainer {
-            ssh, container_id, ..
-        }
-        | TargetLocator::SshNitro {
-            ssh, container_id, ..
-        } => {
+    let commands = if let Some(endpoint) = locator.container_endpoint() {
+        let source = format!("{}:{remote_archive}", endpoint.container_id);
+        if let Some(ssh) = endpoint.ssh {
             vec![
                 crate::targets::ssh_command(
                     SshTrafficClass::Control,
@@ -347,23 +302,34 @@ pub fn transfer_plan(
                 crate::targets::ssh_engine_command(
                     SshTrafficClass::Bulk,
                     ssh,
-                    locator.container_engine().expect("remote container"),
-                    ["cp", &format!("{container_id}:{remote_archive}"), staging],
+                    endpoint.engine,
+                    ["cp", &source, staging],
                 )
                 .purpose("stage remote container checkpoint"),
+                crate::targets::scp_download(ssh, staging, &local)
+                    .purpose("download remote container checkpoint over SSH"),
+            ]
+        } else {
+            vec![
+                CommandSpec::new(endpoint.engine, ["cp", &source, &local]).purpose(format!(
+                    "download checkpoint from local {}",
+                    endpoint.engine
+                )),
             ]
         }
+    } else {
+        match locator {
+            TargetLocator::LocalBare { .. } => vec![
+                CommandSpec::new("cp", ["--", remote_archive, local.as_str()])
+                    .purpose("copy local bare checkpoint"),
+            ],
+            TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => vec![
+                crate::targets::scp_download(ssh, remote_archive, &local)
+                    .purpose("download checkpoint over SSH"),
+            ],
+            _ => unreachable!("containers handled above"),
+        }
     };
-    if let TargetLocator::SshPodman { ssh, .. }
-    | TargetLocator::SshDocker { ssh, .. }
-    | TargetLocator::SshAppleContainer { ssh, .. }
-    | TargetLocator::SshNitro { ssh, .. } = locator
-    {
-        commands.push(
-            crate::targets::scp_download(ssh, staging, &local)
-                .purpose("download remote container checkpoint over SSH"),
-        );
-    }
     Ok(CommandPlan {
         description: format!("download checkpoint for {session_id}"),
         commands,

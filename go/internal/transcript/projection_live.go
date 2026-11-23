@@ -76,7 +76,7 @@ func MaterializedSessionFromLiveBaseline(baseline *core.LiveSessionBaseline) (co
 		if config, ok := queued.Command.(core.RelayCommandSetConfig); ok {
 			kind = core.QueuedCommandKindSetConfig{Key: config.Key, Value: config.Value}
 		}
-		content, err := QueuedCommandContent(queued.Command)
+		content, err := QueuedCommandContent(queued.CommandID, queued.Command)
 		if err != nil {
 			return core.MaterializedSession{}, err
 		}
@@ -91,7 +91,7 @@ func MaterializedSessionFromLiveBaseline(baseline *core.LiveSessionBaseline) (co
 	beforeLatest := max(state.LatestOrdinal-1, 1)
 	for i := range baseline.DeliveredInitialPrompts {
 		initial := &baseline.DeliveredInitialPrompts[i]
-		content, err := QueuedCommandContent(initial.Command)
+		content, err := QueuedCommandContent(initial.CommandID, initial.Command)
 		if err != nil {
 			return core.MaterializedSession{}, err
 		}

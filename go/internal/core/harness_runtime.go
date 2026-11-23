@@ -2,9 +2,9 @@
 
 // Exact harness versions used by Mjolnir-managed installations.
 //
-// Installation and process ownership live in `brokk-mj-worker`; this module
-// holds shared pin metadata and managed-install paths/manifests so the
-// controller and worker cannot silently disagree about an installation.
+// Installation lives in `brokk-mj-harness-install` (Go package
+// harnessinstall). This module holds shared pin metadata and managed-install
+// paths and manifests so the controller and worker agree on installations.
 
 package core
 
@@ -32,11 +32,11 @@ const (
 
 // NodeVersion is the exact Node.js release Mjolnir installs when the target
 // has no compatible runtime. Keep this in lockstep with
-// `assets/node/runtime.json`.
+// `mj-harness-install/assets/node/runtime.json`.
 const NodeVersion = "24.22.1"
 
-// MiseVersion: keep in lockstep with `assets/mise/runtime.json`. Static musl
-// binary hashes:
+// MiseVersion: keep in lockstep with
+// `mj-harness-install/assets/mise/runtime.json`. Static musl binary hashes:
 // https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
 const MiseVersion = "2026.11.9"
 
@@ -146,7 +146,7 @@ func ManagedHarnessManifestMatches(path string, harness HarnessKind, installID s
 
 const (
 	CodexACPPackage    = "@brokkai/codex-acp"
-	CodexACPVersion    = "1.15.0"
+	CodexACPVersion    = "1.15.1"
 	CodexCLIVersion    = "0.170.0"
 	ClaudeACPVersion   = "0.108.0"
 	ClaudeCLIVersion   = "2.1.326"
@@ -475,8 +475,9 @@ func (b NpmBridge) scriptForVersion(version string) string {
 type HarnessPin struct {
 	// InstallID is the identity of the installed content, and the directory
 	// name under the harness cache. Change it whenever the installed bytes
-	// change, including a change to the harness asset `package.json`, so
-	// caches written by an earlier packaging are replaced instead of reused.
+	// change, including a change to the harness asset `package.json`, or
+	// when receipts from earlier packaging no longer establish that an
+	// installation is usable.
 	InstallID      string
 	DisplayVersion string
 	Entrypoint     string
@@ -490,12 +491,12 @@ func Pin(kind HarnessKind) HarnessPin {
 	case HarnessKindMuse:
 		return HarnessPin{InstallID: "muse-acp-0.25.0_muse-1.4.23-R8977.1", DisplayVersion: "muse-acp 0.25.0 + Muse Code 1.4.23-R8977.1", Entrypoint: "bin/muse", CLIEntrypoint: "bin/muse"}
 	case HarnessKindCodex:
-		return HarnessPin{InstallID: "brokkai-codex-acp-1.15.0_codex-0.170.0", DisplayVersion: "@brokkai/codex-acp 1.15.0 + codex 0.170.0", Entrypoint: "node_modules/.bin/codex-acp", CLIEntrypoint: CodexCLIEntrypoint}
+		// pkg2: require a runnable CLI even when npm reports success.
+		return HarnessPin{InstallID: "brokkai-codex-acp-1.15.1_codex-0.170.0_pkg2", DisplayVersion: "@brokkai/codex-acp 1.15.1 + codex 0.170.0", Entrypoint: "node_modules/.bin/codex-acp", CLIEntrypoint: CodexCLIEntrypoint}
 	case HarnessKindClaude:
-		// pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
-		// Installs made before that change kept the package's native-binary
-		// stub, so their identity must not match this pin.
-		return HarnessPin{InstallID: "claude-agent-acp-0.108.0_claude-2.1.326_pkg2", DisplayVersion: "claude-agent-acp 0.108.0 + Claude Code 2.1.326", Entrypoint: "node_modules/.bin/claude-agent-acp", CLIEntrypoint: "node_modules/.bin/claude"}
+		// pkg2 approved the native install script. pkg3 requires the
+		// installed CLI to run before issuing a receipt.
+		return HarnessPin{InstallID: "claude-agent-acp-0.108.0_claude-2.1.326_pkg3", DisplayVersion: "claude-agent-acp 0.108.0 + Claude Code 2.1.326", Entrypoint: "node_modules/.bin/claude-agent-acp", CLIEntrypoint: "node_modules/.bin/claude"}
 	case HarnessKindKimi:
 		return HarnessPin{InstallID: "kimi-2.6.3", DisplayVersion: "Kimi Code 2.6.3", Entrypoint: "bin/kimi", CLIEntrypoint: "bin/kimi"}
 	case HarnessKindGrok:

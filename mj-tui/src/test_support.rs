@@ -417,6 +417,7 @@ pub(crate) fn config() -> Config {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
@@ -452,6 +453,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
         title: "Raise the dead".into(),
         harness_kind: HarnessKind::Codex,
         last_profile: "codex-1".into(),
+        staged_aws_profile: None,
         bundle_id: "hel".into(),
         project_directory: None,
         managed_worktree: None,

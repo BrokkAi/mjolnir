@@ -7,8 +7,72 @@ use crate::relay::test_support::*;
 use crate::relay::{
     ClaimedRelayCommand, RELAY_EVENT_FORMAT_V1, RELAY_EVENT_GENESIS_DIGEST, RelayCommandKind,
     RelayCommandOutcome, RelayCursor, RelayErrorCode, RelayErrorDetail, RelayExecutionState,
-    RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
+    RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload, TurnInterruptTarget,
 };
+
+#[test]
+fn guardian_reviews_survive_journal_replay_without_duplicating_pending_verdicts() {
+    use mj_core::guardian::{Outcome, PriorGuardianReview};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let review = |id: &str| PriorGuardianReview {
+        review_id: Some(id.into()),
+        tool: "Bash".into(),
+        action_summary: id.into(),
+        outcome: Outcome::Deny,
+        risk_level: None,
+        user_authorization: None,
+        rationale: None,
+    };
+    let first = review("one");
+    let second = review("two");
+    let expected = vec![first.clone(), second.clone()];
+    let context = relay.turn_context();
+    for review in &expected {
+        context.record_prior_guardian_review(review.clone());
+    }
+    // Echo the first settled verdict while the second is still in flight.
+    for review in [first, second.clone(), second] {
+        relay
+            .record_observation(RelayObservation::GuardianReviewed { review })
+            .unwrap();
+        assert_eq!(context.prior_guardian_reviews(), expected);
+    }
+    assert_eq!(relay.snapshot.prior_guardian_reviews(), expected);
+
+    drop(relay);
+    std::fs::remove_file(temp.path().join(RELAY_STATE_FILE)).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(relay.turn_context().prior_guardian_reviews(), expected);
+    assert_eq!(relay.snapshot.prior_guardian_reviews(), expected);
+
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+    submit_relay(&mut relay, "clear-context", RelayCommand::ClearContext);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-context",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "new-native-session".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.turn_context().prior_guardian_reviews().is_empty());
+    assert!(relay.snapshot.prior_guardian_reviews().is_empty());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(relay.turn_context().prior_guardian_reviews().is_empty());
+}
 
 // Hard-won: b62fe3b: later notices evicted the turn facts still read by the process watcher.
 #[test]
@@ -2106,49 +2170,37 @@ fn restored_relay_rejects_an_invalid_canonical_frontier() {
 #[test]
 fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
     let temp = tempfile::tempdir().unwrap();
-    let mut snapshot = RelaySnapshot::new(SESSION.into());
-    let mut command = prompt(&"x".repeat(25 * 1024));
-    if let RelayCommand::Prompt { prompt } = &mut command
-        && let ContentBlock::Text(text) = &mut prompt[0]
-    {
-        text.meta = Some(serde_json::from_str(r#"{"z":{"b":2,"a":1},"a":0}"#).unwrap());
-    }
+    let mut snapshot = serde_json::to_value(RelaySnapshot::new(SESSION.into())).unwrap();
+    let command = prompt(&"x".repeat(25 * 1024));
     for index in 0..330 {
         let id = format!("legacy-{index}");
-        snapshot.handled_commands.insert(
-            id.clone(),
-            mj_core::relay::HandledRelayCommand {
-                command: Some(command.clone()),
-                terminal_identity: None,
-                accepted_ordinal: index * 2 + 1,
-                terminal_ordinal: Some(index * 2 + 2),
-                outcome: Some(RelayCommandOutcome::Prompt {
-                    work_facts: None,
-                    diagnostic: None,
-                    stop_reason: "end_turn".into(),
-                    usage: None,
-                }),
-                failure: None,
-            },
-        );
-        snapshot.dispatches.insert(
-            id,
-            mj_core::relay::RelayDispatchRecord {
-                command: command.clone(),
-                state: RelayDispatchState::Completed,
-            },
-        );
+        snapshot["handled_commands"][&id] = serde_json::json!({
+            "command": command,
+            "accepted_ordinal": index * 2 + 1,
+            "terminal_ordinal": index * 2 + 2
+        });
+        snapshot["dispatches"][&id] = serde_json::json!({
+            "command": command,
+            "state": "completed"
+        });
     }
-    snapshot.format_version = 19;
-    snapshot.latest_ordinal = 660;
-    snapshot.latest_digest = "a".repeat(64);
-    snapshot.acknowledged_through = snapshot.latest_ordinal;
-    snapshot.acknowledged_digest = snapshot.latest_digest.clone();
-    snapshot.recovery_floor_ordinal = snapshot.latest_ordinal;
-    snapshot.recovery_floor_digest = snapshot.latest_digest.clone();
-    // Serializing without the optional identity produces the actual shipped shape.
+    snapshot["format_version"] = serde_json::json!(19);
+    for field in [
+        "latest_ordinal",
+        "acknowledged_through",
+        "recovery_floor_ordinal",
+    ] {
+        snapshot[field] = serde_json::json!(660);
+    }
+    for field in [
+        "latest_digest",
+        "acknowledged_digest",
+        "recovery_floor_digest",
+    ] {
+        snapshot[field] = serde_json::json!("a".repeat(64));
+    }
     let legacy = serde_json::to_vec_pretty(&snapshot).unwrap();
-    assert!(legacy.len() > RELAY_SNAPSHOT_BYTE_BUDGET);
+    assert!(legacy.len() > 16 * 1024 * 1024);
     let path = temp.path().join(RELAY_STATE_FILE);
     fs::write(&path, &legacy).unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -2160,19 +2212,126 @@ fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
             .snapshot
             .handled_commands
             .values()
-            .all(|handled| handled.command.is_none())
+            .all(|handled| handled.terminal_identity.is_some())
     );
-    let mut reordered = command.clone();
-    if let RelayCommand::Prompt { prompt } = &mut reordered
+    assert_eq!(submit_relay(&mut relay, "legacy-329", command), 659);
+    assert_eq!(relay.latest_ordinal(), 660);
+    drop(relay);
+    DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+}
+
+#[test]
+fn revision_29_migrates_live_payloads_and_legacy_receipts_through_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    // An otherwise unchanged open still commits the migration.
+    let mut idle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    idle["format_version"] = serde_json::json!(29);
+    drop(relay);
+    fs::write(&path, serde_json::to_vec(&idle).unwrap()).unwrap();
+    relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        persisted_relay_snapshot(temp.path()).format_version,
+        mj_core::relay::RELAY_STATE_VERSION
+    );
+
+    let mut old = prompt("uncompacted terminal body");
+    if let RelayCommand::Prompt { prompt } = &mut old
+        && let ContentBlock::Text(text) = &mut prompt[0]
+    {
+        text.meta = Some(serde_json::from_str(r#"{"z":{"b":2,"a":1},"a":0}"#).unwrap());
+    }
+    let old_ordinal = submit_relay(&mut relay, "legacy-terminal", old.clone());
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "legacy-terminal");
+    let compacted = prompt("compacted terminal body");
+    let compacted_ordinal = submit_relay(&mut relay, "compact-terminal", compacted.clone());
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "compact-terminal");
+
+    let active = prompt("active payload lives in dispatch");
+    let active_ordinal = submit_relay(&mut relay, "active-prompt", active.clone());
+    let queued = prompt("queued payload lives in dispatch");
+    let queued_ordinal = submit_relay(&mut relay, "queued-prompt", queued.clone());
+    let config = RelayCommand::SetConfig {
+        key: "model".into(),
+        value: "sonnet".into(),
+    };
+    let config_ordinal = submit_relay(&mut relay, "queued-config", config.clone());
+    let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
+    assert_eq!(legacy["active_prompt"]["command_id"], "active-prompt");
+    legacy["format_version"] = serde_json::json!(29);
+    // Write the replaced fields literally, using the legacy flattened queue layout.
+    legacy["active_prompt"]["prompt"] =
+        serde_json::to_value(active.prompt_blocks().unwrap()).unwrap();
+    legacy["queued_prompts"][0]["prompt"] =
+        serde_json::to_value(queued.prompt_blocks().unwrap()).unwrap();
+    legacy["queued_prompts"][1]["key"] = serde_json::json!("model");
+    legacy["queued_prompts"][1]["value"] = serde_json::json!("sonnet");
+    for (id, command) in [
+        ("active-prompt", &active),
+        ("queued-prompt", &queued),
+        ("queued-config", &config),
+        ("legacy-terminal", &old),
+    ] {
+        legacy["handled_commands"][id]["command"] = serde_json::to_value(command).unwrap();
+    }
+    legacy["handled_commands"]["legacy-terminal"]
+        .as_object_mut()
+        .unwrap()
+        .remove("terminal_identity");
+    // A legacy terminal receipt can have a body even with no dispatch.
+    assert!(legacy["dispatches"].get("legacy-terminal").is_none());
+    let tail_ordinal = relay
+        .record_observation(RelayObservation::Warning {
+            message: "journal record after the legacy snapshot".into(),
+        })
+        .unwrap();
+    drop(relay);
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(relay.latest_ordinal(), tail_ordinal);
+    assert_eq!(
+        queued_command_ids(&relay),
+        ["queued-prompt", "queued-config"]
+    );
+    let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let snapshot = persisted_relay_snapshot(temp.path());
+    assert_eq!(snapshot.format_version, mj_core::relay::RELAY_STATE_VERSION);
+    assert_eq!(snapshot.latest_ordinal, tail_ordinal);
+    assert_eq!(snapshot.active_prompt.unwrap().command_id, "active-prompt");
+    assert!(stored["active_prompt"].get("prompt").is_none());
+    assert!(stored["queued_prompts"][0].get("prompt").is_none());
+    assert!(stored["queued_prompts"][1].get("key").is_none());
+    assert!(stored["queued_prompts"][1].get("value").is_none());
+    assert!(
+        stored["handled_commands"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry.get("command").is_none())
+    );
+    assert_eq!(snapshot.dispatches.len(), 3);
+    assert_eq!(snapshot.dispatches["active-prompt"].command, active);
+    assert_eq!(snapshot.dispatches["queued-prompt"].command, queued);
+
+    if let RelayCommand::Prompt { prompt } = &mut old
         && let ContentBlock::Text(text) = &mut prompt[0]
     {
         text.meta = Some(serde_json::from_str(r#"{"a":0,"z":{"a":1,"b":2}}"#).unwrap());
     }
-    assert_eq!(command, reordered);
-    assert_eq!(submit_relay(&mut relay, "legacy-329", reordered), 659);
-    assert_eq!(relay.latest_ordinal(), 660);
-    drop(relay);
-    DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    for (id, command, ordinal) in [
+        ("legacy-terminal", old, old_ordinal),
+        ("compact-terminal", compacted, compacted_ordinal),
+        ("active-prompt", active, active_ordinal),
+        ("queued-prompt", queued, queued_ordinal),
+        ("queued-config", config, config_ordinal),
+    ] {
+        assert_eq!(submit_relay(&mut relay, id, command), ordinal);
+    }
+    assert_eq!(relay.latest_ordinal(), tail_ordinal);
 }
 
 // Hard-won: 1c150431b: a never-delivered request vanished from the recovery prompt.
@@ -2271,7 +2430,15 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
             .prompt_blocks_for_command(&claimed[0].command_id)
             .unwrap()
             .into_owned();
-        assert_eq!(&recovery_blocks[1..], original_blocks.as_slice());
+        assert_eq!(
+            claimed[0].command.prompt_blocks().unwrap().as_ref(),
+            original_blocks.as_slice()
+        );
+        assert_eq!(
+            recovery_blocks.len(),
+            1,
+            "recovery must not replay the request"
+        );
         let ContentBlock::Text(note) = &recovery_blocks[0] else {
             panic!("missing recovery note");
         };
@@ -2302,7 +2469,7 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
                 .unwrap()
                 .as_ref(),
             recovery_blocks.as_slice(),
-            "a second restart must not nest the note or lose the original request"
+            "a second restart must send only the recovery note"
         );
         relay
             .record_command_completed(
@@ -2416,6 +2583,7 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
                 elicitation_id: id.into(),
                 action: action.into(),
                 reply: None,
+                answers: None,
             })
             .unwrap();
         assert_eq!(
@@ -2438,7 +2606,7 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
 // Hard-won: 1d399ac64: interrupt during reload left queued recovery running afterwards.
 #[test]
 fn interrupt_queued_recovery_finishes_locally_across_partial_completion() {
-    for cut in 0..3 {
+    for (cut, legacy) in [(0, false), (1, false), (2, false), (0, true)] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
         submit_relay(&mut relay, "original-turn", prompt("first task"));
@@ -2447,15 +2615,35 @@ fn interrupt_queued_recovery_finishes_locally_across_partial_completion() {
         drop(relay);
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
         let target = mj_core::continuation::restart_continuation_id("original-turn");
+        assert!(!relay.is_acp_ready());
+        let command = relay
+            .operational_state()
+            .turn_controls
+            .unwrap()
+            .interrupt
+            .unwrap();
+        assert_eq!(
+            command,
+            RelayCommand::CancelTurnTarget {
+                target: TurnInterruptTarget::QueuedRestart {
+                    command_id: target.clone()
+                },
+            }
+        );
+        let command = if legacy {
+            RelayCommand::CancelTurn
+        } else {
+            command
+        };
         if cut == 0 {
-            submit_relay(&mut relay, "interrupt-reload", RelayCommand::CancelTurn);
+            submit_relay(&mut relay, "interrupt-reload", command);
         } else {
             relay
                 .append_relay_event(
                     Some("interrupt-reload"),
                     RelayObservation::CommandQueued {
                         command_id: "interrupt-reload".into(),
-                        command: RelayCommand::CancelTurn,
+                        command,
                         created_at_ms: 1,
                         insert_at_front: false,
                     },
@@ -2562,7 +2750,7 @@ fn restart_continuation_preserves_ordinary_user_work_alongside_a_native_goal() {
 
 // Hard-won: 1c150431b: recovery discarded requests never persisted by the harness.
 #[test]
-fn restart_continuation_moves_a_maximum_request_when_the_durable_queue_is_near_full() {
+fn restart_continuation_moves_a_maximum_request_with_more_than_16_mib_queued() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     let overhead = serde_json::to_vec(&prompt("")).unwrap().len();
@@ -2573,22 +2761,19 @@ fn restart_continuation_moves_a_maximum_request_when_the_durable_queue_is_near_f
     );
     submit_relay(&mut relay, "maximum-request", original.clone());
     relay.claim_pending_commands(true).unwrap();
-    // Each queued request is represented in receipt, dispatch, and queue.
-    // Fill until one additional admitted-size payload would exceed the
-    // snapshot's documented budget; moving the current turn must still fit.
-    let mut queued = 0;
-    loop {
-        let id = format!("queued-large-request-{queued}");
-        if relay.submit_command(&id, original.clone()).is_err() {
-            break;
-        }
-        queued += 1;
+    let queued = 17;
+    for index in 0..queued {
+        submit_relay(
+            &mut relay,
+            &format!("queued-large-request-{index}"),
+            original.clone(),
+        );
     }
-    assert!(queued > 0);
-    let size = serde_json::to_vec(&relay.snapshot).unwrap().len();
     assert!(
-        size > mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET
-            - 3 * mj_core::relay::RELAY_COMMAND_BYTE_BUDGET
+        fs::metadata(temp.path().join(RELAY_STATE_FILE))
+            .unwrap()
+            .len()
+            > 16 * 1024 * 1024
     );
     // Claim is durable, but ACP never received this request.
     for _ in 0..3 {
@@ -2612,8 +2797,11 @@ fn restart_continuation_moves_a_maximum_request_when_the_durable_queue_is_near_f
             .prompt_blocks_for_command(&recovered[0].command_id)
             .unwrap();
         assert_eq!(relay.snapshot.queued_prompts.len(), queued);
-        assert_eq!(&blocks[1..], original.prompt_blocks().unwrap().as_ref());
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            recovered[0].command.prompt_blocks().unwrap().as_ref(),
+            original.prompt_blocks().unwrap().as_ref()
+        );
+        assert_eq!(blocks.len(), 1);
     }
 }
 
@@ -2668,11 +2856,16 @@ fn restart_continuation_preserves_mailbox_wake_content_without_redelivering_its_
         let recovered = relay.claim_pending_commands(true).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            &recovered[0]
+            recovered[0].command.prompt_blocks().unwrap().as_ref(),
+            original_blocks.as_slice()
+        );
+        assert_eq!(
+            recovered[0]
                 .command
                 .prompt_blocks_for_command(&recovered[0].command_id)
-                .unwrap()[1..],
-            original_blocks.as_slice()
+                .unwrap()
+                .len(),
+            1
         );
         assert_eq!(recovered[0].command, original_command);
         if attempt == 1 {
@@ -2795,70 +2988,6 @@ fn removing_a_queued_restart_continuation_releases_its_mailbox_context() {
     );
     assert!(relay.snapshot.queued_prompts.is_empty());
     assert!(relay.snapshot.mailbox_prompt_contexts.is_empty());
-}
-
-// Hard-won: d2f26b4c6: recovery metadata could exceed a completely full snapshot.
-#[test]
-fn restart_continuation_reports_queue_exhaustion_without_wedging_open() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
-    let large = prompt(&"x".repeat(
-        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET - serde_json::to_vec(&prompt("")).unwrap().len(),
-    ));
-    submit_relay(&mut relay, "interrupted-full", large.clone());
-    relay.claim_pending_commands(true).unwrap();
-    let mut n = 0;
-    while relay
-        .submit_command(&format!("queued-full-{n}"), large.clone())
-        .is_ok()
-    {
-        n += 1;
-    }
-    let projected_size = |length| {
-        let mut event = RelayEvent {
-            format: RELAY_EVENT_FORMAT_V2,
-            ordinal: relay.latest_ordinal() + 1,
-            previous_digest: String::new(),
-            digest: String::new(),
-            recorded_at_ms: epoch_millis(),
-            command_id: Some("fill-remainder".into()),
-            observation: RelayObservation::CommandQueued {
-                command_id: "fill-remainder".into(),
-                command: prompt(&"z".repeat(length)),
-                created_at_ms: epoch_millis(),
-                insert_at_front: false,
-            },
-        };
-        event.digest = relay_event_digest(&event).unwrap();
-        let mut snapshot = relay.snapshot.clone();
-        apply_relay_event(&mut snapshot, &event).unwrap();
-        serde_json::to_vec(&snapshot).unwrap().len()
-    };
-    let remaining = mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET - projected_size(0);
-    // The accepted command is stored in receipt, dispatch, and queue.
-    submit_relay(
-        &mut relay,
-        "fill-remainder",
-        prompt(&"z".repeat(remaining / 3)),
-    );
-    assert!(
-        mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET
-            - serde_json::to_vec(&relay.snapshot).unwrap().len()
-            < 3
-    );
-    drop(relay);
-    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
-    assert!(retained_events(&relay).iter().any(|event| matches!(&event.observation,
-        RelayObservation::Warning { message } if message.contains("could not be resumed automatically") && message.contains("queue is full"))));
-    assert!(
-        !relay
-            .snapshot
-            .handled_commands
-            .keys()
-            .any(|id| mj_core::continuation::is_restart_continuation(id))
-    );
-    drop(relay);
-    DurableRelay::open(temp.path(), SESSION, "test").unwrap();
 }
 
 // Hard-won: 1d399ac64: a transfer rejected by the operational-state budget wedged recovery.

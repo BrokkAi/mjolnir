@@ -103,7 +103,8 @@ func isServedRelayMethod(method string) bool {
 	switch method {
 	case "hello", "attach", "acknowledge", "submit", "status", "drain_mailbox", "ack_mailbox",
 		"credential_state", "read_credentials", "install_credentials", "skills_state", "install_skills",
-		"history_query", "history_requests", "complete_history_request", "compact", "respond_elicitation":
+		"history_query", "history_requests", "complete_history_request", "guardian_requests",
+		"complete_guardian_request", "compact", "respond_elicitation":
 		return true
 	}
 	return false

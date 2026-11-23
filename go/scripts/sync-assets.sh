@@ -11,4 +11,4 @@ copy() { # copy <source relative to repo root> <destination relative to go/>
 	cp -R "$root/$1" "$root/go/$2"
 }
 copy mj-core/assets internal/core/assets
-cp -R "$root/mj-harness-install/assets/." "$root/go/internal/core/assets/"
+copy mj-harness-install/assets internal/harnessinstall/assets

@@ -167,8 +167,16 @@ fn new_wizard_profile_rows(dashboard: &DashboardState, wizard: &NewWizard) -> Ve
                 };
                 let accent = crate::render::provider_accent(&provider);
                 let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-                let (profile_cell, weekly, five_hour) =
-                    predicted_cells(dashboard.predicted_provider_profile(&provider));
+                let profile = if !expanded
+                    && wizard.effective_focused_provider(dashboard).is_none()
+                    && NewWizard::provider_for_profile(dashboard, wizard.profile).as_ref()
+                        == Some(&provider)
+                {
+                    dashboard.new_wizard_profile_id(wizard.profile)
+                } else {
+                    dashboard.predicted_provider_profile(&provider)
+                };
+                let (profile_cell, weekly, five_hour) = predicted_cells(profile);
                 rows.push(PickerChoice::table(vec![
                     PickerCell::blank(),
                     PickerCell::styled(
@@ -1499,9 +1507,9 @@ pub(crate) fn render_mount_wizard(
         .targets
         .get(&target_id)
         .expect("selected target index is present in config");
-    let protection = match target {
+    let protection = mounts.overlay_unavailable().unwrap_or(match target {
         TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. } => {
-            "Apple Container has no :O overlay mode; each extra bind is read-only."
+            "Apple container mounts copy-on-write attachments read-only. Read-write is available."
         }
         TargetTemplate::LocalPodman { .. } | TargetTemplate::SshPodman { .. } => {
             "Podman uses :O copy-on-write overlays; read-only skips the overlay."
@@ -1520,7 +1528,7 @@ pub(crate) fn render_mount_wizard(
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
             unreachable!("bare targets do not attach resources")
         }
-    };
+    });
     let mut lines = vec![
         Line::raw(format!("Target: {target_id} ({})", target_label(target))),
         Line::raw(""),

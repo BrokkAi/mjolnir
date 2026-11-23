@@ -1,6 +1,5 @@
 //! Physical teardown belongs to an environment, never to a session's UI row.
 use super::Controller;
-use crate::targets::CommandSpec;
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::Config;
 use mj_core::state::{ManagedWorktree, SessionRecord};
@@ -19,25 +18,33 @@ use crate::worker_lifecycle::WorkerPermit;
 pub(super) struct Reclamation {
     environment: EnvironmentRecord,
     workers: Vec<(EnvironmentWorker, targets::TargetLocator)>,
-    _permits: Vec<WorkerPermit>,
+    permits: Vec<WorkerPermit>,
 }
 
 /// Exact worker whose managed Stop completed under retained launch permits.
 pub(crate) struct StoppedWorker<'a> {
-    _authority: &'a Reclamation,
-    session_id: &'a str,
+    permit: &'a WorkerPermit,
     target: &'a targets::TargetLocator,
     root: String,
 }
 impl targets::StoppedWorkerProof for StoppedWorker<'_> {
     fn session_id(&self) -> &str {
-        self.session_id
+        self.permit.session_id()
     }
     fn target(&self) -> &targets::TargetLocator {
         self.target
     }
     fn root(&self) -> &str {
         &self.root
+    }
+}
+impl<'a> StoppedWorker<'a> {
+    fn new(permit: &'a WorkerPermit, target: &'a targets::TargetLocator, root: String) -> Self {
+        Self {
+            permit,
+            target,
+            root,
+        }
     }
 }
 impl Reclamation {
@@ -52,12 +59,16 @@ impl Reclamation {
                 .any(|(entry, location)| std::ptr::eq(entry, worker) && location == target),
             "retirement does not cover worker placement"
         );
-        Ok(StoppedWorker {
-            _authority: self,
-            session_id: &worker.session_id,
+        let permit = self
+            .permits
+            .iter()
+            .find(|permit| permit.session_id() == worker.session_id)
+            .context("retirement does not hold worker permit")?;
+        Ok(StoppedWorker::new(
+            permit,
             target,
-            root: targets::worker_root(target, &worker.session_id)?,
-        })
+            targets::worker_root(target, &worker.session_id)?,
+        ))
     }
 }
 
@@ -192,7 +203,7 @@ impl Reclamation {
         Ok(Self {
             environment,
             workers,
-            _permits: permits,
+            permits,
         })
     }
 
@@ -231,17 +242,18 @@ impl Reclamation {
             )?;
         }
         for (worker, target) in &self.workers {
-            if targets::is_borrowed(target) {
-                // A removed container removes these private roots with it. A
-                // bare child has a separate root that must be reclaimed here.
-                if matches!(target, targets::TargetLocator::SshBare { .. }) {
+            if worker.session_id != self.environment.owner_session_id {
+                // Container retirement removes the child roots with it.
+                if matches!(
+                    target,
+                    targets::TargetLocator::LocalBare { .. }
+                        | targets::TargetLocator::SshBare { .. }
+                ) {
                     targets::stopped_borrowed_worker_cleanup_plan(
                         self.stopped_worker(worker, target)?,
                     )?
                     .execute(executor, &crate::controller::ControlWorker)?;
                 }
-            } else if worker.session_id != self.environment.owner_session_id {
-                execute_owned_target_cleanup(self, target, worker, executor)?;
             }
         }
         for (worker, target) in &self.workers {
@@ -298,15 +310,31 @@ fn execute_owned_target_cleanup(
     Ok(())
 }
 
-/// A child relinquishes execution, not the owner's files. Its lease remains
-/// durable until the entire environment is reclaimed, including after Destroy.
+/// Stop each borrowed worker and remove its private roots. Keep the lease
+/// inventory until the entire environment is reclaimed, including after Destroy.
 pub(super) fn stop_borrower(
     session_id: &str,
     config: &Config,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    let permit = crate::worker_lifecycle::require(session_id)?;
     let environments = database::worker_environments(session_id)?;
+    stop_workers_in_environments(
+        session_id,
+        config,
+        executor,
+        environments
+            .iter()
+            .filter(|environment| environment.owner_session_id != session_id),
+    )
+}
+
+pub(super) fn stop_workers_in_environments<'a>(
+    session_id: &str,
+    config: &Config,
+    executor: &impl CommandExecutor,
+    environments: impl IntoIterator<Item = &'a EnvironmentRecord>,
+) -> Result<()> {
+    let permit = crate::worker_lifecycle::require(session_id)?;
     for environment in environments
         .into_iter()
         .filter(|environment| environment.phase != EnvironmentPhase::Reclaimed)
@@ -318,6 +346,12 @@ pub(super) fn stop_borrower(
             let target = backend(&worker, config)?;
             let root = targets::worker_root(&target, session_id)?;
             super::worker_binary::stop_worker(&permit, executor, &target, &root)?;
+            if environment.owner_session_id != session_id {
+                targets::stopped_borrowed_worker_cleanup_plan(StoppedWorker::new(
+                    &permit, &target, root,
+                ))?
+                .execute(executor, &super::ControlWorker)?;
+            }
         }
     }
     Ok(())
@@ -657,6 +691,376 @@ pub(super) fn retire_inactive_environments(
         }
     }
     Ok(retained)
+}
+
+pub use targets::TargetAvailability;
+
+pub fn target_availability(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<TargetAvailability> {
+    target_availability_with_start(controller, session_id, executor, true)
+}
+
+fn target_availability_with_start(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+    start: bool,
+) -> Result<TargetAvailability> {
+    let record = controller
+        .state
+        .sessions
+        .get(session_id)
+        .with_context(|| format!("unknown session {session_id}"))?;
+    let Some(locator) = record.target.as_ref() else {
+        return Ok(TargetAvailability::Missing);
+    };
+    let locator = crate::controller::backend_locator(locator, record, &controller.config)?;
+
+    if let Some(plan) = crate::targets::target_recovery_plan(&locator, session_id)? {
+        let output = executor
+            .execute(&plan.exists)
+            .context("check retained target before Restart")?;
+        match output.status {
+            0 if !start => Ok(TargetAvailability::Reachable),
+            0 => match crate::targets::ensure_recovery_target_running(executor, Some(&plan))? {
+                crate::targets::TargetRecoveryOutcome::Missing => Ok(TargetAvailability::Missing),
+                crate::targets::TargetRecoveryOutcome::AlreadyRunning
+                | crate::targets::TargetRecoveryOutcome::Started
+                | crate::targets::TargetRecoveryOutcome::NotRequired => {
+                    Ok(TargetAvailability::Reachable)
+                }
+            },
+            1 => Ok(TargetAvailability::Missing),
+            125 => Ok(TargetAvailability::Unreachable),
+            255 if locator_is_remote(&locator) => Ok(TargetAvailability::Unreachable),
+            status => bail!(
+                "could not confirm retained target availability before Restart (status {status}): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+    } else if let Some(endpoint) = locator
+        .container_endpoint()
+        .filter(|endpoint| endpoint.engine == "container")
+    {
+        targets::apple_container_availability(endpoint, executor, start)
+    } else {
+        let probe = crate::targets::command_on_locator(
+            SshTrafficClass::Control,
+            &locator,
+            session_id,
+            vec!["true".into()],
+            "probe retained target before Restart",
+        )?;
+        let output = executor
+            .execute(&probe)
+            .context("probe retained target before Restart")?;
+        match output.status {
+            0 => Ok(TargetAvailability::Reachable),
+            255 if locator_is_remote(&locator) => Ok(TargetAvailability::Unreachable),
+            status => bail!(
+                "could not confirm retained target availability before Restart (status {status}); refusing destructive fallback: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+    }
+}
+
+fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
+    matches!(
+        locator,
+        mj_core::targets::TargetLocator::AwsEc2 { .. }
+            | mj_core::targets::TargetLocator::SshBare { .. }
+            | mj_core::targets::TargetLocator::SshPodman { .. }
+            | mj_core::targets::TargetLocator::SshDocker { .. }
+            | mj_core::targets::TargetLocator::SshAppleContainer { .. }
+            | mj_core::targets::TargetLocator::SshNitro { .. }
+    )
+}
+
+/// Directory evidence shared by advisory preflight and the lifecycle decision.
+pub(super) fn directory_available(
+    backend: &targets::TargetLocator,
+    directory: &str,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let output = executor.execute(&super::worker_binary::directory_presence_command(
+        backend, directory,
+    ))?;
+    ensure!(
+        output.status == 0,
+        "cannot inspect retained directory {directory:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "present" => Ok(true),
+        "absent" => Ok(false),
+        value => bail!("unexpected directory presence response {value:?}"),
+    }
+}
+
+fn retained_container_checkout_available(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    if targets::retained_workspace_volume_exists(backend, session_id, executor)? {
+        return Ok(true);
+    }
+    let record = &controller.state.sessions[session_id];
+    let workspace = PathBuf::from(super::network_git::workspace_root(
+        backend,
+        record.container_workspace.as_deref(),
+    ));
+    let checkouts = resume_checkout_directories(controller, session_id, backend)?;
+    let mut paths = std::collections::BTreeSet::new();
+    match backend {
+        targets::TargetLocator::LocalPodman {
+            workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
+            ..
+        }
+        | targets::TargetLocator::SshPodman {
+            workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
+            ..
+        } => {
+            paths.insert(PathBuf::from(path));
+        }
+        _ => {}
+    }
+    for mount in mj_core::state::applied_container_settings(record).additional_mounts {
+        for directory in checkouts.iter().chain(std::iter::once(&workspace)) {
+            if let Ok(relative) = directory.strip_prefix(&mount.destination) {
+                paths.insert(mount.source.join(relative));
+            }
+        }
+        if mount.destination.starts_with(&workspace) {
+            paths.insert(mount.source.clone());
+        }
+    }
+    let host = match backend {
+        targets::TargetLocator::SshPodman { ssh, .. }
+        | targets::TargetLocator::SshDocker { ssh, .. }
+        | targets::TargetLocator::SshAppleContainer { ssh, .. }
+        | targets::TargetLocator::SshNitro { ssh, .. } => targets::TargetLocator::SshBare {
+            ssh: ssh.clone(),
+            workspace: String::new(),
+            worker_id: None,
+        },
+        _ => targets::TargetLocator::LocalBare {
+            worker_root: String::new(),
+        },
+    };
+    let mut present = false;
+    let mut unknown = None;
+    for path in paths {
+        match directory_available(&host, &path.to_string_lossy(), executor) {
+            Ok(found) => present |= found,
+            Err(error) => unknown = Some(error),
+        }
+    }
+    if present {
+        Ok(true)
+    } else if let Some(error) = unknown {
+        Err(error)
+    } else {
+        Ok(false)
+    }
+}
+
+pub(super) fn resume_checkout_available(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let (backend, _) = controller.worker_placement(session_id)?;
+    match target_availability_with_start(controller, session_id, executor, false)? {
+        TargetAvailability::Unreachable => bail!("target engine is unreachable"),
+        TargetAvailability::Missing => {
+            return retained_container_checkout_available(
+                controller, session_id, &backend, executor,
+            );
+        }
+        TargetAvailability::Reachable => {}
+    }
+    let (_, root) = controller.worker_placement(session_id)?;
+    let pending = executor.execute(&super::worker_binary::worker_recovery_command(
+        &backend, &root,
+    ))?;
+    ensure!(
+        pending.status == 0,
+        "cannot inspect pending checkout recovery"
+    );
+    if String::from_utf8_lossy(&pending.stdout).trim() == "checkout-partial" {
+        return Ok(false);
+    }
+    resume_checkouts_present(controller, session_id, &backend, executor)
+}
+
+pub(super) fn resume_checkout_directories(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+) -> Result<Vec<PathBuf>> {
+    if matches!(
+        controller.state.checkout(session_id)?.effective(),
+        mj_core::state::Checkout::ManagedWorkspace
+    ) {
+        let record = &controller.state.sessions[session_id];
+        if let Some(bundle) = record.project_bundle(&controller.config) {
+            let workspace = PathBuf::from(super::network_git::workspace_root(
+                backend,
+                record.container_workspace.as_deref(),
+            ));
+            return Ok(bundle
+                .repositories
+                .iter()
+                .map(|repo| workspace.join(&repo.destination))
+                .collect());
+        }
+    }
+    Ok(vec![PathBuf::from(resume_checkout_directory(
+        controller, session_id, backend,
+    )?)])
+}
+
+fn resume_checkouts_present(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let mut present = true;
+    for directory in resume_checkout_directories(controller, session_id, backend)? {
+        present &= directory_available(backend, &directory.to_string_lossy(), executor)?;
+    }
+    Ok(present)
+}
+
+pub(super) fn resume_checkout_directory(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+) -> Result<String> {
+    let session = &controller.state.sessions[session_id];
+    if let Some(path) = controller.state.checkout(session_id)?.project_directory() {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    let root = PathBuf::from(super::network_git::workspace_root(
+        backend,
+        session.container_workspace.as_deref(),
+    ));
+    Ok(session
+        .project_bundle(&controller.config)
+        .and_then(|bundle| bundle.primary())
+        .map(|primary| root.join(&primary.destination))
+        .unwrap_or(root)
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Evidence for Resume, obtained while its worker lifecycle permit is held.
+pub(super) enum ResumeEnvironment {
+    LiveWorker,
+    WorkerMissing,
+    ParentDataMissing,
+    RetainedContainerMissing,
+    CheckoutMissing,
+    Absent,
+    Unknown(anyhow::Error),
+}
+
+pub(super) fn classify_resume_environment(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> ResumeEnvironment {
+    let probe = || -> Result<ResumeEnvironment> {
+        let (backend, root) = controller.worker_placement(session_id)?;
+        match target_availability(controller, session_id, executor)? {
+            TargetAvailability::Missing => {
+                return Ok(
+                    if retained_container_checkout_available(
+                        controller, session_id, &backend, executor,
+                    )? {
+                        ResumeEnvironment::RetainedContainerMissing
+                    } else {
+                        ResumeEnvironment::Absent
+                    },
+                );
+            }
+            TargetAvailability::Unreachable => bail!("the target engine is unreachable"),
+            TargetAvailability::Reachable => {}
+        }
+        let output =
+            super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
+        ensure!(
+            output.status == 0,
+            "worker liveness probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let live = match String::from_utf8_lossy(&output.stdout).trim() {
+            "alive" | "starting" => true,
+            "dead" => false,
+            value => bail!("unexpected worker liveness response {value:?}"),
+        };
+        let checkout = resume_checkouts_present(controller, session_id, &backend, executor)?;
+        let output = executor.execute(&super::worker_binary::worker_recovery_command(
+            &backend, &root,
+        ))?;
+        ensure!(
+            output.status == 0,
+            "cannot inspect retained parent runtime: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recovery = String::from_utf8_lossy(&output.stdout);
+        if live && recovery.trim() != "checkout-partial" {
+            return Ok(if checkout {
+                ResumeEnvironment::LiveWorker
+            } else {
+                ResumeEnvironment::CheckoutMissing
+            });
+        }
+        let runtime = match recovery.trim() {
+            "partial" => {
+                return Ok(if checkout {
+                    ResumeEnvironment::ParentDataMissing
+                } else {
+                    ResumeEnvironment::CheckoutMissing
+                });
+            }
+            "checkout-partial" => return Ok(ResumeEnvironment::CheckoutMissing),
+            "recoverable" => true,
+            "nothing" | "absent" => false,
+            value => bail!("unexpected parent runtime response {value:?}"),
+        };
+        let profile = controller
+            .config
+            .named_profile(&controller.state.sessions[session_id].last_profile)?;
+        let native = directory_available(
+            &backend,
+            &super::target_profile_home(&backend, session_id, profile),
+            executor,
+        )?;
+        Ok(
+            if !checkout && !runtime && !native && backend.container_engine().is_none() {
+                ResumeEnvironment::Absent
+            } else if !checkout {
+                ResumeEnvironment::CheckoutMissing
+            } else if (!runtime || !native)
+                && controller.state.sessions[session_id]
+                    .native_session_id
+                    .is_some()
+            {
+                ResumeEnvironment::ParentDataMissing
+            } else {
+                ResumeEnvironment::WorkerMissing
+            },
+        )
+    };
+    probe().unwrap_or_else(ResumeEnvironment::Unknown)
 }
 
 #[cfg(test)]
@@ -1007,473 +1411,4 @@ mod tests {
                 .contains_key(&later.id)
         );
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetAvailability {
-    Reachable,
-    Missing,
-    Unreachable,
-}
-
-pub fn target_availability(
-    controller: &Controller,
-    session_id: &str,
-    executor: &impl CommandExecutor,
-) -> Result<TargetAvailability> {
-    target_availability_with_start(controller, session_id, executor, true)
-}
-
-fn target_availability_with_start(
-    controller: &Controller,
-    session_id: &str,
-    executor: &impl CommandExecutor,
-    start: bool,
-) -> Result<TargetAvailability> {
-    let record = controller
-        .state
-        .sessions
-        .get(session_id)
-        .with_context(|| format!("unknown session {session_id}"))?;
-    let Some(locator) = record.target.as_ref() else {
-        return Ok(TargetAvailability::Missing);
-    };
-    let locator = crate::controller::backend_locator(locator, record, &controller.config)?;
-
-    if let Some(plan) = crate::targets::target_recovery_plan(&locator, session_id)? {
-        let output = executor
-            .execute(&plan.exists)
-            .context("check retained target before Restart")?;
-        match output.status {
-            0 if !start => Ok(TargetAvailability::Reachable),
-            0 => match crate::targets::ensure_recovery_target_running(executor, Some(&plan))? {
-                crate::targets::TargetRecoveryOutcome::Missing => Ok(TargetAvailability::Missing),
-                crate::targets::TargetRecoveryOutcome::AlreadyRunning
-                | crate::targets::TargetRecoveryOutcome::Started
-                | crate::targets::TargetRecoveryOutcome::NotRequired => {
-                    Ok(TargetAvailability::Reachable)
-                }
-            },
-            1 => Ok(TargetAvailability::Missing),
-            125 => Ok(TargetAvailability::Unreachable),
-            255 if locator_is_remote(&locator) => Ok(TargetAvailability::Unreachable),
-            status => bail!(
-                "could not confirm retained target availability before Restart (status {status}): {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    } else if let mj_core::targets::TargetLocator::AppleContainer { container_id, .. }
-    | mj_core::targets::TargetLocator::SshAppleContainer { container_id, .. } = &locator
-    {
-        // Listing runs on the host that owns the runtime, which for a remote
-        // target is the other side of ssh.
-        let engine = locator.container_engine().expect("Apple container locator");
-        let arguments = vec![
-            engine.to_owned(),
-            "list".to_owned(),
-            "--all".to_owned(),
-            "--quiet".to_owned(),
-        ];
-        let list = match &locator {
-            mj_core::targets::TargetLocator::SshAppleContainer { ssh, .. } => {
-                crate::targets::ssh_command_owned(SshTrafficClass::Control, ssh, arguments)
-            }
-            _ => {
-                let mut arguments = arguments.into_iter();
-                CommandSpec::new(
-                    arguments.next().expect("engine"),
-                    arguments.collect::<Vec<_>>(),
-                )
-            }
-        }
-        .purpose("check retained Apple container before Restart");
-        let output = executor
-            .execute(&list)
-            .context("list retained Apple target before Restart")?;
-        if output.status == 255 && locator_is_remote(&locator) {
-            return Ok(TargetAvailability::Unreachable);
-        }
-        ensure!(
-            output.status == 0,
-            "could not confirm Apple target availability before Restart (status {}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let listed = String::from_utf8(output.stdout)
-            .context("decode Apple container list before Restart")?;
-        if listed.lines().any(|id| id.trim() == container_id) {
-            Ok(TargetAvailability::Reachable)
-        } else {
-            Ok(TargetAvailability::Missing)
-        }
-    } else {
-        let probe = crate::targets::command_on_locator(
-            SshTrafficClass::Control,
-            &locator,
-            session_id,
-            vec!["true".into()],
-            "probe retained target before Restart",
-        )?;
-        let output = executor
-            .execute(&probe)
-            .context("probe retained target before Restart")?;
-        match output.status {
-            0 => Ok(TargetAvailability::Reachable),
-            255 if locator_is_remote(&locator) => Ok(TargetAvailability::Unreachable),
-            status => bail!(
-                "could not confirm retained target availability before Restart (status {status}); refusing destructive fallback: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
-    }
-}
-
-fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
-    matches!(
-        locator,
-        mj_core::targets::TargetLocator::AwsEc2 { .. }
-            | mj_core::targets::TargetLocator::SshBare { .. }
-            | mj_core::targets::TargetLocator::SshPodman { .. }
-            | mj_core::targets::TargetLocator::SshDocker { .. }
-            | mj_core::targets::TargetLocator::SshAppleContainer { .. }
-            | mj_core::targets::TargetLocator::SshNitro { .. }
-    )
-}
-
-/// Apple's default list contains only running containers (see cleanup.rs).
-/// Resume may start the exact retained container; Restart's probe stays read-only.
-fn start_retained_apple_for_resume(
-    locator: &targets::TargetLocator,
-    executor: &impl CommandExecutor,
-) -> Result<()> {
-    let (ssh, container_id) = match locator {
-        targets::TargetLocator::AppleContainer { container_id, .. } => (None, container_id),
-        targets::TargetLocator::SshAppleContainer {
-            ssh, container_id, ..
-        } => (Some(ssh), container_id),
-        _ => return Ok(()),
-    };
-    let command = |args: Vec<String>, purpose| {
-        match ssh {
-            Some(ssh) => targets::ssh_command_owned(SshTrafficClass::Control, ssh, args),
-            None => CommandSpec::new(&args[0], args[1..].to_vec()),
-        }
-        .purpose(purpose)
-    };
-    let running = command(
-        vec!["container".into(), "list".into(), "--quiet".into()],
-        "list running retained Apple containers for Resume",
-    );
-    let is_running = || -> Result<bool> {
-        let output = executor.execute(&running)?;
-        ensure!(
-            output.status == 0,
-            "list running Apple containers: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(String::from_utf8(output.stdout)?
-            .lines()
-            .any(|id| id.trim() == container_id))
-    };
-    if !is_running()? {
-        let start = command(
-            vec!["container".into(), "start".into(), container_id.clone()],
-            "start retained Apple container for Resume",
-        );
-        let output = executor.execute(&start)?;
-        ensure!(
-            output.status == 0,
-            "start retained Apple container: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        ensure!(
-            is_running()?,
-            "retained Apple container did not become running"
-        );
-    }
-    Ok(())
-}
-
-/// Directory evidence shared by advisory preflight and the lifecycle decision.
-pub(super) fn directory_available(
-    backend: &targets::TargetLocator,
-    directory: &str,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    let output = executor.execute(&super::worker_binary::directory_presence_command(
-        backend, directory,
-    ))?;
-    ensure!(
-        output.status == 0,
-        "cannot inspect retained directory {directory:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "present" => Ok(true),
-        "absent" => Ok(false),
-        value => bail!("unexpected directory presence response {value:?}"),
-    }
-}
-
-fn retained_container_checkout_available(
-    controller: &Controller,
-    session_id: &str,
-    backend: &targets::TargetLocator,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    if targets::retained_workspace_volume_exists(backend, session_id, executor)? {
-        return Ok(true);
-    }
-    let record = &controller.state.sessions[session_id];
-    let workspace = PathBuf::from(super::network_git::workspace_root(
-        backend,
-        record.container_workspace.as_deref(),
-    ));
-    let checkouts = resume_checkout_directories(controller, session_id, backend)?;
-    let mut paths = std::collections::BTreeSet::new();
-    match backend {
-        targets::TargetLocator::LocalPodman {
-            workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
-            ..
-        }
-        | targets::TargetLocator::SshPodman {
-            workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
-            ..
-        } => {
-            paths.insert(PathBuf::from(path));
-        }
-        _ => {}
-    }
-    for mount in mj_core::state::applied_container_settings(record).additional_mounts {
-        for directory in checkouts.iter().chain(std::iter::once(&workspace)) {
-            if let Ok(relative) = directory.strip_prefix(&mount.destination) {
-                paths.insert(mount.source.join(relative));
-            }
-        }
-        if mount.destination.starts_with(&workspace) {
-            paths.insert(mount.source.clone());
-        }
-    }
-    let host = match backend {
-        targets::TargetLocator::SshPodman { ssh, .. }
-        | targets::TargetLocator::SshDocker { ssh, .. }
-        | targets::TargetLocator::SshAppleContainer { ssh, .. }
-        | targets::TargetLocator::SshNitro { ssh, .. } => targets::TargetLocator::SshBare {
-            ssh: ssh.clone(),
-            workspace: String::new(),
-            worker_id: None,
-        },
-        _ => targets::TargetLocator::LocalBare {
-            worker_root: String::new(),
-        },
-    };
-    let mut present = false;
-    let mut unknown = None;
-    for path in paths {
-        match directory_available(&host, &path.to_string_lossy(), executor) {
-            Ok(found) => present |= found,
-            Err(error) => unknown = Some(error),
-        }
-    }
-    if present {
-        Ok(true)
-    } else if let Some(error) = unknown {
-        Err(error)
-    } else {
-        Ok(false)
-    }
-}
-
-pub(super) fn resume_checkout_available(
-    controller: &Controller,
-    session_id: &str,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    let (backend, _) = controller.worker_placement(session_id)?;
-    match target_availability_with_start(controller, session_id, executor, false)? {
-        TargetAvailability::Unreachable => bail!("target engine is unreachable"),
-        TargetAvailability::Missing => {
-            return retained_container_checkout_available(
-                controller, session_id, &backend, executor,
-            );
-        }
-        TargetAvailability::Reachable => {}
-    }
-    let (_, root) = controller.worker_placement(session_id)?;
-    let pending = executor.execute(&super::worker_binary::worker_recovery_command(
-        &backend, &root,
-    ))?;
-    ensure!(
-        pending.status == 0,
-        "cannot inspect pending checkout recovery"
-    );
-    if String::from_utf8_lossy(&pending.stdout).trim() == "checkout-partial" {
-        return Ok(false);
-    }
-    resume_checkouts_present(controller, session_id, &backend, executor)
-}
-
-pub(super) fn resume_checkout_directories(
-    controller: &Controller,
-    session_id: &str,
-    backend: &targets::TargetLocator,
-) -> Result<Vec<PathBuf>> {
-    if matches!(
-        controller.state.checkout(session_id)?.effective(),
-        mj_core::state::Checkout::ManagedWorkspace
-    ) {
-        let record = &controller.state.sessions[session_id];
-        if let Some(bundle) = record.project_bundle(&controller.config) {
-            let workspace = PathBuf::from(super::network_git::workspace_root(
-                backend,
-                record.container_workspace.as_deref(),
-            ));
-            return Ok(bundle
-                .repositories
-                .iter()
-                .map(|repo| workspace.join(&repo.destination))
-                .collect());
-        }
-    }
-    Ok(vec![PathBuf::from(resume_checkout_directory(
-        controller, session_id, backend,
-    )?)])
-}
-
-fn resume_checkouts_present(
-    controller: &Controller,
-    session_id: &str,
-    backend: &targets::TargetLocator,
-    executor: &impl CommandExecutor,
-) -> Result<bool> {
-    let mut present = true;
-    for directory in resume_checkout_directories(controller, session_id, backend)? {
-        present &= directory_available(backend, &directory.to_string_lossy(), executor)?;
-    }
-    Ok(present)
-}
-
-pub(super) fn resume_checkout_directory(
-    controller: &Controller,
-    session_id: &str,
-    backend: &targets::TargetLocator,
-) -> Result<String> {
-    let session = &controller.state.sessions[session_id];
-    if let Some(path) = controller.state.checkout(session_id)?.project_directory() {
-        return Ok(path.to_string_lossy().into_owned());
-    }
-    let root = PathBuf::from(super::network_git::workspace_root(
-        backend,
-        session.container_workspace.as_deref(),
-    ));
-    Ok(session
-        .project_bundle(&controller.config)
-        .and_then(|bundle| bundle.primary())
-        .map(|primary| root.join(&primary.destination))
-        .unwrap_or(root)
-        .to_string_lossy()
-        .into_owned())
-}
-
-/// Evidence for Resume, obtained while its worker lifecycle permit is held.
-pub(super) enum ResumeEnvironment {
-    LiveWorker,
-    WorkerMissing,
-    ParentDataMissing,
-    RetainedContainerMissing,
-    CheckoutMissing,
-    Absent,
-    Unknown(anyhow::Error),
-}
-
-pub(super) fn classify_resume_environment(
-    controller: &Controller,
-    session_id: &str,
-    executor: &impl CommandExecutor,
-) -> ResumeEnvironment {
-    let probe = || -> Result<ResumeEnvironment> {
-        let (backend, root) = controller.worker_placement(session_id)?;
-        match target_availability(controller, session_id, executor)? {
-            TargetAvailability::Missing => {
-                return Ok(
-                    if retained_container_checkout_available(
-                        controller, session_id, &backend, executor,
-                    )? {
-                        ResumeEnvironment::RetainedContainerMissing
-                    } else {
-                        ResumeEnvironment::Absent
-                    },
-                );
-            }
-            TargetAvailability::Unreachable => bail!("the target engine is unreachable"),
-            TargetAvailability::Reachable => {}
-        }
-        start_retained_apple_for_resume(&backend, executor)?;
-        let output =
-            super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
-        ensure!(
-            output.status == 0,
-            "worker liveness probe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let live = match String::from_utf8_lossy(&output.stdout).trim() {
-            "alive" | "starting" => true,
-            "dead" => false,
-            value => bail!("unexpected worker liveness response {value:?}"),
-        };
-        let checkout = resume_checkouts_present(controller, session_id, &backend, executor)?;
-        let output = executor.execute(&super::worker_binary::worker_recovery_command(
-            &backend, &root,
-        ))?;
-        ensure!(
-            output.status == 0,
-            "cannot inspect retained parent runtime: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let recovery = String::from_utf8_lossy(&output.stdout);
-        if live && recovery.trim() != "checkout-partial" {
-            return Ok(if checkout {
-                ResumeEnvironment::LiveWorker
-            } else {
-                ResumeEnvironment::CheckoutMissing
-            });
-        }
-        let runtime = match recovery.trim() {
-            "partial" => {
-                return Ok(if checkout {
-                    ResumeEnvironment::ParentDataMissing
-                } else {
-                    ResumeEnvironment::CheckoutMissing
-                });
-            }
-            "checkout-partial" => return Ok(ResumeEnvironment::CheckoutMissing),
-            "recoverable" => true,
-            "nothing" | "absent" => false,
-            value => bail!("unexpected parent runtime response {value:?}"),
-        };
-        let profile = controller
-            .config
-            .named_profile(&controller.state.sessions[session_id].last_profile)?;
-        let native = directory_available(
-            &backend,
-            &super::target_profile_home(&backend, session_id, profile),
-            executor,
-        )?;
-        Ok(
-            if !checkout && !runtime && !native && backend.container_engine().is_none() {
-                ResumeEnvironment::Absent
-            } else if !checkout {
-                ResumeEnvironment::CheckoutMissing
-            } else if (!runtime || !native)
-                && controller.state.sessions[session_id]
-                    .native_session_id
-                    .is_some()
-            {
-                ResumeEnvironment::ParentDataMissing
-            } else {
-                ResumeEnvironment::WorkerMissing
-            },
-        )
-    };
-    probe().unwrap_or_else(ResumeEnvironment::Unknown)
 }

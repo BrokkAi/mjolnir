@@ -1,8 +1,9 @@
 // Port of mj-checkpoint/src/archive/git/operation/tests.rs.
 //
 // A clone stopped in the middle of a Git operation goes through a real
-// checkpoint archive and a resume-style restore, and both copies must then
-// behave the same way under Git's own next step.
+// legacy checkpoint archive and a resume-style restore, which drops the
+// operation's state with a notice and keeps its conflicted working files as
+// ordinary unstaged edits.
 
 package checkpoint
 
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,24 +235,6 @@ func operationUnrelatedWork(t testing.TB, repository string) {
 	}
 }
 
-// operationFinishResolving settles every path operationPartlyResolve left
-// unmerged.
-var operationFinishResolvingSteps = [][]string{{"add", "a.txt", "link"}, {"rm", "-q", "m.txt"}}
-
-func operationFinishResolving(t testing.TB, repository string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(repository, "a.txt"),
-		[]byte("1\nresolved 2\n3\n4\n5\n6\n7\nresolved 8\n9\n"), 0o666); err != nil {
-		t.Fatal(err)
-	}
-	for _, arguments := range operationFinishResolvingSteps {
-		arguments = slices.DeleteFunc(slices.Clone(arguments), func(argument string) bool {
-			return runtime.GOOS == "windows" && argument == "link"
-		})
-		operationStepOK(t, repository, arguments...)
-	}
-}
-
 // operationWorktreeEntry is one working-tree path: missing, a file, or a
 // symbolic link.
 type operationWorktreeEntry struct {
@@ -367,93 +351,6 @@ func operationCollectGitDirectory(t testing.TB, root string, directory string, f
 	}
 }
 
-// operationAssertSame fails when two observations differ.
-func operationAssertSame(t testing.TB, got operationObserved, want operationObserved) {
-	t.Helper()
-	if reflect.DeepEqual(got, want) {
-		return
-	}
-	var differences []string
-	compare := func(name string, left, right string) {
-		if left != right {
-			differences = append(differences, fmt.Sprintf("%s: got %q, want %q", name, left, right))
-		}
-	}
-	compare("head", got.head, want.head)
-	compare("status", got.status, want.status)
-	compare("index", got.index, want.index)
-	compare("refs", got.refs, want.refs)
-	for _, path := range gitSortedKeys(got.worktree) {
-		if !reflect.DeepEqual(got.worktree[path], want.worktree[path]) {
-			differences = append(differences, fmt.Sprintf("worktree %s: got %+v, want %+v", path, got.worktree[path], want.worktree[path]))
-		}
-	}
-	for _, path := range gitSortedKeys(want.worktree) {
-		if _, found := got.worktree[path]; !found {
-			differences = append(differences, fmt.Sprintf("worktree %s: missing, want %+v", path, want.worktree[path]))
-		}
-	}
-	for _, path := range gitSortedKeys(got.gitDirectory) {
-		wantContents, found := want.gitDirectory[path]
-		if !found || string(got.gitDirectory[path]) != string(wantContents) {
-			differences = append(differences, fmt.Sprintf("git directory %s: got %q, want %q (present %v)",
-				path, got.gitDirectory[path], wantContents, found))
-		}
-	}
-	for _, path := range gitSortedKeys(want.gitDirectory) {
-		if _, found := got.gitDirectory[path]; !found {
-			differences = append(differences, fmt.Sprintf("git directory %s: missing, want %q", path, want.gitDirectory[path]))
-		}
-	}
-	t.Fatalf("observations differ:\n%s", strings.Join(differences, "\n"))
-}
-
-// operationCopyTree makes an exact copy of a checkout, Git directory
-// included.
-func operationCopyTree(t testing.TB, from string, to string) {
-	t.Helper()
-	if err := os.MkdirAll(to, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(from)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		source := filepath.Join(from, entry.Name())
-		target := filepath.Join(to, entry.Name())
-		switch {
-		case entry.IsDir():
-			operationCopyTree(t, source, target)
-		case entry.Type()&fs.ModeSymlink != 0:
-			if runtime.GOOS != "windows" {
-				link, err := os.Readlink(source)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(link, target); err != nil {
-					t.Fatal(err)
-				}
-			}
-		default:
-			info, err := entry.Info()
-			if err != nil {
-				t.Fatal(err)
-			}
-			contents, err := os.ReadFile(source)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(target, contents, info.Mode().Perm()); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(target, info.Mode().Perm()); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-}
-
 func operationCapture(t testing.TB, source string, base string) RepositorySnapshot {
 	t.Helper()
 	snapshot, err := CollectGitSnapshot(git231{}, source, &GitCollectionSpec{
@@ -470,40 +367,29 @@ func operationCapture(t testing.TB, source string, base string) RepositorySnapsh
 	return snapshot
 }
 
-// operationRestoreArchive restores the archive the way resume does: into a fresh
-// clone of origin, from the verified archive file.
-func operationRestoreArchive(t testing.TB, lab *operationLab, archive string, name string) string {
+// operationRestoreArchive restores the archive the way resume does: into a
+// fresh clone of origin, from the verified archive file, returning the
+// checkout path and the resume notices.
+func operationRestoreArchive(t testing.TB, lab *operationLab, archive string, name string) (string, []string) {
 	t.Helper()
 	workspace := filepath.Join(lab.directory, name)
 	if err := os.MkdirAll(workspace, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	destination := cloneRepository(t, workspace, lab.origin, "repo")
-	if err := RestoreRepositories(archive, workspace, git231{}); err != nil {
+	notices, err := RestoreSingleRepositoryIntoCheckout(archive, destination, git231{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	return destination
+	return destination, notices
 }
 
-type operationRoundTrip struct {
-	finishedSource    string
-	finishedRestored  string
-	abandonedCopy     string
-	abandonedRestored string
-}
-
-// operationRoundTripThrough checkpoints the source through a real archive,
-// restores it twice, and checks that each restored copy is the source: first
-// as it stands, then after Git's own step that finishes the operation (taken
-// in the source and one copy) and after the step that abandons it (taken in
-// an exact copy of the source and the other).
-func operationRoundTripThrough(t testing.TB, lab *operationLab, finish func(string), abandon func(string)) operationRoundTrip {
+// operationRoundTripDroppedOperation checkpoints the source through a real
+// legacy archive, restores it, and checks that the in-progress Git
+// operation state is dropped with a notice while conflicted working files
+// survive as ordinary unstaged edits.
+func operationRoundTripDroppedOperation(t testing.TB, lab *operationLab, expectedKind string, expectedConflictedPaths []string) (string, []string) {
 	t.Helper()
-	abandonedCopy := filepath.Join(lab.directory, "abandoned-copy")
-	operationCopyTree(t, lab.source, abandonedCopy)
-	// The copy's index records the source's file times; Git's own abort steps
-	// do not refresh it before they compare.
-	operationStep(t, abandonedCopy, "update-index", "-q", "--refresh")
 	snapshot := operationCapture(t, lab.source, lab.base)
 	archive := filepath.Join(lab.directory, "checkpoint.hel.zip")
 	archiveInput := input()
@@ -513,38 +399,50 @@ func operationRoundTripThrough(t testing.TB, lab *operationLab, finish func(stri
 		t.Fatal(err)
 	}
 
-	finishedRestored := operationRestoreArchive(t, lab, archive, "finished")
-	abandonedRestored := operationRestoreArchive(t, lab, archive, "abandoned")
+	restored, notices := operationRestoreArchive(t, lab, archive, "restored")
 	before := operationObserve(t, lab.source)
-	operationAssertSame(t, operationObserve(t, finishedRestored), before)
-	operationAssertSame(t, operationObserve(t, abandonedRestored), before)
+	after := operationObserve(t, restored)
 
-	finish(lab.source)
-	finish(finishedRestored)
-	operationAssertSame(t, operationObserve(t, finishedRestored), operationObserve(t, lab.source))
-	abandon(abandonedCopy)
-	abandon(abandonedRestored)
-	operationAssertSame(t, operationObserve(t, abandonedRestored), operationObserve(t, abandonedCopy))
-	return operationRoundTrip{
-		finishedSource:    lab.source,
-		finishedRestored:  finishedRestored,
-		abandonedCopy:     abandonedCopy,
-		abandonedRestored: abandonedRestored,
+	// Working-tree files (including conflicted files, missing worktree
+	// paths, staged/unstaged edits, and untracked files) survive as ordinary
+	// files. A path that was both unmerged and missing from the working tree
+	// may no longer appear in `ls-files` once unmerged index stages are
+	// dropped.
+	expectedWorktree := maps.Clone(before.worktree)
+	maps.DeleteFunc(expectedWorktree, func(path string, entry operationWorktreeEntry) bool {
+		_, listed := after.worktree[path]
+		return entry.kind == "missing" && !listed
+	})
+	if !reflect.DeepEqual(after.worktree, expectedWorktree) {
+		t.Fatalf("restored worktree %+v, want %+v", after.worktree, expectedWorktree)
 	}
-}
-
-func operationParents(repository string) []string {
-	return strings.Split(gitLine(repository, "rev-list", "--parents", "-n", "1", "HEAD"), " ")[1:]
+	// No active Git operation state or unmerged index stages remain.
+	if len(after.gitDirectory) != 0 {
+		t.Fatalf("expected no active Git operation state, found: %q", gitSortedKeys(after.gitDirectory))
+	}
+	if unmerged := gitLine(restored, "ls-files", "--unmerged"); unmerged != "" {
+		t.Fatalf("expected no unmerged index entries after dropping legacy operation state: %q", unmerged)
+	}
+	if len(notices) != 1 {
+		t.Fatalf("expected one resume notice, got: %q", notices)
+	}
+	if !strings.Contains(notices[0], expectedKind) {
+		t.Fatalf("expected notice to name '%s': %s", expectedKind, notices[0])
+	}
+	for _, path := range expectedConflictedPaths {
+		if !strings.Contains(notices[0], path) {
+			t.Fatalf("expected notice to name preserved conflicted path '%s': %s", path, notices[0])
+		}
+	}
+	return restored, notices
 }
 
 // Hard-won: #1319: a clone mid-merge could not be checkpointed, so suspend failed forever
 // Hard-won: 5a3457a30: Git 2.25 echoed --path-format=absolute, so every clone checkpoint failed to locate its operation state.
-func TestACloneStoppedInAConflictedMergeResumesMidMerge(t *testing.T) {
+func TestACloneStoppedInAConflictedMergeDropsOperationAndPreservesConflictedFiles(t *testing.T) {
 	lab := newOperationLab(t)
 	diverged := operationDiverge(t, lab)
 	operationStepOK(t, lab.source, "switch", "-q", "main")
-	// An rr-cache directory turns rerere on, so the merge records its
-	// conflicts there and in MERGE_RR.
 	if err := os.Mkdir(filepath.Join(lab.source, ".git/rr-cache"), 0o777); err != nil {
 		t.Fatal(err)
 	}
@@ -552,143 +450,66 @@ func TestACloneStoppedInAConflictedMergeResumesMidMerge(t *testing.T) {
 	operationStepStops(t, lab.source, "merge", "--autostash", "side")
 	operationPartlyResolve(t, lab.source)
 
-	checked := operationRoundTripThrough(t, lab,
-		func(repository string) {
-			operationFinishResolving(t, repository)
-			operationStepOK(t, repository, "commit", "--no-edit")
-		},
-		func(repository string) { operationStepOK(t, repository, "merge", "--abort") },
-	)
-	if parents := operationParents(checked.finishedRestored); !slices.Equal(parents, []string{diverged.main, diverged.sideTip}) {
-		t.Fatalf("parents %q, want %q", parents, []string{diverged.main, diverged.sideTip})
-	}
-	if head := gitLine(checked.abandonedRestored, "rev-parse", "HEAD"); head != diverged.main {
+	restored, _ := operationRoundTripDroppedOperation(t, lab, "merge", []string{"a.txt", "link", "m.txt"})
+	if head := gitLine(restored, "rev-parse", "HEAD"); head != diverged.main {
 		t.Fatalf("HEAD %s, want %s", head, diverged.main)
-	}
-	contents, err := os.ReadFile(filepath.Join(checked.abandonedRestored, "e.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(contents) != "autostashed e\n" {
-		t.Fatalf("e.txt is %q", contents)
 	}
 }
 
-func TestACloneStoppedInACherryPickSequenceResumesIt(t *testing.T) {
+func TestACloneStoppedInACherryPickSequenceDropsOperationAndPreservesConflictedFiles(t *testing.T) {
 	lab := newOperationLab(t)
 	diverged := operationDiverge(t, lab)
 	operationStepOK(t, lab.source, "switch", "-q", "main")
-	// The picked commits are then named only by the operation: the second
-	// one only by the sequencer's todo list, with an abbreviated id.
 	operationStepOK(t, lab.source, "branch", "-q", "-D", "side")
 	operationStepStops(t, lab.source, "cherry-pick", diverged.sideFirst, diverged.sideTip)
 	operationPartlyResolve(t, lab.source)
 
-	checked := operationRoundTripThrough(t, lab,
-		func(repository string) {
-			operationFinishResolving(t, repository)
-			operationStepOK(t, repository, "cherry-pick", "--continue")
-		},
-		func(repository string) { operationStepOK(t, repository, "cherry-pick", "--abort") },
-	)
-	contents, err := os.ReadFile(filepath.Join(checked.finishedRestored, "s.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(contents) != "side s\n" {
-		t.Fatalf("s.txt is %q", contents)
-	}
-	if commit := gitLine(checked.finishedRestored, "rev-parse", "HEAD~2"); commit != diverged.main {
-		t.Fatalf("HEAD~2 %s, want %s", commit, diverged.main)
-	}
-	if head := gitLine(checked.abandonedRestored, "rev-parse", "HEAD"); head != diverged.main {
+	restored, _ := operationRoundTripDroppedOperation(t, lab, "cherry-pick", []string{"a.txt", "link", "m.txt"})
+	if head := gitLine(restored, "rev-parse", "HEAD"); head != diverged.main {
 		t.Fatalf("HEAD %s, want %s", head, diverged.main)
 	}
 }
 
-func TestACloneStoppedInAConflictedRevertResumesIt(t *testing.T) {
+func TestACloneStoppedInAConflictedRevertDropsOperationAndPreservesConflictedFiles(t *testing.T) {
 	lab := newOperationLab(t)
 	reverted := operationCommitChanges(t, lab.source, "main work", operationMainChanges())
 	later := operationCommitChanges(t, lab.source, "later work", operationSideChanges())
 	operationStepStops(t, lab.source, "revert", reverted)
 	operationPartlyResolve(t, lab.source)
 
-	checked := operationRoundTripThrough(t, lab,
-		func(repository string) {
-			operationFinishResolving(t, repository)
-			operationStepOK(t, repository, "revert", "--continue")
-		},
-		func(repository string) { operationStepOK(t, repository, "revert", "--abort") },
-	)
-	if parents := operationParents(checked.finishedRestored); !slices.Equal(parents, []string{later}) {
-		t.Fatalf("parents %q, want %q", parents, []string{later})
-	}
-	if head := gitLine(checked.abandonedRestored, "rev-parse", "HEAD"); head != later {
+	restored, _ := operationRoundTripDroppedOperation(t, lab, "revert", []string{"a.txt", "link", "m.txt"})
+	if head := gitLine(restored, "rev-parse", "HEAD"); head != later {
 		t.Fatalf("HEAD %s, want %s", head, later)
 	}
 }
 
-func TestACloneStoppedInARebaseResumesItWithEitherBackend(t *testing.T) {
+func TestACloneStoppedInARebaseDropsOperationAndPreservesConflictedFiles(t *testing.T) {
 	for _, backend := range []string{"--merge", "--apply"} {
 		lab := newOperationLab(t)
-		diverged := operationDiverge(t, lab)
+		operationDiverge(t, lab)
 		operationDirtyBeforeStarting(t, lab.source)
 		operationStepStops(t, lab.source, "rebase", backend, "--autostash", "main")
 		operationPartlyResolve(t, lab.source)
 
-		checked := operationRoundTripThrough(t, lab,
-			func(repository string) {
-				operationFinishResolving(t, repository)
-				// A rebase continues only once nothing is left unstaged.
-				operationStepOK(t, repository, "add", "d.txt")
-				operationStepOK(t, repository, "rebase", "--continue")
-			},
-			func(repository string) { operationStepOK(t, repository, "rebase", "--abort") },
-		)
-		for _, repository := range []string{checked.finishedSource, checked.finishedRestored} {
-			if head := gitLine(repository, "symbolic-ref", "HEAD"); head != "refs/heads/side" {
-				t.Fatalf("%s: HEAD is %s", backend, head)
-			}
-			if commit := gitLine(repository, "rev-parse", "HEAD~2"); commit != diverged.main {
-				t.Fatalf("%s: HEAD~2 %s, want %s", backend, commit, diverged.main)
-			}
-		}
-		for _, repository := range []string{checked.abandonedCopy, checked.abandonedRestored} {
-			if head := gitLine(repository, "rev-parse", "HEAD"); head != diverged.sideTip {
-				t.Fatalf("%s: HEAD %s, want %s", backend, head, diverged.sideTip)
-			}
-		}
+		operationRoundTripDroppedOperation(t, lab, "rebase", []string{"a.txt", "link", "m.txt"})
 	}
 }
 
-func TestACloneInTheMiddleOfABisectResumesIt(t *testing.T) {
+func TestACloneInTheMiddleOfABisectDropsOperationWithNotice(t *testing.T) {
 	lab := newOperationLab(t)
 	for number := 1; number <= 6; number++ {
 		operationCommitChanges(t, lab.source, fmt.Sprintf("history %d", number),
 			[]operationChange{{"h.txt", someText(fmt.Sprintf("%d\n", number))}})
 	}
-	tip := gitLine(lab.source, "rev-parse", "HEAD")
 	operationStepOK(t, lab.source, "bisect", "start")
 	operationStepOK(t, lab.source, "bisect", "bad")
 	operationStepOK(t, lab.source, "bisect", "good", lab.base)
 	operationStepOK(t, lab.source, "bisect", "bad")
 	operationUnrelatedWork(t, lab.source)
-	log := git(lab.source, "bisect", "log")
 
-	checked := operationRoundTripThrough(t, lab,
-		func(repository string) {
-			if got := git(repository, "bisect", "log"); string(got) != string(log) {
-				t.Fatalf("bisect log %q, want %q", got, log)
-			}
-			operationStepOK(t, repository, "bisect", "good")
-		},
-		func(repository string) { operationStepOK(t, repository, "bisect", "reset") },
-	)
-	if head := gitLine(checked.finishedRestored, "rev-parse", "HEAD"); head == tip {
-		t.Fatalf("HEAD stayed at %s", tip)
-	}
-	if head := gitLine(checked.abandonedRestored, "rev-parse", "HEAD"); head != tip {
-		t.Fatalf("HEAD %s, want %s", head, tip)
+	restored, _ := operationRoundTripDroppedOperation(t, lab, "bisect", nil)
+	if refs := gitLine(restored, "for-each-ref", "refs/bisect"); refs != "" {
+		t.Fatalf("refs/bisect = %q", refs)
 	}
 }
 

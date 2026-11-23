@@ -1,5 +1,5 @@
 //! Process-local composer ownership and ordered, coalescing durability.
-use mj_controller::database::DetachedSessionDraft;
+use mj_core::storage::{DetachedSessionDraft, RetiredDetachedDraft};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -13,10 +13,22 @@ pub(crate) struct ComposerDraftCache {
 struct DraftPersistence {
     desired: u64,
     saved: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_retirements: Vec<(u64, RetiredDetachedDraft)>,
     #[serde(skip)]
     in_flight: Option<u64>,
     #[serde(skip)]
     failed: bool,
+}
+
+impl DraftPersistence {
+    fn schedule_save(&mut self) {
+        self.desired = self
+            .desired
+            .checked_add(1)
+            .expect("terminal draft revision exhausted");
+        self.failed = false;
+    }
 }
 
 impl ComposerDraftCache {
@@ -44,6 +56,7 @@ impl ComposerDraftCache {
             .or_insert_with(|| DetachedSessionDraft {
                 text: inherited_input.to_owned(),
                 inherited_input: Some(inherited_input.to_owned()),
+                retired_drafts: Vec::new(),
             });
         self.remember(session_id);
         self.drafts[session_id].clone()
@@ -60,13 +73,19 @@ impl ComposerDraftCache {
         if entry.text != text {
             entry.text = text;
             let state = self.persistence.get_mut(session_id).unwrap();
-            state.desired = state
-                .desired
-                .checked_add(1)
-                .expect("terminal draft revision exhausted");
-            state.failed = false;
+            state.schedule_save();
         }
         entry.clone()
+    }
+
+    pub(crate) fn retire_draft(&mut self, session_id: &str, source: RetiredDetachedDraft) -> u64 {
+        let state = self
+            .persistence
+            .get_mut(session_id)
+            .expect("capture the recovered draft first");
+        state.schedule_save();
+        state.pending_retirements.push((state.desired, source));
+        state.desired
     }
 
     /// Removed sessions retain their empty local composer but have no writes
@@ -78,6 +97,7 @@ impl ComposerDraftCache {
         // cannot lose a request whose tracker guard has just been released.
         if let Some(state) = self.persistence.get_mut(session_id) {
             state.saved = state.desired;
+            state.pending_retirements.clear();
             state.failed = false;
         }
     }
@@ -104,7 +124,14 @@ impl ComposerDraftCache {
         }
         state.failed = false;
         state.in_flight = Some(state.desired);
-        Some((state.desired, self.drafts[session_id].clone()))
+        let mut draft = self.drafts[session_id].clone();
+        draft.retired_drafts = state
+            .pending_retirements
+            .iter()
+            .filter(|(added_revision, _)| *added_revision <= state.desired)
+            .map(|(_, source)| source.clone())
+            .collect();
+        Some((state.desired, draft))
     }
 
     pub(crate) fn complete(&mut self, session_id: &str, revision: u64, succeeded: bool) {
@@ -117,6 +144,9 @@ impl ComposerDraftCache {
         state.in_flight = None;
         if succeeded {
             state.saved = state.saved.max(revision);
+            state
+                .pending_retirements
+                .retain(|(added_revision, _)| *added_revision > revision);
             self.drafts.get_mut(session_id).unwrap().inherited_input = None;
         }
         // A new edit is its own retry trigger; a failed unchanged revision
@@ -271,5 +301,50 @@ mod tests {
             cache.start("a", false).is_none(),
             "failed final flush must not spin"
         );
+    }
+    #[test]
+    fn retirement_survives_failure_and_later_recovery_survives_earlier_ack() {
+        let mut cache = ComposerDraftCache::default();
+        cache.capture("session", "same composer text".into(), "");
+        let (initial, _) = cache.start("session", false).unwrap();
+        cache.complete("session", initial, true);
+        assert!(cache.start("session", false).is_none());
+
+        let first_source = RetiredDetachedDraft {
+            draft_id: "first".into(),
+            revision: Some(3),
+        };
+        let first = cache.retire_draft("session", first_source.clone());
+        assert!(first > initial);
+        assert_eq!(
+            cache
+                .start("session", false)
+                .unwrap()
+                .1
+                .retired_drafts
+                .as_slice(),
+            std::slice::from_ref(&first_source)
+        );
+        cache.complete("session", first, false);
+        assert!(cache.start("session", false).is_none());
+
+        let handoff = serde_json::to_string(&cache).unwrap();
+        let mut cache: ComposerDraftCache = serde_json::from_str(&handoff).unwrap();
+        let (retry, draft) = cache.start("session", true).unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(draft.retired_drafts, [first_source]);
+        let second_source = RetiredDetachedDraft {
+            draft_id: "second".into(),
+            revision: None,
+        };
+        let second = cache.retire_draft("session", second_source.clone());
+        assert!(second > retry);
+        assert!(cache.start("session", false).is_none());
+        cache.complete("session", retry, true);
+        let (revision, draft) = cache.start("session", false).unwrap();
+        assert_eq!(revision, second);
+        assert_eq!(draft.retired_drafts, [second_source]);
+        cache.complete("session", revision, true);
+        assert!(cache.start("session", true).is_none());
     }
 }

@@ -2,7 +2,7 @@
 //! and the snapshot they fold into. `apply_relay_event` is the single place
 //! that turns one more event into the next snapshot; everything else here is
 //! either a type that shape describes, or the byte-budget/truncation and
-//! digest machinery that keeps events and snapshots bounded and verifiable.
+//! digest machinery that keeps wire events verifiable and within budget.
 //! Nothing in this module touches the filesystem.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -163,6 +163,10 @@ pub enum RelayCommand {
     CancelTurnFor {
         active_prompt_id: String,
     },
+    /// Interrupt exactly the worker-published target.
+    CancelTurnTarget {
+        target: TurnInterruptTarget,
+    },
     /// Interrupt this turn only while the intended queued change is still first.
     ApplyQueuedFor {
         active_prompt_id: String,
@@ -243,7 +247,7 @@ pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[S
 }
 
 impl RelayCommand {
-    /// Effective prompt, including the worker-authored restart note.
+    /// Effective prompt. Ordinary restart continuations send only the recovery note.
     pub fn prompt_blocks_for_command(
         &self,
         command_id: &str,
@@ -252,12 +256,9 @@ impl RelayCommand {
         if crate::continuation::is_restart_continuation(command_id)
             && !crate::acp::prompt_is_slash_command(&prompt)
         {
-            let mut prompt = prompt.into_owned();
-            prompt.insert(
-                0,
-                ContentBlock::from(crate::continuation::RESTART_RECOVERY_NOTE.to_owned()),
-            );
-            Some(std::borrow::Cow::Owned(prompt))
+            Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                crate::continuation::RESTART_RECOVERY_NOTE.to_owned(),
+            )]))
         } else {
             Some(prompt)
         }
@@ -294,6 +295,7 @@ impl RelayCommand {
             Self::ClearNotifications { .. } | Self::NotificationsRead { .. } => {
                 super::RELAY_NOTIFICATION_STACK_PROTOCOL
             }
+            Self::CancelTurnTarget { .. } => super::RELAY_CANCEL_TURN_TARGET_PROTOCOL,
             Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
@@ -381,6 +383,7 @@ impl RelayCommand {
                 | Self::CancelTurn
                 | Self::Steer { .. }
                 | Self::CancelTurnFor { .. }
+                | Self::CancelTurnTarget { .. }
                 | Self::ApplyQueuedFor { .. }
                 | Self::Cancel
                 | Self::Close { .. }
@@ -413,7 +416,9 @@ impl RelayCommand {
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
             Self::Steer { .. } => RelayCommandKind::Steer,
-            Self::CancelTurnFor { .. } => RelayCommandKind::CancelTurn,
+            Self::CancelTurnFor { .. } | Self::CancelTurnTarget { .. } => {
+                RelayCommandKind::CancelTurn
+            }
             Self::ApplyQueuedFor { .. } => RelayCommandKind::CancelTurn,
             Self::ResolveSteering { .. } => RelayCommandKind::ResolveSteering,
             Self::Cancel => RelayCommandKind::Cancel,
@@ -713,34 +718,6 @@ impl UserShellResult {
     }
 }
 
-/// One entry of the durable command queue. Prompts and configuration changes
-/// share the queue so they run in the order the user submitted them.
-///
-/// The payload is untagged so entries written before configuration changes
-/// could be queued still load: they carry a `prompt` field and nothing else.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoredQueuedRelayCommand {
-    pub command_id: String,
-    #[serde(flatten)]
-    pub payload: StoredQueuedRelayPayload,
-    pub created_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum StoredQueuedRelayPayload {
-    Prompt { prompt: Vec<ContentBlock> },
-    SetConfig { key: String, value: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoredActiveRelayPrompt {
-    pub command_id: String,
-    pub prompt: Vec<ContentBlock>,
-    pub created_at_ms: i64,
-    pub started_at_ms: i64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayExecutionState {
@@ -1036,6 +1013,11 @@ impl RelayOperationalState {
 
     /// Targeted turn control was introduced with relay protocol 17.
     #[must_use]
+    pub fn publishes_interrupt_targets(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_CANCEL_TURN_TARGET_PROTOCOL)
+    }
+
     pub fn supports_targeted_turn_control(&self) -> bool {
         self.relay_protocol_version.is_some_and(|version| {
             version
@@ -1143,14 +1125,17 @@ impl RelayOperationalState {
     }
 
     /// What this session is doing. Older workers can publish an inferred idle
-    /// state even while their authoritative native inventory reports a task.
+    /// state even while their authoritative native inventory reports a task,
+    /// so a reported task takes the classification of the same facts. The
+    /// daemon's quota check, published over the worker's state, still shows.
     #[must_use]
     pub fn activity_state(&self) -> crate::activity::ActivityState {
         self.activity
             .clone()
-            .filter(|_| {
-                BackgroundCommand::oldest_antigravity_task_start(&self.background_commands)
-                    .is_none()
+            .filter(|published| {
+                matches!(published, crate::activity::ActivityState::CheckingQuota)
+                    || BackgroundCommand::oldest_antigravity_task_start(&self.background_commands)
+                        .is_none()
             })
             .unwrap_or_else(|| crate::activity::classify(&self.facts()))
     }
@@ -1401,12 +1386,17 @@ pub enum RelayObservation {
     ElicitationRequested {
         request: ElicitationRequest,
     },
+    GuardianReviewed {
+        review: crate::guardian::PriorGuardianReview,
+    },
     ElicitationResolved {
         elicitation_id: String,
         action: String,
         /// Rendered user reply, with secret fields masked before recording.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<crate::guardian::TrustedUserAnswerField>>,
     },
     ElicitationsCleared,
     CommandQueued {
@@ -1686,17 +1676,48 @@ pub struct HarnessTurnCancel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "StoredCommandReceipt")]
 pub struct HandledRelayCommand {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<RelayCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_identity: Option<TerminalRelayCommandIdentity>,
     pub accepted_ordinal: u64,
     pub terminal_ordinal: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<RelayCommandOutcome>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredCommandReceipt {
+    // Before revision 30, a receipt kept a copy of the command.
+    command: Option<RelayCommand>,
+    terminal_identity: Option<TerminalRelayCommandIdentity>,
+    accepted_ordinal: u64,
+    terminal_ordinal: Option<u64>,
+    outcome: Option<RelayCommandOutcome>,
+    failure: Option<String>,
+}
+
+impl TryFrom<StoredCommandReceipt> for HandledRelayCommand {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredCommandReceipt) -> anyhow::Result<Self> {
+        let mut terminal_identity = stored.terminal_identity;
+        if terminal_identity.is_none()
+            && stored.terminal_ordinal.is_some()
+            && let Some(command) = &stored.command
+        {
+            terminal_identity = Some(TerminalRelayCommandIdentity::from_command(command)?);
+        }
+        Ok(Self {
+            terminal_identity,
+            accepted_ordinal: stored.accepted_ordinal,
+            terminal_ordinal: stored.terminal_ordinal,
+            outcome: stored.outcome,
+            failure: stored.failure,
+        })
+    }
 }
 
 /// The information a terminal receipt needs after its execution payload is gone.
@@ -1712,8 +1733,12 @@ pub struct TerminalRelayCommandIdentity {
 
 impl HandledRelayCommand {
     /// Mailbox keys preserve event identity across plain-text/structured retries.
-    pub fn matches_command(&self, command: &RelayCommand) -> anyhow::Result<bool> {
-        if let Some(original) = &self.command {
+    pub fn matches_command(
+        &self,
+        live_command: Option<&RelayCommand>,
+        command: &RelayCommand,
+    ) -> anyhow::Result<bool> {
+        if let Some(original) = live_command {
             return Ok(original == command
                 || matches!((original, command),
                 (RelayCommand::DeliverMailboxEvent { event: original },
@@ -1813,6 +1838,10 @@ pub struct RelaySnapshot {
     pub person_input_through: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_user_inputs: Vec<crate::guardian::TrustedUserInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_guardian_reviews: Vec<crate::guardian::PriorGuardianReview>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1909,8 +1938,8 @@ pub struct RelaySnapshot {
     pub modes: Option<SessionModeState>,
     pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
-    pub active_prompt: Option<StoredActiveRelayPrompt>,
-    pub queued_prompts: Vec<StoredQueuedRelayCommand>,
+    pub active_prompt: Option<ActiveRelayPrompt>,
+    pub queued_prompts: Vec<QueuedRelayPrompt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_prompt_context: Option<PendingPromptContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1996,6 +2025,14 @@ impl RelaySnapshot {
             .map(crate::assessment::ContextHistory::reader_view)
     }
 
+    pub fn trusted_user_inputs(&self) -> Vec<crate::guardian::TrustedUserInput> {
+        self.trusted_user_inputs.clone()
+    }
+
+    pub fn prior_guardian_reviews(&self) -> Vec<crate::guardian::PriorGuardianReview> {
+        self.prior_guardian_reviews.clone()
+    }
+
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
         self.harness_turn.filter(|turn| turn.autonomous)
@@ -2016,6 +2053,8 @@ impl RelaySnapshot {
             notifications_read_through: 0,
             person_input_through: 0,
             assessment_context: Some(Default::default()),
+            trusted_user_inputs: Vec::new(),
+            prior_guardian_reviews: Vec::new(),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
             continuation: Default::default(),
@@ -2222,19 +2261,8 @@ impl RelaySnapshot {
             modes: self.modes.clone(),
             available_commands: self.available_commands.clone(),
             config: self.config.clone(),
-            active_prompt: self.active_prompt.as_ref().map(|prompt| ActiveRelayPrompt {
-                command_id: prompt.command_id.clone(),
-                created_at_ms: prompt.created_at_ms,
-                started_at_ms: prompt.started_at_ms,
-            }),
-            queued_prompts: self
-                .queued_prompts
-                .iter()
-                .map(|prompt| QueuedRelayPrompt {
-                    command_id: prompt.command_id.clone(),
-                    created_at_ms: prompt.created_at_ms,
-                })
-                .collect(),
+            active_prompt: self.active_prompt.clone(),
+            queued_prompts: self.queued_prompts.clone(),
             active_user_shells: self.active_user_shells.values().cloned().collect(),
             active_agent_terminals: Vec::new(),
             checkpoint_barrier: self.checkpoint_barrier.clone(),

@@ -676,7 +676,8 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
         .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
-    open_new_session_wizard(&mut dashboard);
+    dashboard.quota_providers.settle();
+    ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     dashboard.apply_project_directory_check(missing, Some(false));
@@ -1655,7 +1656,7 @@ fn new_session_profile_step_aligns_its_columns() {
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     dashboard.quota_providers.settle();
     ready_open_new_wizard(&mut dashboard);
-    // ANTHROPIC starts expanded for the initially selected claude-1; expand
+    // The fixture selects claude-1 explicitly; expand
     // MOONSHOT too so both providers' rows are visible for column alignment.
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Down));
@@ -1883,11 +1884,41 @@ fn new_session_profile_step_reconciles_when_provider_discovery_completes() {
     assert!(rendered.contains("codex-1"), "{rendered}");
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
 
+    // An expanded resolving group also stays open when a different provider's
+    // profile is selected; discovery must reconcile every expanded group.
+    let original_profile = new_wizard(&dashboard).profile;
+    let claude = dashboard
+        .offered_profiles()
+        .position(|(id, _)| id == "claude-1")
+        .unwrap();
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.set_profile(claude);
+    }
+    let rendered = drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(rendered.contains("▾ OPENAI"), "{rendered}");
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.set_profile(original_profile);
+    }
+
     // A stale focused "(resolving)" header clears back to the selected profile
     // instead of leaving Next disabled or swallowing Enter.
     if let Mode::New(wizard) = &mut dashboard.mode {
         wizard.focused_provider = Some(resolving);
+        wizard.expanded_providers.clear();
     }
+    let rendered = drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(rendered.contains("▸ OPENAI"), "{rendered}");
+    assert!(
+        new_wizard(&dashboard)
+            .effective_expanded_providers(&dashboard)
+            .is_empty()
+    );
+    assert_eq!(
+        new_wizard(&dashboard)
+            .selected_profile_id(&dashboard)
+            .as_deref(),
+        Some("codex-1")
+    );
     assert!(new_wizard(&dashboard).profile_advance_enabled(&dashboard));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
@@ -1935,9 +1966,8 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
         },
     )]);
     dashboard.begin_new();
-    // running_session() opens on codex-1 under OPENAI; move up to ANTHROPIC and
+    // running_session() opens on the collapsed OPENAI header; move up to ANTHROPIC and
     // expand it so claude-1's quota columns are shown.
-    ready_key(&mut dashboard, key(KeyCode::Up));
     ready_key(&mut dashboard, key(KeyCode::Up));
     ready_key(&mut dashboard, key(KeyCode::Right));
     let lines = captured_drawn(&mut dashboard, 120, 30);
@@ -2143,6 +2173,7 @@ fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
         .collect::<String>();
     assert!(rendered.contains("rw · writes reach the host directory"));
     assert!(rendered.contains("ro · read-only"));
+    assert!(rendered.contains("nfs (network filesystem)"));
     assert!(!rendered.contains("cow ·"));
 
     // Escape closes only the list; the changed mode is an unsaved edit, so
@@ -3479,14 +3510,6 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
 
 fn wizard_with_capacity(template: TargetTemplate, remaining: HostContainerSize) -> DashboardState {
     let mut config = config();
-    let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
-        panic!("podman fixture target");
-    };
-    let template = match template {
-        TargetTemplate::LocalPodman { .. } => TargetTemplate::LocalPodman { container },
-        TargetTemplate::AppleContainer { .. } => TargetTemplate::AppleContainer { container },
-        _ => panic!("unexpected test target"),
-    };
     config.targets.insert("podman".into(), template);
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     set_container_capacity_for_targets(
@@ -3554,25 +3577,37 @@ fn apple_container_cpu_overcommit_does_not_warn_and_can_submit() {
 }
 
 #[test]
-fn apple_container_ram_overcommit_blocks_submission() {
-    let dashboard = wizard_with_capacity(
-        TargetTemplate::AppleContainer {
-            container: config().targets["podman"].container().unwrap().clone(),
+fn hard_ram_overcommit_blocks_submission_with_the_targets_reason() {
+    let container = config().targets["podman"].container().unwrap().clone();
+    let apple = TargetTemplate::AppleContainer {
+        container: container.clone(),
+    };
+    let docker = TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: Some(true),
+            ..container
         },
-        HostContainerSize {
-            cpus: 12,
-            memory_bytes: 4 << 30,
-        },
-    );
-    let wizard = new_wizard(&dashboard);
-    assert!(wizard.resource_allocation.is_none());
-    assert!(
-        wizard
-            .sizing_error
-            .as_deref()
-            .is_some_and(|error| { error.contains("RAM is a hard limit on this host") })
-    );
-    assert!(!target_advance_enabled(&dashboard, wizard));
+    };
+    for (target, reason) in [
+        (
+            apple,
+            "Apple containers do not give freed memory back to macOS",
+        ),
+        (docker, "this target is configured to enforce RAM limits"),
+    ] {
+        let dashboard = wizard_with_capacity(
+            target,
+            HostContainerSize {
+                cpus: 12,
+                memory_bytes: 4 << 30,
+            },
+        );
+        let wizard = new_wizard(&dashboard);
+        assert!(wizard.resource_allocation.is_none());
+        let message = wizard.sizing_error.as_deref().unwrap();
+        assert!(message.contains(reason), "{message}");
+        assert!(!target_advance_enabled(&dashboard, wizard));
+    }
 }
 
 #[test]
@@ -4012,7 +4047,16 @@ fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in
 /// tests concerned with other behavior. No availability answer is needed:
 /// until one arrives, everything configured is offered.
 fn ready_open_new_wizard(dashboard: &mut DashboardState) -> DashboardAction {
-    open_new_session_wizard(dashboard)
+    let action = open_new_session_wizard(dashboard);
+    // These scenarios exercise a concrete profile's later steps. Select it
+    // explicitly now that opening the picker leaves provider groups collapsed.
+    if matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile) {
+        ready_key(dashboard, key(KeyCode::Right));
+        if new_wizard(dashboard).focused_provider.is_some() {
+            ready_key(dashboard, key(KeyCode::Right));
+        }
+    }
+    action
 }
 
 fn ready_key(dashboard: &mut DashboardState, event: crossterm::event::KeyEvent) -> DashboardAction {
@@ -5975,6 +6019,10 @@ fn golden_project_picker() {
 fn golden_profile_picker_table() {
     for (label, run) in [
         (
+            "new_session_remembers_provider_expansion",
+            new_session_remembers_provider_expansion as fn(),
+        ),
+        (
             "new_session_profile_step_aligns_its_columns",
             new_session_profile_step_aligns_its_columns as fn(),
         ),
@@ -5998,6 +6046,41 @@ fn golden_profile_picker_table() {
         "profile-picker-table",
         &take_golden_output(),
     );
+}
+
+fn new_session_remembers_provider_expansion() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open_new_session_wizard(&mut dashboard);
+    assert!(new_wizard(&dashboard).expanded_providers.is_empty());
+    assert_eq!(
+        new_wizard(&dashboard)
+            .selected_profile_id(&dashboard)
+            .as_deref(),
+        Some("codex-1")
+    );
+    captured_drawn(&mut dashboard, 120, 30);
+    // Expand a different provider from the recent launch's OPENAI selection.
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    let expanded = new_wizard(&dashboard).expanded_providers.clone();
+    assert!(!expanded.is_empty());
+    // Move onto a concrete profile, then reopen: its provider stays expanded.
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    open_new_session_wizard(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).expanded_providers, expanded);
+    captured_drawn(&mut dashboard, 120, 30);
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Left));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    open_new_session_wizard(&mut dashboard);
+    assert!(new_wizard(&dashboard).expanded_providers.is_empty());
+    assert!(
+        new_wizard(&dashboard)
+            .effective_expanded_providers(&dashboard)
+            .is_empty()
+    );
+    captured_drawn(&mut dashboard, 120, 30);
 }
 
 fn new_session_wizard_keeps_its_frame_across_steps() {

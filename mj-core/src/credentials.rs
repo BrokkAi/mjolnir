@@ -964,10 +964,8 @@ pub enum SyncStep {
     /// Not a step: the session's whole sync failed (its connection, say)
     /// before any step ran. Reported without a step.
     Session,
-    /// The role-scoped AWS credentials, renewed by the session's own task.
+    /// AWS credentials, renewed by the session's own task.
     Aws,
-    /// The profile's one AWS export, reconciled with its login pass.
-    AwsExport,
     HarnessLogin,
     Skills,
     GithubToken,

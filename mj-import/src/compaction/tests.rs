@@ -143,6 +143,117 @@ async fn prior_handoff_slices_old_history_and_keeps_same_turn_work() {
     assert!(!prompts.contains("old answer"));
 }
 
+// Hard-won: #1111: harness prompts crowded out work in cross-harness handoffs.
+#[tokio::test]
+async fn compaction_omits_harness_prompts_and_keeps_their_work() {
+    let mut input = snapshot(vec![
+        user("quota retry boilerplate"),
+        user("automatic continuation boilerplate"),
+        CanonicalTranscriptBody::Tool {
+            call: tool_call("completed", "checked output after continuation"),
+            presentation: None,
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+        },
+        user("handback reminder boilerplate"),
+        user("[HARNESS NOTE: generated control text]"),
+        agent("verified the retry result"),
+        user("assignment from parent"),
+        user("message from peer"),
+        user("request from human"),
+    ]);
+    for (item, id) in input.transcript.iter_mut().zip([
+        "user:quota-retry-once",
+        "user:auto-continue-once",
+        "tool:read",
+        "handback-reminder-once",
+        "user:legacy-note",
+        "agent:result",
+        "user:subagent-spawn-once",
+        "user:session-message-turn-once",
+        "user:prompt-once",
+    ]) {
+        item.stable_id = id.into();
+    }
+    let prior = PriorCompaction {
+        through_position: 1,
+        summary: "earlier state".into(),
+        retained_positions: Vec::new(),
+    };
+    let budget = CompactionBudget::uniform(64 * 1024);
+    let mut views = Vec::new();
+    for prior in [None, Some(&prior)] {
+        let backend = FakeBackend::default();
+        let handoff = compact_snapshot_since(&input, budget, &backend, prior)
+            .await
+            .unwrap();
+        views.extend(backend.prompts.into_inner().unwrap());
+        views.push(handoff.split_once(RETAINED_OPEN).unwrap().1.to_owned());
+    }
+    views.push(render_recent_snapshot(&input, budget.handoff_bytes));
+    for view in views {
+        for absent in [
+            "quota retry boilerplate",
+            "automatic continuation boilerplate",
+            "handback reminder boilerplate",
+            "[HARNESS NOTE:",
+        ] {
+            assert!(!view.contains(absent), "{view}");
+        }
+        for present in [
+            "checked output after continuation",
+            "verified the retry result",
+            "assignment from parent",
+            "message from peer",
+            "request from human",
+        ] {
+            assert!(view.contains(present), "missing {present}: {view}");
+        }
+    }
+
+    // A delta containing only harness prompts needs no model request.
+    input.transcript.truncate(2);
+    input.event_frontier = 2;
+    let backend = FakeBackend::default();
+    let handoff = compact_snapshot_since(&input, budget, &backend, Some(&prior))
+        .await
+        .unwrap();
+    assert!(backend.prompts.lock().unwrap().is_empty());
+    assert!(handoff.contains("earlier state"));
+
+    input.transcript.truncate(1);
+    input.event_frontier = 1;
+    let error = turns_from_snapshot(&input).unwrap_err();
+    assert!(error.to_string().contains("contains no user turns"));
+}
+
+// Hard-won: #1111: a review delivered immediately before a move disappeared from the handoff.
+#[tokio::test]
+async fn delivered_review_reaches_the_summarizer_and_retained_context() {
+    let mut input = snapshot(vec![
+        user("Resolve any merge blockers"),
+        agent("Waiting for the final review"),
+        CanonicalTranscriptBody::System {
+            text: "Review finished; this is the final result.\nP1: Preserve the migration marker."
+                .into(),
+        },
+    ]);
+    input.transcript[2].stable_id = "system:mailbox:delivered:push-review:one".into();
+    let backend = FakeBackend::default();
+    let handoff = compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    let verdict = "P1: Preserve the migration marker.";
+    assert!(backend.prompts.lock().unwrap().join("\n").contains(verdict));
+    assert!(
+        handoff
+            .split_once(RETAINED_OPEN)
+            .unwrap()
+            .1
+            .contains(verdict)
+    );
+}
+
 #[tokio::test]
 async fn paged_prior_state_enters_reduction_once() {
     let large = "delta payload".repeat(8 * 1024);
@@ -783,6 +894,11 @@ async fn page_summaries_that_fit_one_prompt_reduce_in_a_single_request() {
     .unwrap();
 
     let prompts = backend.prompts.lock().unwrap();
+    // The restriction leaked into handoffs in #1111, including on paged runs.
+    for prompt in prompts.iter() {
+        assert!(prompt.contains("Do not inspect or modify the workspace and do not call tools. That restriction applies only to you while writing this summary; never copy it into state_snapshot."));
+        assert!(prompt.contains("Do not carry forward source-harness tool or MCP availability (or missing-tool workarounds) as current facts; the destination harness has its own tools and system instructions."));
+    }
     let pages = prompts
         .iter()
         .filter(|prompt| prompt.contains("<historical_transcript>"))

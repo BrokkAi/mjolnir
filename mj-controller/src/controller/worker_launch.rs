@@ -3,7 +3,7 @@
 
 use super::worker_binary::launch::*;
 use super::*;
-use crate::worker_launch;
+use crate::worker_launch::{self, StagedWorkerProfile};
 #[cfg(test)]
 use mj_core::worker_launch::ProjectMemoryLaunchConfig;
 use mj_core::worker_launch::WorkerLaunchConfig;
@@ -43,7 +43,7 @@ impl Controller {
         worker_root: &str,
         executor: &impl CommandExecutor,
         history: LaunchHistory<'_>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         worker_launch::prepare_worker_files(
             &self.config,
             &self.state,
@@ -63,7 +63,7 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
         history: LaunchHistory<'_>,
-    ) -> Result<Option<mj_core::credentials::LoginFingerprint>> {
+    ) -> Result<StagedWorkerProfile> {
         worker_launch::prepare_worker_files_for(
             &self.config,
             &self.state,
@@ -77,7 +77,7 @@ impl Controller {
     }
 
     /// Return the pending harness preflight so a new checkout can finish first,
-    /// and the login identity when refreshing the profile for an existing worker.
+    /// and the staged credential identities.
     pub(in crate::controller) fn stage_worker_files_for(
         &self,
         session_id: &str,
@@ -86,10 +86,7 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
         history: LaunchHistory<'_>,
-    ) -> Result<(
-        Option<WorkerLaunchConfig>,
-        Option<mj_core::credentials::LoginFingerprint>,
-    )> {
+    ) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
         worker_launch::stage_worker_files_for(
             &self.config,
             &self.state,

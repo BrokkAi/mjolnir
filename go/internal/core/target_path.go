@@ -218,6 +218,20 @@ func comparePaths(a, b string) int {
 	return len(left) - len(right)
 }
 
+// pathStripPrefix is Rust's `Path::strip_prefix`: the rest of `path`, as it
+// is spelled there, after the components of `base`; false when `base` is not
+// a component prefix of `path`.
+func pathStripPrefix(path, base string) (string, bool) {
+	if !pathStartsWith(path, base) {
+		return "", false
+	}
+	left, prefix := pathComponents(path), len(pathComponents(base))
+	if prefix == len(left) {
+		return "", true
+	}
+	return path[left[prefix].start:], true
+}
+
 // pathStartsWith is Rust's `Path::starts_with`: whether `base` is a
 // component prefix of `path`.
 func pathStartsWith(path, base string) bool {

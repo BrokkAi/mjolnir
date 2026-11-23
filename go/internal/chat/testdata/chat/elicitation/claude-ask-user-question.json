@@ -1,0 +1,97 @@
+{
+  "mode": "form",
+  "sessionId": "session-1",
+  "toolCallId": "toolu_ask_1",
+  "message": "Please answer the following questions.",
+  "requestedSchema": {
+    "type": "object",
+    "properties": {
+      "question_0": {
+        "type": "string",
+        "title": "Cache",
+        "description": "Which cache should the service use?",
+        "oneOf": [
+          {
+            "const": "Redis",
+            "title": "Redis",
+            "description": "In-memory store with persistence",
+            "_meta": {
+              "_claude/askUserQuestionOption": {
+                "preview": "maxmemory-policy allkeys-lru"
+              }
+            }
+          },
+          {
+            "const": "Memcached",
+            "title": "Memcached",
+            "description": "Simple volatile cache"
+          }
+        ]
+      },
+      "question_0_custom": {
+        "type": "string",
+        "title": "Other",
+        "description": "Type your own answer, or add a note to the option you chose above (optional).",
+        "_meta": {
+          "_askUserQuestionCustomAnswer": {
+            "questionId": "question_0",
+            "isCustomAnswer": true
+          },
+          "jetbrains": {
+            "air": {
+              "version": 1,
+              "customAnswer": {
+                "questionId": "question_0",
+                "isCustomAnswer": true
+              }
+            }
+          }
+        }
+      },
+      "question_1": {
+        "type": "array",
+        "title": "Targets",
+        "description": "Which platforms should CI cover?",
+        "items": {
+          "anyOf": [
+            {
+              "const": "linux",
+              "title": "linux",
+              "description": "Ubuntu runners"
+            },
+            {
+              "const": "macos",
+              "title": "macos",
+              "description": "Apple silicon runners"
+            },
+            {
+              "const": "windows",
+              "title": "windows",
+              "description": "Windows Server runners"
+            }
+          ]
+        }
+      },
+      "question_1_custom": {
+        "type": "string",
+        "title": "Other",
+        "description": "Type your own answer to add to your selection above (optional).",
+        "_meta": {
+          "_askUserQuestionCustomAnswer": {
+            "questionId": "question_1",
+            "isCustomAnswer": true
+          },
+          "jetbrains": {
+            "air": {
+              "version": 1,
+              "customAnswer": {
+                "questionId": "question_1",
+                "isCustomAnswer": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

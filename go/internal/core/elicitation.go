@@ -58,6 +58,69 @@ func (r *ElicitationRequest) UnmarshalJSON(data []byte) error {
 	return transcriptStrictDecode(data, (*plain)(r), true)
 }
 
+// Equal is Rust's derived PartialEq: an empty list equals an absent one, as
+// two empty Vecs do.
+func (r *ElicitationRequest) Equal(other *ElicitationRequest) bool {
+	if r.ID != other.ID || r.Message != other.Message ||
+		!configOptionalEqual(r.Title, other.Title) ||
+		!configOptionalEqual(r.Description, other.Description) ||
+		len(r.Fields) != len(other.Fields) {
+		return false
+	}
+	for i := range r.Fields {
+		if !r.Fields[i].Equal(&other.Fields[i]) {
+			return false
+		}
+	}
+	if r.ToolPermission == nil || other.ToolPermission == nil {
+		return r.ToolPermission == nil && other.ToolPermission == nil
+	}
+	return configOptionalEqual(r.ToolPermission.ToolCallID, other.ToolPermission.ToolCallID) &&
+		r.ToolPermission.Skip == other.ToolPermission.Skip
+}
+
+// Equal is Rust's derived PartialEq.
+func (f *ElicitationField) Equal(other *ElicitationField) bool {
+	if f.ID != other.ID || f.Title != other.Title || f.Required != other.Required || f.Secret != other.Secret ||
+		!configOptionalEqual(f.Description, other.Description) ||
+		!configOptionalEqual(f.CustomAnswerFor, other.CustomAnswerFor) ||
+		!configOptionalEqual(f.CustomAnswerOption, other.CustomAnswerOption) {
+		return false
+	}
+	optionsEqual := func(a, b []ElicitationOption) bool {
+		return slices.EqualFunc(a, b, func(a, b ElicitationOption) bool {
+			return a.Value == b.Value && a.Title == b.Title &&
+				configOptionalEqual(a.Description, b.Description) && configOptionalEqual(a.Preview, b.Preview)
+		})
+	}
+	switch kind := f.Kind.(type) {
+	case ElicitationFieldKindText:
+		other, ok := other.Kind.(ElicitationFieldKindText)
+		return ok && configOptionalEqual(kind.Default, other.Default) &&
+			configOptionalEqual(kind.MinLength, other.MinLength) && configOptionalEqual(kind.MaxLength, other.MaxLength) &&
+			configOptionalEqual(kind.Pattern, other.Pattern) && configOptionalEqual(kind.Format, other.Format)
+	case ElicitationFieldKindSingleSelect:
+		other, ok := other.Kind.(ElicitationFieldKindSingleSelect)
+		return ok && optionsEqual(kind.Options, other.Options) && configOptionalEqual(kind.Default, other.Default)
+	case ElicitationFieldKindMultiSelect:
+		other, ok := other.Kind.(ElicitationFieldKindMultiSelect)
+		return ok && optionsEqual(kind.Options, other.Options) && slices.Equal(kind.Default, other.Default) &&
+			configOptionalEqual(kind.MinItems, other.MinItems) && configOptionalEqual(kind.MaxItems, other.MaxItems)
+	case ElicitationFieldKindBoolean:
+		other, ok := other.Kind.(ElicitationFieldKindBoolean)
+		return ok && configOptionalEqual(kind.Default, other.Default)
+	case ElicitationFieldKindInteger:
+		other, ok := other.Kind.(ElicitationFieldKindInteger)
+		return ok && configOptionalEqual(kind.Default, other.Default) &&
+			configOptionalEqual(kind.Minimum, other.Minimum) && configOptionalEqual(kind.Maximum, other.Maximum)
+	case ElicitationFieldKindNumber:
+		other, ok := other.Kind.(ElicitationFieldKindNumber)
+		return ok && configOptionalEqual(kind.Default, other.Default) &&
+			configOptionalEqual(kind.Minimum, other.Minimum) && configOptionalEqual(kind.Maximum, other.Maximum)
+	}
+	return f.Kind == nil && other.Kind == nil
+}
+
 // ToolPermissionForm is what a tool permission form offers beyond the
 // request's own options.
 type ToolPermissionForm struct {

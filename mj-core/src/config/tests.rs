@@ -39,6 +39,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
 
     // The list of known keys is every setting a container table can carry.
     let every_setting = ContainerTemplate {
+        memory_hard_limit: Some(true),
         image: "a:1".into(),
         pull_policy: ImagePullPolicy::Never,
         platform: Some("linux/amd64".into()),
@@ -904,6 +905,7 @@ fn sample_config() -> Config {
             "podman-default".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: ImagePullPolicy::Auto,
@@ -2727,6 +2729,29 @@ fn a_config_without_a_version_names_the_line_to_add() {
 }
 
 #[test]
+fn schema_error_locations_only_refer_to_the_config_on_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for (profiles, location) in [
+        ("", Some((3, 11))),
+        ("\n[profiles.retired]\nkind = \"mimo\"\n", None),
+    ] {
+        fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\n[guardian]\nenabled = \"false\"\n{profiles}"),
+        )
+        .unwrap();
+        let error = Config::load_from(&path).unwrap_err();
+        let config_error = error.downcast_ref::<ConfigLoadError>().unwrap();
+        assert!(
+            matches!(config_error, ConfigLoadError::Schema { .. }),
+            "{error:#}"
+        );
+        assert_eq!(config_error.location(), location, "{error:#}");
+    }
+}
+
+#[test]
 fn removed_profile_overrides_have_an_actionable_error() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -3140,6 +3165,13 @@ machine = "ec2"
     assert!(super::container_memory_is_hard_limit(
         &config.targets["ec2-nitro"]
     ));
+    fs::write(&path, format!("{source}memory_hard_limit = false\n")).unwrap();
+    let error = Config::load_from(&path).unwrap_err();
+    assert!(format!("{error:#}").contains("cannot disable memory_hard_limit"));
+    fs::write(&path, format!("{source}memory_hard_limit = true\n")).unwrap();
+    let strict = Config::load_from(&path).unwrap();
+    strict.save_to(&path).unwrap();
+    assert_eq!(Config::load_from(&path).unwrap().targets, strict.targets);
     // No machine can host a sandbox but an SSH one.
     fs::write(
         directory.path().join("local.toml"),
@@ -3268,6 +3300,7 @@ fn a_release_pins_its_version_and_a_development_build_uses_latest() {
 fn container_target(image: &str) -> TargetTemplate {
     TargetTemplate::LocalDocker {
         container: ContainerTemplate {
+            memory_hard_limit: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             platform: None,

@@ -26,8 +26,11 @@ pub(super) async fn decode_prompt_images_off_task(
     mj_core::runtime::spawn_blocking(move || {
         let mut action = action;
         let ControllerAction::Prompt {
-            session_id, images, ..
-        } = &action
+            session_id,
+            text,
+            images,
+            ..
+        } = &mut action
         else {
             unreachable!("only prompt actions carry images")
         };
@@ -38,10 +41,8 @@ pub(super) async fn decode_prompt_images_off_task(
                 "could not open the image attachment store",
             )
         })?;
-        let ControllerAction::Prompt { images, .. } = &mut action else {
-            unreachable!("only prompt actions carry images")
-        };
-        for image in images {
+        let mut pending_blobs = Vec::new();
+        for image in images.iter_mut() {
             if let Some(reference) = image.attachment.clone() {
                 // Reading through this session's store both verifies the
                 // digest and prevents a reference from another session being
@@ -69,12 +70,7 @@ pub(super) async fn decode_prompt_images_off_task(
                 .map_err(|_| {
                     ApiError::bad_request("the inline image could not become an attachment")
                 })?;
-                store.install(&reference, &optimized.bytes).map_err(|_| {
-                    ApiError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "could not store the image attachment",
-                    )
-                })?;
+                pending_blobs.push((reference.clone(), optimized.bytes));
                 image.data_base64.clear();
                 image.attachment = Some(reference);
                 image.mime_type = optimized.mime_type;
@@ -84,8 +80,14 @@ pub(super) async fn decode_prompt_images_off_task(
         }
         // Every image is now the reference the worker will receive, so the
         // whole prompt is measured as its command.
-        if let ControllerAction::Prompt { text, images, .. } = &action {
-            ensure_prompt_command_fits(text, images)?;
+        ensure_prompt_command_fits(text, images)?;
+        for (reference, bytes) in pending_blobs {
+            store.install(&reference, &bytes).map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not store the image attachment",
+                )
+            })?;
         }
         Ok(action)
     })
@@ -628,11 +630,15 @@ fn validate_action_against(
                     .validate_minimum_useful_container()
                     .map_err(|error| ApiError::bad_request(error.to_string()))?;
             }
-            if let (Some(allocation), Some(capacity)) =
-                (resource_allocation.as_deref(), target.container_capacity)
-                && capacity.refuses(allocation, target.container_memory_hard_limit)
+            if let (Some(allocation), Some(capacity), Some(reason)) = (
+                resource_allocation.as_deref(),
+                target.container_capacity,
+                target.container_memory_hard_limit_reason.as_deref(),
+            ) && capacity.refuses(allocation, true)
             {
-                return Err(ApiError::bad_request(capacity.refusal_message(allocation)));
+                return Err(ApiError::bad_request(
+                    capacity.refusal_message(allocation, reason),
+                ));
             }
             if let (
                 Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }),
@@ -717,12 +723,17 @@ fn validate_action_against(
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
         | ControllerAction::Suspend { session_id, .. }
-        | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::CancelContainerUpgrade { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
+        }
+        ControllerAction::Destroy { session_id } => {
+            validate_public_id(session_id)?;
+            if !snapshot.retired_session_ids.contains(session_id) {
+                require_session_record(snapshot, session_id)?;
+            }
         }
         ControllerAction::Rename { session_id, title } => {
             validate_public_id(session_id)?;

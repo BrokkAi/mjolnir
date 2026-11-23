@@ -201,7 +201,7 @@ func TestARestartedCodexAdapterBlocksReplacementUntilItReportsAgain(t *testing.T
 	if SafeToReplace(&restarted, HarnessKindCodex) {
 		t.Fatal("restarted Codex is replaceable")
 	}
-	blockers := ReplacementBlockers(&restarted, HarnessKindCodex)
+	blockers := ReplacementBlockers(&restarted, HarnessKindCodex, WorkerReplacementAutomaticUpgrade)
 	if len(blockers) != 1 || !strings.Contains(blockers[0], "has not reported goal and execution state") {
 		t.Fatalf("blockers = %q", blockers)
 	}
@@ -215,7 +215,7 @@ func TestARestartedCodexAdapterBlocksReplacementUntilItReportsAgain(t *testing.T
 	if !SafeToReplace(&reported, HarnessKindCodex) {
 		t.Fatal("reported Codex is not replaceable")
 	}
-	if blockers := ReplacementBlockers(&reported, HarnessKindCodex); len(blockers) != 0 {
+	if blockers := ReplacementBlockers(&reported, HarnessKindCodex, WorkerReplacementAutomaticUpgrade); len(blockers) != 0 {
 		t.Fatalf("blockers = %q", blockers)
 	}
 }
@@ -246,8 +246,9 @@ func TestReplacementBlockersAgreeWithSafeToReplace(t *testing.T) {
 		}),
 	}
 	for _, facts := range busyFacts {
-		for _, harness := range []HarnessKind{HarnessKindCodex, HarnessKindKimi, HarnessKindClaude} {
-			if (len(ReplacementBlockers(&facts, harness)) == 0) != SafeToReplace(&facts, harness) {
+		for _, harness := range []HarnessKind{HarnessKindCodex, HarnessKindKimi, HarnessKindClaude, HarnessKindAntigravity} {
+			if (len(ReplacementBlockers(&facts, harness, WorkerReplacementAutomaticUpgrade)) == 0) !=
+				SafeToReplaceFor(&facts, harness, WorkerReplacementAutomaticUpgrade) {
 				t.Fatalf("%v %+v", harness, facts)
 			}
 		}
@@ -501,6 +502,77 @@ func TestADisconnectedSessionReportsNoSilenceAge(t *testing.T) {
 	}
 }
 
+// Hard-won: #1611: worker replacement could treat unreported or inferred-idle Antigravity tasks as settled.
+func TestAntigravityReplacementWaitsForAnAuthoritativeEmptyTaskInventory(t *testing.T) {
+	harness := HarnessKindAntigravity
+	snapshot := NewRelaySnapshot("antigravity")
+	state := snapshot.OperationalState()
+	// RelayOperationalState.SafeToReplaceFor and the Antigravity task fact
+	// in Facts come with the relay snapshot sync (core-relay-sessions).
+	replacer, ok := any(&state).(interface {
+		SafeToReplaceFor(HarnessKind, WorkerReplacement) bool
+	})
+	if !ok {
+		t.Skip("needs RelayOperationalState.SafeToReplaceFor from the relay snapshot sync")
+	}
+	state.Execution = RelayExecutionStateIdle
+	state.ACPReady = agentBool(true)
+	// A pre-tracking worker leaves the field absent even when a job is live.
+	// Only an automatic binary upgrade requires a reported inventory.
+	if replacer.SafeToReplaceFor(harness, WorkerReplacementAutomaticUpgrade) {
+		t.Fatal("a legacy worker upgrades automatically")
+	}
+	if !state.SafeToReplace(harness) ||
+		!state.SafeToMove(harness, MovePurposeManual) ||
+		!state.SafeToMove(harness, MovePurposeQuotaRetry) {
+		t.Fatal("a legacy worker blocks explicit replacement")
+	}
+
+	state.BackgroundWorkKnown = agentBool(true)
+	state.InferredIdleSinceMs = agentI64(activityNow)
+	state.BackgroundNeeded = agentBool(false)
+	state.BackgroundCommands = append(state.BackgroundCommands, BackgroundCommand{
+		ID:          "terminal:leftover",
+		Command:     "sleep infinity",
+		StartedAtMs: activityNow - 1,
+		CanStop:     true,
+	})
+	if activity := state.ActivityState(); !activity.IsIdle() {
+		t.Fatalf("activity = %+v", activity)
+	}
+	if !state.SafeToReplace(harness) {
+		t.Fatal("unneeded leftover process blocks replacement")
+	}
+	state.Activity = ActivityState{Kind: ActivityStateIdle, SinceMs: agentI64(activityNow)}
+	// BackgroundCommand::antigravity("task-70", NOW, "build").
+	state.BackgroundCommands = append(state.BackgroundCommands, BackgroundCommand{
+		ID:          "antigravity:task-70",
+		StartedAtMs: activityNow,
+		Command:     "build",
+	})
+	if got := state.ActivityState(); !reflect.DeepEqual(got, ActivityState{Kind: ActivityStateBackground, StartedAtMs: agentI64(activityNow)}) {
+		t.Fatalf("activity = %+v", got)
+	}
+	if !state.HasWorkInFlight() {
+		t.Fatal("a native task is not work in flight")
+	}
+	if state.SafeToReplace(harness) || replacer.SafeToReplaceFor(harness, WorkerReplacementAutomaticUpgrade) {
+		t.Fatal("a live native task is replaceable")
+	}
+
+	// Losing the observation is not evidence that the task finished.
+	state.BackgroundCommands = state.BackgroundCommands[:1]
+	state.BackgroundWorkKnown = agentBool(false)
+	if state.SafeToReplace(harness) || replacer.SafeToReplaceFor(harness, WorkerReplacementAutomaticUpgrade) {
+		t.Fatal("an unsynchronized inventory is replaceable")
+	}
+
+	state.BackgroundWorkKnown = agentBool(true)
+	if !replacer.SafeToReplaceFor(harness, WorkerReplacementAutomaticUpgrade) {
+		t.Fatal("an authoritative empty inventory blocks upgrade")
+	}
+}
+
 func TestInferredIdlePreservesOwnedBackgroundWorkAndForegroundPrecedence(t *testing.T) {
 	facts := activityFacts(func(f *ActivityFacts) {
 		f.BackgroundCommands = 4
@@ -673,7 +745,7 @@ func TestDurableGoalIntentAllowsReplacementWithoutDiscardingActualWork(t *testin
 		if wait := RoutineCheckpointWait(&goal, harness); wait != nil {
 			t.Fatalf("%v: wait = %#v", harness, wait)
 		}
-		if blockers := ReplacementBlockers(&goal, harness); len(blockers) != 0 {
+		if blockers := ReplacementBlockers(&goal, harness, WorkerReplacementAutomaticUpgrade); len(blockers) != 0 {
 			t.Fatalf("%v: blockers = %q", harness, blockers)
 		}
 	}

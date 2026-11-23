@@ -218,10 +218,13 @@ pub(crate) fn render_chat_footer(
     // Built with `theme::footer_separator()` rather than a literal dot, so the
     // split below finds the same glyph the ASCII symbol set draws.
     let sep = theme::footer_separator();
-    let queued_keys = format!(
-        "Up/Ctrl-P edit last queued{sep}Enter send/queue{sep}Ctrl-R history{sep}Shift-Enter newline{sep}{}",
-        chat.turn_control_intent().escape_hint(),
+    let mut queued_keys = format!(
+        "Up/Ctrl-P edit last queued{sep}Enter send/queue{sep}Ctrl-R history{sep}Shift-Enter newline"
     );
+    if !chat.publishes_interrupt_targets || chat.agent_turn_interruptible() {
+        queued_keys.push_str(sep);
+        queued_keys.push_str(chat.turn_control_intent().escape_hint());
+    }
     let composer_keys = if !prompt_focused {
         format!("Tab pane{sep}PgUp/PgDn transcript")
     } else if chat.voice_active {
@@ -659,11 +662,7 @@ pub(crate) fn prompt_bottom_queue_control(chat: &ChatState) -> Option<Line<'stat
     if !chat.queued_prompts.is_empty() {
         labels.push(format!("{} queued", chat.queued_prompts.len()));
     }
-    if chat.prompt_in_flight()
-        || chat.harness_turn_stoppable()
-        || (chat.session_activity.capacity_retry.is_some()
-            || chat.session_activity.quota_recovery.is_some())
-    {
+    if chat.agent_turn_interruptible() {
         labels.push(chat.turn_control_intent().escape_hint().to_owned());
     }
     (!labels.is_empty()).then(|| {

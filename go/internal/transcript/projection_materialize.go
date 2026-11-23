@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
@@ -144,9 +145,9 @@ func entryBaseID(entry *core.ChatEntry) string {
 		return fmt.Sprintf("thought:%d", entry.StartSeq)
 	case core.ChatRoleTool:
 		if entry.ToolCallID != nil {
-			return "tool:" + *entry.ToolCallID
+			return ToolItemID(*entry.ToolCallID)
 		}
-		return fmt.Sprintf("tool:%d", entry.StartSeq)
+		return ToolItemID(strconv.FormatUint(entry.StartSeq, 10))
 	case core.ChatRolePlan:
 		return fmt.Sprintf("plan:%d", entry.StartSeq)
 	case core.ChatRolePlanProposal:
@@ -447,7 +448,12 @@ func canonicalItemShared(item *core.TranscriptItem) core.CanonicalTranscriptItem
 			Presentation:    presentation,
 		}
 	case core.TranscriptBodyTerminalOutput:
-		body = core.CanonicalTranscriptBodyTerminalOutput{Record: canonicalTerminalOutput(&source.Record)}
+		body = core.CanonicalTranscriptBodyTerminalOutput{
+			Record:          canonicalTerminalOutput(&source.Record),
+			OutputLineCount: source.OutputLineCount,
+			FirstErrorLine:  source.FirstErrorLine,
+			DetailTrimmed:   source.DetailTrimmed,
+		}
 	case core.TranscriptBodyPlan:
 		body = core.CanonicalTranscriptBodyPlan{Plan: slices.Clone(source.Plan)}
 	case core.TranscriptBodyPlanProposal:
@@ -468,57 +474,8 @@ func canonicalItemShared(item *core.TranscriptItem) core.CanonicalTranscriptItem
 func MaterializedSessionFromCanonical(sessionID string, canonical *core.CanonicalSessionSnapshot) (core.MaterializedSession, error) {
 	transcript := make([]*core.TranscriptItem, 0, len(canonical.Transcript))
 	for i := range canonical.Transcript {
-		item := &canonical.Transcript[i]
-		var body core.TranscriptBody
-		switch source := item.Body.(type) {
-		case core.CanonicalTranscriptBodyUser:
-			body = core.TranscriptBodyUser{Content: slices.Clone(source.Content)}
-		case core.CanonicalTranscriptBodyMessage:
-			var event *core.MailboxEvent
-			if source.Event != nil {
-				copied := *source.Event
-				event = &copied
-			}
-			body = core.TranscriptBodyMessage{Event: event}
-		// Chunks stored before streamed text was merged on the way in
-		// arrive one per token; collapse them as they come back.
-		case core.CanonicalTranscriptBodyAgent:
-			body = core.TranscriptBodyAgent{Chunks: coalescedChunks(source.Chunks), Streaming: source.Streaming}
-		case core.CanonicalTranscriptBodyThought:
-			body = core.TranscriptBodyThought{Chunks: coalescedChunks(source.Chunks), Streaming: source.Streaming}
-		case core.CanonicalTranscriptBodyTool:
-			var outputs []core.TerminalOutputRecord
-			for j := range source.TerminalOutputs {
-				outputs = append(outputs, materializedTerminalOutput(&source.TerminalOutputs[j]))
-			}
-			var presentation *core.ToolCallPresentation
-			if source.Presentation != nil {
-				copied := *source.Presentation
-				presentation = &copied
-			}
-			body = core.TranscriptBodyTool{
-				Call:            core.OpaqueToolCallFromValue(source.Call),
-				TerminalOutputs: outputs,
-				TerminalRefs:    slices.Clone(source.TerminalRefs),
-				Presentation:    presentation,
-			}
-		case core.CanonicalTranscriptBodyTerminalOutput:
-			body = core.TranscriptBodyTerminalOutput{Record: materializedTerminalOutput(&source.Record)}
-		case core.CanonicalTranscriptBodyPlan:
-			body = core.TranscriptBodyPlan{Plan: slices.Clone(source.Plan)}
-		case core.CanonicalTranscriptBodyPlanProposal:
-			body = core.TranscriptBodyPlanProposal{ProposalID: source.ProposalID, Plan: source.Plan}
-		case core.CanonicalTranscriptBodySystem:
-			body = core.TranscriptBodySystem{Text: source.Text}
-		}
-		transcript = append(transcript, &core.TranscriptItem{
-			StableID:                  item.StableID,
-			Position:                  item.Position,
-			LatestContentEventOrdinal: item.LatestContentEventOrdinal,
-			CreatedAtMs:               item.CreatedAtMs,
-			LastChangedAtMs:           item.LastChangedAtMs,
-			Body:                      body,
-		})
+		item := MaterializedTranscriptItemFromCanonical(&canonical.Transcript[i])
+		transcript = append(transcript, &item)
 	}
 	var execution core.MaterializedExecutionState
 	switch canonical.Session.Execution.State {
@@ -546,6 +503,64 @@ func MaterializedSessionFromCanonical(sessionID string, canonical *core.Canonica
 	}, nil
 }
 
+func MaterializedTranscriptItemFromCanonical(item *core.CanonicalTranscriptItem) core.TranscriptItem {
+	var body core.TranscriptBody
+	switch source := item.Body.(type) {
+	case core.CanonicalTranscriptBodyUser:
+		body = core.TranscriptBodyUser{Content: slices.Clone(source.Content)}
+	case core.CanonicalTranscriptBodyMessage:
+		var event *core.MailboxEvent
+		if source.Event != nil {
+			copied := *source.Event
+			event = &copied
+		}
+		body = core.TranscriptBodyMessage{Event: event}
+	// Chunks stored before streamed text was merged on the way in arrive one
+	// per token; collapse them as they come back.
+	case core.CanonicalTranscriptBodyAgent:
+		body = core.TranscriptBodyAgent{Chunks: coalescedChunks(source.Chunks), Streaming: source.Streaming}
+	case core.CanonicalTranscriptBodyThought:
+		body = core.TranscriptBodyThought{Chunks: coalescedChunks(source.Chunks), Streaming: source.Streaming}
+	case core.CanonicalTranscriptBodyTool:
+		var outputs []core.TerminalOutputRecord
+		for j := range source.TerminalOutputs {
+			outputs = append(outputs, materializedTerminalOutput(&source.TerminalOutputs[j]))
+		}
+		var presentation *core.ToolCallPresentation
+		if source.Presentation != nil {
+			copied := *source.Presentation
+			presentation = &copied
+		}
+		body = core.TranscriptBodyTool{
+			Call:            core.OpaqueToolCallFromValue(source.Call),
+			TerminalOutputs: outputs,
+			TerminalRefs:    slices.Clone(source.TerminalRefs),
+			Presentation:    presentation,
+		}
+	case core.CanonicalTranscriptBodyTerminalOutput:
+		body = core.TranscriptBodyTerminalOutput{
+			Record:          materializedTerminalOutput(&source.Record),
+			OutputLineCount: source.OutputLineCount,
+			FirstErrorLine:  source.FirstErrorLine,
+			DetailTrimmed:   source.DetailTrimmed,
+		}
+	case core.CanonicalTranscriptBodyPlan:
+		body = core.TranscriptBodyPlan{Plan: slices.Clone(source.Plan)}
+	case core.CanonicalTranscriptBodyPlanProposal:
+		body = core.TranscriptBodyPlanProposal{ProposalID: source.ProposalID, Plan: source.Plan}
+	case core.CanonicalTranscriptBodySystem:
+		body = core.TranscriptBodySystem{Text: source.Text}
+	}
+	return core.TranscriptItem{
+		StableID:                  item.StableID,
+		Position:                  item.Position,
+		LatestContentEventOrdinal: item.LatestContentEventOrdinal,
+		CreatedAtMs:               item.CreatedAtMs,
+		LastChangedAtMs:           item.LastChangedAtMs,
+		Body:                      body,
+	}
+}
+
 // MaterializedQueuedPromptsFromCanonical projects archived queued commands
 // onto the durable queue shape. Kept apart from the whole-projection build
 // so a caller that only has to restore the queue does not have to rebuild
@@ -557,10 +572,18 @@ func MaterializedQueuedPromptsFromCanonical(queuedPrompts []core.CanonicalQueued
 		if prompt.Kind.Kind == core.CanonicalQueuedCommandKindSetConfig {
 			kind = core.QueuedCommandKindSetConfig{Key: prompt.Kind.Key, Value: prompt.Kind.Value}
 		}
+		// As in QueuedCommandContent, the projection keeps no payload for a
+		// mailbox wake; the archive carries it only for the worker's queue.
+		// A restored wake shows and starts as a live one does, and the next
+		// checkpoint reads it from the worker again.
+		content := []any{}
+		if !core.CarriesMailboxWake(prompt.CommandID) {
+			content = queuedContentValues(prompt.Content)
+		}
 		prompts = append(prompts, core.MaterializedQueuedPrompt{
 			CommandID:  prompt.CommandID,
 			Kind:       kind,
-			Content:    queuedContentValues(prompt.Content),
+			Content:    content,
 			QueuedAtMs: prompt.QueuedAtMs,
 		})
 	}

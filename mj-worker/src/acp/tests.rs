@@ -149,7 +149,7 @@ for line in sys.stdin:
     if method == 'initialize':
         result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True, 'sessionCapabilities':{'resume':{}}},
             '_meta':{'jetbrains':{'air':{'version':1,'capabilities':['nativeSubagentSessions'],
-                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear']}}}}}
+                'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear'],'resumePolicies':['pause','preserve']}}}}}
     elif method in ('session/new', 'session/resume', 'session/load'):
         assert method == 'session/load', request
         update({'sessionUpdate':'agent_message_chunk', 'content':{'type':'text','text':'old history ' * 12000}})
@@ -373,6 +373,13 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         None,
     ))
     .unwrap();
+    let resume_policy = "/_meta/jetbrains/air/goal/resumePolicy";
+    assert_eq!(
+        request
+            .pointer(resume_policy)
+            .and_then(serde_json::Value::as_str),
+        Some("preserve")
+    );
     assert_eq!(
         request.get("mcpServers"),
         Some(&serde_json::json!([])),
@@ -394,6 +401,12 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         ))
         .unwrap(),
     ] {
+        assert_eq!(
+            opened
+                .pointer(resume_policy)
+                .and_then(serde_json::Value::as_str),
+            Some("pause")
+        );
         assert!(
             opened
                 .get("mcpServers")
@@ -1342,7 +1355,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 
         spec.subagent_policy = mj_core::subagent::SubagentPolicy::Native;
         spec.subagent_mcp_socket = None;
-        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap());
         assert!(
             meta.pointer("/claudeCode/options/disallowedTools")
                 .is_none(),
@@ -1359,7 +1372,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
             subtle: None,
         };
         spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
-        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap());
         let hidden = match harness {
             HarnessKind::Claude => meta.pointer("/claudeCode/options/disallowedTools"),
             _ => meta.pointer("/codex/options/disallowedTools"),
@@ -1381,7 +1394,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         ] {
             spec.subagent_policy = policy;
             spec.subagent_mcp_socket = None;
-            let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
+            let meta = serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap());
             let path = if harness == HarnessKind::Claude {
                 "/claudeCode/options/disallowedTools"
             } else {
@@ -1547,7 +1560,8 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     };
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
         spec.harness = harness;
-        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap_or_default());
+        let meta =
+            serde_json::Value::Object(session_request_meta(&spec, true, false).unwrap_or_default());
         let (pointer, expected) = match harness {
             HarnessKind::Claude => (
                 "/claudeCode/options/disallowedTools",
@@ -2520,6 +2534,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         elicitation_id,
         action,
         reply,
+        answers,
     } = resolution
     else {
         unreachable!()
@@ -2544,6 +2559,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
             elicitation_id,
             action,
             reply,
+            answers,
         })
         .unwrap();
     let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");
@@ -2625,128 +2641,6 @@ fn grok_plan_review_answers_are_user_selected() {
     assert_eq!(
         grok::plan_response(ElicitationResponse::Accept { content }),
         serde_json::json!({"outcome": "approved"})
-    );
-}
-
-#[test]
-fn supported_permission_plan_reviews_are_detected_and_mapped_to_native_options() {
-    use agent_client_protocol::v1::schema::{
-        PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
-    };
-
-    let fixtures = [
-        ("Implement this plan?", "IMPLEMENT_PLAN_OPTION_ID"),
-        ("ExitPlanMode", "default"),
-        ("Review plan", "plan_approve"),
-    ];
-    for (title, approval_id) in fixtures {
-        let request = RequestPermissionRequest::new(
-            "session-1",
-            ToolCallUpdate::new(
-                "tool-1",
-                ToolCallUpdateFields::new()
-                    .title(title.to_owned())
-                    .raw_input(serde_json::json!({"plan": "Do the work"})),
-            ),
-            vec![
-                PermissionOption::new(approval_id, "Approve", PermissionOptionKind::AllowOnce),
-                PermissionOption::new("plan_revise", "Revise", PermissionOptionKind::RejectOnce),
-            ],
-        );
-        assert!(is_plan_permission(&request), "fixture {title}");
-        let review = normalized_plan_review(
-            "plan-review-1".into(),
-            &serde_json::to_value(&request).unwrap(),
-        );
-        assert!(review.message.contains("Do the work"));
-        let mut content = BTreeMap::new();
-        content.insert(
-            PLAN_REVIEW_ACTION.into(),
-            ElicitationValue::String("implement".into()),
-        );
-        let response = permission_plan_response(&request, ElicitationResponse::Accept { content });
-        assert_eq!(
-            serde_json::to_value(response).unwrap()["outcome"]["optionId"],
-            approval_id
-        );
-    }
-}
-
-/// The exact `session/request_permission` Claude Code's ACP bridge sends when
-/// ExitPlanMode fires: a `switch_mode` tool call carrying the plan and a
-/// `planFilePath`, titled "Ready to code?", with generic permission-mode option
-/// ids. Captured from a live worker.log. None of the title/option heuristics
-/// match it, so the classifier must key on the tool kind and plan payload.
-#[test]
-fn claude_exit_plan_mode_request_is_detected_and_mapped() {
-    let request: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
-        "sessionId": "7c4ce22d-9b3a-421b-b9f9-f2b8d3b73bb8",
-        "toolCall": {
-            "toolCallId": "toolu_01L8aaLyXndAiFoQM9yhpsRy",
-            "kind": "switch_mode",
-            "title": "Ready to code?",
-            "content": [{
-                "type": "content",
-                "content": {"type": "text", "text": "# Add --version flag\n\nDo the work."}
-            }],
-            "rawInput": {
-                "plan": "# Add --version flag\n\nDo the work.",
-                "planFilePath": "/home/jonathan/.claude/plans/add-a-version-flag.md"
-            }
-        },
-        "options": [
-            {"optionId": "bypassPermissions", "name": "Yes, and bypass permissions", "kind": "allow_always"},
-            {"optionId": "auto", "name": "Yes, and use \"auto\" mode", "kind": "allow_always"},
-            {"optionId": "acceptEdits", "name": "Yes, and auto-accept edits", "kind": "allow_always"},
-            {"optionId": "default", "name": "Yes, and manually approve edits", "kind": "allow_once"},
-            {"optionId": "plan", "name": "No, keep planning", "kind": "reject_once"}
-        ]
-    }))
-    .expect("captured Claude ExitPlanMode payload deserializes");
-
-    assert!(
-        is_plan_permission(&request),
-        "Claude's switch_mode request must be classified as a plan review"
-    );
-
-    let review = normalized_plan_review(
-        "plan-review-1".into(),
-        &serde_json::to_value(&request).unwrap(),
-    );
-    assert!(review.message.contains("Add --version flag"));
-
-    // Guardian implementations use Auto rather than manual edit approvals.
-    let mut implement = BTreeMap::new();
-    implement.insert(
-        PLAN_REVIEW_ACTION.into(),
-        ElicitationValue::String("implement".into()),
-    );
-    let PlanPermissionAnswer::Native(approved) = policy_plan_permission_answer(
-        &request,
-        ElicitationResponse::Accept { content: implement },
-        HarnessKind::Claude,
-        HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals),
-    )
-    .unwrap() else {
-        panic!("Auto is offered by this bridge");
-    };
-    assert_eq!(
-        serde_json::to_value(approved).unwrap()["outcome"]["optionId"],
-        "auto"
-    );
-
-    // Declining keeps planning by selecting the reject option instead of
-    // cancelling the turn.
-    let mut keep = BTreeMap::new();
-    keep.insert(
-        PLAN_REVIEW_ACTION.into(),
-        ElicitationValue::String("keep_planning".into()),
-    );
-    let declined =
-        permission_plan_response(&request, ElicitationResponse::Accept { content: keep });
-    assert_eq!(
-        serde_json::to_value(declined).unwrap()["outcome"]["optionId"],
-        "plan"
     );
 }
 
@@ -4042,7 +3936,14 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
             if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("tool_call"))
     })
     .await;
-    tools.open("long-build", mj_core::clock::epoch_millis());
+    tools.observe_for_owner(
+        &SessionUpdate::ToolCall(
+            agent_client_protocol::v1::schema::ToolCall::new("long-build", "Long build")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::InProgress),
+        ),
+        mj_core::clock::epoch_millis(),
+        mj_core::activity::ForegroundOwner::Prompt("prompt-1".into()),
+    );
 
     // Well past the silence bound, and nothing has arrived since the tool call.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -4100,7 +4001,14 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
         .unwrap();
     let mut methods = Vec::new();
     wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
-    tools.open("long-build", mj_core::clock::epoch_millis());
+    tools.observe_for_owner(
+        &SessionUpdate::ToolCall(
+            agent_client_protocol::v1::schema::ToolCall::new("long-build", "Long build")
+                .status(agent_client_protocol::v1::schema::ToolCallStatus::InProgress),
+        ),
+        mj_core::clock::epoch_millis(),
+        mj_core::activity::ForegroundOwner::Prompt("prompt-1".into()),
+    );
 
     let warning = wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::Warning { .. })
@@ -8893,6 +8801,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                     elicitation_id,
                     action,
                     reply,
+                    ..
                 } => {
                     assert!(reply.is_none(), "harness withdrawal is not a user reply");
                     break (requested, (elicitation_id, action));
@@ -8903,8 +8812,9 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     })
     .await
     .expect("a withdrawn form resolves");
-    assert_eq!(requested.as_deref(), Some("elicitation-1"));
-    assert_eq!(resolved, ("elicitation-1".to_owned(), "cancel".to_owned()));
+    let requested = requested.expect("the runtime published the form");
+    assert!(requested.starts_with("elicitation-"));
+    assert_eq!(resolved, (requested, "cancel".to_owned()));
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
     bridge.abort();

@@ -42,9 +42,9 @@ Enter open · / searc                                                           
 │ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │                     │
 │hel ───────────────  │ hosts under Machines.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   podman                          10 settings  ›                         Add                 │                     │
+│  Stopped  podman    │   podman                          11 settings  ›                         Add                 │                     │
 │  │ No messages yet  │   builder                         4 settings  ›                          Detect runtimes     │                     │
-│  │                  │   builder-docker                  10 settings  ›                         Machines            │                     │
+│  │                  │   builder-docker                  11 settings  ›                         Machines            │                     │
 │                     │                                                                          Detection results   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -114,9 +114,9 @@ Enter open · / searc                                                           
 │ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │                     │
 │hel ───────────────  │ hosts under Machines.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   podman                          10 settings  ›                         Add                 │                     │
+│  Stopped  podman    │   podman                          11 settings  ›                         Add                 │                     │
 │  │ No messages yet  │   builder                         4 settings  ›                          Detect runtimes     │                     │
-│  │                  │   builder-docker                  10 settings  ›                         Machines            │                     │
+│  │                  │   builder-docker                  11 settings  ›                         Machines            │                     │
 │                     │                                                                          Detection results   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

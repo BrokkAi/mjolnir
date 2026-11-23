@@ -1,0 +1,14 @@
+{
+  "options": [
+    {"kind": "allow_once", "name": "Yes, implement this plan", "optionId": "implement_plan"},
+    {"kind": "reject_once", "name": "No, and tell Codex what to do differently", "optionId": "revise_plan"}
+  ],
+  "sessionId": "session-1",
+  "toolCall": {
+    "kind": "switch_mode",
+    "rawInput": {"plan": "# Plan\n\n1. Make the change."},
+    "status": "pending",
+    "title": "Implement this plan?",
+    "toolCallId": "plan-review:plan-2"
+  }
+}

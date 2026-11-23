@@ -1234,8 +1234,8 @@ fn stage_mode_0600_file(
 /// For each key whose recorded `host` matches one of `candidate_targets` (an
 /// SSH/EC2 host), runs both `worker authorized-keys remove --operation-id` and
 /// `rm -f -- <private_key_path> <known_hosts_path>` on that host via the
-/// daemon's control connection. Keys without a matching remote locator fall
-/// back to local file removal.
+/// daemon's control connection. A known remote grant without a locator stays
+/// pending. Local-only keys fall back to local file removal.
 ///
 /// Returns the subset of keys whose remote cleanup failed so callers can retain
 /// them for retry if a host was unreachable.
@@ -1263,7 +1263,12 @@ pub(crate) fn cleanup_interrupted_move_credentials(
                     .map(host_shell_locator)
             });
         let Some(host) = matched_host else {
-            super::recovery::cleanup_local_move_key_files(std::slice::from_ref(key));
+            if key.authorized_keys_path.is_some() || key.worker_bin.is_some() {
+                tracing::warn!(operation_id, host = %key.host, "cannot resolve the host for a pending Move SSH grant");
+                remaining.push(key.clone());
+            } else {
+                super::recovery::cleanup_local_move_key_files(std::slice::from_ref(key));
+            }
             continue;
         };
         let key_operation_id = key

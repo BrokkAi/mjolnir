@@ -213,9 +213,7 @@ impl Controller {
             mj_core::state::applied_container_settings(&record).resource_allocation,
             backend::ContainerOverrides::for_session(&record),
         )?;
-        for notice in super::provisioning::enforce_cgroup_capable_limits(&mut target, executor) {
-            executor.notify_notice(&notice);
-        }
+        super::provisioning::enforce_cgroup_capable_limits(&mut target, None, executor);
         let canonical = match record.target.as_ref() {
             Some(locator) => locator.clone(),
             None => Box::new(backend::locator_after_provision_named(

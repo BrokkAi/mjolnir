@@ -559,6 +559,9 @@ mod tests {
             user_instructions: vec!["Check the repository status.".into()],
             user_instructions_omitted: false,
             project_instructions: None,
+            trusted_user_inputs: Vec::new(),
+            prior_reviews: Vec::new(),
+            retry_reason: None,
             transcript: String::new(),
         }
     }

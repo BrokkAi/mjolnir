@@ -16,7 +16,7 @@ const { chromium } = require('@playwright/test');
     const rows = [];
     for (let index = 0; index < Number(count); index++) {
       await page.waitForFunction(async ({ baseUrl, sessionId }) => {
-        const snapshot = await (await fetch(`${baseUrl}/api/snapshot`)).json();
+        const snapshot = await (await fetch(`${baseUrl}/api/v1/snapshot`)).json();
         if (!snapshot.cursor || !snapshot.interned) throw new Error('snapshot is missing its wire cursor or interned table');
         const session = snapshot.sessions.find(row => row.id === sessionId);
         if (!session) return false;

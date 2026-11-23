@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -469,5 +470,74 @@ func TestAcceptedMailCrossesACheckpointIntoTheRestoredRelayExactlyOnce(t *testin
 	checkpointTestsMust(t, err)
 	if started[0].CommandID != "queued-1" || started[0].HiddenPromptContext != nil {
 		t.Fatalf("started %+v", started[0])
+	}
+}
+
+func TestWorkerSuspendPreflightReportsUntrackedKeepDirAndDryRun(t *testing.T) {
+	temp := t.TempDir()
+	repo := filepath.Join(temp, "repo")
+	checkpointTestsMust(t, os.MkdirAll(repo, 0o777))
+	git := func(args ...string) string {
+		command := exec.Command("git", args...)
+		command.Dir = repo
+		var stdout, stderr bytes.Buffer
+		command.Stdout, command.Stderr = &stdout, &stderr
+		if err := command.Run(); err != nil {
+			t.Fatalf("git %v failed: %s", args, stderr.String())
+		}
+		return strings.TrimSpace(stdout.String())
+	}
+	git("init", "-b", "main")
+	git("config", "user.name", "Test")
+	git("config", "user.email", "test@example.com")
+	checkpointTestsMust(t, os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o666))
+	git("add", "tracked.txt")
+	git("commit", "-m", "initial")
+	head := git("rev-parse", "HEAD")
+
+	checkpointTestsMust(t, os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte("/.mj/keep/\n"), 0o666))
+	checkpointTestsMust(t, os.WriteFile(filepath.Join(repo, "scratch.txt"), []byte("untracked\n"), 0o666))
+	keepDir := filepath.Join(repo, ".mj", "keep", "s1")
+	checkpointTestsMust(t, os.MkdirAll(keepDir, 0o777))
+	checkpointTestsMust(t, os.WriteFile(filepath.Join(keepDir, "evidence.txt"), []byte("keep\n"), 0o666))
+
+	excludeCommits := []string{head}
+	spec := core.WorkerSuspendPreflightSpec{
+		SessionID: "s1",
+		Repositories: []core.WorkerPreflightRepo{{
+			ID:             "workspace",
+			Path:           repo,
+			Raw:            false,
+			ExcludeCommits: &excludeCommits,
+			KeepDir:        &keepDir,
+			OriginOverride: nil,
+		}},
+		DryRun: true,
+	}
+	result, err := RunSuspendPreflight(&spec, checkpoint.SystemGit{})
+	checkpointTestsMust(t, err)
+	found := false
+	for _, untracked := range result.Untracked {
+		if untracked.Path == "scratch.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected scratch.txt in untracked: %+v", result.Untracked)
+	}
+	if len(result.KeepDirEntries) != 1 || result.KeepDirEntries[0].Path != "evidence.txt" {
+		t.Fatalf("keep dir entries %+v", result.KeepDirEntries)
+	}
+	if result.KeepDirBytes == 0 {
+		t.Fatal("keep dir bytes are zero")
+	}
+	if result.DryRun == nil {
+		t.Fatal("dry_run estimate")
+	}
+	if result.DryRun.SessionStateBytes != nil {
+		t.Fatalf("session state bytes %d", *result.DryRun.SessionStateBytes)
+	}
+	if result.DryRun.GitDeltaBytes == nil {
+		t.Fatal("no Git delta estimate")
 	}
 }

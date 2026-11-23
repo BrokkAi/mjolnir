@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::doctor::{
-    ApplePlatform, CheckStatus, apple_container_runtime_check, current_apple_platform,
-    local_docker_runtime_check, local_podman_runtime_check,
+    CheckStatus, apple_container_runtime_check, local_docker_runtime_check,
+    local_podman_runtime_check,
 };
+use crate::targets::{ApplePlatform, current_apple_platform};
 use crate::targets::{CommandExecutor, CommandSpec};
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
@@ -465,6 +466,7 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&str>) -> Confi
 /// The shared setup/startup template for a locally available container engine.
 pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str, TargetTemplate) {
     let container = ContainerTemplate {
+        memory_hard_limit: None,
         build_cache: None,
         image: image.trim().to_owned(),
         pull_policy: Default::default(),

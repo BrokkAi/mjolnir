@@ -85,7 +85,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     stage('bundle-create');
     const bundles = await page.evaluate(async () => {
       const create = async source => {
-        const response = await fetch('/api/bundles', {
+        const response = await fetch('/api/v1/bundles', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ source }),
         });
@@ -96,7 +96,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
         create('example/browser-fixture'), create('example/browser-fixture-other'),
       ]);
       const reused = await create('https://github.com/example/browser-fixture.git');
-      const snapshot = await fetch('/api/snapshot').then(response => response.json());
+      const snapshot = await fetch('/api/v1/snapshot').then(response => response.json());
       const sessions = snapshot.sessions.map(row => {
         const resolved = { ...row };
         for (const field of ['available_commands', 'capabilities', 'config_options', 'compatible_resume_targets', 'incompatible_resume_targets']) {

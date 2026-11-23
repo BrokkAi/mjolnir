@@ -1,8 +1,4 @@
-//go:build unix
-
-// Port of the tests in mj-core/src/test_hooks.rs. Rust compiles them only
-// with the `test-hooks` feature; the fake command helpers they cover are
-// always built here, so they run on every Unix test run.
+// Port of the tests in mj-core/src/test_hooks.rs.
 
 package core
 
@@ -14,7 +10,14 @@ import (
 	"testing"
 )
 
+func TestTestHooksStayOffWithoutExplicitOptIn(t *testing.T) {
+	if TestHooksEnabled() || TestFixturesEnabled() {
+		t.Fatal("test hooks or fixtures are on without an opt-in")
+	}
+}
+
 func TestFakeCommandPreservesArgumentsOutputAndStatusWithRestrictedPath(t *testing.T) {
+	skipUnlessUnix(t)
 	directory := filepath.Join(t.TempDir(), "tools with spaces")
 	if err := os.Mkdir(directory, 0o777); err != nil {
 		t.Fatal(err)
@@ -56,6 +59,7 @@ func TestFakeCommandPreservesArgumentsOutputAndStatusWithRestrictedPath(t *testi
 }
 
 func TestFakeCommandStreamsInputWhileItsScriptIsOpenForWriting(t *testing.T) {
+	skipUnlessUnix(t)
 	directory := t.TempDir()
 	InstallFakeCommand(directory, "echo-input", "exec /bin/cat\n")
 	// An inherited writer can outlive installation. Reading the script

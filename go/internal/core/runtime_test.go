@@ -5,10 +5,89 @@ package core
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// More concurrent SpawnOffAsyncWorkers futures than a bounded blocking pool
+// must still complete when every one of them awaits SpawnBlocking and a
+// nested SpawnOffAsyncWorkers.
+// Hard-won: #1640: Running `spawn_off_async_workers` on Tokio's blocking pool deadlocked when 512+ lifecycles awaited `spawn_blocking`.
+func TestOffAsyncWorkersDoNotStarveTheBlockingPool(t *testing.T) {
+	state := NewShutdownState()
+	runtime := NewRuntime()
+	var barrier sync.WaitGroup
+	barrier.Add(8)
+	started := time.Now()
+	var tasks []*JoinHandle[int]
+	for index := range 8 {
+		tasks = append(tasks, spawnOffAsyncWorkersWith(state, func(ctx context.Context) int {
+			// Hold every outer task in flight before any inner blocking work
+			// runs, so a shared blocking pool of size 2 would deadlock.
+			barrier.Done()
+			barrier.Wait()
+			leaf, err := SpawnBlockingOn(runtime, func() int { return index + 1 }).Join(ctx)
+			if err != nil {
+				panic(err)
+			}
+			inline := OffAsyncWorker(func() int { return leaf * 2 })
+			nested, err := spawnOffAsyncWorkersWith(state, func(ctx context.Context) int {
+				value, err := SpawnBlockingOn(runtime, func() int { return inline + 10 }).Join(ctx)
+				if err != nil {
+					panic(err)
+				}
+				return value
+			}).Join(ctx)
+			if err != nil {
+				panic(err)
+			}
+			return nested
+		}))
+	}
+	for index, task := range tasks {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		output, err := task.Join(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("off-worker task %d: %v", index, err)
+		}
+		if want := (index+1)*2 + 10; output != want {
+			t.Fatalf("task %d = %d, want %d", index, output, want)
+		}
+	}
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("off-worker tasks took %v", elapsed)
+	}
+	// Shutdown must still cancel an in-flight off-worker future promptly.
+	entered := make(chan context.Context, 1)
+	Spawn(func() struct{} {
+		_, _ = spawnOffAsyncWorkersWith(state, func(ctx context.Context) struct{} {
+			entered <- ctx
+			select {
+			case <-time.After(30 * time.Second):
+			case <-ctx.Done():
+			}
+			return struct{}{}
+		}).Join(context.Background())
+		return struct{}{}
+	})
+	futureCtx := <-entered
+	shutdownStarted := time.Now()
+	report := state.ShutdownWith(runtime, BlockingWorkAwait{}, 5*time.Second)
+	if report != (ShutdownReport{}) {
+		t.Fatalf("report = %+v", report)
+	}
+	if elapsed := time.Since(shutdownStarted); elapsed >= 2*time.Second {
+		t.Fatalf("shutdown waited %v for off-worker await", elapsed)
+	}
+	// Rust checks that the future was dropped; a Go future is cancelled
+	// through its context.
+	if futureCtx.Err() == nil {
+		t.Fatal("shutdown should cancel the in-flight off-worker future")
+	}
+}
 
 // Hard-won: 323c8446: Blocking awaits kept polling a dead Tokio timer driver and panicked during shutdown.
 func TestShutdownCancelsAnInFlightBlockingAwait(t *testing.T) {

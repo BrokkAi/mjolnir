@@ -145,6 +145,7 @@ fn ssh_docker_registration_config() -> Config {
                 extra_args: Vec::new(),
             },
             container: ConfigContainer {
+                memory_hard_limit: None,
                 build_cache: None,
                 image: "failimage:never".into(),
                 pull_policy: Default::default(),
@@ -257,7 +258,11 @@ impl CommandExecutor for DockerDesktopExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.program.as_str() {
             "docker" => "Docker Desktop 4.40.0 (187762)\n",
-            "sh" if command.purpose == "probe mount source filesystem" => "ext4\n",
+            "ssh" if command.purpose == "identify the SSH Docker host and daemon platform" => {
+                assert!(command.args.last().unwrap().contains("uname -s"));
+                "Darwin\n"
+            }
+            "ssh" if command.purpose == "validate remote directory" => "",
             other => panic!("unexpected command {other}"),
         };
         Ok(CommandOutput {
@@ -300,6 +305,67 @@ fn docker_desktop_attachments_are_mounted_read_only_and_reported() {
         notices[0].starts_with("Mounted /Users/dev/project read-only: Docker runs in a VM"),
         "{notices:?}"
     );
+}
+
+#[test]
+fn mac_container_attachments_agree_in_mount_editor_and_launch_plan() {
+    let source = tempfile::tempdir().unwrap();
+    let mut config = ssh_docker_registration_config();
+    let TargetTemplate::SshDocker { ssh, container } = config.targets["docker"].clone() else {
+        unreachable!()
+    };
+    config.targets.insert(
+        "local-apple".into(),
+        TargetTemplate::AppleContainer {
+            container: container.clone(),
+        },
+    );
+    config.targets.insert(
+        "remote-apple".into(),
+        TargetTemplate::SshAppleContainer { ssh, container },
+    );
+    let controller = super::super::Controller {
+        config,
+        state: Default::default(),
+    };
+    let executor = DockerDesktopExecutor;
+    for (id, expected) in [
+        ("docker", "Docker runs in a VM"),
+        (
+            "local-apple",
+            "Apple container does not support copy-on-write directory overlays",
+        ),
+        (
+            "remote-apple",
+            "Apple container does not support copy-on-write directory overlays",
+        ),
+    ] {
+        let reason = controller
+            .validate_mount_source(id, source.path(), &executor)
+            .unwrap()
+            .expect("the editor should explain why it disables copy-on-write");
+        assert!(reason.starts_with(expected), "{id}: {reason}");
+
+        let mut mounts = [
+            AdditionalMount {
+                source: source.path().to_owned(),
+                destination: PathBuf::from("/mnt/project"),
+                access: targets::MountAccess::Cow,
+            },
+            AdditionalMount {
+                source: source.path().to_owned(),
+                destination: PathBuf::from("/mnt/scratch"),
+                access: targets::MountAccess::Rw,
+            },
+        ];
+        let target =
+            backend_target(&controller.config.targets[id], None, Default::default()).unwrap();
+        let notices = enforce_overlay_capable_mounts(&target, &mut mounts, &executor);
+        assert_eq!(notices.len(), 1, "{id}: {notices:?}");
+        assert!(notices[0].contains(&reason), "{id}: {notices:?}");
+        assert_eq!(mounts[0].access, targets::MountAccess::Ro);
+        assert_eq!(mounts[1].access, targets::MountAccess::Rw);
+    }
 }
 
 #[test]
@@ -1164,6 +1230,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         title: "new session".into(),
         harness_kind: mj_core::config::HarnessKind::Kimi,
         last_profile: "kimi".into(),
+        staged_aws_profile: None,
         bundle_id: "raw-project".into(),
         project_directory: Some("/srv/project".into()),
         managed_worktree: None,
@@ -1687,6 +1754,7 @@ fn raw_ssh_targets_select_permissions_and_ssh_podman_is_unconstrained() {
     let podman = TargetTemplate::SshPodman {
         ssh: ssh.clone(),
         container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: "example.invalid/agent:latest".into(),
             pull_policy: Default::default(),
@@ -2230,8 +2298,25 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
     downloader.join().expect("the download thread finishes");
 }
 
-/// Answers `podman info --format '{{json .Host}}'` with a fixed host object.
-struct CgroupExecutor(serde_json::Value);
+#[derive(Default)]
+struct CgroupExecutor {
+    responses: std::cell::RefCell<Vec<CommandOutput>>,
+    probes: std::cell::RefCell<Vec<CommandSpec>>,
+    notices: std::cell::RefCell<Vec<String>>,
+}
+
+impl CgroupExecutor {
+    fn answering(stdout: serde_json::Value) -> Self {
+        Self {
+            responses: std::cell::RefCell::new(vec![CommandOutput {
+                status: 0,
+                stdout: stdout.to_string().into_bytes(),
+                stderr: Vec::new(),
+            }]),
+            ..Default::default()
+        }
+    }
+}
 
 impl CommandExecutor for CgroupExecutor {
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
@@ -2258,12 +2343,12 @@ impl CommandExecutor for CgroupExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        assert_eq!(command.purpose, "check Podman cgroup controllers");
-        Ok(CommandOutput {
-            status: 0,
-            stdout: self.0.to_string().into_bytes(),
-            stderr: Vec::new(),
-        })
+        self.probes.borrow_mut().push(command.clone());
+        Ok(self.responses.borrow_mut().remove(0))
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.notices.borrow_mut().push(notice.to_owned());
     }
 }
 
@@ -2297,13 +2382,14 @@ fn container_run_args(target: &targets::TargetTemplate) -> Vec<String> {
 #[test]
 fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     let mut target = limited_podman_target();
-    let executor = CgroupExecutor(serde_json::json!({
+    let executor = CgroupExecutor::answering(serde_json::json!({
         "cgroupManager": "systemd",
         "cgroupVersion": "v2",
         "cgroupControllers": ["pids"],
     }));
 
-    let notices = enforce_cgroup_capable_limits(&mut target, &executor);
+    enforce_cgroup_capable_limits(&mut target, None, &executor);
+    let notices = executor.notices.borrow();
 
     let args = container_run_args(&target);
     assert!(
@@ -2322,11 +2408,74 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
 
     // A host that does not report its controllers is unknown, not empty.
     let mut target = limited_podman_target();
-    let executor = CgroupExecutor(serde_json::json!({ "cgroupVersion": "v2" }));
-    assert!(enforce_cgroup_capable_limits(&mut target, &executor).is_empty());
+    let executor = CgroupExecutor::answering(serde_json::json!({ "cgroupVersion": "v2" }));
+    enforce_cgroup_capable_limits(&mut target, None, &executor);
+    assert!(executor.notices.borrow().is_empty());
     let args = container_run_args(&target);
     assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
+}
+
+#[test]
+fn docker_cgroup_limits_reuse_local_preflight_and_probe_ssh_once() {
+    let info = serde_json::json!({
+        "ServerVersion": "27.5.1",
+        "OSType": "linux",
+        "SecurityOptions": ["name=rootless"],
+        "CgroupDriver": "systemd",
+        "CgroupVersion": "2",
+        "CpuCfsPeriod": false,
+        "MemoryLimit": true,
+    });
+    let targets::TargetTemplate::LocalPodman(container) = limited_podman_target() else {
+        unreachable!()
+    };
+    let ssh = SshTarget {
+        destination: "dev@docker.example.test".into(),
+        ssh_args: Vec::new(),
+    };
+    let config = mj_core::config::TargetTemplate::LocalDocker {
+        container: ConfigContainer {
+            image: container.image.clone(),
+            memory_hard_limit: None,
+            build_cache: None,
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+
+    let mut local = targets::TargetTemplate::LocalDocker(container.clone());
+    let local_executor = CgroupExecutor::answering(info.clone());
+    let capabilities = preflight_target(&config, &local_executor, TargetCheck::Launch).unwrap();
+    enforce_cgroup_capable_limits(&mut local, capabilities, &local_executor);
+    let mut remote = targets::TargetTemplate::SshDocker { ssh, container };
+    let remote_executor = CgroupExecutor::answering(info);
+    enforce_cgroup_capable_limits(&mut remote, None, &remote_executor);
+    let local_probes = local_executor.probes.borrow();
+    assert_eq!(local_probes.len(), 1);
+    assert_eq!(local_probes[0].args, ["info", "--format", "{{json .}}"]);
+    let remote_probes = remote_executor.probes.borrow();
+    assert_eq!(remote_probes.len(), 1);
+    assert_eq!(remote_probes[0].program, "ssh");
+    assert!(
+        remote_probes[0]
+            .args
+            .last()
+            .unwrap()
+            .contains("'docker' 'info' '--format' '{{json .}}'")
+    );
+    for (target, executor) in [(&local, &local_executor), (&remote, &remote_executor)] {
+        let args = &target.image_host().unwrap().1.extra_run_args;
+        assert_eq!(args, &["--memory=8589934592"]);
+        let notices = executor.notices.borrow();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("Rootless Docker cannot enforce session cpu limits"));
+    }
+    assert!(remote_executor.notices.borrow()[0].contains("On dev@docker.example.test"));
 }
 
 /// A held real Git checkout overlaps file staging. Harness preflight waits for

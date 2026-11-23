@@ -80,14 +80,13 @@ fn claude_policy_mode(enforcement: Option<ExecutionEnforcement>) -> &'static str
 }
 
 /// The permission mode a Claude plan-approval option continues in, and whether
-/// it first clears the context. claude-agent-acp 0.84 names the options
-/// `exit-plan-*`; earlier bridges named them by the mode itself.
+/// it first clears the context. These IDs come from claude-agent-acp 0.108.0.
 fn claude_plan_option_mode(option_id: &str) -> Option<(&'static str, bool)> {
     Some(match option_id {
-        "exit-plan-bypass" | "bypassPermissions" => ("bypassPermissions", false),
-        "exit-plan-auto" | "auto" => ("auto", false),
-        "exit-plan-accept-edits" | "acceptEdits" => ("acceptEdits", false),
-        "exit-plan-default" | "default" => ("default", false),
+        "exit-plan-bypass" => ("bypassPermissions", false),
+        "exit-plan-auto" => ("auto", false),
+        "exit-plan-accept-edits" => ("acceptEdits", false),
+        "exit-plan-default" => ("default", false),
         "exit-plan-clear-bypass" => ("bypassPermissions", true),
         "exit-plan-clear-auto" => ("auto", true),
         "exit-plan-clear-accept-edits" => ("acceptEdits", true),
@@ -104,26 +103,12 @@ fn claude_policy_plan_option(
 ) -> Option<&PermissionOption> {
     let mode = claude_policy_mode(enforcement);
     request.options.iter().find(|option| {
-        claude_plan_option_mode(&option.option_id.to_string()) == Some((mode, false))
+        claude_plan_option_mode(&option.option_id.0) == Some((mode, false))
             && matches!(
                 option.kind,
                 PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
             )
     })
-}
-
-/// Whether this is Claude's own ExitPlanMode approval in the claude-agent-acp
-/// 0.84 shape. Its tool call carries no kind for an AIR client, so the option
-/// ids are what identify it.
-pub(super) fn is_claude_plan_approval(
-    request: &RequestPermissionRequest,
-    harness: HarnessKind,
-) -> bool {
-    harness == HarnessKind::Claude
-        && request
-            .options
-            .iter()
-            .any(|option| option.option_id.to_string().starts_with("exit-plan-"))
 }
 
 /// One answer a permission form offers, and the harness option it selects.
@@ -151,18 +136,16 @@ pub(super) struct PermissionAnswers {
 /// answers, so every surface (terminal, web, `mj respond`, automation) sees
 /// and can select the same set.
 ///
-/// Claude's own plan approval (claude-agent-acp 0.84 `exit-plan-*` options,
-/// which reach this form when Claude wrote no plan file) must not change the
-/// session's execution policy. The option that continues under that policy
-/// becomes a plain "Yes", and no option for another mode is offered. When
-/// Claude does not offer the policy's mode, lower modes stay so the plan can
-/// still be approved; bypassPermissions is never offered to a Guardian session.
+/// Claude's plan approval form preserves the session's execution policy. The
+/// option that continues under that policy becomes a plain "Yes" and hides
+/// other modes. When Claude omits the policy's mode, lower modes stay available
+/// for approval. Guardian keeps bypassPermissions hidden.
 pub(super) fn permission_choices(
     request: &RequestPermissionRequest,
-    harness: HarnessKind,
+    plan_permission: Option<PlanPermission>,
     enforcement: Option<ExecutionEnforcement>,
 ) -> PermissionAnswers {
-    let choices = offered_permission_choices(request, harness, enforcement);
+    let choices = offered_permission_choices(request, plan_permission, enforcement);
     let skip = request
         .options
         .iter()
@@ -178,10 +161,10 @@ pub(super) fn permission_choices(
 
 fn offered_permission_choices(
     request: &RequestPermissionRequest,
-    harness: HarnessKind,
+    plan_permission: Option<PlanPermission>,
     enforcement: Option<ExecutionEnforcement>,
 ) -> Vec<PermissionChoice> {
-    if !is_claude_plan_approval(request, harness) {
+    if plan_permission != Some(PlanPermission::Claude) {
         return request
             .options
             .iter()
@@ -196,8 +179,7 @@ fn offered_permission_choices(
     // Any option in the policy's mode, its clear-context one included, lets
     // the plan be approved without another mode.
     let policy_offered = request.options.iter().any(|option| {
-        claude_plan_option_mode(&option.option_id.to_string())
-            .is_some_and(|(mode, _)| mode == policy_mode)
+        claude_plan_option_mode(&option.option_id.0).is_some_and(|(mode, _)| mode == policy_mode)
     });
     let mut choices: Vec<_> = yes
         .map(|option| PermissionChoice {
@@ -210,7 +192,7 @@ fn offered_permission_choices(
         if yes.is_some_and(|yes| yes.option_id == option.option_id) {
             continue;
         }
-        let mode = claude_plan_option_mode(&option.option_id.to_string());
+        let mode = claude_plan_option_mode(&option.option_id.0);
         let title = match mode {
             // The policy owns the mode: with its own mode on offer, no other
             // mode is. Without it, lower modes stay so the plan can still be
@@ -228,136 +210,122 @@ fn offered_permission_choices(
     choices
 }
 
-pub(super) fn policy_plan_permission_answer(
-    request: &RequestPermissionRequest,
-    response: ElicitationResponse,
-    harness: HarnessKind,
-    enforcement: Option<ExecutionEnforcement>,
-) -> Result<PlanPermissionAnswer> {
-    if harness != HarnessKind::Claude || plan_review_answer(response.clone()).0 != "implement" {
-        return Ok(PlanPermissionAnswer::Native(permission_plan_response(
-            request, response,
-        )));
+const CODEX_IMPLEMENT_PLAN: &str = "implement_plan";
+const CODEX_REVISE_PLAN: &str = "revise_plan";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlanPermission {
+    Claude,
+    Codex,
+}
+
+impl PlanPermission {
+    pub(super) fn can_implement(
+        self,
+        request: &RequestPermissionRequest,
+        enforcement: Option<ExecutionEnforcement>,
+    ) -> bool {
+        match self {
+            Self::Codex => true,
+            Self::Claude => {
+                claude_policy_plan_option(request, enforcement).is_some()
+                    || claude_policy_mode(enforcement) == "bypassPermissions"
+            }
+        }
     }
-    let mode = claude_policy_mode(enforcement);
-    if let Some(option) = claude_policy_plan_option(request, enforcement) {
-        return Ok(PlanPermissionAnswer::Native(
-            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
-                SelectedPermissionOutcome::new(option.option_id.clone()),
-            )),
-        ));
+
+    pub(super) fn recognize(
+        request: &RequestPermissionRequest,
+        harness: HarnessKind,
+    ) -> Option<Self> {
+        match harness {
+            // Claude's AIR tool call omits the tool kind. The ExitPlanMode
+            // options identify the approval.
+            HarnessKind::Claude
+                if request
+                    .options
+                    .iter()
+                    .any(|option| claude_plan_option_mode(&option.option_id.0).is_some()) =>
+            {
+                Some(Self::Claude)
+            }
+            HarnessKind::Codex
+                if permission_option(request, CODEX_IMPLEMENT_PLAN).is_some()
+                    && permission_option(request, CODEX_REVISE_PLAN).is_some() =>
+            {
+                Some(Self::Codex)
+            }
+            _ => None,
+        }
     }
-    if mode == "bypassPermissions" {
-        Ok(PlanPermissionAnswer::ContinueInBypass)
-    } else {
-        bail!(
-            "Cannot implement the approved plan: Claude did not offer the required {mode} mode. Update the Claude bridge, use a model supporting that mode, or choose another Claude permission mode in the profile's settings."
-        )
+
+    pub(super) fn answer(
+        self,
+        request: &RequestPermissionRequest,
+        response: ElicitationResponse,
+        enforcement: Option<ExecutionEnforcement>,
+    ) -> Result<PlanPermissionAnswer> {
+        if plan_review_answer(response).0 != "implement" {
+            return Ok(PlanPermissionAnswer::Native(self.decline(request)));
+        }
+        if self == Self::Codex {
+            return Ok(PlanPermissionAnswer::Native(select_plan_option(
+                permission_option(request, CODEX_IMPLEMENT_PLAN),
+            )));
+        }
+        if let Some(option) = claude_policy_plan_option(request, enforcement) {
+            return Ok(PlanPermissionAnswer::Native(select_plan_option(Some(
+                option,
+            ))));
+        }
+        let mode = claude_policy_mode(enforcement);
+        if mode == "bypassPermissions" {
+            Ok(PlanPermissionAnswer::ContinueInBypass)
+        } else {
+            bail!(
+                "Cannot implement the approved plan: Claude did not offer the required {mode} mode. Update the Claude bridge, use a model supporting that mode, or choose another Claude permission mode in the profile's settings."
+            )
+        }
+    }
+
+    pub(super) fn decline(self, request: &RequestPermissionRequest) -> RequestPermissionResponse {
+        let option = match self {
+            Self::Codex => permission_option(request, CODEX_REVISE_PLAN),
+            Self::Claude => permission_option(request, "reject").or_else(|| {
+                [
+                    PermissionOptionKind::RejectOnce,
+                    PermissionOptionKind::RejectAlways,
+                ]
+                .into_iter()
+                .find_map(|kind| {
+                    request.options.iter().find(|option| {
+                        option.kind == kind
+                            && claude_plan_option_mode(&option.option_id.0).is_none()
+                    })
+                })
+            }),
+        };
+        select_plan_option(option)
     }
 }
 
-pub(super) fn nested_string_matches(
-    value: &serde_json::Value,
-    keys: &[&str],
-    predicate: &impl Fn(&str) -> bool,
-) -> bool {
-    match value {
-        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
-            (keys.contains(&key.as_str()) && value.as_str().is_some_and(predicate))
-                || nested_string_matches(value, keys, predicate)
-        }),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| nested_string_matches(value, keys, predicate)),
-        _ => false,
-    }
-}
-
-pub(super) fn is_plan_permission(request: &RequestPermissionRequest) -> bool {
-    let Ok(value) = serde_json::to_value(request) else {
-        return false;
-    };
-    // Claude Code's ExitPlanMode approval arrives as a `switch_mode` tool call
-    // whose rawInput carries the plan text and a `planFilePath`; its title is
-    // "Ready to code?" and its options are generic permission-mode ids
-    // (`default`, `acceptEdits`, `plan`, ...). None of those match a title or
-    // option-id heuristic, so key on the tool kind and the plan payload.
-    nested_string_matches(&value, &["kind"], &|kind| {
-        kind == "plan_review" || kind == "switch_mode"
-    }) || nested_string(&value, &["planFilePath", "plan_file_path"]).is_some()
-        || nested_string_matches(&value, &["title", "name"], &|name| {
-            let normalized = name.to_ascii_lowercase().replace([' ', '_'], "");
-            normalized.contains("implementthisplan") || normalized.contains("exitplanmode")
-        })
-        || request.options.iter().any(|option| {
-            let id = option.option_id.to_string().to_ascii_lowercase();
-            id.contains("plan_approve")
-                || id.contains("implement_plan")
-                || id.contains("plan_revise")
-                || id.contains("reject_and_exit")
-        })
-}
-
-pub(super) fn permission_plan_response(
-    request: &RequestPermissionRequest,
-    response: ElicitationResponse,
-) -> RequestPermissionResponse {
-    let (action, _) = plan_review_answer(response);
-    let needles: &[&str] = match action.as_str() {
-        "implement" => &["implement_plan", "plan_approve", "default", "approve"],
-        "revise" => &["plan_revise", "revise"],
-        "exit" => &["reject_and_exit", "exit"],
-        _ => &[],
-    };
-    let selected = request
+fn permission_option<'a>(
+    request: &'a RequestPermissionRequest,
+    id: &str,
+) -> Option<&'a PermissionOption> {
+    request
         .options
         .iter()
-        .find(|option| {
-            let id = option.option_id.to_string().to_ascii_lowercase();
-            let name = option.name.to_ascii_lowercase();
-            needles
-                .iter()
-                .any(|needle| id.contains(needle) || name.contains(needle))
-        })
-        .or_else(|| {
-            // No harness-specific option id matched. Claude's "Ready to code?"
-            // exposes only generic kinds, so fall back by intent: implement
-            // takes an allow option; every decline (revise, keep_planning,
-            // exit) takes a reject option to stay in plan mode rather than
-            // cancelling the turn.
-            if action == "implement" {
-                // Prefer the least-privileged approval so an unmatched harness
-                // never silently escalates to a bypass-permissions option.
-                request
-                    .options
-                    .iter()
-                    .find(|option| option.kind == PermissionOptionKind::AllowOnce)
-                    .or_else(|| {
-                        request
-                            .options
-                            .iter()
-                            .find(|option| option.kind == PermissionOptionKind::AllowAlways)
-                    })
-            } else {
-                request
-                    .options
-                    .iter()
-                    .find(|option| option.kind == PermissionOptionKind::RejectOnce)
-                    .or_else(|| {
-                        request
-                            .options
-                            .iter()
-                            .find(|option| option.kind == PermissionOptionKind::RejectAlways)
-                    })
-            }
-        });
-    selected.map_or_else(
-        || RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
-        |option| {
-            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
-                SelectedPermissionOutcome::new(option.option_id.clone()),
+        .find(|option| option.option_id.0.as_ref() == id)
+}
+
+fn select_plan_option(option: Option<&PermissionOption>) -> RequestPermissionResponse {
+    RequestPermissionResponse::new(
+        option.map_or(RequestPermissionOutcome::Cancelled, |option| {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                option.option_id.clone(),
             ))
-        },
+        }),
     )
 }
 

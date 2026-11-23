@@ -413,6 +413,26 @@ pub fn start_worker_durably(
     worker_root: &str,
     github: &mj_core::config::GithubConfig,
 ) -> Result<()> {
+    start_worker_durably_with_aws_profile(
+        owner,
+        target,
+        executor,
+        locator,
+        worker_root,
+        github,
+        None,
+    )
+}
+
+pub fn start_worker_durably_with_aws_profile(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    target: &mj_core::state::TargetLocator,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    github: &mj_core::config::GithubConfig,
+    staged_aws_profile: Option<Option<&str>>,
+) -> Result<()> {
     owner.verify_target(target)?;
     let id = owner.session_id();
     if let Some(intent) = crate::database::load_worker_restart(id)?
@@ -448,6 +468,9 @@ pub fn start_worker_durably(
             == Some(crate::database::WorkerRestartPhase::Swapping),
         "worker replacement has already launched"
     );
+    if let Some(profile) = staged_aws_profile {
+        crate::database::record_worker_restart_aws_profile(id, owner.operation_id(), profile)?;
+    }
     start_worker(owner, executor, locator, worker_root, github)?;
     crate::database::advance_worker_restart(
         id,
@@ -465,110 +488,42 @@ pub fn start_worker_command(locator: &targets::TargetLocator, worker_root: &str)
         "hel_launch_log=$(mktemp {}/worker-launch.XXXXXXXX) || exit $?; ",
         targets::posix_quote(worker_root),
     );
-    let detached_script = format!(
-        "{attempt_log}nohup {} >\"$hel_launch_log\" 2>&1 </dev/null &",
-        targets::join_remote_command(&[
-            binary.clone(),
-            "worker".into(),
-            "run".into(),
-            "--root".into(),
-            worker_root.into(),
-            "--config".into(),
-            config.clone(),
-        ]),
-    );
-    // Even a loader failure is retained in the attempt-specific log.
-    let exec_script = format!(
-        "{attempt_log}exec {} >\"$hel_launch_log\" 2>&1",
-        targets::join_remote_command(&[
-            binary.clone(),
-            "worker".into(),
-            "run".into(),
-            "--root".into(),
-            worker_root.into(),
-            "--config".into(),
-            config.clone(),
-        ]),
-    );
-    match locator {
-        targets::TargetLocator::LocalBare { .. } => {
-            // The worker this launches outlives the launch, so completion must
-            // not signal the process group it inherited from this shell.
-            let mut spec = CommandSpec::new("sh", ["-c", &detached_script]);
-            spec.detaches = true;
-            spec
-        }
-        targets::TargetLocator::LocalPodman { container_id, .. } => CommandSpec::new(
-            "podman",
-            ["exec", "--detach", container_id, "sh", "-c", &exec_script],
-        ),
-        targets::TargetLocator::LocalDocker { container_id, .. } => CommandSpec::new(
-            "docker",
-            ["exec", "--detach", container_id, "sh", "-c", &exec_script],
-        ),
-        targets::TargetLocator::AppleContainer { container_id, .. } => CommandSpec::new(
-            "container",
-            ["exec", "--detach", container_id, "sh", "-c", &exec_script],
-        ),
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => crate::targets::ssh_command(
+    let worker = targets::join_remote_command(&[
+        binary,
+        "worker".into(),
+        "run".into(),
+        "--root".into(),
+        worker_root.into(),
+        "--config".into(),
+        config,
+    ]);
+    if let Some(endpoint) = locator.container_endpoint() {
+        // Even a loader failure is retained in the attempt-specific log.
+        let script = format!("{attempt_log}exec {worker} >\"$hel_launch_log\" 2>&1");
+        endpoint.host_command(
             SshTrafficClass::Control,
-            ssh,
-            ["sh", "-c", &detached_script],
-        ),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => crate::targets::ssh_command(
+            targets::engine_command(
+                endpoint.engine,
+                [
+                    "exec",
+                    "--detach",
+                    endpoint.container_id,
+                    "sh",
+                    "-c",
+                    &script,
+                ],
+            ),
+        )
+    } else {
+        let script = format!("{attempt_log}nohup {worker} >\"$hel_launch_log\" 2>&1 </dev/null &");
+        let mut spec = targets::locator_command(
             SshTrafficClass::Control,
-            ssh,
-            [
-                "podman",
-                "exec",
-                "--detach",
-                container_id,
-                "sh",
-                "-c",
-                &exec_script,
-            ],
-        ),
-        targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        } => crate::targets::ssh_command(
-            SshTrafficClass::Control,
-            ssh,
-            [
-                "docker",
-                "exec",
-                "--detach",
-                container_id,
-                "sh",
-                "-c",
-                &exec_script,
-            ],
-        ),
-        targets::TargetLocator::SshAppleContainer {
-            ssh, container_id, ..
-        } => crate::targets::ssh_command(
-            SshTrafficClass::Control,
-            ssh,
-            [
-                "container",
-                "exec",
-                "--detach",
-                container_id,
-                "sh",
-                "-c",
-                &exec_script,
-            ],
-        ),
-        targets::TargetLocator::SshNitro {
-            ssh, container_id, ..
-        } => crate::targets::ssh_engine_command(
-            SshTrafficClass::Control,
-            ssh,
-            targets::MICROVM_ENGINE,
-            ["exec", "--detach", container_id, "sh", "-c", &exec_script],
-        ),
+            locator,
+            vec!["sh".into(), "-c".into(), script],
+        );
+        // A local worker outlives the launch shell and inherits its process group.
+        spec.detaches = matches!(locator, targets::TargetLocator::LocalBare { .. });
+        spec
     }
     .purpose("start detached Mjolnir worker")
     // Everything before this moves data into the target and reports as Sync.

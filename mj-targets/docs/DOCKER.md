@@ -43,10 +43,12 @@ Docker on the controller machine.
 Before launch, Mjolnir runs:
 
 ```console
-docker version --format '{{.Server.Version}} {{.Server.Os}}'
+docker info --format '{{json .}}'
 ```
 
 The command must succeed and report `linux` as the server operating system.
+When rootless Docker reports it cannot enforce a requested CPU or memory
+limit, Mjolnir drops that limit and shows how to configure cgroup delegation.
 For each session Mjolnir starts one detached, labeled container, uses `docker exec`
 and `docker cp` for the worker and its files, and removes that exact container
 only after checkpointing succeeds.

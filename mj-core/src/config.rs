@@ -2271,6 +2271,7 @@ impl Config {
     #[allow(clippy::vec_init_then_push)]
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
+            memory_hard_limit: None,
             build_cache: None,
             image: DEFAULT_SESSION_IMAGE.into(),
             pull_policy: Default::default(),
@@ -2284,6 +2285,7 @@ impl Config {
         if crate::targets::HOST_RUNS_WORKERS {
             defaults.push(("localhost", TargetTemplate::LocalBare));
         }
+        #[cfg(not(target_os = "macos"))]
         defaults.push((
             "podman",
             TargetTemplate::LocalPodman {
@@ -2362,7 +2364,7 @@ impl Config {
                 path.display()
             );
         }
-        reject_removed_profile_overrides(&contents)?;
+        reject_removed_profile_overrides(&document)?;
         if loading::has_legacy_subagent_yolo_choices(&document) {
             static WARNED_YOLO_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
             let warned = WARNED_YOLO_PATHS.get_or_init(|| Mutex::new(HashSet::new()));
@@ -2424,7 +2426,13 @@ impl Config {
                 }
             })
         })
-        .map_err(|error| loading::config_toml_error(path, &contents, error))?;
+        .map_err(|error| {
+            loading::config_schema_error(
+                path,
+                removed.is_empty().then_some(contents.as_str()),
+                error,
+            )
+        })?;
         unread.extend(unread_build_cache_keys(&document));
         refuse_unread_keys(path, &unread)?;
         config.validate()?;

@@ -1,11 +1,34 @@
 use super::*;
 
-/// A unified diff of everything the session changed.
+/// Summarize session changes or return a patch for the requested paths.
 pub(super) async fn diff(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-    Query(options): Query<DiffOptions>,
+    Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Response, ApiFailure> {
+    // Scalar options may appear once. A path is accumulated for every
+    // occurrence, including empty values so the worker can refuse them.
+    let mut options = DiffOptions::default();
+    let mut json = None;
+    for (key, value) in query {
+        match key.as_str() {
+            "base" if options.base.is_none() => options.base = Some(value),
+            "json" if json.is_none() => {
+                json = Some(
+                    value
+                        .parse()
+                        .map_err(|_| ApiFailure::bad_request("json must be true or false"))?,
+                );
+            }
+            "path" => options.paths.push(value),
+            _ => {
+                return Err(ApiFailure::bad_request(format!(
+                    "unknown or repeated diff option {key:?}"
+                )));
+            }
+        }
+    }
+    options.json = json.unwrap_or_default();
     let backend = backend(&state)?.clone();
     let json = options.json;
     let diff = backend.diff(session_id, options).await?;
@@ -457,7 +480,15 @@ pub(super) async fn export(
     let backend = backend(&state)?.clone();
     match request.kind {
         ExportKind::Patch => {
-            let diff = backend.diff(session_id, DiffOptions::default()).await?;
+            let diff = backend
+                .diff(
+                    session_id,
+                    DiffOptions {
+                        full_patch: true,
+                        ..DiffOptions::default()
+                    },
+                )
+                .await?;
             Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
         }
         ExportKind::Branch => {

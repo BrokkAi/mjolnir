@@ -69,6 +69,9 @@ impl CorpusRow {
             // record whether the history preceding the retained ones is complete.
             user_instructions_omitted: true,
             project_instructions,
+            trusted_user_inputs: Vec::new(),
+            prior_reviews: Vec::new(),
+            retry_reason: None,
             transcript: self.recent_transcript,
         })
     }

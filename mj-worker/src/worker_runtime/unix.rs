@@ -1426,6 +1426,25 @@ mod history_tests {
             user_instructions: vec![],
             user_instructions_omitted: false,
             project_instructions: None,
+            trusted_user_inputs: vec![mj_core::guardian::TrustedUserInput {
+                id: "ask".into(),
+                kind: mj_core::guardian::TrustedUserInputKind::UserAnswer,
+                title: None,
+                prompt: "Proceed?".into(),
+                action: "accept".into(),
+                answers: Vec::new(),
+                legacy_reply: Some("Yes".into()),
+            }],
+            prior_reviews: vec![mj_core::guardian::PriorGuardianReview {
+                review_id: None,
+                tool: "shell".into(),
+                action_summary: "make deploy".into(),
+                outcome: mj_core::guardian::Outcome::Allow,
+                risk_level: None,
+                user_authorization: None,
+                rationale: None,
+            }],
+            retry_reason: Some("New reply".into()),
             transcript: String::new(),
         };
         let pending = || {
@@ -1457,6 +1476,9 @@ mod history_tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].action, request.action);
         let request_id = requests[0].request_id.clone();
+        assert_eq!(requests[0].trusted_user_inputs, request.trusted_user_inputs);
+        assert_eq!(requests[0].prior_reviews, request.prior_reviews);
+        assert_eq!(requests[0].retry_reason, request.retry_reason);
         drop(connection);
         server.await.unwrap().unwrap();
         assert!(!first.is_finished());
@@ -3760,7 +3782,9 @@ pub(super) async fn serve_client_with_shared_credentials(
             }
             let guardian_payload = match &envelope.request {
                 RelayRequest::GuardianRequests => Some(RelayResponsePayload::GuardianRequests {
-                    requests: relay.guardian.requests(),
+                    requests: relay.guardian.requests().iter()
+                        .map(|request| request.for_protocol(envelope.protocol_version))
+                        .collect(),
                 }),
                 RelayRequest::CompleteGuardianRequest { result } => {
                     relay.guardian.complete(result.clone());
@@ -4703,7 +4727,6 @@ mod preparation_tests {
         let root = temp.path().to_path_buf();
         let (status, _preparation) = watch::channel(PreparationSnapshot::default());
         let cancellation = CancellationToken::new();
-        let step_root = root.clone();
         let step_status = status.clone();
         let step_cancellation = cancellation.clone();
         let (release_blocking_tx, release_blocking_rx) = std::sync::mpsc::channel::<()>();
@@ -4711,14 +4734,18 @@ mod preparation_tests {
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             supervise_preparation::<()>(&root, &status, &cancellation, async move {
-                let budget = preparation_step(
-                    &step_root,
-                    &step_status,
-                    "acp-setup",
-                    Duration::from_millis(200),
-                    &step_cancellation,
-                )
-                .await?;
+                // Set the step snapshot and budget directly without running
+                // `preparation_step`'s startup-breadcrumb disk write inside the
+                // 200ms budget, so heavy parallel load cannot expire the step
+                // before the blocked closure is spawned.
+                let budget = PreparationStepBudget::new("acp-setup", Duration::from_millis(200));
+                step_status.send_modify(|snapshot| {
+                    snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
+                        step: "acp-setup".to_owned(),
+                        since_ms: chrono::Utc::now().timestamp_millis(),
+                    });
+                    snapshot.step_deadline = Some(budget.deadline);
+                });
                 bounded_blocking_preparation_step(&budget, &step_cancellation, move |_| {
                     let _ = release_blocking_rx.recv();
                     let _ = blocking_finished_tx.send(());

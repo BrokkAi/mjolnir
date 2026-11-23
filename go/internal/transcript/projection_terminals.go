@@ -199,7 +199,7 @@ func replaceOrPushTerminalRecord(records *[]core.TerminalOutputRecord, record co
 }
 
 func fallbackTerminalToolItemID(terminalID string) string {
-	return "tool:" + core.FallbackTerminalToolCallID(terminalID)
+	return ToolItemID(core.FallbackTerminalToolCallID(terminalID))
 }
 
 func fallbackToolItem(item *core.TranscriptItem) (bool, error) {
@@ -260,7 +260,7 @@ func fallbackTerminalAlreadyClaimed(index *ProjectionIndex, call *schema.ToolCal
 		return false, err
 	}
 	for _, terminalID := range toolCallTerminalIDs(value) {
-		for _, item := range index.terminalReferrers(terminalID) {
+		for _, item := range index.TerminalReferrers(terminalID) {
 			body, ok := item.Body.(core.TranscriptBodyTool)
 			if ok && body.Call.TypedValid() && !body.Call.IsFallback() {
 				return true, nil
@@ -445,6 +445,8 @@ func canonicalTerminalOutput(record *core.TerminalOutputRecord) core.CanonicalTe
 	}
 }
 
+// materializedTerminalOutput is Rust's `record.into()`, mj-core's
+// From<&CanonicalTerminalOutput> for TerminalOutputRecord.
 func materializedTerminalOutput(record *core.CanonicalTerminalOutput) core.TerminalOutputRecord {
 	return core.TerminalOutputRecord{
 		TerminalID: record.TerminalID,

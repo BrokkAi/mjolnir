@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 // proxyInitialInputTimeout is how long the relay proxy waits for its
@@ -76,7 +77,7 @@ func readBoundedLine(reader *bufio.Reader, maximumBytes int) (string, bool, erro
 	default:
 		return "", false, nil
 	}
-	text, err := captureFromUTF8(line)
+	text, err := fromUTF8(line)
 	if err != nil {
 		return "", false, fmt.Errorf("relay request is not UTF-8: %w", err)
 	}
@@ -295,20 +296,20 @@ const (
 
 func runACPSupervisorWithStreams(ctx context.Context, spec AcpSupervisorSpec, parentStdin io.Reader, parentStdout io.Writer) error {
 	if spec.HarnessLease != nil {
-		lease, err := core.AcquireSupervisorLease(*spec.HarnessLease)
+		lease, err := harnessinstall.AcquireSupervisorLease(*spec.HarnessLease)
 		if err != nil {
 			return err
 		}
 		defer lease.Drop()
 	}
 	if spec.NodeLease != nil {
-		lease, err := core.AcquireSupervisorLease(*spec.NodeLease)
+		lease, err := harnessinstall.AcquireSupervisorLease(*spec.NodeLease)
 		if err != nil {
 			return err
 		}
 		defer lease.Drop()
 	}
-	environment, err := core.WithOverrides(ctx, spec.Environment)
+	environment, err := harnessinstall.WithOverrides(ctx, spec.Environment)
 	if err != nil {
 		return err
 	}
@@ -339,7 +340,7 @@ func runACPSupervisorWithStreams(ctx context.Context, spec AcpSupervisorSpec, pa
 		return fmt.Errorf("launch supervised ACP bridge %s: %w", spec.Command, err)
 	}
 	command.Stdin, command.Stdout = stdinRead, stdoutWrite
-	err = command.Start()
+	err = core.SpawnChild(command)
 	_ = stdinRead.Close()
 	_ = stdoutWrite.Close()
 	if err != nil {

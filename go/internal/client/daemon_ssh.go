@@ -35,7 +35,9 @@ const (
 // Discover discovers process-private remote credentials. No client-side
 // daemon or store is consulted. Cancelling ctx cancels the SSH process
 // group.
-func Discover(ctx context.Context, placement core.DaemonConfig, remoteInstance string, intent DiscoveryIntent) (DaemonEndpoint, error) {
+//
+// remoteInstance nil runs the remote's unnamed instance (no `--instance`).
+func Discover(ctx context.Context, placement core.DaemonConfig, remoteInstance *string, intent DiscoveryIntent) (DaemonEndpoint, error) {
 	if placement.Host == nil {
 		return DaemonEndpoint{}, errors.New("[daemon] host is required for SSH placement")
 	}
@@ -43,14 +45,11 @@ func Discover(ctx context.Context, placement core.DaemonConfig, remoteInstance s
 	if strings.HasPrefix(host, "-") {
 		return DaemonEndpoint{}, errors.New("[daemon] host cannot be an SSH option")
 	}
-	args := []string{
-		placement.RemoteCommandOrDefault(),
-		"--instance",
-		remoteInstance,
-		"daemon",
-		"endpoint",
-		"--json",
+	args := []string{placement.RemoteCommandOrDefault()}
+	if remoteInstance != nil {
+		args = append(args, "--instance", *remoteInstance)
 	}
+	args = append(args, "daemon", "endpoint", "--json")
 	if intent == DiscoveryIntentExisting {
 		args = append(args, "--existing")
 	}
@@ -162,7 +161,7 @@ func (l *SshLease) Close() {
 func Open(
 	ctx context.Context,
 	placement core.DaemonConfig,
-	remoteInstance string,
+	remoteInstance *string,
 	intent DiscoveryIntent,
 	cancel <-chan struct{},
 ) (*SshLease, error) {
@@ -217,7 +216,7 @@ func selectPort() (uint16, error) {
 func openWithPort(
 	ctx context.Context,
 	placement core.DaemonConfig,
-	remoteInstance string,
+	remoteInstance *string,
 	intent DiscoveryIntent,
 	port func() (uint16, error),
 ) (*SshLease, error) {
@@ -306,7 +305,7 @@ func openWithPort(
 func sshTunnelReady(
 	ctx context.Context,
 	placement core.DaemonConfig,
-	remoteInstance string,
+	remoteInstance *string,
 	intent DiscoveryIntent,
 	lease *SshLease,
 ) (fresh *DaemonEndpoint, exited *os.ProcessState, err error) {
@@ -350,7 +349,7 @@ func sshTunnelReady(
 func sshProbeUntilReady(
 	ctx context.Context,
 	placement core.DaemonConfig,
-	remoteInstance string,
+	remoteInstance *string,
 	intent DiscoveryIntent,
 	lease *SshLease,
 ) (*DaemonEndpoint, error) {

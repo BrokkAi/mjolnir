@@ -6,11 +6,9 @@ package client
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -117,15 +115,25 @@ type ReviewerActionSetReviewBase struct {
 	Commit string  `json:"commit"`
 }
 
-func (ReviewerActionCaptureDelta) isReviewerAction()     {}
-func (ReviewerActionRecordReviewed) isReviewerAction()   {}
-func (ReviewerActionRecordOverridden) isReviewerAction() {}
-func (ReviewerActionSetReviewBase) isReviewerAction()    {}
+// ReviewerActionResolveRepositories names the repository roots Paths select,
+// changing nothing.
+type ReviewerActionResolveRepositories struct {
+	Paths []string `json:"paths"`
+}
+
+func (ReviewerActionCaptureDelta) isReviewerAction()        {}
+func (ReviewerActionRecordReviewed) isReviewerAction()      {}
+func (ReviewerActionRecordOverridden) isReviewerAction()    {}
+func (ReviewerActionSetReviewBase) isReviewerAction()       {}
+func (ReviewerActionResolveRepositories) isReviewerAction() {}
 
 func (ReviewerActionCaptureDelta) OperationName() string     { return "reviewer_capture_delta" }
 func (ReviewerActionRecordReviewed) OperationName() string   { return "reviewer_record_reviewed" }
 func (ReviewerActionRecordOverridden) OperationName() string { return "reviewer_record_overridden" }
 func (ReviewerActionSetReviewBase) OperationName() string    { return "reviewer_set_review_base" }
+func (ReviewerActionResolveRepositories) OperationName() string {
+	return "reviewer_resolve_repositories"
+}
 
 func (v ReviewerActionCaptureDelta) MarshalJSON() ([]byte, error) {
 	type plain ReviewerActionCaptureDelta
@@ -147,6 +155,11 @@ func (v ReviewerActionSetReviewBase) MarshalJSON() ([]byte, error) {
 	return sessionExternalStruct("set_review_base", plain(v))
 }
 
+func (v ReviewerActionResolveRepositories) MarshalJSON() ([]byte, error) {
+	type plain ReviewerActionResolveRepositories
+	return sessionExternalStruct("resolve_repositories", plain(v))
+}
+
 // UnmarshalReviewerActionJSON decodes serde's externally tagged form.
 func UnmarshalReviewerActionJSON(data []byte) (ReviewerAction, error) {
 	name, body, err := daemonSplitExternal(data)
@@ -162,8 +175,10 @@ func UnmarshalReviewerActionJSON(data []byte) (ReviewerAction, error) {
 		return sessionExternalVariant[ReviewerActionRecordOverridden, ReviewerAction](body)
 	case "set_review_base":
 		return sessionExternalVariant[ReviewerActionSetReviewBase, ReviewerAction](body)
+	case "resolve_repositories":
+		return sessionExternalVariant[ReviewerActionResolveRepositories, ReviewerAction](body)
 	}
-	return nil, daemonUnknownVariant(name, []string{"capture_delta", "record_reviewed", "record_overridden", "set_review_base"})
+	return nil, daemonUnknownVariant(name, []string{"capture_delta", "record_reviewed", "record_overridden", "set_review_base", "resolve_repositories"})
 }
 
 // ReviewerOutcome is a reviewer operation's result. Externally tagged in
@@ -185,9 +200,14 @@ type ReviewerOutcomeReviewBaseSet struct {
 	Changed bool   `json:"changed"`
 }
 
+type ReviewerOutcomeRepositories struct {
+	Roots []string `json:"roots"`
+}
+
 func (ReviewerOutcomeDelta) isReviewerOutcome()            {}
 func (ReviewerOutcomeBaselineAdvanced) isReviewerOutcome() {}
 func (ReviewerOutcomeReviewBaseSet) isReviewerOutcome()    {}
+func (ReviewerOutcomeRepositories) isReviewerOutcome()     {}
 
 func (v ReviewerOutcomeDelta) MarshalJSON() ([]byte, error) {
 	type plain ReviewerOutcomeDelta
@@ -203,6 +223,11 @@ func (v ReviewerOutcomeReviewBaseSet) MarshalJSON() ([]byte, error) {
 	return sessionExternalStruct("review_base_set", plain(v))
 }
 
+func (v ReviewerOutcomeRepositories) MarshalJSON() ([]byte, error) {
+	type plain ReviewerOutcomeRepositories
+	return sessionExternalStruct("repositories", plain(v))
+}
+
 // UnmarshalReviewerOutcomeJSON decodes serde's externally tagged form.
 func UnmarshalReviewerOutcomeJSON(data []byte) (ReviewerOutcome, error) {
 	name, body, err := daemonSplitExternal(data)
@@ -216,8 +241,10 @@ func UnmarshalReviewerOutcomeJSON(data []byte) (ReviewerOutcome, error) {
 		return ReviewerOutcomeBaselineAdvanced{}, nil
 	case "review_base_set":
 		return sessionExternalVariant[ReviewerOutcomeReviewBaseSet, ReviewerOutcome](body)
+	case "repositories":
+		return sessionExternalVariant[ReviewerOutcomeRepositories, ReviewerOutcome](body)
 	}
-	return nil, daemonUnknownVariant(name, []string{"delta", "baseline_advanced", "review_base_set"})
+	return nil, daemonUnknownVariant(name, []string{"delta", "baseline_advanced", "review_base_set", "repositories"})
 }
 
 // sessionExternalStruct writes an externally tagged struct variant;
@@ -304,6 +331,9 @@ func (p PendingRelaySync) Wait(ctx context.Context) error {
 // methods are the optional interfaces TranscriptHistoryBackend and
 // GithubTokenBackend; a backend without them gets Rust's defaults.
 type SessionHandleBackend interface {
+	// ToolCallDetail reloads a stored tool row's full detail; nil when the
+	// session has no such row.
+	ToolCallDetail(ctx context.Context, stableID string) (core.ToolCallDetailResult, error)
 	// SearchPrompts is one page of prompts matching query, resuming from
 	// after.
 	SearchPrompts(
@@ -355,6 +385,10 @@ type SessionHandle struct {
 
 func NewSessionHandle(backend SessionHandleBackend) SessionHandle {
 	return SessionHandle{backend: backend}
+}
+
+func (h SessionHandle) ToolCallDetail(ctx context.Context, stableID string) (core.ToolCallDetailResult, error) {
+	return h.backend.ToolCallDetail(ctx, stableID)
 }
 
 func (h SessionHandle) TranscriptHistory(ctx context.Context, before *core.TranscriptCursor) (core.TranscriptHistoryPage, error) {
@@ -658,17 +692,8 @@ func (c SessionControl) WaitForSession(ctx context.Context, sessionID string, ti
 func (c SessionControl) GoString() string { return "SessionControl(..)" }
 
 // NewCommandID is a fresh command id: prefix, a dash, and 32 random hex
-// digits.
-func NewCommandID(prefix string) (string, error) {
-	if strings.TrimSpace(prefix) == "" {
-		return "", errors.New("command ID prefix is required")
-	}
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate command ID: %w", err)
-	}
-	return prefix + "-" + core.LowerHex(random), nil
-}
+// digits. Rust re-exports mj_core::relay::new_command_id here.
+func NewCommandID(prefix string) (string, error) { return core.NewCommandID(prefix) }
 
 // ReplacementSessionTestFixture is a stopped session and a manager that
 // resolves its live replacement.
@@ -697,6 +722,10 @@ type replacementTestSession struct {
 	seen <-chan struct{}
 	// viewClosed: the view's sender is gone (the session manager stopped).
 	viewClosed bool
+}
+
+func (s *replacementTestSession) ToolCallDetail(ctx context.Context, stableID string) (core.ToolCallDetailResult, error) {
+	return nil, nil
 }
 
 func (s *replacementTestSession) SearchPrompts(

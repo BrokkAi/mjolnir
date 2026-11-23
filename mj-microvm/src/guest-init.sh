@@ -21,10 +21,7 @@ done
 log "booting name=$sbx_name ip=$sbx_ip gw=$sbx_gw"
 
 # Everything nested containers and nftables need; failures are logged, not fatal.
-for m in virtio_pci virtio_blk virtio_net ext4 vmw_vsock_virtio_transport nsm \
-         overlay fuse tun veth bridge br_netfilter nf_tables nft_ct nft_nat nft_masq nft_chain_nat nft_compat \
-         nf_conntrack nf_nat nft_reject_inet nft_reject nf_reject_ipv4 xt_MASQUERADE xt_conntrack xt_addrtype \
-         xt_comment xt_mark xt_nat iptable_nat; do
+for m in @GUEST_DRIVERS@; do
   modprobe $m 2>/dev/null || log "modprobe $m failed"
 done
 
@@ -88,8 +85,19 @@ echo "$sbx_name" > /newroot/etc/hostname; hostname "$sbx_name"
 printf '127.0.0.1 localhost\n%s %s\n::1 localhost\n' "${sbx_ip%/*}" "$sbx_name" > /newroot/etc/hosts
 printf 'nameserver %s\n' "${sbx_dns:-169.254.169.253}" > /newroot/etc/resolv.conf
 
-mkdir -p /sys/fs/cgroup && mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || log "cgroup2 mount failed"
+[ -e /newroot/var/run ] || [ -L /newroot/var/run ] || (mkdir -p /newroot/var && ln -s /run /newroot/var/run)
+
+if mkdir -p /sys/fs/cgroup && mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null; then
+  # Put the guest agent and its children in a separate cgroup. Docker creates
+  # container cgroups under the root and needs the CPU and memory controllers.
+  mkdir -p /sys/fs/cgroup/init && echo 0 > /sys/fs/cgroup/init/cgroup.procs || log "could not move init into its cgroup"
+  for c in $(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null); do
+    echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control || log "could not enable cgroup controller $c"
+  done
+else
+  log "cgroup2 mount failed"
+fi
 echo 4 > /proc/sys/kernel/printk 2>/dev/null   # console: errors and worse
-mount --make-rshared /newroot          # rootless Podman warns when / is not a shared mount
+mount --make-rshared /newroot
 log "switch_root"
 exec switch_root /newroot /.mj-microvm/mj-worker microvm guest-agent

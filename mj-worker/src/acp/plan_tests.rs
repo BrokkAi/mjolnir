@@ -4,27 +4,49 @@ use tokio::io::{
     AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
 };
 
-fn implement() -> ElicitationResponse {
+fn plan_action(action: &str) -> ElicitationResponse {
     ElicitationResponse::Accept {
         content: BTreeMap::from([(
             PLAN_REVIEW_ACTION.into(),
-            ElicitationValue::String("implement".into()),
+            ElicitationValue::String(action.into()),
         )]),
     }
 }
 
+fn implement() -> ElicitationResponse {
+    plan_action("implement")
+}
+
+fn bridge_plan_request(harness: HarnessKind) -> Option<(Value, &'static str)> {
+    // Claude v0.108.0: src/tests/acp-scenarios/__snapshots__/air/exit-plan-approve.jsonl
+    // Codex v1.15.0: src/__tests__/scenarios/data/air/plan-review-permission.jsonl
+    let (fixture, reject) = match harness {
+        HarnessKind::Claude => (
+            include_str!("testdata/plan-permissions/claude-0.108.0-air.json"),
+            "reject",
+        ),
+        HarnessKind::Codex => (
+            include_str!("testdata/plan-permissions/codex-1.15.0-air.json"),
+            "revise_plan",
+        ),
+        _ => return None,
+    };
+    let mut params: Value = serde_json::from_str(fixture).unwrap();
+    params["sessionId"] = json!("plan-session");
+    Some((params, reject))
+}
+
 fn permission(plan: &str, options: &[&str]) -> Value {
-    json!({
-        "sessionId": "plan-session",
-        "toolCall": {
-            "toolCallId": "plan-tool", "kind": "switch_mode", "title": "Ready to code?",
-            "rawInput": {"plan": plan, "planFilePath": "/workspace/plan.md"}
-        },
-        "options": options.iter().map(|id| json!({
-            "optionId": id, "name": id,
-            "kind": if *id == "reject" {"reject_once"} else {"allow_always"}
-        })).collect::<Vec<_>>()
-    })
+    let (mut request, _) = bridge_plan_request(HarnessKind::Claude).unwrap();
+    request["toolCall"]["rawInput"]["plan"] = json!(plan);
+    let offered = request["options"].as_array().unwrap();
+    request["options"] = options.iter().map(|id| {
+        offered.iter().find(|option| option["optionId"] == *id).cloned().unwrap_or_else(|| {
+            assert_eq!(*id, "exit-plan-clear-bypass");
+            json!({"optionId": id, "name": "Yes, clear context and bypass permissions", "kind": "allow_always"})
+        })
+    }).collect::<Vec<_>>().into();
+    request
 }
 
 fn mode_config(current: &str) -> Value {
@@ -535,90 +557,6 @@ async fn a_refused_claude_plan_exit_reports_failure_without_continuing() {
         }
     }
     probe.no_message().await;
-}
-
-#[test]
-fn claude_plan_approval_selects_the_deployment_mode_without_clearing_context() {
-    for ids in [
-        ["auto", "bypassPermissions", "default"],
-        ["exit-plan-auto", "exit-plan-bypass", "exit-plan-default"],
-    ] {
-        for reverse in [false, true] {
-            let mut options = vec![
-                "exit-plan-clear-auto",
-                "exit-plan-clear-bypass",
-                ids[2],
-                ids[0],
-                ids[1],
-            ];
-            if reverse {
-                options.reverse();
-            }
-            let request = serde_json::from_value(permission("Approved plan", &options)).unwrap();
-            for (policy, expected) in [
-                (ExecutionPolicy::ConfiguredApprovals, ids[0]),
-                (ExecutionPolicy::Unconstrained, ids[1]),
-            ] {
-                let PlanPermissionAnswer::Native(answer) = policy_plan_permission_answer(
-                    &request,
-                    implement(),
-                    HarnessKind::Claude,
-                    HarnessKind::Claude.execution_enforcement(policy),
-                )
-                .unwrap() else {
-                    panic!("offered mode must be selected directly");
-                };
-                assert_eq!(
-                    serde_json::to_value(answer).unwrap()["outcome"]["optionId"],
-                    expected
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() {
-    let request = serde_json::from_value(permission(
-        "Plan",
-        &["exit-plan-clear-auto", "default", "acceptEdits", "reject"],
-    ))
-    .unwrap();
-    assert!(
-        policy_plan_permission_answer(
-            &request,
-            implement(),
-            HarnessKind::Claude,
-            HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
-        )
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("required auto")
-    );
-    assert!(matches!(
-        policy_plan_permission_answer(
-            &request,
-            implement(),
-            HarnessKind::Claude,
-            HarnessKind::Claude.execution_enforcement(ExecutionPolicy::Unconstrained)
-        )
-        .unwrap(),
-        PlanPermissionAnswer::ContinueInBypass
-    ));
-    let PlanPermissionAnswer::Native(answer) = policy_plan_permission_answer(
-        &request,
-        ElicitationResponse::Decline,
-        HarnessKind::Claude,
-        HarnessKind::Claude.execution_enforcement(ExecutionPolicy::Unconstrained),
-    )
-    .unwrap() else {
-        panic!("decline is native")
-    };
-    assert_eq!(
-        serde_json::to_value(answer).unwrap()["outcome"]["optionId"],
-        "reject"
-    );
 }
 
 /// A real ACP transport with the agent side controlled by the test. No fake
@@ -1338,27 +1276,45 @@ async fn dropping_bridge_connection_discards_a_pending_implementation() {
 }
 
 #[tokio::test]
-async fn guardian_without_auto_reports_failure_instead_of_selecting_manual_mode() {
+async fn guardian_without_auto_uses_a_permitted_manual_mode() {
     let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
-    let (prompt, _, answer) = probe
-        .approve(
-            "Plan",
-            &["exit-plan-default", "exit-plan-clear-auto", "reject"],
-        )
-        .await;
-    assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
-    loop {
-        if let RuntimeEvent::Warning { message } = probe.event().await
-            && message.contains("required auto")
-        {
-            break;
-        }
-    }
+    let params = permission(
+        "Plan",
+        &["exit-plan-default", "exit-plan-clear-auto", "reject"],
+    );
     probe
-        .result(&prompt, json!({"stopReason": "end_turn"}))
+        .send(json!({
+            "jsonrpc": "2.0", "id": "exit-plan-default", "method": "session/request_permission",
+            "params": params
+        }))
         .await;
-    probe.finished().await;
-    probe.no_message().await;
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = probe.event().await {
+            break request;
+        }
+    };
+    let ElicitationFieldKind::SingleSelect { options, .. } = &request.fields[0].kind else {
+        panic!("the permission approval is a select")
+    };
+    let selected = options[0].value.clone();
+    let (resolved, response) = oneshot::channel();
+    probe
+        .commands
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String(selected.clone()),
+                )]),
+            },
+            resolved,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let answer = probe.message().await;
+    assert_eq!(answer["result"]["outcome"]["optionId"], selected);
     probe.close().await;
 }
 
@@ -1625,34 +1581,63 @@ async fn unconstrained_native_child_tool_permissions_are_auto_approved() {
 }
 
 #[tokio::test]
-async fn unconstrained_plan_permissions_still_wait_for_approval_for_every_harness() {
-    for harness in HarnessKind::ALL {
-        let mut probe =
-            PlanProbe::with_harness(ExecutionPolicy::Unconstrained, false, harness).await;
-        probe
-            .send(json!({
-                "jsonrpc": "2.0", "id": "plan-ask", "method": "session/request_permission",
-                "params": permission("Implement the parser.", &["bypassPermissions", "reject"])
-            }))
-            .await;
-        let request = loop {
-            match probe.event().await {
-                RuntimeEvent::ElicitationRequested { request } => break request,
-                RuntimeEvent::Warning { message } => {
-                    panic!("plan approval must not warn: {message}")
+async fn pinned_plan_permissions_wait_for_consent_and_select_exact_bridge_options() {
+    for (harness, policy, approve) in [
+        (
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+            "exit-plan-auto",
+        ),
+        (
+            HarnessKind::Claude,
+            ExecutionPolicy::Unconstrained,
+            "exit-plan-bypass",
+        ),
+        (
+            HarnessKind::Codex,
+            ExecutionPolicy::Unconstrained,
+            "implement_plan",
+        ),
+    ] {
+        let (mut params, reject) = bridge_plan_request(harness).unwrap();
+        // Only rawInput.plan can supply the proposal, even with decoy plan text.
+        params["toolCall"]["rawInput"]["nested"] = json!({"planContent": "A different plan"});
+        params["_meta"]["plan"] = json!("Another plan");
+        let mut probe = PlanProbe::with_harness(policy, false, harness).await;
+        for (action, expected) in [
+            ("implement", approve),
+            ("revise", reject),
+            ("keep_planning", reject),
+            ("exit", reject),
+        ] {
+            probe
+                .send(json!({
+                    "jsonrpc": "2.0", "id": action, "method": "session/request_permission",
+                    "params": params
+                }))
+                .await;
+            let request = loop {
+                match probe.event().await {
+                    RuntimeEvent::ElicitationRequested { request } => break request,
+                    RuntimeEvent::Warning { message } => panic!("{harness:?}: {message}"),
+                    _ => {}
                 }
-                _ => {}
-            }
-        };
-        assert!(request.id.starts_with("plan-review-"));
-        probe.no_message().await;
-        probe
-            .answer_with(&request.id, ElicitationResponse::Decline)
-            .await
-            .unwrap();
-        let answer = probe.message().await;
-        assert_eq!(answer["id"], "plan-ask");
-        assert_eq!(answer["result"]["outcome"]["optionId"], "reject");
+            };
+            assert_eq!(
+                plan_review_proposal(&request),
+                params
+                    .pointer("/toolCall/rawInput/plan")
+                    .and_then(Value::as_str)
+            );
+            probe.no_message().await;
+            probe
+                .answer_with(&request.id, plan_action(action))
+                .await
+                .unwrap();
+            let answer = probe.message().await;
+            assert_eq!(answer["id"], action);
+            assert_eq!(answer["result"]["outcome"]["optionId"], expected);
+        }
         probe.close().await;
     }
 }
@@ -1708,7 +1693,11 @@ async fn a_non_plan_permission_request_is_answered_by_the_user() {
                 "sessionId": "plan-session",
                 "toolCall": {
                     "toolCallId": "fetch-1", "kind": "fetch",
-                    "title": "Fetch https://example.com/docs"
+                    "title": "Fetch https://example.com/docs",
+                    "rawInput": {"payload": [{
+                        "title": "exit plan mode", "name": "implement this plan",
+                        "planFilePath": "/workspace/plan.md", "optionId": "implement_plan"
+                    }]}
                 },
                 "options": [
                     {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
@@ -1856,6 +1845,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
             elicitation_id: old.id.clone(),
             action: "cancel".into(),
             reply: None,
+            answers: None,
         })
         .unwrap();
     assert_eq!(relay.operational_state().cancelling_prompt_id, None);
@@ -1871,6 +1861,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
             elicitation_id: new.id.clone(),
             action: "cancel".into(),
             reply: None,
+            answers: None,
         })
         .unwrap();
     assert_eq!(
@@ -2027,6 +2018,7 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
             elicitation_id,
             action,
             reply,
+            ..
         } = probe.event().await
             && elicitation_id == form.id
         {
@@ -2042,50 +2034,27 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     probe.close().await;
 }
 
-/// Claude's ExitPlanMode request exactly as claude-agent-acp 0.84.0 sends it
-/// to Mjolnir, an AIR client, when Claude wrote no plan file: the tool call has
-/// no kind and the input no plan, so it is not a plan review. The Guardian
-/// shape without a plan was captured from a live worker.log. The options are
-/// what `buildExitPlanModePermissionOptions` builds, stably sorted by kind
-/// (allow once, allow always, reject): the mode the session was in before
-/// Plan leads the elevated ones (Auto for Guardian, bypass for YOLO), and a
-/// plan text adds a clear-context option for that mode before them.
+/// Derive the planless and YOLO variants of the pinned AIR snapshot.
 fn bridge_exit_plan_request(policy: ExecutionPolicy, plan: bool) -> Value {
-    let mut options = vec![
-        json!({"optionId": "exit-plan-default", "name": "Yes, manually approve edits", "kind": "allow_once"}),
-    ];
-    if plan {
-        options.push(if policy.is_unconstrained() {
-            json!({"optionId": "exit-plan-clear-bypass", "name": "Yes, clear context (12% used) and bypass permissions", "kind": "allow_always"})
-        } else {
-            json!({"optionId": "exit-plan-clear-auto", "name": "Yes, clear context (12% used) and use auto mode", "kind": "allow_always"})
+    let (mut request, _) = bridge_plan_request(HarnessKind::Claude).unwrap();
+    let options = request["options"].as_array_mut().unwrap();
+    if !plan {
+        request["toolCall"]["rawInput"] = json!({"nested": {"plan": "A decoy plan"}});
+        request["options"].as_array_mut().unwrap().remove(1);
+    } else if policy.is_unconstrained() {
+        options[1] = json!({
+            "optionId": "exit-plan-clear-bypass",
+            "name": "Yes, clear context and bypass permissions", "kind": "allow_always"
         });
     }
-    let auto = json!({"optionId": "exit-plan-auto", "name": "Yes, and use auto mode", "kind": "allow_always"});
-    let bypass = json!({"optionId": "exit-plan-bypass", "name": "Yes, and bypass permissions", "kind": "allow_always"});
-    if policy.is_unconstrained() {
-        options.extend([bypass, auto]);
-    } else {
-        options.extend([auto, bypass]);
-    }
-    options.push(json!({"optionId": "reject", "name": "No, keep planning", "kind": "reject_once"}));
-    json!({
-        "sessionId": "plan-session",
-        "toolCall": {
-            "toolCallId": "toolu_exit_plan",
-            "title": "Approve Plan",
-            "rawInput": if plan {json!({"plan": "Add one line."})} else {json!({})}
-        },
-        "options": options,
-        "_meta": {"jetbrains": {"air": {"version": 1, "permission": {"version": 1, "title": "Ready to code?"}}}}
-    })
+    request
 }
 
 fn offered(request: &Value, policy: ExecutionPolicy) -> Vec<(String, String)> {
     let request: RequestPermissionRequest = serde_json::from_value(request.clone()).unwrap();
     permission_choices(
         &request,
-        HarnessKind::Claude,
+        PlanPermission::recognize(&request, HarnessKind::Claude),
         HarnessKind::Claude.execution_enforcement(policy),
     )
     .choices
@@ -2106,9 +2075,6 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
 fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_guardian() {
     let guardian = ExecutionPolicy::ConfiguredApprovals;
     let yolo = ExecutionPolicy::Unconstrained;
-    assert!(!is_plan_permission(
-        &serde_json::from_value(bridge_exit_plan_request(guardian, false)).unwrap()
-    ));
     // The policy owns the mode, so approving a plan offers only the policy's
     // own option, with and without clearing the context.
     assert_eq!(
@@ -2183,6 +2149,7 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
                 _ => {}
             }
         };
+        assert!(request.tool_permission.is_some());
         let ElicitationFieldKind::SingleSelect { options, .. } = &request.fields[0].kind else {
             panic!("the approval is a select")
         };
@@ -2228,6 +2195,72 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
     }
 }
 
+#[tokio::test]
+async fn claude_plan_without_auto_mode_uses_policy_filtered_permission_form() {
+    let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    let (mut params, _) = bridge_plan_request(HarnessKind::Claude).unwrap();
+    params["toolCall"]["rawInput"]["plan"] = json!("Ship the feature");
+    let available = params["options"].as_array().unwrap().clone();
+    params["options"] = [
+        json!({"optionId": "exit-plan-bypass", "name": "Yes, bypass permissions", "kind": "allow_always"}),
+        json!({"optionId": "exit-plan-accept-edits", "name": "Yes, accept edits", "kind": "allow_once"}),
+        json!({"optionId": "exit-plan-default", "name": "Yes, default mode", "kind": "allow_once"}),
+        available.iter().find(|option| option["optionId"] == "reject").unwrap().clone(),
+    ].into();
+    probe
+        .send(json!({
+            "jsonrpc": "2.0", "id": "exit-plan-lower-mode", "method": "session/request_permission",
+            "params": params
+        }))
+        .await;
+    let request = loop {
+        match probe.event().await {
+            RuntimeEvent::ElicitationRequested { request } => break request,
+            RuntimeEvent::Warning { message } => {
+                panic!("plan permission must not warn: {message}")
+            }
+            _ => {}
+        }
+    };
+    assert!(request.tool_permission.is_some());
+    assert!(!request.id.starts_with("plan-review-"));
+    let ElicitationFieldKind::SingleSelect { options, .. } = &request.fields[0].kind else {
+        panic!("the permission approval is a select")
+    };
+    let option_ids = options
+        .iter()
+        .map(|option| option.value.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        option_ids,
+        ["exit-plan-accept-edits", "exit-plan-default", "reject"]
+    );
+
+    let (resolved, response) = oneshot::channel();
+    probe
+        .commands
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String("exit-plan-accept-edits".into()),
+                )]),
+            },
+            resolved,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "exit-plan-lower-mode");
+    assert_eq!(
+        answer["result"]["outcome"]["optionId"],
+        "exit-plan-accept-edits"
+    );
+    probe.close().await;
+}
+
 /// Exercise the actual ACP callbacks, including the harness-specific plan
 /// envelopes, while keeping question ownership independent of harness kind.
 /// A parent agent answers questions with a message but cannot grant
@@ -2263,8 +2296,10 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
                     "options":[{"optionId":"allow", "name":"Allow once", "kind":"allow_once"}, {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
                 }
             });
-            let plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("The proposed plan", &["bypassPermissions", "reject"])});
-            let mut approvals = vec![plan, secret];
+            let mut approvals = vec![secret];
+            if let Some((params, _)) = bridge_plan_request(harness) {
+                approvals.push(json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":params}));
+            }
             if policy.is_unconstrained() {
                 probe.send(tool_ask).await;
                 let answer = probe.message().await;
@@ -2322,6 +2357,7 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
                         elicitation_id,
                         action,
                         reply,
+                        ..
                     } = probe.event().await
                     {
                         assert_eq!(elicitation_id, request.id);
@@ -2388,6 +2424,7 @@ impl PlanProbe {
                 elicitation_id,
                 action,
                 reply,
+                ..
             } => {
                 assert_eq!(elicitation_id, question.id);
                 assert_eq!(action, mj_core::elicitation::OPERATOR_AWAY_ACTION);
@@ -2461,6 +2498,7 @@ impl PlanProbe {
                 elicitation_id,
                 action,
                 reply,
+                ..
             } = self.event().await
             {
                 assert_eq!(elicitation_id, pending.id);
@@ -2549,12 +2587,16 @@ async fn operator_away_resolves_questions_already_pending_across_harnesses() {
             "options":[{"optionId":"allow", "name":"Allow once", "kind":"allow_once"},
                 {"optionId":"reject", "name":"Reject", "kind":"reject_once"}]
         }});
-        let plan = json!({"jsonrpc":"2.0", "id":"plan-pending", "method":"session/request_permission", "params":permission("Proposed plan", &["bypassPermissions", "reject"])});
         let mut asks = vec![
             (question.clone(), json!({"action":"decline"})),
-            (tool, rejected.clone()),
-            (plan, rejected),
+            (tool, rejected),
         ];
+        if let Some((params, reject)) = bridge_plan_request(harness) {
+            asks.push((
+                json!({"jsonrpc":"2.0", "id":"plan-pending", "method":"session/request_permission", "params":params}),
+                json!({"outcome":{"outcome":"selected", "optionId":reject}}),
+            ));
+        }
         if harness == HarnessKind::Grok {
             asks.push((
                 json!({"jsonrpc":"2.0", "id":"grok-plan-pending", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}),
@@ -2702,22 +2744,27 @@ async fn operator_away_refuses_once_then_exposes_repeats_across_acp_paths() {
             .away_repeat(question, json!({"action":"decline"}))
             .await;
 
-        let mut plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("Proposed plan", &["bypassPermissions", "reject"])});
-        if harness == HarnessKind::Grok {
-            let grok = json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"First draft"}});
+        if let Some((mut params, reject)) = bridge_plan_request(harness) {
+            if harness == HarnessKind::Claude {
+                // The first refusal must count even if Claude used a standard
+                // permission card and sends a plan review on its next attempt.
+                params = bridge_exit_plan_request(ExecutionPolicy::ConfiguredApprovals, false);
+            }
+            let mut plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":params});
+            let rejected = json!({"outcome":{"outcome":"selected", "optionId":reject}});
+            probe.away_refusal(plan.clone(), rejected.clone()).await;
+            plan["params"]["toolCall"]["rawInput"]["plan"] = json!("Entirely rewritten plan");
+            probe.away_repeat(plan, rejected).await;
+        } else if harness == HarnessKind::Grok {
+            let mut grok = json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"First draft"}});
             probe
                 .away_refusal(grok.clone(), json!({"outcome":"cancelled"}))
                 .await;
+            grok["params"]["plan"] = json!("Entirely rewritten plan");
             probe
                 .away_repeat(grok, json!({"outcome":"cancelled"}))
                 .await;
-            // Both plan transports share the same per-agent refusal memory.
-            probe.away_repeat(plan.clone(), rejected.clone()).await;
-        } else {
-            probe.away_refusal(plan.clone(), rejected.clone()).await;
         }
-        plan["params"]["toolCall"]["rawInput"]["plan"] = json!("Entirely rewritten plan");
-        probe.away_repeat(plan, rejected.clone()).await;
         probe.close().await;
     }
 }
@@ -2763,7 +2810,7 @@ async fn operator_away_native_children_have_independent_refusal_memory() {
         probe
             .away_repeat(question, json!({"action":"decline"}))
             .await;
-        let mut plan = permission("Inspect the repository", &["bypassPermissions", "reject"]);
+        let mut plan = permission("Inspect the repository", &["exit-plan-bypass", "reject"]);
         plan["sessionId"] = json!(agent);
         let ask = json!({"jsonrpc":"2.0", "id":format!("plan-{agent}"), "method":"session/request_permission", "params":plan});
         let rejected = json!({"outcome":{"outcome":"selected", "optionId":"reject"}});

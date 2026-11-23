@@ -20,6 +20,7 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/workerreview"
 )
 
 // reviewCapture answers a reviewer's capture requests against the primary
@@ -76,7 +77,7 @@ func (c *reviewCapture) run(ctx context.Context, request core.ReviewerRequest) (
 	case core.ReviewerRequestRecordReviewed:
 		for _, root := range slices.Sorted(maps.Keys(request.Trees)) {
 			tree, commit := request.Trees[root][0], request.Trees[root][1]
-			if err := RecordReviewBase(git, root, tree, commit); err != nil {
+			if err := workerreview.RecordReviewBase(git, root, tree, commit); err != nil {
 				return nil, err
 			}
 		}
@@ -91,6 +92,8 @@ func (c *reviewCapture) run(ctx context.Context, request core.ReviewerRequest) (
 		return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewBaselineAdvanced{}}, nil
 	case core.ReviewerRequestSetReviewBase:
 		return c.setReviewBase(ctx, request.Path, request.Commit)
+	case core.ReviewerRequestResolveRepositories:
+		return c.resolveRepositories(request.Paths)
 	}
 	return nil, fmt.Errorf("unknown reviewer request %T", request)
 }
@@ -108,7 +111,7 @@ func (c *reviewCapture) roots() []string {
 // primary session's relay.
 func (c *reviewCapture) captureDelta(ctx context.Context, requested *[]string) (core.RelayResponseBody, error) {
 	git := checkpoint.SystemGit{}
-	discovered := DiscoverRepositories(git, c.roots())
+	discovered := workerreview.DiscoverRepositories(git, c.roots())
 	repositories, origins := discovered, map[string]string{}
 	if requested != nil {
 		var err error
@@ -122,9 +125,9 @@ func (c *reviewCapture) captureDelta(ctx context.Context, requested *[]string) (
 		var start *string
 		var err error
 		if origin, ok := origins[root]; ok {
-			start, err = LinkedWorktreeStart(git, root, origin, c.SessionID)
+			start, err = workerreview.LinkedWorktreeStart(git, root, origin, c.SessionID)
 		} else {
-			start, err = ReviewStartHead(git, root, c.SessionID)
+			start, err = workerreview.ReviewStartHead(git, root, c.SessionID)
 		}
 		if err != nil {
 			return nil, err
@@ -132,7 +135,7 @@ func (c *reviewCapture) captureDelta(ctx context.Context, requested *[]string) (
 		if start == nil {
 			return nil, errors.New("the repository has no HEAD commit")
 		}
-		capture, err := CapturePushableCommits(git, root, *start)
+		capture, err := workerreview.CapturePushableCommits(git, root, *start)
 		if err != nil {
 			return nil, err
 		}
@@ -145,11 +148,23 @@ func (c *reviewCapture) captureDelta(ctx context.Context, requested *[]string) (
 	return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewDelta{Repositories: deltas}}, nil
 }
 
+// resolveRepositories names the repository root each path selects and
+// changes nothing: the resolution half of a scoped capture, without its
+// start ref or its diff.
+func (c *reviewCapture) resolveRepositories(paths []string) (core.RelayResponseBody, error) {
+	discovered := workerreview.DiscoverRepositories(checkpoint.SystemGit{}, c.roots())
+	roots, _, err := scopedRepositories(c.Cwd, discovered, paths)
+	if err != nil {
+		return nil, err
+	}
+	return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewRepositories{Roots: roots}}, nil
+}
+
 // setReviewBase makes a reviewed or overridden commit the base of the next
 // push review.
 func (c *reviewCapture) setReviewBase(ctx context.Context, path *string, commit string) (core.RelayResponseBody, error) {
 	git := checkpoint.SystemGit{}
-	discovered := DiscoverRepositories(git, c.roots())
+	discovered := workerreview.DiscoverRepositories(git, c.roots())
 	selected := c.Cwd
 	if path != nil {
 		selected = *path
@@ -162,19 +177,19 @@ func (c *reviewCapture) setReviewBase(ctx context.Context, path *string, commit 
 		return nil, errors.New("the path names no repository")
 	}
 	root := repositories[0]
-	laterCommit, laterTree, found, err := LaterReviewBase(git, root, commit)
+	laterCommit, laterTree, found, err := workerreview.LaterReviewBase(git, root, commit)
 	if err != nil {
 		return nil, err
 	}
 	if found {
-		if _, _, err := SetReviewBase(git, root, laterCommit); err != nil {
+		if _, _, err := workerreview.SetReviewBase(git, root, laterCommit); err != nil {
 			return nil, err
 		}
 		return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewBaseSet{
 			Root: root, Commit: laterCommit, Tree: laterTree, Changed: false,
 		}}, nil
 	}
-	setCommit, setTree, err := SetReviewBase(git, root, commit)
+	setCommit, setTree, err := workerreview.SetReviewBase(git, root, commit)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +204,7 @@ func (c *reviewCapture) setReviewBase(ctx context.Context, path *string, commit 
 func scopedRepositories(cwd string, discovered []string, paths []string) ([]string, map[string]string, error) {
 	git := checkpoint.SystemGit{}
 	common := func(root string) (string, error) {
-		output, err := checkedGit(git, root, []string{"rev-parse", "--path-format=absolute", "--git-common-dir"})
+		output, err := workerreview.CheckedGit(git, root, []string{"rev-parse", "--path-format=absolute", "--git-common-dir"})
 		if err != nil {
 			return "", err
 		}
@@ -223,9 +238,17 @@ func scopedRepositories(cwd string, discovered []string, paths []string) ([]stri
 		}
 		// Resolved as discovery resolves a root, so an override's recapture
 		// reports the same repository keys the verdict recorded.
-		root, ok := captureRepositoryRoot(git, directory)
+		root, ok := workerreview.RepositoryRoot(git, directory)
 		if !ok {
-			return nil, nil, fmt.Errorf("%s is not in a Git repository", path)
+			named := path
+			if path == "." {
+				named = "the working directory"
+			}
+			if len(discovered) == 0 {
+				return nil, nil, fmt.Errorf("%s is not in a Git repository", named)
+			}
+			return nil, nil, fmt.Errorf("%s is not in a Git repository; name one of the workspace repositories: %s",
+				named, strings.Join(discovered, ", "))
 		}
 		repository, err := common(root)
 		if err != nil {

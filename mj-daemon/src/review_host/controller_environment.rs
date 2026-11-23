@@ -5,6 +5,7 @@ use super::*;
 use mj_controller::database::TurnReviewState;
 use mj_controller::session_manager::ManagedSessionHandle;
 use mj_core::config::ReviewConfig;
+use mj_core::state::SessionState;
 
 /// The production environment: the controller as it is on disk right now.
 ///
@@ -123,6 +124,14 @@ impl ReviewEnvironment for ControllerEnvironment {
             .subagents
             .values()
             .filter(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
+            .filter(|child| {
+                // Older releases suspended finished reviewers. Keep their transcripts.
+                controller
+                    .state
+                    .sessions
+                    .get(&child.child_session_id)
+                    .is_none_or(|record| record.state != SessionState::Stopped)
+            })
             .map(|child| ReviewerChildRelation {
                 parent_session_id: child.parent_session_id.clone(),
                 request_key: child.kind.request_key(&child.request_key),
@@ -224,9 +233,11 @@ impl ReviewEnvironment for ControllerEnvironment {
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let runtime = self.runtime().await?;
-            // A child that is already gone is closed; retrying an unknown
-            // session would never end.
-            if runtime.session_record(child).is_none() {
+            // Cleanup is complete if the child is gone or was already suspended.
+            if runtime
+                .session_record(child)
+                .is_none_or(|record| record.state == SessionState::Stopped)
+            {
                 return Ok(());
             }
             // A reviewer's verdict lives in the review's own state, and its
@@ -365,4 +376,100 @@ pub(crate) fn validate_review_profile(
         return Err("this session is archived".to_owned());
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::daemon::tests::{
+        runtime_test_session, runtime_test_subagent, test_runtime_state_loading_the_store,
+    };
+    use std::time::Duration;
+
+    /// Review cleanup keeps the conversations left by suspend-only close while
+    /// removing newer finished reviewers and preserving their usage accounting.
+    // Hard-won: #1612: startup sweep destroyed pre-existing Stopped reviewer records
+    #[tokio::test]
+    async fn review_cleanup_preserves_stopped_reviewers_and_removes_other_finished_reviewers() {
+        const NAME: &str =
+            "review_cleanup_preserves_stopped_reviewers_and_removes_other_finished_reviewers";
+        const CHILD: &str = "MJ_TEST_REVIEW_CLEANUP";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let home = directory.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "review-cleanup-retention")
+            .isolated_store(directory.path())
+            .env(
+                mj_core::config::SESSION_INDEX_ENV,
+                directory.path().join("sessionwiki"),
+            )
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .run();
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let workspace = mj_controller::database::create_workspace("Reviewer destroy").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let parent_id = "0123456789abcdef0123456789abcdef";
+        let stopped_id = "33333333333333333333333333333333";
+        let reviewer_id = "44444444444444444444444444444444";
+        let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+        parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join(parent_id),
+        }));
+        mj_controller::database::save_session(&parent).unwrap();
+        for (id, state) in [
+            (stopped_id, SessionState::Stopped),
+            (reviewer_id, SessionState::Error),
+        ] {
+            let reviewer = runtime_test_session(id, &workspace.id, state);
+            let mut relation = runtime_test_subagent(id, parent_id);
+            relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+            relation.task_name = "review".into();
+            mj_controller::database::save_subagent_session(&reviewer, &relation).unwrap();
+        }
+
+        let state = test_runtime_state_loading_the_store();
+        let environment = ControllerEnvironment::default();
+        environment.runtime.set(Arc::downgrade(&state)).unwrap();
+        let candidates: Vec<_> = environment
+            .reviewer_children()
+            .unwrap()
+            .into_iter()
+            .map(|child| child.child_session_id)
+            .collect();
+        assert_eq!(candidates, [reviewer_id]);
+
+        // Even a close requested directly must preserve the historical reviewer.
+        for child in [stopped_id, reviewer_id, reviewer_id] {
+            tokio::time::timeout(Duration::from_secs(60), environment.close_child(child))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        let stored = mj_controller::database::load_state().unwrap();
+        assert_eq!(stored.sessions[stopped_id].state, SessionState::Stopped);
+        assert!(stored.subagents.contains_key(stopped_id));
+        assert!(!stored.sessions.contains_key(reviewer_id));
+        assert!(!stored.subagents.contains_key(reviewer_id));
+        assert!(stored.sessions.contains_key(parent_id));
+        let connection =
+            rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
+        let accounted: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM subagent_accounting WHERE child_session_id=?1 AND task_name='review'",
+                [reviewer_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(accounted, 1);
+    }
 }

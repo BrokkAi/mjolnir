@@ -218,6 +218,12 @@ func (i RepositoryIdentityRemoteDirectory) MarshalJSON() ([]byte, error) {
 	return marshalSerdeJSON(map[string]wire{"remote_directory": wire(i)})
 }
 
+// UnmarshalRepositoryIdentity decodes a RepositoryIdentity for other
+// packages (the store reads a project location's identity column).
+func UnmarshalRepositoryIdentity(data []byte) (RepositoryIdentity, error) {
+	return unmarshalRepositoryIdentity(data)
+}
+
 // unmarshalRepositoryIdentity decodes serde's externally tagged form.
 func unmarshalRepositoryIdentity(data []byte) (RepositoryIdentity, error) {
 	var tagged map[string]json.RawMessage

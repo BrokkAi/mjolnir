@@ -1136,6 +1136,7 @@ work when Git is older.
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
 | `memory` | string | no | unset (no template override) | Runtime memory value, for example `"32g"`. Per-session selection can override it. |
+| `memory_hard_limit` | boolean | no | false on Docker and Podman, true on Apple containers and Nitro | Require a known budget with sufficient RAM to start a container. Nitro uses a fixed memory pool and requires this setting to stay enabled. |
 | `environment` | table of strings or references | no | empty | Environment placed inside the target container. Values take the same forms as a profile's; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. |
 | `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
 
@@ -1192,9 +1193,8 @@ EXAMPLE = "value"
 
 All common container fields are accepted, and `workspace_storage` supports all
 three Podman variants. A local Podman target runs rootless Podman on Linux,
-WSL2, or macOS with a rootless `podman machine`; rootful machines and manually
-configured remote connections are not supported. On an SSH machine the
-container and any workspace volume live on that host, so supplemental
+including WSL2. On macOS, use Docker or Apple container. On a Linux SSH machine
+the container and any workspace volume live on that host, so supplemental
 directory sources are paths on it rather than on the controller. It always
 runs the harness unconstrained inside the container boundary. See
 [Podman](/podman/) and [SSH and SSH Podman](/ssh/).

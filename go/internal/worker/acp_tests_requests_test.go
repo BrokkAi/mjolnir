@@ -341,6 +341,7 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 		for _, policy := range []core.ExecutionPolicy{core.ExecutionPolicyConfiguredApprovals, core.ExecutionPolicyUnconstrained} {
 			for _, role := range []core.SubagentMcpRole{
 				core.SubagentMcpRoleParent,
+				core.SubagentMcpRoleOrchestrator,
 				core.SubagentMcpRoleMessageOnly,
 				core.SubagentMcpRoleFetchOnly,
 				core.SubagentMcpRoleChild,
@@ -349,6 +350,10 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 				spec.ExecutionPolicy = policy
 				socket := workerSocket(role)
 				socket.ReviewTools = true
+				oracle := role == core.SubagentMcpRoleOrchestrator
+				orchestratorsEnabled := role == core.SubagentMcpRoleParent
+				socket.Oracle = oracle
+				socket.OrchestratorsEnabled = orchestratorsEnabled
 				spec.SubagentMCPSocket = &socket
 				spec.ProjectMemory = &core.ProjectMemoryLaunchConfig{
 					HistorySocket:   acpTestsStringPointer("/worker/history.sock"),
@@ -409,7 +414,7 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 							if !slices.Contains(args, "--socket") || !slices.Contains(args, harness.ID()) {
 								t.Fatalf("review args %v", args)
 							}
-							if role == core.SubagentMcpRoleChild || role == core.SubagentMcpRoleFetchOnly {
+							if role == core.SubagentMcpRoleChild || role == core.SubagentMcpRoleFetchOnly || role == core.SubagentMcpRoleOrchestrator {
 								if !slices.Equal(args[len(args)-3:], []string{"--review-server", "--role", role.ID()}) {
 									t.Fatalf("review args %v", args)
 								}
@@ -458,7 +463,7 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 						allowed, present := acpTestsPointer(request, "/_meta/claudeCode/options/allowedTools")
 						if guardian {
 							expected := []string{"Bash(gh:*)", "mcp__mj-memory__*"}
-							for _, tool := range role.ToolNames() {
+							for _, tool := range role.ToolNames(oracle, orchestratorsEnabled) {
 								expected = append(expected, "mcp__mj-agents__"+tool)
 							}
 							if offersReview {
@@ -476,13 +481,16 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 				}
 				if harness == core.HarnessKindDsh {
 					approvals := ownedMcpApprovalsForLaunch(&spec)
-					offers := func(tool string) bool { return slices.Contains(role.ToolNames(), tool) }
+					offers := func(tool string) bool { return slices.Contains(role.ToolNames(oracle, orchestratorsEnabled), tool) }
 					for _, check := range []struct {
 						title string
 						owned bool
 					}{
-						{"mcp  mj-agents  spawn", offers("spawn")},
+						{"mcp  mj-agents  spawn worker", offers("spawn_worker")},
+						{"mcp  mj-agents  spawn orchestrator", orchestratorsEnabled},
+						{"mcp  mj-agents  ask oracle", oracle},
 						{"mcp  mj-agents  list agents", offers("list_agents")},
+						{"mcp  mj-agents  list targets", offers("list_targets")},
 						{"mcp  mj-review  request review", offersReview},
 						{"mcp  mj-review  override review", offersReview},
 						{"mcp  mj-review  set baseline", offersReview},
@@ -841,11 +849,8 @@ func TestAChildSocketServesHandbackAndHidesNativeTools(t *testing.T) {
 		t.Fatalf("server name %q", server.Name)
 	}
 	args := server.Args
-	if len(args) < 4 || args[len(args)-3] != "child" || args[len(args)-4] != "--role" {
-		t.Fatalf("a child's server names its role: %q", args)
-	}
-	if args[len(args)-1] != "true" || args[len(args)-2] != "--agent-mailboxes-enabled" {
-		t.Fatalf("a child's server enables mailboxes: %q", args)
+	if len(args) < 2 || args[len(args)-1] != "child" || args[len(args)-2] != "--role" {
+		t.Fatalf("a child's server names its role last: %q", args)
 	}
 }
 

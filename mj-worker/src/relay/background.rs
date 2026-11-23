@@ -1083,8 +1083,7 @@ impl DurableRelay {
 
     pub fn agent_terminal_closed(&mut self, terminal_id: &str) -> Result<()> {
         self.active_agent_terminals.remove(terminal_id);
-        self.foreground_tools
-            .close(&crate::acp::fallback_terminal_tool_call_id(terminal_id));
+        self.foreground_tools.retire_terminal(terminal_id);
         self.closed_agent_terminals.insert(terminal_id.to_owned());
         self.persist_activity_transition()
     }
@@ -1098,8 +1097,7 @@ impl DurableRelay {
             .keys()
             .filter(|id| crate::terminal::TerminalRegistry::owns_terminal(connection_id, id))
         {
-            self.foreground_tools
-                .close(&crate::acp::fallback_terminal_tool_call_id(id));
+            self.foreground_tools.retire_terminal(id);
         }
         self.active_agent_terminals
             .retain(|id, _| !crate::terminal::TerminalRegistry::owns_terminal(connection_id, id));

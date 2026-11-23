@@ -24,6 +24,7 @@ pub(super) struct ServerState {
     pub(super) secure_cookie: bool,
     pub(super) code_guard: Arc<Mutex<CodeGuard>>,
     pub(super) api_token: Arc<str>,
+    pub(super) loopback_token: Arc<str>,
     pub(super) subagent: Option<Arc<dyn api::SubagentBackend>>,
     /// Where the remembered fast-start preferences live, so a handler can
     /// report the saved default without reading the process environment.
@@ -116,90 +117,16 @@ pub(super) fn router(options: ServerOptions) -> Router {
         viewer_revocations: options.viewer_revocations,
         session_ttl: options.session_ttl,
         secure_cookie: options.secure_cookie,
-        code_guard: Arc::new(Mutex::new(CodeGuard::default())),
+        code_guard: options.code_guard,
         api_token: options.api_token.into(),
+        loopback_token: options.loopback_token.into(),
         subagent: options.subagent,
         preferences_path: options.preferences_path,
         worker_source_check: options.worker_source_check,
-        held_prompts: Arc::new(api::HeldPrompts::default()),
+        held_prompts: options.held_prompts,
         upgrade_gate: options.upgrade_gate,
     };
     let upgrade_gate = state.upgrade_gate.clone();
-    let protected = Router::new()
-        .route("/api/push/key", get(push_key))
-        .route("/api/push/status", get(push_device_status))
-        .route("/api/snapshot", get(snapshot))
-        .route("/api/sessions/{session_id}/row", get(session_row))
-        .route(
-            "/api/sessions/{session_id}/items/{stable_id}/detail",
-            get(api::tool_call_detail),
-        )
-        .route(
-            "/api/sessions/{session_id}/notification-message",
-            get(notification_message),
-        )
-        .route("/api/conversations/{session_id}", get(conversation))
-        .route(
-            "/api/conversations/{session_id}/read",
-            post(mark_conversation_read),
-        )
-        .route("/api/events", get(events))
-        .route("/api/bundles", post(create_bundle))
-        .route("/api/preflight/new", post(preflight_new))
-        .route("/api/preflight/resume", post(preflight_resume))
-        .route("/api/paths/complete", post(complete_path))
-        .route("/api/projects/discover", post(discover_projects))
-        .route("/api/projects", get(read_projects).post(refresh_projects))
-        .route(
-            "/api/git-identity",
-            get(read_git_identity).post(save_git_identity),
-        )
-        .route("/api/moves/prepare", post(prepare_move))
-        .route(
-            "/api/sessions/{session_id}/container-upgrade",
-            get(preview_container_upgrade),
-        )
-        .route("/api/sessions/{session_id}/client-state", get(client_state))
-        .route(
-            "/api/sessions/{session_id}/background-tasks/stop",
-            post(stop_background_task),
-        )
-        .route(
-            "/api/sessions/{session_id}/attachments",
-            post(upload_attachment).layer(named_body_limit(MAX_ATTACHMENT_UPLOAD_BYTES)),
-        )
-        .route(
-            "/api/sessions/{session_id}/draft",
-            put(save_draft).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
-        )
-        .route("/api/sessions/{session_id}/history", get(prompt_history))
-        .route(
-            "/api/workspaces/{workspace_id}/read",
-            post(mark_workspace_read),
-        )
-        .route(
-            "/api/actions",
-            post(action).layer(named_body_limit(MAX_PROMPT_BODY_BYTES)),
-        )
-        // Configuration is edited here, on the cookie-only surface, and never
-        // through `/api/actions` or `/api/v1`; see `settings.rs`.
-        .route("/api/settings", get(read_settings))
-        .route(
-            "/api/settings/page",
-            post(render_settings_page).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
-        )
-        .route(
-            "/api/settings/edit",
-            post(edit_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
-        )
-        .route(
-            "/api/settings/save",
-            post(save_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_session,
-        ));
     Router::new()
         .route("/", get(viewer))
         .route("/login", get(viewer))
@@ -223,7 +150,6 @@ pub(super) fn router(options: ServerOptions) -> Router {
                 .delete(clear_session),
         )
         .route("/auth/login", get(create_session_from_query))
-        .merge(protected)
         .nest("/api/v1", api::router(state.clone()))
         .layer(named_body_limit(MAX_BODY_BYTES))
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))

@@ -20,15 +20,14 @@ use mj_core::targets::{
 
 use super::{DEFAULT_IMAGE, RuntimeKind, RuntimeProbe};
 use crate::doctor::{
-    APPLE_CONTAINER_INSTALL_URL, CheckStatus, SshConnectivity, ssh_connectivity,
-    ssh_docker_failure_remediation, ssh_podman_failure,
+    CheckStatus, SshConnectivity, ssh_connectivity, ssh_docker_failure_remediation,
+    ssh_podman_failure,
 };
 use crate::targets::{
-    APPLE_CONTAINER_MACOS_PROBE, APPLE_CONTAINER_MINIMUM_MACOS, APPLE_CONTAINER_STATUS_PROBE,
-    APPLE_CONTAINER_VERSION_PROBE, CommandExecutor, DOCKER_SERVER_VERSION, PLATFORM_PROBE,
-    ProbeFrames, SSH_PODMAN_PREFLIGHT_SCRIPT, SshTarget, TargetOs, TargetPlatform,
-    parse_framed_probes, ssh_validation_command, verify_ssh_apple_container, verify_ssh_docker,
-    verify_ssh_podman,
+    APPLE_CONTAINER_MACOS_PROBE, APPLE_CONTAINER_STATUS_PROBE, APPLE_CONTAINER_VERSION_PROBE,
+    CommandExecutor, DOCKER_SERVER_INFO, PLATFORM_PROBE, ProbeFrames, SSH_PODMAN_PREFLIGHT_SCRIPT,
+    SshTarget, TargetOs, TargetPlatform, observe_ssh_apple_container_on_platform,
+    parse_framed_probes, ssh_validation_command, verify_ssh_docker, verify_ssh_podman,
 };
 
 /// What probing one machine found.
@@ -132,21 +131,37 @@ const MACHINE_PROBE_FRAMES: ProbeFrames = ProbeFrames {
     status: "__mj_machine_status__",
 };
 
-/// Every remote command line the runtime checks send to an SSH host, built
-/// from the same constants the checks use, and whether it runs only on an
-/// Apple-silicon Mac. The machine probe runs them all in one SSH call and
-/// replays the answers to the checks.
-fn machine_probe_commands() -> Vec<(String, bool)> {
+#[derive(Clone, Copy)]
+enum ProbePlatform {
+    Any,
+    Linux,
+    AppleSilicon,
+}
+
+/// Commands for one SSH batch, built from the same constants as the runtime checks.
+fn machine_probe_commands() -> Vec<(String, ProbePlatform)> {
     let line = |args: &[&str]| {
         remote_command_line(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
     };
     vec![
-        (line(&PLATFORM_PROBE), false),
-        (line(&["sh", "-c", SSH_PODMAN_PREFLIGHT_SCRIPT]), false),
-        (line(&DOCKER_SERVER_VERSION), false),
-        (line(&APPLE_CONTAINER_MACOS_PROBE), true),
-        (line(&APPLE_CONTAINER_VERSION_PROBE), true),
-        (line(&APPLE_CONTAINER_STATUS_PROBE), true),
+        (line(&PLATFORM_PROBE), ProbePlatform::Any),
+        (
+            line(&["sh", "-c", SSH_PODMAN_PREFLIGHT_SCRIPT]),
+            ProbePlatform::Linux,
+        ),
+        (line(&DOCKER_SERVER_INFO), ProbePlatform::Any),
+        (
+            line(&APPLE_CONTAINER_MACOS_PROBE),
+            ProbePlatform::AppleSilicon,
+        ),
+        (
+            line(&APPLE_CONTAINER_VERSION_PROBE),
+            ProbePlatform::AppleSilicon,
+        ),
+        (
+            line(&APPLE_CONTAINER_STATUS_PROBE),
+            ProbePlatform::AppleSilicon,
+        ),
     ]
 }
 
@@ -155,7 +170,7 @@ fn machine_probe_commands() -> Vec<(String, bool)> {
 /// reads no input, so a probe that waits on stdin cannot stall the rest. The
 /// Apple container commands run only where `uname -sm` reports an
 /// Apple-silicon Mac: another host has no `container` command to ask about.
-fn machine_probe_script(commands: &[(String, bool)]) -> String {
+fn machine_probe_script(commands: &[(String, ProbePlatform)]) -> String {
     let ProbeFrames { begin, end, status } = MACHINE_PROBE_FRAMES;
     let mut script = format!(
         r#"exec 3>&1
@@ -169,20 +184,31 @@ probe() {{
     printf '{begin} %s.stdout\n%s\n{end}\n' "$name" "$out"
     printf '{status} %s %s\n' "$name" "$status"
 }}
-apple=no
-[ "$(uname -sm 2>/dev/null)" = "Darwin arm64" ] && apple=yes
 "#
     );
-    for (index, (command, apple_only)) in commands.iter().enumerate() {
-        let guard = if *apple_only {
-            "[ $apple = yes ] && "
-        } else {
-            ""
+    for (index, (command, platform)) in commands.iter().enumerate() {
+        let guard = match platform {
+            ProbePlatform::Any => "",
+            ProbePlatform::Linux => r#"[ "$linux" = yes ] && "#,
+            ProbePlatform::AppleSilicon => r#"[ "$apple" = yes ] && "#,
         };
         script.push_str(&format!(
             "{guard}probe {index} sh -c {}\n",
             posix_quote(command)
         ));
+        if index == 0 {
+            script.push_str(
+                r#"apple=no
+linux=no
+set -f
+set -- $out
+case "$status:$#:$1:$2" in
+    0:2:Linux:*) linux=yes ;;
+    0:2:Darwin:arm64|0:2:Darwin:aarch64) apple=yes ;;
+esac
+"#,
+            );
+        }
     }
     script.push_str("exit 0\n");
     script
@@ -362,12 +388,6 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
     }
     let destination = &target.destination;
     let platform = probe_platform(&target, executor);
-    // Apple container runs only on Apple-silicon macOS, so a host that reported
-    // another platform is not asked for it: a Linux host has no `container`
-    // command and no reason to be told to install one.
-    let apple_host = platform.as_ref().ok().is_some_and(|platform| {
-        platform.os == TargetOs::Darwin && platform.architecture == "aarch64"
-    });
     let bare = match &platform {
         Ok(platform) => RuntimeProbe {
             kind: RuntimeKind::Bare,
@@ -391,20 +411,32 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
             ),
         },
     };
-    let podman = match verify_ssh_podman(&target, executor) {
-        Ok(preflight) => RuntimeProbe {
+    let podman = if platform
+        .as_ref()
+        .is_ok_and(|platform| platform.os == TargetOs::Darwin)
+    {
+        RuntimeProbe {
             kind: RuntimeKind::Podman,
-            status: CheckStatus::Ready,
-            detail: format!("Rootless Podman {} is available.", preflight.version),
+            status: CheckStatus::Unsupported,
+            detail: crate::targets::PODMAN_UNSUPPORTED_ON_MACOS.to_owned(),
             remediation: None,
-        },
-        Err(error) => {
-            let (detail, remediation) = ssh_podman_failure(destination, &error);
-            RuntimeProbe {
+        }
+    } else {
+        match verify_ssh_podman(&target, executor) {
+            Ok(preflight) => RuntimeProbe {
                 kind: RuntimeKind::Podman,
-                status: CheckStatus::Fixable,
-                detail,
-                remediation: Some(remediation),
+                status: CheckStatus::Ready,
+                detail: format!("Rootless Podman {} is available.", preflight.version),
+                remediation: None,
+            },
+            Err(error) => {
+                let (detail, remediation) = ssh_podman_failure(destination, &error);
+                RuntimeProbe {
+                    kind: RuntimeKind::Podman,
+                    status: CheckStatus::Fixable,
+                    detail,
+                    remediation: Some(remediation),
+                }
             }
         }
     };
@@ -422,47 +454,22 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
             remediation: Some(ssh_docker_failure_remediation(destination)),
         },
     };
-    let apple_container = if apple_host {
-        match verify_ssh_apple_container(&target, executor) {
-            Ok(preflight) => RuntimeProbe {
-                kind: RuntimeKind::AppleContainer,
-                status: CheckStatus::Ready,
-                detail: format!(
-                    "Apple container {} is available on macOS {}.",
-                    preflight.version, preflight.macos_version
-                ),
-                remediation: None,
-            },
-            Err(error) => RuntimeProbe {
-                kind: RuntimeKind::AppleContainer,
-                status: CheckStatus::Fixable,
+    let observation = match platform {
+        Ok(platform) => observe_ssh_apple_container_on_platform(&target, platform, executor),
+        Err(error) => Ok(
+            crate::targets::AppleContainerObservation::UnsupportedPlatform {
                 detail: format!("{error:#}"),
-                remediation: Some(format!(
-                    "On {destination}: install the Apple container runtime from {APPLE_CONTAINER_INSTALL_URL}, start it with `container system start`, and use macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer. Run `mj doctor` to see which of these is missing."
-                )),
             },
-        }
-    } else {
-        RuntimeProbe {
-            kind: RuntimeKind::AppleContainer,
-            status: CheckStatus::Unsupported,
-            detail: format!(
-                "Apple container runs only on Apple-silicon macOS {APPLE_CONTAINER_MINIMUM_MACOS} or newer, and {}.",
-                match &platform {
-                    Ok(platform) => format!(
-                        "{destination} runs {} on {}",
-                        match platform.os {
-                            TargetOs::Linux => "Linux",
-                            TargetOs::Darwin => "macOS",
-                        },
-                        platform.architecture
-                    ),
-                    Err(error) => format!("{error:#}"),
-                }
-            ),
-            remediation: None,
-        }
+        ),
     };
+    let apple_container = super::runtime_probe_from_check(
+        RuntimeKind::AppleContainer,
+        crate::doctor::apple_container_observation_check(
+            "runtime.ssh-apple-container",
+            "Remote Apple container runtime",
+            observation,
+        ),
+    );
     MachineProbeOutcome::Answered(vec![bare, podman, docker, apple_container])
 }
 
@@ -496,6 +503,7 @@ fn machine_runtime(
     kind: RuntimeKind,
 ) -> Option<(String, TargetTemplate)> {
     let container = |machine: &Machine| ContainerTemplate {
+        memory_hard_limit: None,
         // In memory a container runtime carries its machine's cache settings.
         build_cache: machine.build_cache().cloned(),
         image: DEFAULT_IMAGE.to_owned(),

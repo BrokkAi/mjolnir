@@ -28,6 +28,9 @@ func newClaudeProbe(t *testing.T) *claudeProbe {
 func claudeProbeWithReplayedAutonomousTurn(t *testing.T, replay bool) *claudeProbe {
 	t.Helper()
 	spec := acpDriveSpec("claude-probe", core.HarnessKindClaude, core.ExecutionPolicyConfiguredApprovals, "/workspace")
+	// These probes exercise the person's permission form.
+	spec.ApprovalChoices = core.DefaultApprovalChoices()
+	spec.ApprovalChoices.MjolnirGuardian = false
 	if replay {
 		session := claudeSession
 		spec.ResumeSession = &session

@@ -5,8 +5,9 @@
 // (transcript, projection, summary, turn_context, authorization, handoff,
 // github_item, github_history) are files of this one package.
 //
-// The crate's `github-history` feature has no Go counterpart: the history
-// evidence functions it gates are always built.
+// Rust's test builds enable mj-core's shared test fixtures at startup
+// (enable_test_fixtures_on_startup!); a Go test binary is recognised by
+// testing.Testing() where core needs it.
 package transcript
 
 // ToolItemID is the stable transcript item identity for a raw ACP tool call

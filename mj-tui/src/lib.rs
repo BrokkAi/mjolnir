@@ -766,6 +766,12 @@ pub enum DashboardAction {
     RecoverWorkspaceDraft {
         generation: u64,
         draft_id: String,
+        session_id: Option<String>,
+    },
+    DiscardWorkspaceDrafts {
+        generation: u64,
+        workspace_id: String,
+        draft_id: Option<String>,
     },
     /// Switch the visible conversation between rendered Markdown and raw text.
     ToggleTranscriptRendering,
@@ -1090,6 +1096,8 @@ pub struct DashboardState {
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_selection: Option<render::quota_pools::QuotaRow>,
     pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
+    /// Provider groups retained across openings of the new-session picker.
+    pub(crate) new_wizard_expanded_providers: BTreeSet<mj_core::config::QuotaProvider>,
     pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,
     /// Last rendered Quota row bounds, by profile id, for the row's
     /// right-click menu.
@@ -1417,6 +1425,7 @@ impl DashboardState {
             capacity_index: 0,
             quota_selection: None,
             quota_expanded: Default::default(),
+            new_wizard_expanded_providers: Default::default(),
             focus: Focus::Sessions,
             pane_sizes: PaneSizes {
                 sessions: sidebar_size,

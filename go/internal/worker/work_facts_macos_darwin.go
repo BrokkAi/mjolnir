@@ -22,7 +22,7 @@ func readTable(sessionID string) (ProcessTable, error) {
 		return ProcessTable{}, err
 	}
 	environmentLines := map[uint32]string{}
-	for _, line := range captureLines(environment) {
+	for _, line := range rustLines(environment) {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
@@ -43,7 +43,7 @@ func readTable(sessionID string) (ProcessTable, error) {
 	}
 	var rows []ProcRow
 	commands := map[uint32]string{}
-	for _, line := range captureLines(listed) {
+	for _, line := range rustLines(listed) {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
 			continue

@@ -592,7 +592,7 @@ pub(super) async fn create_bundle(
 
 /// Create or reuse the quick bundle for one repository source.
 ///
-/// Used by the viewer's `/api/bundles` route for bundle-backed targets.
+/// Used by the viewer's `/api/v1/bundles` route for bundle-backed targets.
 pub(super) async fn create_quick_bundle(
     state: &ServerState,
     source: String,
@@ -742,68 +742,6 @@ pub(super) async fn mark_conversation_read(
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|_| ApiError::new(StatusCode::CONFLICT, "read receipt failed"))?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Ask the live session actor to stop one task the current projection still
-/// shows. The snapshot check is intentionally repeated at admission time:
-/// a task may have completed, or lost its provider stop capability, between
-/// the browser rendering its button and the POST arriving.
-pub(super) async fn stop_background_task(
-    State(state): State<ServerState>,
-    Path(session_id): Path<String>,
-    Json(request): Json<api::StopBackgroundTaskRequest>,
-) -> Result<StatusCode, ApiError> {
-    validate_public_id(&session_id)?;
-    // Task ids are opaque provider ids (the worker currently uses values such
-    // as `terminal:<id>`), so they do not use the config id alphabet. The
-    // request is still bounded and must name a task in the current snapshot.
-    if request.background_task_id.is_empty() || request.background_task_id.len() > 256 {
-        return Err(ApiError::bad_request("invalid background task id"));
-    }
-    {
-        let snapshot = state.snapshot_rx.borrow();
-        let session = require_session_record(&snapshot, &session_id)?;
-        let task = session
-            .background_tasks
-            .iter()
-            .find(|task| task.id == request.background_task_id)
-            .ok_or_else(|| {
-                ApiError::new(StatusCode::CONFLICT, "background task is no longer running")
-            })?;
-        if !task.can_stop {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "background task cannot be stopped",
-            ));
-        }
-    }
-
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .background_task_stop_tx
-        .send(BackgroundTaskStopRequest {
-            session_id,
-            background_task_id: request.background_task_id,
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    match result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
-    {
-        Ok(()) => Ok(StatusCode::ACCEPTED),
-        Err(BackgroundTaskStopFailure::SessionUnavailable) => Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the live session is unavailable",
-        )),
-        Err(BackgroundTaskStopFailure::Provider | BackgroundTaskStopFailure::Internal) => {
-            Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "the provider could not stop this background task",
-            ))
-        }
-    }
 }
 
 type PreflightNewRequest = mj_client::daemon::NewSessionPreflightRequest;
@@ -1376,34 +1314,6 @@ fn git_identity_failure(verb: &'static str, error: anyhow::Error) -> ApiError {
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("could not {verb} the Git identity: {error:#}"),
     )
-}
-
-/// Engine inspection runs in the controller's supervised background work.
-pub(super) async fn preview_container_upgrade(
-    State(state): State<ServerState>,
-    axum::extract::Path(session_id): axum::extract::Path<String>,
-) -> Result<Json<mj_core::state::ContainerUpgradePreview>, ApiError> {
-    validate_public_id(&session_id)?;
-    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
-    Ok(Json(
-        ask_container_upgrade_preview(&state, session_id).await?,
-    ))
-}
-
-pub(super) async fn ask_container_upgrade_preview(
-    state: &ServerState,
-    session_id: String,
-) -> Result<mj_core::state::ContainerUpgradePreview, ApiError> {
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    state
-        .client_state_tx
-        .send(ClientStateRequest::ContainerUpgradePreview { session_id, reply })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    answer
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
-        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
 }
 
 pub(super) async fn ask_suspend_preflight(

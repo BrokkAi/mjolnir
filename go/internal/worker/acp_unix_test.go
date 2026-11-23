@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 // acpTestsHasFifos says whether this platform has the FIFOs the fifo-load
@@ -633,12 +634,13 @@ for line in sys.stdin:
 	spec := acpTestsSpec(core.HarnessKindCodex, "python3", temp)
 	spec.Args = []string{script}
 	spec.SubagentMCPSocket = &SubagentMcpSocket{
-		Path:                  filepath.Join(temp, "subagents.sock"),
-		Role:                  core.SubagentMcpRoleParent,
-		AgentMailboxesEnabled: true,
-		SubtleSubagents:       true,
-		ReviewTools:           false,
-		ProfileRegistration:   false,
+		Path:                 filepath.Join(temp, "subagents.sock"),
+		Role:                 core.SubagentMcpRoleParent,
+		Oracle:               false,
+		OrchestratorsEnabled: false,
+		SubtleSubagents:      true,
+		ReviewTools:          false,
+		ProfileRegistration:  false,
 	}
 	spec.ProjectMemory = &core.ProjectMemoryLaunchConfig{
 		ProjectKey:      "project",
@@ -2008,4 +2010,217 @@ func TestDroppingTheConnectionKillsTerminalProcessGroups(t *testing.T) {
 	assertProcessesAreGone(t, pids)
 	runner.bridge.Close()
 	runner.stopEvents()
+}
+
+// acpTestsAwaitResolution waits for a oneshot command resolution, failing
+// the test when none arrives in time.
+func acpTestsAwaitResolution(t *testing.T, resolution <-chan error, what string) error {
+	t.Helper()
+	select {
+	case outcome := <-resolution:
+		return outcome
+	case <-time.After(30 * time.Second):
+		t.Fatal(what)
+		return nil
+	}
+}
+
+// acpTestsAwaitConfigured reads events until the session is configured.
+func acpTestsAwaitConfigured(t *testing.T, events <-chan core.RuntimeEvent, driver *acpTestsDriver) {
+	t.Helper()
+	var seen []string
+	for {
+		event, closed, timedOut := acpTestsNext(events, driver, 30*time.Second)
+		if closed || timedOut {
+			t.Fatalf("initial bridge should open and configure; seen=%v", seen)
+		}
+		if _, ok := event.(core.RuntimeEventSessionConfigured); ok {
+			return
+		}
+		seen = append(seen, fmt.Sprintf("%#v", event))
+	}
+}
+
+func TestReloadLaunchConfigPropagatesReplacementBridgeStartupFailure(t *testing.T) {
+	_ = harnessinstall.InitializeFromParent()
+	temp := t.TempDir()
+	spec := silentBridgeSpec(core.StallPolicy{})
+	spec.Cwd = temp
+	spec.Harness = core.HarnessKindCodex
+	spec.Command = "python3"
+	spec.Args = []string{
+		"-u",
+		"-c",
+		`
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if "method" not in req or "id" not in req:
+        continue
+    m = req["method"]
+    if m == "initialize":
+        res = {"protocolVersion": 1}
+    elif m == "session/new":
+        res = {"sessionId": "ses-initial", "modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]}}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+`,
+	}
+
+	requests := make(chan CommandRequest, 8)
+	events := make(chan core.RuntimeEvent, 32)
+	runtime := acpTestsStartRun(spec, requests, events)
+
+	acpTestsAwaitConfigured(t, events, runtime)
+
+	badLaunch := launchConfig(temp)
+	badLaunch.Cwd = filepath.Join(temp, "nonexistent-reload-cwd")
+	resolution := make(chan error, 1)
+	requests <- CommandRequestReloadLaunchConfig{
+		Environment:           badLaunch.Environment,
+		LaunchConfig:          &badLaunch,
+		AdditionalDirectories: []string{},
+		Resolved:              resolution,
+	}
+
+	err := acpTestsAwaitResolution(t, resolution, "reload reply channel should carry the startup failure")
+	if err == nil {
+		t.Fatal("replacement bridge startup failure must not ack Ok")
+	}
+	if !strings.Contains(err.Error(), "does not exist") && !strings.Contains(err.Error(), "nonexistent-reload-cwd") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	runtime.abort()
+	runtime.waitBriefly(10 * time.Second)
+}
+
+func TestReloadLaunchConfigSpawnsUpdatedCommandArgsAndWritesSupervisorSpec(t *testing.T) {
+	_ = harnessinstall.InitializeFromParent()
+	temp := t.TempDir()
+	bridgeScript := func(sessionID string) string {
+		return fmt.Sprintf(`
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if "method" not in req or "id" not in req:
+        continue
+    m = req["method"]
+    if m == "initialize":
+        res = {"protocolVersion": 1}
+    elif m == "session/new":
+        res = {"sessionId": "%s", "modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "default", "name": "Default"}, {"id": "bypassPermissions", "name": "Bypass"}]}}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+`, sessionID)
+	}
+	spec := silentBridgeSpec(core.StallPolicy{})
+	spec.Cwd = temp
+	spec.Harness = core.HarnessKindCodex
+	spec.Command = "python3"
+	spec.Args = []string{"-u", "-c", bridgeScript("ses-initial")}
+
+	requests := make(chan CommandRequest, 8)
+	events := make(chan core.RuntimeEvent, 32)
+	runtime := acpTestsStartRun(spec, requests, events)
+
+	acpTestsAwaitConfigured(t, events, runtime)
+
+	supervisorPath := filepath.Join(temp, "acp-supervisor.json")
+	nextLaunch := launchConfig(temp)
+	nextLaunch.Cwd = temp
+	nextLaunch.Harness = core.HarnessKindClaude
+	nextCommand := "python3"
+	nextArgs := []string{"-u", "-c", bridgeScript("ses-reloaded")}
+	nextSupervisor := AcpSupervisorSpecFrom(&nextLaunch)
+	nextSupervisor.Command = nextCommand
+	nextSupervisor.Args = slices.Clone(nextArgs)
+	resolution := make(chan error, 1)
+	requests <- CommandRequestReloadLaunchConfig{
+		Environment:           nextLaunch.Environment,
+		Command:               &nextCommand,
+		Args:                  &nextArgs,
+		LaunchConfig:          &nextLaunch,
+		AdditionalDirectories: []string{},
+		SupervisorSpec:        &ReloadSupervisorSpec{Path: supervisorPath, Spec: nextSupervisor},
+		Resolved:              resolution,
+	}
+
+	if err := acpTestsAwaitResolution(t, resolution, "reload reply channel should resolve"); err != nil {
+		t.Fatalf("replacement bridge should open cleanly: %v", err)
+	}
+
+	writtenSpec, err := os.ReadFile(supervisorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(writtenSpec), "ses-reloaded") {
+		t.Fatalf("expected updated supervisor spec on disk, got: %s", writtenSpec)
+	}
+	// Rust's current-thread runtime has emitted the replacement's session
+	// events by the time the test reads them; here they are awaited.
+	sawReloaded := false
+	for !sawReloaded {
+		event, closed, timedOut := acpTestsNext(events, runtime, 10*time.Second)
+		if closed || timedOut {
+			break
+		}
+		sawReloaded = strings.Contains(fmt.Sprintf("%#v", event), "ses-reloaded")
+	}
+	if !sawReloaded {
+		t.Fatal("replacement bridge should have opened with the new command/args (ses-reloaded)")
+	}
+	runtime.abort()
+	runtime.waitBriefly(10 * time.Second)
+}
+
+func TestReloadLaunchConfigClearsStaleAcceptedConfigSelectors(t *testing.T) {
+	spec := silentBridgeSpec(core.StallPolicy{})
+	spec.Harness = core.HarnessKindCodex
+	oldModel := "old-codex-model"
+	spec.InitialModel = &oldModel
+	setAccepted := func(model, effort string) {
+		accepted, unlock := spec.AcceptedConfig.Lock()
+		*accepted = core.AcceptedSessionConfig{Model: &model, Effort: &effort}
+		unlock()
+	}
+	acceptedEffort := func() *string {
+		accepted, unlock := spec.AcceptedConfig.Lock()
+		defer unlock()
+		return accepted.Effort
+	}
+	setAccepted("accepted-codex-model", "high")
+
+	// Same harness with a new initial_model clears stale accepted model so
+	// StartupModel selects the new Move model, while preserving effort.
+	sameHarness := launchConfig("/profile")
+	sameHarness.Harness = core.HarnessKindCodex
+	newModel := "new-codex-model"
+	sameHarness.InitialModel = &newModel
+	spec.applyReloadAcceptedConfig(&sameHarness)
+	spec.InitialModel = sameHarness.InitialModel
+	if model := spec.StartupModel(); model == nil || *model != "new-codex-model" {
+		t.Fatalf("startup model %v", model)
+	}
+	if effort := acceptedEffort(); effort == nil || *effort != "high" {
+		t.Fatalf("effort %v", effort)
+	}
+
+	// Harness switch clears accepted_config completely (both model and
+	// effort).
+	setAccepted("accepted-codex-model", "xhigh")
+	crossHarness := launchConfig("/profile")
+	crossHarness.Harness = core.HarnessKindClaude
+	claudeModel := "claude-sonnet"
+	crossHarness.InitialModel = &claudeModel
+	spec.applyReloadAcceptedConfig(&crossHarness)
+	spec.Harness = crossHarness.Harness
+	spec.InitialModel = crossHarness.InitialModel
+	if model := spec.StartupModel(); model == nil || *model != "claude-sonnet" {
+		t.Fatalf("startup model %v", model)
+	}
+	if effort := acceptedEffort(); effort != nil {
+		t.Fatalf("effort %v", *effort)
+	}
 }

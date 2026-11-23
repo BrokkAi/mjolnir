@@ -3502,6 +3502,41 @@ async fn a_reviewer_that_ends_with_an_undelivered_handback_resolves_with_it() {
     host.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_restored_reviewer_can_hand_back_its_preloaded_prompt() {
+    let session = session_id("restored-preloaded-handback");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    let mut handback = stored_handback(&environment, "reviewer-1", "real defect").unwrap();
+    let group =
+        mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&format!("key-{}", children[0]));
+    handback.command_id = mj_store::database::startup_step_id(&group, "prompt");
+    environment.standings.lock().unwrap().insert(
+        children[0].clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: Some(handback),
+        },
+    );
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("No findings."),
+    )
+    .await;
+    wait_until_review_resolves(&host, &session).await;
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(complete && failures.is_empty(), "{failures:?}");
+    host.shutdown().await.unwrap();
+}
+
 /// Ending is a fact about a role only until it has an outcome, and it counts
 /// once however often it is reported.
 #[tokio::test]

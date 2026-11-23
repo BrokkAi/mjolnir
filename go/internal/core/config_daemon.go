@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -108,6 +109,119 @@ func DaemonConfigLoadPlacement(path string) (DaemonConfig, error) {
 		return DaemonConfig{}, err
 	}
 	return placement, nil
+}
+
+// DaemonConfigIsSetIn reports whether the file has a `[daemon]` table at
+// all. A placement written as `runtime = "host"` equals the default once
+// loaded, so only the file can tell an explicit choice from none.
+func DaemonConfigIsSetIn(path string) (bool, error) {
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read placement %s: %w", path, err)
+	}
+	document, err := parseTOMLDocument(string(contents))
+	if err != nil {
+		return false, fmt.Errorf("parse placement %s: %w", path, err)
+	}
+	_, ok := document["daemon"]
+	return ok, nil
+}
+
+// ReplacePlacement writes this placement as the file's `[daemon]` table,
+// provided the file still holds expected: nil for no `[daemon]` table at all
+// (an explicit `runtime = "host"` is a table, though it loads as the
+// default), else the placement it loads as. The check and the write happen
+// under one hold of the config lock, so two launches that each decided from
+// the same file cannot both win: the second is refused instead of silently
+// replacing the first. Every other table, comment and the order of the file
+// stay as they are, and the rest of the file is not loaded: an SSH client's
+// config belongs to the daemon machine and may hold tables this build must
+// not reinterpret.
+func (d DaemonConfig) ReplacePlacement(path string, expected *DaemonConfig) error {
+	lock, err := configLockAcquire(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := configEnsureWritable(path); err != nil {
+		return err
+	}
+	set, err := DaemonConfigIsSetIn(path)
+	if err != nil {
+		return err
+	}
+	var current *DaemonConfig
+	if set {
+		placement, err := DaemonConfigLoadPlacement(path)
+		if err != nil {
+			return err
+		}
+		current = &placement
+	}
+	if !daemonConfigOptionEqual(current, expected) {
+		change := "it is no longer set"
+		if current != nil {
+			change = "it is now set"
+			if current.Host != nil {
+				change = "it now names " + *current.Host
+			}
+		}
+		return fmt.Errorf("the daemon placement in %s changed while this was running: %s", path, change)
+	}
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read placement %s: %w", path, err)
+	}
+	document, err := parseTomlEditDocument(string(existing))
+	if err != nil {
+		return fmt.Errorf("parse placement %s: %w", path, err)
+	}
+	// Only the non-default keys serialize, so the default placement removes
+	// the table instead of leaving an empty one behind.
+	serialized, err := marshalTOML(d)
+	if err != nil {
+		return fmt.Errorf("serialize daemon placement: %w", err)
+	}
+	keys, err := parseTomlEditDocument(serialized)
+	if err != nil {
+		return fmt.Errorf("reparse daemon placement: %w", err)
+	}
+	if len(keys.root.keys()) == 0 {
+		document.root.remove("daemon")
+	} else {
+		// A file made here starts the way every file Mjolnir writes does.
+		// Without the line, switching `runtime` back to `host` by hand would
+		// leave a file the local daemon refuses to load.
+		if strings.TrimSpace(string(existing)) == "" {
+			tomlEditSet(document.root, "version", &tomlEditValue{kind: tomlEditInteger, repr: fmt.Sprint(ConfigVersion)})
+		}
+		tomlEditSet(document.root, "daemon", cloneTomlEditTable(keys.root))
+	}
+	return AtomicWrite(path, []byte(document.String()))
+}
+
+// daemonConfigOptionEqual is PartialEq for Option<&DaemonConfig>.
+func daemonConfigOptionEqual(a, b *DaemonConfig) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Runtime == b.Runtime && configOptionalEqual(a.Host, b.Host) && configOptionalEqual(a.Instance, b.Instance) &&
+		slices.Equal(a.SSHArgs, b.SSHArgs) && configOptionalEqual(a.RemoteCommand, b.RemoteCommand) &&
+		configOptionalEqual(a.Image, b.Image) && slices.Equal(a.Mounts, b.Mounts)
+}
+
+// RemoteInstance is the instance the remote `mj` runs as: the configured
+// one, else the client's own. False is the remote's unnamed instance. It
+// must not become `--instance default`, which selects `instances/default`, a
+// different store from the one a plain `mj` on that machine uses.
+func (d DaemonConfig) RemoteInstance() (string, bool) {
+	if d.Instance != nil {
+		return *d.Instance, true
+	}
+	return InstanceName()
 }
 
 // daemonConfigKeys is every key DaemonConfig reads. A deeper key belongs to

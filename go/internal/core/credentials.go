@@ -65,13 +65,58 @@ func CredentialFingerprint(bytes []byte) string {
 	return LowerHex(sum[:])
 }
 
-// ClaudeOauthLoginPath is the staged OAuth login, excluding setup tokens and
-// API-key/Bedrock launches.
-func ClaudeOauthLoginPath(environment map[string]string) (string, bool) {
-	for _, key := range []string{ClaudeOauthTokenEnv, "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
-		if value, ok := environment[key]; ok && value != "" && value != "0" {
-			return "", false
+// ClaudeEnvironmentAuthKind names how Claude is configured to authenticate
+// outside its native login.
+type ClaudeEnvironmentAuthKind int
+
+const (
+	ClaudeEnvironmentAuthToken ClaudeEnvironmentAuthKind = iota
+	ClaudeEnvironmentAuthBedrock
+	ClaudeEnvironmentAuthExternalProvider
+)
+
+// ClaudeEnvironmentAuth is how Claude is configured to authenticate outside
+// its native login.
+type ClaudeEnvironmentAuth struct {
+	Kind ClaudeEnvironmentAuthKind
+	// Token is the environment variable holding the token, for
+	// ClaudeEnvironmentAuthToken.
+	Token string
+}
+
+// ClaudeEnvironmentAuthFrom is Rust's claude_environment_auth.
+func ClaudeEnvironmentAuthFrom(environment map[string]string) (ClaudeEnvironmentAuth, bool) {
+	// Claude Code interprets these trimmed values case-insensitively.
+	enabled := func(name string) bool {
+		value, ok := environment[name]
+		if !ok {
+			return false
 		}
+		switch asciiLowercase(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+		return false
+	}
+	if enabled("CLAUDE_CODE_USE_BEDROCK") {
+		return ClaudeEnvironmentAuth{Kind: ClaudeEnvironmentAuthBedrock}, true
+	}
+	if enabled("CLAUDE_CODE_USE_VERTEX") || enabled("CLAUDE_CODE_USE_FOUNDRY") {
+		return ClaudeEnvironmentAuth{Kind: ClaudeEnvironmentAuthExternalProvider}, true
+	}
+	for _, name := range []string{ClaudeOauthTokenEnv, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		if value, ok := environment[name]; ok && strings.TrimSpace(value) != "" {
+			return ClaudeEnvironmentAuth{Kind: ClaudeEnvironmentAuthToken, Token: name}, true
+		}
+	}
+	return ClaudeEnvironmentAuth{}, false
+}
+
+// ClaudeOauthLoginPath is the staged OAuth login for a launch using native
+// OAuth.
+func ClaudeOauthLoginPath(environment map[string]string) (string, bool) {
+	if _, ok := ClaudeEnvironmentAuthFrom(environment); ok {
+		return "", false
 	}
 	home, ok := environment[HarnessKindClaude.HomeEnv()]
 	if !ok {
@@ -1153,12 +1198,9 @@ const (
 	// SyncStepSession is not a step: the session's whole sync failed (its
 	// connection, say) before any step ran. Reported without a step.
 	SyncStepSession SyncStep = iota
-	// SyncStepAws is the role-scoped AWS credentials, renewed by the
+	// SyncStepAws is the AWS credentials, renewed by the
 	// session's own task.
 	SyncStepAws
-	// SyncStepAwsExport is the profile's one AWS export, reconciled with its
-	// login pass.
-	SyncStepAwsExport
 	SyncStepHarnessLogin
 	SyncStepSkills
 	SyncStepGithubToken

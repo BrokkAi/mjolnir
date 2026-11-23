@@ -3,8 +3,6 @@
 package transcript
 
 import (
-	"bufio"
-	"bytes"
 	"cmp"
 	"encoding/json"
 	"fmt"
@@ -746,80 +744,5 @@ func TestGithubHistoryPythonUnicodeBoundaries(t *testing.T) {
 	raw := Retrieve(&item, transcriptText, &session)
 	if got, want := historySnippetsJSON(t, raw), f.Index("snippets"); got != want.String() {
 		t.Fatalf("snippets:\n%s\n%s", got, want.String())
-	}
-}
-
-func TestGithubHistoryPythonFormatFixtures(t *testing.T) {
-	lines := bufio.NewScanner(bytes.NewReader(historyFixture(t, "reference.jsonl")))
-	lines.Buffer(nil, 64<<20)
-	fixtures := 0
-	for lines.Scan() {
-		f := historyParse(t, lines.Text())
-		fixtures++
-		id := f.Index("pid")
-		str := func(v OrderedValue) string {
-			text, _ := v.AsStr()
-			return text
-		}
-		item := f.Index("item")
-		transcriptText := str(f.Index("transcript_text"))
-		bounded := f.Index("bounded_evidence_without_history")
-		session := bounded.Index("session")
-		raw := Retrieve(&item, transcriptText, &session)
-		if got, want := historySnippetsJSON(t, raw), str(f.Index("expected_retrieved_json")); got != want {
-			t.Fatalf("lexical %s:\n%s\n%s", id.String(), got, want)
-		}
-		var prepared core.GithubItemEvidence
-		if err := json.Unmarshal([]byte(str(f.Index("expected_evidence_json"))), &prepared); err != nil {
-			t.Fatalf("evidence %s: %v", id.String(), err)
-		}
-		itemSegment, sessionSegment, err := StudentSegments(&prepared)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := str(f.Index("expected_item_segment")); itemSegment != want {
-			t.Fatalf("item segment %s:\n%s\n%s", id.String(), itemSegment, want)
-		}
-		if want := str(f.Index("expected_session_segment")); sessionSegment != want {
-			t.Fatalf("session segment %s:\n%s\n%s", id.String(), sessionSegment, want)
-		}
-		expectedSpans := f.Index("expected_raw_spans")
-		spans, _ := expectedSpans.AsArray()
-		for i := 0; i < min(len(raw), len(spans)); i++ {
-			start, end, bits := spans[i].Index("start"), spans[i].Index("end"), spans[i].Index("score_bits")
-			wantStart, _ := start.AsU64()
-			wantEnd, _ := end.AsU64()
-			if uint64(raw[i].Start) != wantStart || uint64(raw[i].End) != wantEnd {
-				t.Fatalf("span %s: %d..%d, want %d..%d", id.String(), raw[i].Start, raw[i].End, wantStart, wantEnd)
-			}
-			if got := fmt.Sprintf("%016x", math.Float64bits(raw[i].Score)); got != str(bits) {
-				t.Fatalf("score %s: %s, want %s", id.String(), got, str(bits))
-			}
-		}
-		actual, err := GithubHistoryEvidence(&item, transcriptText, &bounded)
-		if err != nil {
-			t.Fatal(err)
-		}
-		actualSession := actual.Evidence.Index("session")
-		if got, want := actualSession.Index("history"), str(f.Index("expected_history_json")); got.String() != want {
-			t.Fatalf("budget %s:\n%s\n%s", id.String(), got.String(), want)
-		}
-		if got, want := actual.Evidence.String(), str(f.Index("expected_evidence_json")); got != want {
-			t.Fatalf("evidence %s:\n%s\n%s", id.String(), got, want)
-		}
-		stats := f.Index("expected_stats")
-		historyTokens, totalTokens := stats.Index("history_tokens"), stats.Index("total_tokens")
-		if want, _ := historyTokens.AsU64(); uint64(actual.HistoryTokens) != want {
-			t.Fatalf("tokens %s: %d, want %d", id.String(), actual.HistoryTokens, want)
-		}
-		if want, _ := totalTokens.AsU64(); uint64(actual.TotalTokens) != want {
-			t.Fatalf("pair tokens %s: %d, want %d", id.String(), actual.TotalTokens, want)
-		}
-	}
-	if err := lines.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if fixtures == 0 {
-		t.Fatal("no reference fixtures")
 	}
 }
