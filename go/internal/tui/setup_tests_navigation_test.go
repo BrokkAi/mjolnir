@@ -438,7 +438,7 @@ func TestSettingsOwnsTheTerminalCursorAndRestoresTheComposerAfterDismissal(t *te
 	dashboard := dashboardWithSession(session)
 	dashboard.FocusPrompt()
 	fixture := client.NewReplacementSessionTestFixture(id, 1)
-	active := chat.ActiveChatOpen(fixture.Stopped, "hel", nil, fixture.Control, chat.SessionHeaderIdentity{}, "", chat.Notices{})
+	active := chat.ActiveChatOpen(fixture.Stopped, "hel", nil, fixture.Control, chat.SessionHeaderIdentity{}, "", chat.NewNotices())
 	chats := map[string]*chat.ActiveChat{id: active}
 	cursorShown := func() bool {
 		frame := chat.NewFrame(uv.NewBuffer(140, 40))

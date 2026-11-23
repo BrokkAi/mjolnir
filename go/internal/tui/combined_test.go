@@ -618,15 +618,13 @@ func pinCombinedGoldenOperationClock(t *testing.T, dashboard *DashboardState) {
 }
 
 // combinedFormChat is notifications_pane's test helper form_chat: a warm
-// chat whose session holds request as its open form. It belongs to the
-// notifications pane's tests (tui-8); until they are merged it is nil, and
-// the golden that needs it skips.
-var combinedFormChat func(session string, request core.ElicitationRequest) *chat.ActiveChat
+// chat whose session holds request as its open form.
+func combinedFormChat(session string, request core.ElicitationRequest) *chat.ActiveChat {
+	active, _ := formChat(session, request)
+	return active
+}
 
 func TestGoldenCombinedDashboardRender(t *testing.T) {
-	if combinedFormChat == nil {
-		t.Skip("needs notifications_pane's form_chat test helper (tui-8); assign combinedFormChat once it is merged")
-	}
 	var output strings.Builder
 	midsizeSupport := dashboardWithSession(runningSession())
 	targets := make([]core.DeploymentCapacityTarget, 0, 12)
