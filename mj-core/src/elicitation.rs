@@ -310,30 +310,36 @@ impl ElicitationRequest {
         };
         self.submitted_fields(content)
             .map(|(field, title, value)| {
-                let (value, option_label) = if self.field_is_secret(field) {
-                    ("[hidden]".to_owned(), None)
-                } else {
-                    let raw = match value {
-                        ElicitationValue::String(text) => text.clone(),
-                        ElicitationValue::StringArray(values) => values.join(", "),
-                        ElicitationValue::Integer(number) => number.to_string(),
-                        ElicitationValue::Number(number) => number.to_string(),
-                        ElicitationValue::Boolean(flag) => flag.to_string(),
-                    };
-                    let option_label = if matches!(
-                        field.kind,
-                        ElicitationFieldKind::SingleSelect { .. }
-                            | ElicitationFieldKind::MultiSelect { .. }
-                    ) {
-                        let display = field.reply_value_text(value);
-                        (display != raw).then_some(display)
+                let secret = self.field_is_secret(field);
+                let selected_option = matches!(
+                    field.kind,
+                    ElicitationFieldKind::SingleSelect { .. }
+                        | ElicitationFieldKind::MultiSelect { .. }
+                );
+                let (value, option_label) = if selected_option {
+                    let displayed = if secret {
+                        "[hidden]".to_owned()
                     } else {
-                        None
+                        field.reply_value_text(value)
                     };
-                    (raw, option_label)
+                    (String::new(), Some(displayed))
+                } else {
+                    let entered = if secret {
+                        "[hidden]".to_owned()
+                    } else {
+                        match value {
+                            ElicitationValue::String(text) => text.clone(),
+                            ElicitationValue::StringArray(values) => values.join(", "),
+                            ElicitationValue::Integer(number) => number.to_string(),
+                            ElicitationValue::Number(number) => number.to_string(),
+                            ElicitationValue::Boolean(flag) => flag.to_string(),
+                        }
+                    };
+                    (entered, None)
                 };
                 crate::guardian::TrustedUserAnswerField {
                     field_label: title.to_owned(),
+                    selected_option,
                     value,
                     option_label,
                 }
