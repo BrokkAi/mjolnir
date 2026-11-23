@@ -6,17 +6,7 @@ use super::*;
 
 pub(super) use mj_checkpoint::native::opencode::database_key;
 
-const LEGACY: &str = "Open this session in OpenCode and let it finish migrating its session database before importing.";
-
-pub(super) fn import_issue(path: &Path) -> Result<Option<&'static str>> {
-    let Some((database, id)) = database_key(path) else {
-        return Ok(Some(LEGACY));
-    };
-    let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("open OpenCode session database {}", database.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    Ok((!mj_checkpoint::native::opencode::has_resumable_session(&conn, id)?).then_some(LEGACY))
-}
+pub(super) const LEGACY: &str = "Open this session in OpenCode and let it finish migrating its session database before importing.";
 
 pub(super) fn candidates(
     home: &Path,

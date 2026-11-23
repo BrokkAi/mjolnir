@@ -197,6 +197,7 @@ impl NativeScanCache {
 pub struct LocatedNativeSession {
     pub native_session_id: String,
     pub source_path: PathBuf,
+    pub modified_at: SystemTime,
 }
 
 /// One native session as a picker lists it, normalized across harnesses.
@@ -220,25 +221,41 @@ pub fn locate_native_session(
     home: &Path,
     selection: &ClaudeSessionSelection,
 ) -> Result<LocatedNativeSession> {
-    let (native_session_id, source_path) = match harness {
+    let (native_session_id, source_path, modified_at) = match harness {
         HarnessKind::Muse => {
             return muse::locate(&mj_checkpoint::native::muse_sessions_root(home)?, selection);
         }
         HarnessKind::Codex => {
             let located = locate_codex_session(home, selection)?;
-            (located.native_session_id, located.jsonl_path)
+            (
+                located.native_session_id,
+                located.jsonl_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Claude => {
             let located = locate_claude_session(home, selection)?;
-            (located.native_session_id, located.jsonl_path)
+            (
+                located.native_session_id,
+                located.jsonl_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Kimi => {
             let located = locate_kimi_session(home, selection)?;
-            (located.native_session_id, located.session_path)
+            (
+                located.native_session_id,
+                located.session_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Grok => {
             let located = locate_grok_session(home, selection)?;
-            (located.native_session_id, located.session_path)
+            (
+                located.native_session_id,
+                located.session_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode => {
             let found = metadata_candidates(harness, home, &NativeScanCache::shared())?
@@ -264,12 +281,14 @@ pub fn locate_native_session(
             return Ok(LocatedNativeSession {
                 native_session_id: found.listing.native_session_id,
                 source_path: found.source_path,
+                modified_at: found.listing.modified_at,
             });
         }
     };
     Ok(LocatedNativeSession {
         native_session_id,
         source_path,
+        modified_at,
     })
 }
 
@@ -323,21 +342,21 @@ pub fn native_source_file(harness: HarnessKind, path: &Path) -> &Path {
     path
 }
 
-/// The formats on disk that the pinned harnesses can load after restore.
-pub fn native_source_import_issue(
-    harness: HarnessKind,
-    path: &Path,
-) -> Result<Option<&'static str>> {
-    Ok(match harness {
+/// An import limitation recognizable from the indexed path alone.
+pub fn native_source_import_issue(harness: HarnessKind, path: &Path) -> Option<&'static str> {
+    match harness {
+        HarnessKind::Codex if path.to_string_lossy().contains('\u{1f}') => Some(
+            "Mjolnir can only import Codex sessions with a rollout log; this row is from the Codex history database",
+        ),
         HarnessKind::Dsh if !dsh::is_acp_record(path) => Some(
             "the pinned DSH bridge loads flat ACP session records; this row is from the DSH CLI store",
         ),
-        HarnessKind::OpenCode => opencode::import_issue(path)?,
+        HarnessKind::OpenCode if opencode::database_key(path).is_none() => Some(opencode::LEGACY),
         HarnessKind::Antigravity if !antigravity::is_cli_log(path) => Some(
             "Mjolnir imports Antigravity CLI conversations; this row is from the Antigravity IDE",
         ),
         _ => None,
-    })
+    }
 }
 
 /// Scan a harness home newest first, reporting after every candidate.

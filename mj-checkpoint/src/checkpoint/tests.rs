@@ -5176,6 +5176,92 @@ fn missing_parent_restore_preserves_current_components_and_retries_partial_failu
     );
 }
 
+#[test]
+fn full_restore_relocates_legacy_opencode_wal_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    export_checkpoint(&spec).unwrap();
+    let original = read_archive_verified(&spec.output_path).unwrap();
+    let mut session = original.manifest.session.clone();
+    session.harness_kind = HarnessKind::OpenCode;
+    let id = session.native_session_id.clone();
+    let source = temp.path().join("legacy.db");
+    let live = rusqlite::Connection::open(&source).unwrap();
+    live.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .unwrap();
+    let main = fs::read(&source).unwrap();
+    live.execute("INSERT INTO session_v2 VALUES (?1, '/old/app')", [&id])
+        .unwrap();
+    assert_eq!(fs::read(&source).unwrap(), main);
+    let wal = fs::read(temp.path().join("legacy.db-wal")).unwrap();
+    drop(live);
+
+    let relative = PathBuf::from(".data/opencode/opencode.db");
+    let legacy = temp.path().join("legacy.hel.zip");
+    write_archive_hashed(
+        &legacy,
+        &ArchiveInput {
+            session,
+            target: original.manifest.target.clone(),
+            bundle: original.manifest.bundle.clone(),
+            canonical_session: original.canonical_session().unwrap(),
+            repositories: original
+                .manifest
+                .repositories
+                .iter()
+                .map(|repository| archived_repository_snapshot(&original, repository).unwrap())
+                .collect(),
+            native_artifacts: vec![
+                NativeArtifact {
+                    relative_path: relative.clone(),
+                    data: main.into(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from(".data/opencode/opencode.db-wal"),
+                    data: wal.into(),
+                    mode: 0o600,
+                },
+            ],
+        },
+    )
+    .unwrap();
+
+    let target_cwd = temp.path().join("relocated/app");
+    let home = temp.path().join("restored-home");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: legacy,
+            workspace_root: spec.workspace_root,
+            report_root: None,
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Discard,
+            primary_repository_root: Some(target_cwd.clone()),
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    assert!(!home.join(".data/opencode/opencode.db-wal").exists());
+    assert!(!home.join(".data/opencode/opencode.db-shm").exists());
+    let database = rusqlite::Connection::open(home.join(relative)).unwrap();
+    let directory: String = database
+        .query_row(
+            "SELECT directory FROM session_v2 WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Path::new(&directory), target_cwd);
+}
+
 // Hard-won: bd6363001 review: publishing a SQLite database before its WAL made retry silently lose conversation rows.
 #[cfg(unix)]
 #[test]

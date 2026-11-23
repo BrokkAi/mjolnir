@@ -190,19 +190,13 @@ fn locate_client_native_session(
     let mut errors = Vec::new();
     for home in homes {
         match locate_native_session(harness, &home, selection) {
-            Ok(located) => {
-                let modified =
-                    std::fs::metadata(native_source_file(harness, &located.source_path))?
-                        .modified()?;
-                candidates.push((modified, home, located));
-            }
+            Ok(located) => candidates.push((home, located)),
             Err(error) => errors.push(format!("{}: {error:#}", home.display())),
         }
     }
-    candidates.sort_by_key(|(modified, _, _)| *modified);
+    candidates.sort_by_key(|(_, located)| located.modified_at);
     candidates
         .pop()
-        .map(|(_, home, located)| (home, located))
         .with_context(|| format!("no importable native session: {}", errors.join("; ")))
 }
 
@@ -1123,6 +1117,62 @@ fn import_session_from_profile(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn import_latest_opencode_session_across_homes_uses_session_timestamp() {
+        use std::fs;
+        use std::time::{Duration, SystemTime};
+
+        let directory = tempfile::tempdir().unwrap();
+        let home_a = directory.path().join("home-a");
+        let home_b = directory.path().join("home-b");
+        for (home, id, updated_at, file_mtime) in [
+            (
+                &home_a,
+                "older-session",
+                1_794_272_400_000_i64,
+                1_800_000_000,
+            ),
+            (
+                &home_b,
+                "newer-session",
+                1_794_272_500_000_i64,
+                1_700_000_000,
+            ),
+        ] {
+            let data = home.join(".data/opencode");
+            fs::create_dir_all(&data).unwrap();
+            let database = data.join("opencode.db");
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE session_v2 (id TEXT, title TEXT, directory TEXT,
+                    time_created INTEGER, time_updated INTEGER, parent_id TEXT);",
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO session_v2 VALUES (?1, 'Session', '/work/app', ?2, ?2, NULL)",
+                    rusqlite::params![id, updated_at],
+                )
+                .unwrap();
+            drop(connection);
+            fs::OpenOptions::new()
+                .write(true)
+                .open(database)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(file_mtime))
+                .unwrap();
+        }
+        let (home, located) = locate_client_native_session(
+            HarnessKind::OpenCode,
+            vec![home_a, home_b.clone()],
+            &ClaudeSessionSelection::Latest,
+        )
+        .unwrap();
+        assert_eq!(home, home_b);
+        assert_eq!(located.native_session_id, "newer-session");
+    }
 
     // Hard-won: 9ca25dbd2: Sessions Open kept scanning forever after skipping DSH's native store.
     #[test]

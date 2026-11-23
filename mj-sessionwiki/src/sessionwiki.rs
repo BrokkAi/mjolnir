@@ -3036,11 +3036,7 @@ pub fn wiki_continuation(
     }
     let harness = harness_tools::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
-    anyhow::ensure!(
-        harness != HarnessKind::Codex || !path.to_string_lossy().contains('\u{1f}'),
-        "Mjolnir can only import Codex sessions with a rollout log; this row is from the Codex history database"
-    );
-    if let Some(reason) = crate::import::native_source_import_issue(harness, path)? {
+    if let Some(reason) = crate::import::native_source_import_issue(harness, path) {
         anyhow::bail!("{reason}");
     }
     let native_session_id = crate::import::native_session_id_from_path(harness, path)

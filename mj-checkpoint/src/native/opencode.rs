@@ -15,7 +15,7 @@ pub fn database_key(path: &Path) -> Option<(&Path, &str)> {
 
 /// The pinned ACP loader only sees v2 rows. Its v1 migration runs in the
 /// background and can finish after the first session/load.
-pub fn has_resumable_session(conn: &Connection, id: &str) -> Result<bool> {
+pub(crate) fn has_resumable_session(conn: &Connection, id: &str) -> Result<bool> {
     if !table_exists(conn, "session_v2")? {
         return Ok(false);
     }
