@@ -14,10 +14,16 @@ package githubrelevance
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"math"
+	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -262,13 +268,53 @@ type inner struct {
 // innerFail is Inner::fail: count the failure and schedule the automatic
 // retry. The caller holds the inner's mu.
 func innerFail(machine *machine, kind StudentFailureKind, err error) {
-	panic("unported: mj-github-relevance/src/github_student.rs Inner::fail")
+	if machine.failures < math.MaxUint32 {
+		machine.failures++
+	}
+	var detail *preparationFailure
+	if errors.As(err, &detail) {
+		kind = detail.kind
+	}
+	// Same retry progression as the existing GitHub credential lookup: one
+	// second, doubling up to its eighth exponent, with server hints.
+	delay := time.Second << min(machine.failures-1, 8)
+	if detail != nil && detail.retryAfter != nil {
+		delay = max(delay, *detail.retryAfter)
+	}
+	cause := err.Error()
+	slog.Warn("GitHub student failed; automatic retry scheduled", "error", cause, "kind", string(kind), "retry_seconds", uint64(delay/time.Second))
+	now := time.Now()
+	machine.state = stateFailed{failure: failure{
+		kind:      kind,
+		cause:     cause,
+		retryAt:   now.Add(delay),
+		retryAtMs: now.UnixMilli() + delay.Milliseconds(),
+	}}
 }
 
 // completed records an inference result from engine (err nil for a
 // score). A late result from a replaced engine cannot change the new epoch.
 func (i *inner) completed(engine *engine, score float64, err error) {
-	panic("unported: mj-github-relevance/src/github_student.rs Inner::completed")
+	i.mu.Lock()
+	current, ok := i.machine.state.(stateReady)
+	if !ok || current.ready.engine != engine {
+		i.mu.Unlock()
+		return
+	}
+	var notice StudentNotice
+	switch {
+	case err != nil && !current.ready.failing:
+		current.ready.failing = true
+		slog.Warn("GitHub student inference failing", "error", err.Error())
+		notice = StudentNoticeInferenceFailing{Cause: err.Error()}
+	case err == nil && current.ready.failing:
+		current.ready.failing = false
+		notice = StudentNoticeInferenceRecovered{}
+	}
+	i.mu.Unlock()
+	if notice != nil {
+		i.notice(notice)
+	}
 }
 
 // notifyChanged wakes the state's waiters (Notify's notify_one and
@@ -327,7 +373,29 @@ func startStudent(dataDirectory string, useGPU bool, notice Notice, options prep
 // fresh probe. Repeated configuration reloads preserve a measured fallback;
 // disabling retains the CPU engine.
 func (s *Student) SetUseGPU(enabled bool) {
-	panic("unported: mj-github-relevance/src/github_student.rs Student::set_use_gpu")
+	s.inner.mu.Lock()
+	if s.inner.machine.useGPU == enabled {
+		s.inner.mu.Unlock()
+		return
+	}
+	s.inner.machine.useGPU = enabled
+	var old device
+	if current, ok := s.inner.machine.state.(stateReady); ok {
+		old = current.ready.device
+		if enabled {
+			current.ready.device = deviceNeeded{}
+		} else {
+			current.ready.device = deviceCPU{}
+		}
+	}
+	s.inner.mu.Unlock()
+	if preparing, ok := old.(devicePreparing); ok {
+		preparing.request.cancel()
+	}
+	if enabled && gpuRequiresRestart() {
+		s.inner.notice(StudentNoticeGPUAfterRestart{})
+	}
+	s.inner.notifyChanged()
 }
 
 func (s *Student) State() StudentState {
@@ -344,7 +412,90 @@ func (s *Student) ManifestRevision() string {
 // StudentOwner method ScoreSegments (github_relevance.go) wraps it. The
 // error carries a StudentError, findable with errors.As.
 func (s *Student) scoreSegments(ctx context.Context, item, session string) (float64, error) {
-	panic("unported: mj-github-relevance/src/github_student.rs Student::score_segments")
+	owner := s.inner
+	owner.mu.Lock()
+	if _, ok := owner.machine.state.(stateDormant); ok {
+		owner.machine.state = stateLoading{}
+		owner.mu.Unlock()
+		owner.notifyChanged()
+		return 0, StudentErrorUnavailable{State: StudentStateLoading{}}
+	}
+	// Queue time is outside every measured inference duration. Reserve the
+	// actual device only after admission, using the owner's state.
+	current, ok := owner.machine.state.(stateReady)
+	if !ok {
+		state := owner.machine.state.public()
+		owner.mu.Unlock()
+		return 0, StudentErrorUnavailable{State: state}
+	}
+	permits := current.ready.permits
+	waitingEpoch := weak.Make(current.ready.engine)
+	owner.mu.Unlock()
+	select {
+	case <-s.ctx.Done():
+		return 0, StudentErrorUnavailable{State: StudentStateLoading{}}
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case permits <- struct{}{}:
+	}
+	release := func() { <-permits }
+	owner.mu.Lock()
+	current, ok = owner.machine.state.(stateReady)
+	if !ok || weak.Make(current.ready.engine) != waitingEpoch {
+		state := owner.machine.state.public()
+		owner.mu.Unlock()
+		release()
+		return 0, StudentErrorUnavailable{State: state}
+	}
+	var assigned work
+	switch reserved := current.ready.device.(type) {
+	case devicePending:
+		current.ready.device = deviceBenchmarking{gpu: reserved.gpu}
+		assigned = workBenchmark{probe: &probe{
+			inner:   owner,
+			engine:  current.ready.engine,
+			gpu:     reserved.gpu,
+			outcome: probeOutcomeControlFailed{},
+		}}
+	case deviceGPU:
+		assigned = workGPU{gpu: reserved.gpu}
+	default:
+		assigned = workCPU{}
+	}
+	engine := current.ready.engine
+	owner.mu.Unlock()
+	epoch := weak.Make(engine)
+	type outcome struct {
+		score float64
+		err   error
+	}
+	task := core.SpawnBlocking(func() outcome {
+		// The admission permit returns after the work, including when it
+		// panics.
+		defer release()
+		score, err := run(owner, engine, assigned, item, session)
+		owner.completed(engine, score, err)
+		return outcome{score: score, err: err}
+	})
+	select {
+	case <-s.ctx.Done():
+		return 0, StudentErrorUnavailable{State: StudentStateLoading{}}
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-task.Done():
+	}
+	result, err := task.Join(context.Background())
+	if err != nil {
+		failed := fmt.Errorf("GitHub student inference task failed: %w", err)
+		if alive := epoch.Value(); alive != nil {
+			owner.completed(alive, 0, failed)
+		}
+		return 0, StudentErrorInference{Cause: failed.Error()}
+	}
+	if result.err != nil {
+		return 0, StudentErrorInference{Cause: result.err.Error()}
+	}
+	return result.score, nil
 }
 
 // Shutdown cancels preparation promptly; in-flight inference owns no daemon
@@ -451,24 +602,421 @@ func (p *probe) drop() {
 }
 
 func deviceTransition(inner *inner, engine *engine, gpu *gpu, outcome probeOutcome) {
-	panic("unported: mj-github-relevance/src/github_student.rs device_transition")
+	// Reservation cleanup must work even while another failure unwinds; a
+	// Go mutex is not poisoned by a panic.
+	inner.mu.Lock()
+	current, ok := inner.machine.state.(stateReady)
+	if !ok || current.ready.engine != engine || !reservedFor(current.ready.device, gpu) {
+		inner.mu.Unlock()
+		return
+	}
+	var reason StudentDeviceFallbackReason
+	switch outcome := outcome.(type) {
+	case probeOutcomeGPUWins:
+		current.ready.device = deviceGPU{gpu: gpu}
+	case probeOutcomeControlFailed:
+		current.ready.device = devicePending{gpu: gpu}
+	case probeOutcomeCPUWins:
+		current.ready.device = deviceCPU{}
+		reason = StudentDeviceFallbackReasonSlower{GPUMs: outcome.gpuMs, CPUMs: outcome.cpuMs}
+	case probeOutcomeGPUFailed:
+		current.ready.device = deviceCPU{}
+		reason = StudentDeviceFallbackReasonFailed{Kind: StudentFailureKindInference}
+	}
+	inner.mu.Unlock()
+	if reason != nil {
+		inner.notice(StudentNoticeDeviceFallback{From: gpu.device, Reason: reason})
+	}
+}
+
+// reservedFor reports whether device is gpu's selection or benchmark.
+func reservedFor(device device, gpu *gpu) bool {
+	switch current := device.(type) {
+	case deviceGPU:
+		return current.gpu == gpu
+	case deviceBenchmarking:
+		return current.gpu == gpu
+	}
+	return false
+}
+
+// gpuSelected reports, under the owner's lock, whether engine is still
+// the ready engine and device is its device.
+func gpuSelected(inner *inner, engine *engine, matches func(device) bool) bool {
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	current, ok := inner.machine.state.(stateReady)
+	return ok && current.ready.engine == engine && matches(current.ready.device)
 }
 
 func run(inner *inner, engine *engine, work work, item, session string) (float64, error) {
-	panic("unported: mj-github-relevance/src/github_student.rs run")
+	switch work := work.(type) {
+	case workBenchmark:
+		defer work.probe.drop()
+		outcome, score, err := probePair(inner, engine, work.probe.gpu, item, session)
+		work.probe.complete(outcome)
+		return score, err
+	case workGPU:
+		ids, mask, err := engine.tokens(item, session)
+		if err != nil {
+			return 0, err
+		}
+		score, selected, err := func() (float64, bool, error) {
+			// DirectML permits one Run per session. Check selection after
+			// that admission so queued calls cannot undo CPU selection.
+			work.gpu.sessionMu.Lock()
+			defer work.gpu.sessionMu.Unlock()
+			if !gpuSelected(inner, engine, func(current device) bool {
+				selected, ok := current.(deviceGPU)
+				return ok && selected.gpu == work.gpu
+			}) {
+				return 0, false, nil
+			}
+			score, err := work.gpu.session.score(ids, mask)
+			return score, true, err
+		}()
+		switch {
+		case err != nil:
+			slog.Warn("GPU student inference failed; retaining CPU", "error", err.Error(), "device", string(work.gpu.device))
+			deviceTransition(inner, engine, work.gpu, probeOutcomeGPUFailed{})
+			return engine.scoreTokens(ids, mask)
+		case selected:
+			return score, nil
+		default:
+			return engine.scoreTokens(ids, mask)
+		}
+	default:
+		ids, mask, err := engine.tokens(item, session)
+		if err != nil {
+			return 0, err
+		}
+		return engine.scoreTokens(ids, mask)
+	}
 }
 
 // probePair produces one outcome on every ordinary exit; the reservation
 // guard supplies ControlFailed if this computation panics instead of
 // returning an outcome.
 func probePair(inner *inner, engine *engine, gpu *gpu, item, session string) (probeOutcome, float64, error) {
-	panic("unported: mj-github-relevance/src/github_student.rs probe_pair")
+	ids, mask, err := engine.tokens(item, session)
+	if err != nil {
+		return probeOutcomeControlFailed{}, 0, err
+	}
+	// Compare warm executions on both sessions. A first CPU run may
+	// allocate and initialize kernels just as the discarded GPU warmup does.
+	if _, err := engine.scoreTokens(ids, mask); err != nil {
+		return probeOutcomeControlFailed{}, 0, err
+	}
+	start := time.Now()
+	for {
+		remaining := inner.probeControlFailures.Load()
+		if remaining <= 0 {
+			break
+		}
+		if inner.probeControlFailures.CompareAndSwap(remaining, remaining-1) {
+			return probeOutcomeControlFailed{}, 0, errors.New("recorded CPU-control inference failure")
+		}
+	}
+	cpu, err := engine.scoreTokens(ids, mask)
+	if err != nil {
+		return probeOutcomeControlFailed{}, 0, err
+	}
+	cpuTime := time.Since(start)
+	gpu.sessionMu.Lock()
+	defer gpu.sessionMu.Unlock()
+	// A preference or engine change has already released the reservation.
+	// Its epoch check also prevents this stale outcome from changing that
+	// choice.
+	if !gpuSelected(inner, engine, func(current device) bool {
+		benchmarking, ok := current.(deviceBenchmarking)
+		return ok && benchmarking.gpu == gpu
+	}) {
+		return probeOutcomeControlFailed{}, cpu, nil
+	}
+	// Discard cold GPU compilation/allocation before comparing warm latency.
+	if err := gpu.session.warmup(ids, mask); err != nil {
+		slog.Warn("GPU warmup failed; retaining CPU", "error", err.Error())
+		return probeOutcomeGPUFailed{}, cpu, nil
+	}
+	start = time.Now()
+	score, err := gpu.session.score(ids, mask)
+	gpuTime := time.Since(start)
+	switch {
+	case err != nil:
+		slog.Warn("GPU student inference failed; retaining CPU", "error", err.Error(), "device", string(gpu.device))
+		return probeOutcomeGPUFailed{}, cpu, nil
+	case math.Abs(cpu-score) > 0.005:
+		slog.Warn("GPU student parity failed; retaining CPU", "cpu", cpu, "score", score, "device", string(gpu.device))
+		return probeOutcomeGPUFailed{}, cpu, nil
+	case gpuTime >= cpuTime:
+		return probeOutcomeCPUWins{gpuMs: uint64(gpuTime.Milliseconds()), cpuMs: uint64(cpuTime.Milliseconds())}, cpu, nil
+	default:
+		return probeOutcomeGPUWins{}, score, nil
+	}
 }
+
+// supervisorAction is supervise's decision for one turn of its loop.
+type supervisorAction interface{ isSupervisorAction() }
+
+type actionPrepare struct{ useGPU bool }
+
+type actionGPU struct {
+	engine  *engine
+	request *cancellationToken
+}
+
+type actionRetry struct{ at time.Time }
+
+type actionWait struct{}
+
+func (actionPrepare) isSupervisorAction() {}
+func (actionGPU) isSupervisorAction()     {}
+func (actionRetry) isSupervisorAction()   {}
+func (actionWait) isSupervisorAction()    {}
 
 // supervise is the owner's preparation loop; it returns when ctx (the
 // student's cancellation) ends.
 func supervise(ctx context.Context, inner *inner, root string, options preparationOptions) {
-	panic("unported: mj-github-relevance/src/github_student.rs supervise")
+	for {
+		// Subscribe before reading state so an off/on transition cannot be
+		// lost between the decision and waiting for its notification.
+		changed, stop := inner.changed.Subscribe()
+		var action supervisorAction
+		inner.mu.Lock()
+		enabled := inner.machine.useGPU
+		switch state := inner.machine.state.(type) {
+		case stateDormant:
+			action = actionWait{}
+		case stateLoading:
+			action = actionPrepare{useGPU: enabled}
+		case stateFailed:
+			action = actionRetry{at: state.failure.retryAt}
+		case stateReady:
+			if _, needed := state.ready.device.(deviceNeeded); needed {
+				request := newCancellationToken()
+				state.ready.device = devicePreparing{request: request}
+				action = actionGPU{engine: state.ready.engine, request: request}
+			} else {
+				action = actionWait{}
+			}
+		}
+		inner.mu.Unlock()
+		switch action := action.(type) {
+		case actionWait:
+			select {
+			case <-ctx.Done():
+				stop()
+				return
+			case <-changed:
+			}
+			stop()
+		case actionRetry:
+			stop()
+			timer := time.NewTimer(time.Until(action.at))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			inner.mu.Lock()
+			if failed, ok := inner.machine.state.(stateFailed); ok && failed.failure.retryAt.Equal(action.at) {
+				inner.machine.state = stateLoading{}
+				inner.mu.Unlock()
+				inner.notifyChanged()
+			} else {
+				inner.mu.Unlock()
+			}
+		case actionGPU:
+			stop()
+			if !superviseGPU(ctx, inner, root, options, action) {
+				return
+			}
+		case actionPrepare:
+			stop()
+			if !supervisePrepare(ctx, inner, root, options, action.useGPU) {
+				return
+			}
+		}
+	}
+}
+
+// superviseGPU prepares the GPU candidate the owner asked for; false when
+// the student's cancellation ended it.
+func superviseGPU(ctx context.Context, inner *inner, root string, options preparationOptions, action actionGPU) bool {
+	type prepared struct {
+		gpu *gpu
+		err error
+	}
+	preparationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopRequest := context.AfterFunc(action.request.ctx, cancel)
+	defer stopRequest()
+	done := make(chan prepared, 1)
+	go func() {
+		candidate, err := func() (*gpu, error) {
+			client := &http.Client{}
+			device, ok := action.engine.preferredDevice()
+			if !ok {
+				return nil, nil
+			}
+			directory, err := prepare(preparationCtx, filepath.Join(root, "github-student"),
+				options.modelManifest.selected(device == StudentDeviceCoreML), options.modelBase, client)
+			if err != nil {
+				return nil, err
+			}
+			loaded := core.SpawnBlocking(func() prepared {
+				candidate, err := action.engine.loadGPU(directory, device)
+				return prepared{gpu: candidate, err: err}
+			})
+			result, err := loaded.Join(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			return result.gpu, result.err
+		}()
+		done <- prepared{gpu: candidate, err: err}
+	}()
+	var result prepared
+	select {
+	case <-ctx.Done():
+		return false
+	case <-action.request.ctx.Done():
+		return true
+	case result = <-done:
+	}
+	inner.mu.Lock()
+	current, ok := inner.machine.state.(stateReady)
+	preparing, isPreparing := devicePreparing{}, false
+	if ok {
+		preparing, isPreparing = current.ready.device.(devicePreparing)
+	}
+	if !ok || current.ready.engine != action.engine || !isPreparing || preparing.request != action.request {
+		// The result is dropped; native handles go with their cleanups.
+		inner.mu.Unlock()
+		return true
+	}
+	var notice StudentNotice
+	if result.err != nil {
+		slog.Warn("GPU preparation failed; retaining CPU", "error", result.err.Error())
+		if from, ok := action.engine.preferredDevice(); ok {
+			notice = StudentNoticeDeviceFallback{From: from, Reason: StudentDeviceFallbackReasonFailed{Kind: StudentFailureKindLoad}}
+		}
+	}
+	if result.err == nil && result.gpu != nil {
+		current.ready.device = devicePending{gpu: result.gpu}
+	} else {
+		current.ready.device = deviceCPU{}
+	}
+	inner.mu.Unlock()
+	if notice != nil {
+		inner.notice(notice)
+	}
+	return true
+}
+
+// supervisePrepare loads the model and runtime; false when the student's
+// cancellation ended it.
+func supervisePrepare(ctx context.Context, inner *inner, root string, options preparationOptions, useGPU bool) bool {
+	type prepared struct {
+		ready *ready
+		err   error
+	}
+	done := make(chan prepared, 1)
+	go func() {
+		loaded, err := func() (*ready, error) {
+			// Decide unsupported hosts before starting any model bytes.
+			if err := validatePlatform(); err != nil {
+				return nil, err
+			}
+			client := &http.Client{}
+			var directory, runtimeLibrary string
+			err := tryJoinAll(ctx, []func(ctx context.Context) error{
+				func(ctx context.Context) error {
+					var err error
+					directory, err = prepare(ctx, filepath.Join(root, "github-student"), options.modelManifest.selected(false), options.modelBase, client)
+					return err
+				},
+				func(ctx context.Context) error {
+					var err error
+					runtimeLibrary, err = prepareSelected(ctx, filepath.Join(root, "github-student-native"), useGPU, inner.notice, client)
+					return err
+				},
+			})
+			if err != nil {
+				var failure *preparationFailure
+				if !errors.As(err, &failure) {
+					err = preparationFailureError(StudentFailureKindDownload, err, nil)
+				}
+				return nil, err
+			}
+			loading := core.SpawnBlocking(func() prepared {
+				if failures := options.loadFailures; failures != nil {
+					for {
+						remaining := failures.Load()
+						if remaining <= 0 {
+							break
+						}
+						if failures.CompareAndSwap(remaining, remaining-1) {
+							return prepared{err: errors.New("recorded transient loader failure")}
+						}
+					}
+				}
+				engine, err := loadEngine(directory, runtimeLibrary)
+				if err != nil {
+					return prepared{err: err}
+				}
+				capacity, err := parallelism()
+				if err != nil {
+					return prepared{err: err}
+				}
+				return prepared{ready: &ready{
+					engine:  engine,
+					permits: make(chan struct{}, capacity),
+					device:  deviceCPU{},
+				}}
+			})
+			result, err := loading.Join(context.Background())
+			if err != nil {
+				return nil, fmt.Errorf("student loading task failed: %w", err)
+			}
+			return result.ready, result.err
+		}()
+		done <- prepared{ready: loaded, err: err}
+	}()
+	var result prepared
+	select {
+	case <-ctx.Done():
+		return false
+	case result = <-done:
+	}
+	inner.mu.Lock()
+	if ctx.Err() != nil {
+		inner.mu.Unlock()
+		return false
+	}
+	var notice StudentNotice
+	if result.err == nil {
+		if inner.machine.useGPU {
+			result.ready.device = deviceNeeded{}
+		} else {
+			result.ready.device = deviceCPU{}
+		}
+		inner.machine.failures = 0
+		inner.machine.state = stateReady{ready: result.ready}
+	} else {
+		var failure *preparationFailure
+		if errors.As(result.err, &failure) {
+			notice = failure.notice
+		}
+		innerFail(&inner.machine, StudentFailureKindLoad, result.err)
+	}
+	inner.mu.Unlock()
+	inner.notifyChanged()
+	if notice != nil {
+		inner.notice(notice)
+	}
+	return true
 }
 
 type preparationFailure struct {

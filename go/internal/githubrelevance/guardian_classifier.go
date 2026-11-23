@@ -15,7 +15,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,7 +114,22 @@ func (m *guardianClassifierMachine[E]) request(wake chan struct{}) (string, bool
 // loaded records a load's outcome: engine when err is nil. The caller
 // holds mu.
 func (m *guardianClassifierMachine[E]) loaded(engine *E, err error) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs Machine::loaded")
+	if err == nil {
+		m.failures = 0
+		m.state = guardianClassifierState[E]{kind: guardianClassifierStateReady, engine: engine}
+		return
+	}
+	if m.failures < math.MaxUint32 {
+		m.failures++
+	}
+	// Same backoff as the GitHub student, including HTTP Retry-After.
+	delay := time.Second << min(m.failures-1, 8)
+	var failure *preparationFailure
+	if errors.As(err, &failure) && failure.retryAfter != nil {
+		delay = max(delay, *failure.retryAfter)
+	}
+	slog.Warn("Wolf Defender Jev preparation failed", "target", "mj_guardian", "error", err.Error(), "retry_seconds", uint64(delay/time.Second))
+	m.state = guardianClassifierState[E]{kind: guardianClassifierStateFailed, retryAt: time.Now().Add(delay)}
 }
 
 // notifyOne is tokio's Notify::notify_one on a one-slot channel: at most one
@@ -155,7 +178,43 @@ func NewGuardianClassifier(dataDirectory string, useGPU bool) *GuardianClassifie
 
 // Classify scores request, or says why it cannot.
 func (c *GuardianClassifier) Classify(ctx context.Context, request *core.GuardianReviewRequest) GuardianStage1Result {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs GuardianClassifier::classify")
+	if core.WolfActionExceedsStage1Limit(request) {
+		return GuardianStage1ResultEscalatedActionTooLong{}
+	}
+	permit, engine, reason, ok := admitInference(&c.inner.machine, c.inner.wake, c.inner.permits, c.ctx)
+	if !ok {
+		return GuardianStage1ResultUnavailable{Reason: reason}
+	}
+	cloned := *request
+	cloned.UserInstructions = slices.Clone(request.UserInstructions)
+	cancellation := c.ctx
+	task := core.SpawnBlocking(func() GuardianStage1Result {
+		// The permit stays with the native Run if the requester times out.
+		defer permit.release()
+		if cancellation.Err() != nil {
+			return GuardianStage1ResultUnavailable{Reason: "stopped"}
+		}
+		verdict, err := engine.score(&cloned)
+		if err != nil {
+			slog.Warn("Wolf Defender Jev inference failed", "target", "mj_guardian", "error", err.Error())
+			return GuardianStage1ResultUnavailable{Reason: "inference failed"}
+		}
+		return verdict
+	})
+	select {
+	case <-c.ctx.Done():
+		return GuardianStage1ResultUnavailable{Reason: "stopped"}
+	case <-ctx.Done():
+		// The requester gave up; Rust drops the future here.
+		return GuardianStage1ResultUnavailable{Reason: "stopped"}
+	case <-task.Done():
+	}
+	verdict, err := task.Join(context.Background())
+	if err != nil {
+		slog.Warn("Wolf Defender Jev inference task failed", "target", "mj_guardian", "error", err.Error())
+		return GuardianStage1ResultUnavailable{Reason: "inference task failed"}
+	}
+	return verdict
 }
 
 func (c *GuardianClassifier) Shutdown(ctx context.Context) error {
@@ -201,19 +260,116 @@ func (p guardianPermit) release() {
 // ready engine, or the reason the request is refused ("stopped", "loading",
 // "load failed" or "busy").
 func admitInference[E any](machine *guardianClassifierMachine[E], wake chan struct{}, permits chan struct{}, cancellation context.Context) (guardianPermit, *E, string, bool) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs admit_inference")
+	machine.mu.Lock()
+	defer machine.mu.Unlock()
+	if cancellation.Err() != nil {
+		return guardianPermit{}, nil, "stopped", false
+	}
+	if reason, ready := machine.request(wake); !ready {
+		return guardianPermit{}, nil, reason, false
+	}
+	if machine.state.kind != guardianClassifierStateReady {
+		return guardianPermit{}, nil, "loading", false
+	}
+	select {
+	case permits <- struct{}{}:
+	default:
+		return guardianPermit{}, nil, "busy", false
+	}
+	return guardianPermit{permits: permits}, machine.state.engine, "", true
 }
 
 // guardianClassifierSupervise loads the engine whenever a request wakes
 // it, until ctx (the classifier's cancellation) ends.
 func guardianClassifierSupervise(ctx context.Context, inner *guardianClassifierInner, dataDirectory string, useGPU bool) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs supervise")
+	for {
+		// Cancellation first, as Rust's biased select checks it first.
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-inner.wake:
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- func() error {
+				directory, runtimeLibrary, err := guardianClassifierPrepare(ctx, dataDirectory, useGPU)
+				if err != nil {
+					return err
+				}
+				// Publish on the blocking work so a cancelled load releases
+				// its native weights there, even when the supervisor has
+				// already gone.
+				task := core.SpawnBlocking(func() struct{} {
+					if ctx.Err() != nil {
+						return struct{}{}
+					}
+					engine, err := loadGuardianClassifierEngine(directory, runtimeLibrary, useGPU)
+					inner.machine.mu.Lock()
+					defer inner.machine.mu.Unlock()
+					if ctx.Err() == nil {
+						inner.machine.loaded(engine, err)
+					}
+					return struct{}{}
+				})
+				if _, err := task.Join(context.Background()); err != nil {
+					return fmt.Errorf("Wolf Defender Jev loading task failed: %w", err)
+				}
+				return nil
+			}()
+		}()
+		var err error
+		select {
+		case <-ctx.Done():
+			return
+		case err = <-done:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			inner.machine.mu.Lock()
+			if ctx.Err() == nil {
+				inner.machine.loaded(nil, err)
+			}
+			inner.machine.mu.Unlock()
+		}
+	}
 }
 
 // guardianClassifierPrepare returns the verified Wolf model directory and
 // ORT library path.
 func guardianClassifierPrepare(ctx context.Context, dataDirectory string, useGPU bool) (string, string, error) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs prepare")
+	if err := validatePlatform(); err != nil {
+		return "", "", err
+	}
+	var pinned manifest
+	if err := json.Unmarshal(guardianClassifierManifestJSON, &pinned); err != nil {
+		return "", "", err
+	}
+	client := &http.Client{}
+	notice := func(notice StudentNotice) {
+		slog.Warn("Wolf Defender Jev runtime preparation notice", "target", "mj_guardian", "notice", fmt.Sprintf("%#v", notice))
+	}
+	var directory, runtimeLibrary string
+	err := tryJoinAll(ctx, []func(ctx context.Context) error{
+		func(ctx context.Context) error {
+			var err error
+			directory, err = prepare(ctx, filepath.Join(dataDirectory, "models", "wolf-defender-jev"), pinned, "https://huggingface.co", client)
+			return err
+		},
+		func(ctx context.Context) error {
+			var err error
+			runtimeLibrary, err = prepareSelected(ctx, filepath.Join(dataDirectory, "github-student-native"), useGPU, notice, client)
+			return err
+		},
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return directory, runtimeLibrary, nil
 }
 
 type modelConfig struct {
@@ -271,7 +427,73 @@ type prompt struct {
 
 // loadPrompt is Prompt::load: the question and the padded option batch.
 func loadPrompt(tokenizer hfTokenizer, config modelConfig, specials tokenizerConfig) (*prompt, error) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs Prompt::load")
+	if config.MaxCaseTokens != core.WolfStage1MaxCaseTokens {
+		return nil, errors.New("Wolf case token limit disagrees with the pinned configuration")
+	}
+	specialID := func(token *specialToken, fallback string) (int64, error) {
+		text := fallback
+		if token != nil {
+			text = token.text()
+		}
+		id, ok := tokenizer.tokenToID(text)
+		if !ok {
+			return 0, fmt.Errorf("Wolf tokenizer has no %s token", text)
+		}
+		return int64(id), nil
+	}
+	bos, err := specialID(specials.BosToken, "<bos>")
+	if err != nil {
+		return nil, err
+	}
+	eos, err := specialID(specials.EosToken, "<eos>")
+	if err != nil {
+		return nil, err
+	}
+	question, err := encode(tokenizer, core.WolfStage1Question)
+	if err != nil {
+		return nil, err
+	}
+	question = question[:min(len(question), config.MaxQuestionTokens)]
+	var options [][]int64
+	for _, option := range core.WolfStage1Options {
+		ids, err := encode(tokenizer, option)
+		if err != nil {
+			return nil, err
+		}
+		ids = ids[:min(len(ids), config.MaxOptionTokens)]
+		options = append(options, slices.Concat([]int64{bos, tokOption}, ids, []int64{eos}))
+	}
+	width := 0
+	for _, ids := range options {
+		width = max(width, len(ids))
+	}
+	if len(options) == 0 {
+		return nil, errors.New("no Wolf options")
+	}
+	shape := []int64{int64(len(core.WolfStage1Options)), int64(width)}
+	var optionIDs, optionMask []int64
+	for _, ids := range options {
+		for range ids {
+			optionMask = append(optionMask, 1)
+		}
+		optionIDs = append(optionIDs, ids...)
+		paddedEnd := (len(optionIDs) + width - 1) / width * width
+		for len(optionIDs) < paddedEnd {
+			optionIDs = append(optionIDs, 0)
+		}
+		for len(optionMask) < paddedEnd {
+			optionMask = append(optionMask, 0)
+		}
+	}
+	optionsTensor, err := newOrtTensorInt64(shape, optionIDs)
+	if err != nil {
+		return nil, err
+	}
+	maskTensor, err := newOrtTensorInt64(shape, optionMask)
+	if err != nil {
+		return nil, err
+	}
+	return &prompt{bos: bos, eos: eos, question: question, options: optionsTensor, optionMask: maskTensor}, nil
 }
 
 // caseInput is the model input for a case and the question marker's
@@ -326,15 +548,159 @@ type guardianClassifierEngine struct {
 
 // loadGuardianClassifierEngine is Engine::load.
 func loadGuardianClassifierEngine(directory, runtimeLib string, useGPU bool) (*guardianClassifierEngine, error) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs Engine::load")
+	environment, err := environment(runtimeLib)
+	if err != nil {
+		return nil, err
+	}
+	tokenizer, err := loadHFTokenizer(filepath.Join(directory, "tokenizer.json"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not load Wolf tokenizer: %w", err)
+	}
+	configData, err := os.ReadFile(filepath.Join(directory, "config.json"))
+	if err != nil {
+		return nil, err
+	}
+	var config modelConfig
+	if err := json.Unmarshal(configData, &config); err != nil {
+		return nil, err
+	}
+	specialsData, err := os.ReadFile(filepath.Join(directory, "tokenizer_config.json"))
+	if err != nil {
+		return nil, err
+	}
+	var specials tokenizerConfig
+	if err := json.Unmarshal(specialsData, &specials); err != nil {
+		return nil, err
+	}
+	prompt, err := loadPrompt(tokenizer, config, specials)
+	if err != nil {
+		return nil, err
+	}
+	session, err := loadSession(environment, filepath.Join(directory, filepath.FromSlash(modelFile)), useGPU)
+	if err != nil {
+		return nil, err
+	}
+	return &guardianClassifierEngine{tokenizer: tokenizer, prompt: prompt, session: session}, nil
 }
 
 func (e *guardianClassifierEngine) score(request *core.GuardianReviewRequest) (GuardianStage1Result, error) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs Engine::score")
+	started := time.Now()
+	caseIDs, err := encode(e.tokenizer, core.WolfScenePacket(request))
+	if err != nil {
+		return nil, err
+	}
+	tokens := len(caseIDs)
+	ids, questionPos, ok := caseInput(e.prompt.bos, e.prompt.eos, caseIDs, e.prompt.question)
+	if !ok {
+		return GuardianStage1ResultOverflow{Tokens: tokens}, nil
+	}
+	length := int64(len(ids))
+	mask := make([]int64, len(ids))
+	for i := range mask {
+		mask[i] = 1
+	}
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	inputIDs, err := newOrtTensorInt64([]int64{1, length}, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer inputIDs.release()
+	attentionMask, err := newOrtTensorInt64([]int64{1, length}, mask)
+	if err != nil {
+		return nil, err
+	}
+	defer attentionMask.release()
+	position, err := newOrtTensorInt64([]int64{1}, []int64{questionPos})
+	if err != nil {
+		return nil, err
+	}
+	defer position.release()
+	outputs, err := e.session.run([]ortInput{
+		{name: "input_ids", value: inputIDs},
+		{name: "attention_mask", value: attentionMask},
+		{name: "question_pos", value: position},
+		{name: "option_input_ids", value: e.prompt.options},
+		{name: "option_attention_mask", value: e.prompt.optionMask},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer outputs.release()
+	logitsValue, ok := outputs.get("logits")
+	if !ok || logitsValue == nil {
+		return nil, errors.New("Wolf graph has no logits output")
+	}
+	shape, logits, err := logitsValue.tensorFloat32()
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Equal(shape, []int64{1, 2}) {
+		dimensions := make([]string, len(shape))
+		for i, dimension := range shape {
+			dimensions[i] = strconv.FormatInt(dimension, 10)
+		}
+		return nil, fmt.Errorf("Wolf returned unexpected logits shape [%s]", strings.Join(dimensions, ", "))
+	}
+	probability, err := unsafeProbability(logits)
+	if err != nil {
+		return nil, err
+	}
+	return GuardianStage1ResultScored{UnsafeProb: probability, Tokens: tokens, ElapsedMs: uint64(time.Since(started).Milliseconds())}, nil
 }
 
 // loadSession loads model, on the selected GPU provider when useGPU asks
 // for one and it loads, otherwise on the CPU.
 func loadSession(environment *ortEnvironment, model string, useGPU bool) (*ortSession, error) {
-	panic("unported: mj-github-relevance/src/guardian_classifier.rs load_session")
+	builder := func() (*ortSessionBuilder, error) {
+		builder, err := newOrtSessionBuilder(environment)
+		if err != nil {
+			return nil, err
+		}
+		if err := builder.withIntraThreads(min(runtime.NumCPU(), 4)); err != nil {
+			return nil, err
+		}
+		if err := builder.withInterThreads(1); err != nil {
+			return nil, err
+		}
+		return builder, nil
+	}
+	if useGPU {
+		// Use only providers that support Wolf's dynamic input shapes.
+		var provider *ortExecutionProvider
+		switch {
+		case cudaSelected():
+			provider = &ortExecutionProvider{name: ortCUDAProvider, options: []ortOption{{key: "use_tf32", value: "0"}}}
+		case directmlSelected():
+			provider = &ortExecutionProvider{name: ortDirectMLProvider}
+		}
+		if provider != nil {
+			provider.errorOnFailure = true
+			session, err := func() (*ortSession, error) {
+				builder, err := builder()
+				if err != nil {
+					return nil, err
+				}
+				if err := builder.withMemoryPattern(false); err != nil {
+					return nil, err
+				}
+				if err := builder.withParallelExecution(false); err != nil {
+					return nil, err
+				}
+				if err := builder.withExecutionProviders(*provider, ortExecutionProvider{name: ortCPUProvider}); err != nil {
+					return nil, err
+				}
+				return builder.commitFromFile(model)
+			}()
+			if err == nil {
+				return session, nil
+			}
+			slog.Warn("Wolf GPU session failed to load; using CPU", "target", "mj_guardian", "error", err.Error())
+		}
+	}
+	cpu, err := builder()
+	if err != nil {
+		return nil, err
+	}
+	return cpu.commitFromFile(model)
 }

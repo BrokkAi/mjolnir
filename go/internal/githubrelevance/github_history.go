@@ -5,7 +5,11 @@
 package githubrelevance
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
+	"math"
+	"slices"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
@@ -51,7 +55,142 @@ func Evidence(originalItem *transcript.OrderedValue, text string, base *transcri
 // EvidenceFromSpans budgets already retrieved spans into base; the
 // transcript is used only through them.
 func EvidenceFromSpans(base *transcript.OrderedValue, work []transcript.Span) (HistoryEvidence, error) {
-	panic("unported: mj-github-relevance/src/github_history.rs evidence_from_spans")
+	tokenizer, err := historyTokenizer()
+	if err != nil {
+		return HistoryEvidence{}, err
+	}
+	count := func(a string, b *string, special bool) (int, error) {
+		first, second := a, (*string)(nil)
+		if b != nil {
+			first, second = tokenizersInput(a, *b)
+		}
+		ids, err := tokenizer.Encode(first, second, special)
+		if err != nil {
+			return 0, err
+		}
+		return len(ids), nil
+	}
+	// Rust owns work; the caller's spans stay as they were.
+	work = slices.Clone(work)
+	originalSnippets := len(work)
+	for i := range work {
+		if work[i].Snippet.Time != nil {
+			redacted := transcript.Redact(*work[i].Snippet.Time)
+			work[i].Snippet.Time = &redacted
+		}
+	}
+	sessionValue := base.Index("session")
+	source, ok := sessionValue.AsObject()
+	if !ok {
+		return HistoryEvidence{}, errors.New("session must be object")
+	}
+	var session []transcript.OrderedMember
+	has := func(key string) bool {
+		return slices.ContainsFunc(session, func(member transcript.OrderedMember) bool { return member.Key == key })
+	}
+	for _, key := range []string{"conversation", "files", "references", "mentions"} {
+		if value, ok := orderedGet(source, key); ok {
+			session = append(session, transcript.OrderedMember{Key: key, Value: value})
+		}
+	}
+	var extra []string
+	for _, member := range source {
+		if !has(member.Key) && member.Key != "history" {
+			extra = append(extra, member.Key)
+		}
+	}
+	slices.Sort(extra)
+	for _, key := range extra {
+		value, _ := orderedGet(source, key)
+		session = append(session, transcript.OrderedMember{Key: key, Value: value})
+	}
+	object := func(members []transcript.OrderedMember) transcript.OrderedValue {
+		return transcript.OrderedValue{Kind: transcript.OrderedValueObject, Object: slices.Clone(members)}
+	}
+	itemValue := base.Index("item")
+	item := itemValue.String()
+	sessionText := object(session).String()
+	baseTokens, err := count(item, &sessionText, true)
+	if err != nil {
+		return HistoryEvidence{}, err
+	}
+	var removed []HistoryRemoval
+	for {
+		snippets := make([]core.HistorySnippet, 0, len(work))
+		for _, span := range work {
+			snippets = append(snippets, span.Snippet)
+		}
+		encoded, err := serdeJSON(snippets)
+		if err != nil {
+			return HistoryEvidence{}, err
+		}
+		var history transcript.OrderedValue
+		if err := json.Unmarshal(encoded, &history); err != nil {
+			return HistoryEvidence{}, err
+		}
+		historyTokens, err := count(history.String(), nil, false)
+		if err != nil {
+			return HistoryEvidence{}, err
+		}
+		// IndexMap::insert: a known key keeps its place.
+		if index := slices.IndexFunc(session, func(member transcript.OrderedMember) bool { return member.Key == "history" }); index >= 0 {
+			session[index].Value = history
+		} else {
+			session = append(session, transcript.OrderedMember{Key: "history", Value: history})
+		}
+		sessionText := object(session).String()
+		total, err := count(item, &sessionText, true)
+		if err != nil {
+			return HistoryEvidence{}, err
+		}
+		if len(work) == 0 || (historyTokens <= 800 && total <= 7999) {
+			return HistoryEvidence{
+				Evidence: object([]transcript.OrderedMember{
+					{Key: "item", Value: itemValue},
+					{Key: "session", Value: object(session)},
+				}),
+				HistoryTokens:    historyTokens,
+				TotalTokens:      total,
+				BaseTokens:       baseTokens,
+				OriginalSnippets: originalSnippets,
+				Retained:         work,
+				Removed:          removed,
+				OverLimit:        total > 7999,
+			}, nil
+		}
+		worst := 0
+		for candidate := 1; candidate < len(work); candidate++ {
+			order := totalCmp(work[candidate].Score, work[worst].Score)
+			if order < 0 || (order == 0 && work[candidate].Start < work[worst].Start) {
+				worst = candidate
+			}
+		}
+		reason := "input_capacity"
+		if historyTokens > 800 {
+			reason = "history_budget"
+		}
+		removed = append(removed, HistoryRemoval{Start: work[worst].Start, Reason: reason})
+		work = slices.Delete(work, worst, worst+1)
+	}
+}
+
+// orderedGet is IndexMap::get on an object's members.
+func orderedGet(members []transcript.OrderedMember, key string) (transcript.OrderedValue, bool) {
+	for _, member := range members {
+		if member.Key == key {
+			return member.Value, true
+		}
+	}
+	return transcript.OrderedValue{}, false
+}
+
+// totalCmp is f64::total_cmp: IEEE 754 totalOrder.
+func totalCmp(a, b float64) int {
+	left := int64(math.Float64bits(a))
+	right := int64(math.Float64bits(b))
+	left ^= int64(uint64(left>>63) >> 1)
+	right ^= int64(uint64(right>>63) >> 1)
+	return cmp.Compare(left, right)
 }
 
 // tokenizersInput is the pair input of core.GithubHistoryTokenizer.Encode

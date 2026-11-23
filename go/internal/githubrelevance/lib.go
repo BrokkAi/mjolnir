@@ -23,9 +23,22 @@
 package githubrelevance
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
+
+// serdeJSON encodes as serde_json::to_vec does: `<`, `>` and `&` stay
+// literal and there is no trailing newline.
+func serdeJSON(v any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
+}
 
 // requireFields is serde's missing-field check for required members of a
 // JSON object.
