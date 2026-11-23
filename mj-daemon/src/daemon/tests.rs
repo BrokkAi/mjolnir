@@ -2465,6 +2465,15 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
                 r#"{"protocol_version":65,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
+        ProtocolTranscript {
+            protocol_version: 123,
+            daemon_build: "2.74.0",
+            expected_requests: requests(123),
+            responses: [
+                r#"{"protocol_version":123,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-10-27T00:00:00Z","build_version":"2.74.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":123,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
     ]
 }
 
@@ -7171,7 +7180,7 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
 
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
-pub(super) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
+pub(crate) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = remote.control.session_gate.clone();
     let upgrades =
@@ -7812,7 +7821,7 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     let mut history = runtime_test_session("history-close", &workspace.id, SessionState::Stopped);
     history.draft_input = "unsent".into();
     mj_controller::database::save_session(&history).unwrap();
-    mj_controller::database::save_detached_draft(
+    seed_legacy_detached_draft(
         &workspace.id,
         Some(&history.id),
         "terminal",
@@ -8015,7 +8024,7 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
         ))
         .unwrap();
     }
-    mj_controller::database::save_detached_draft(
+    seed_legacy_detached_draft(
         &workspace.id,
         None,
         "terminal",
@@ -8127,14 +8136,7 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         ))
         .unwrap();
     }
-    mj_controller::database::save_detached_draft(
-        &workspace.id,
-        None,
-        "terminal",
-        Some(7),
-        "keep me",
-    )
-    .unwrap();
+    seed_legacy_detached_draft(&workspace.id, None, "terminal", Some(7), "keep me").unwrap();
     let state = test_runtime_state_loading_the_store();
     // Each stop stands in for a close the workspace close joins: one already
     // committed and still removing its target, one still checkpointing.
@@ -8744,6 +8746,7 @@ esac
                         id,
                         &RefusingExecutor("a committed destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8755,6 +8758,7 @@ esac
                         id,
                         &RefusingExecutor("a ready destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8789,7 +8793,7 @@ esac
             let (teardown_moves, close_operations) =
                 mj_controller::database::load_move_recovery().unwrap();
             let owners = teardown
-                .recover_moves(teardown_moves, &close_operations)
+                .recover_moves(teardown_moves, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(!owners.moves.contains(id));
@@ -8849,7 +8853,8 @@ esac
                 mj_controller::database::settle_superseded_move_source(
                     &restored,
                     Some(&source_environment.id),
-                    &operation.operation_id
+                    &operation.operation_id,
+                    true,
                 )
                 .is_err()
             );
@@ -8885,7 +8890,7 @@ esac
             let cancelled = test_runtime_state_loading_the_store();
             // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
             let owners = cancelled
-                .recover_moves(operations, &close_operations)
+                .recover_moves(operations, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(owners.moves.contains(id));
@@ -8946,7 +8951,7 @@ esac
             let (operations, close_operations) =
                 mj_controller::database::load_move_recovery().unwrap();
             let owned = state
-                .recover_moves(operations, &close_operations)
+                .recover_moves(operations, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(
@@ -9183,7 +9188,7 @@ esac
                     BTreeSet::new()
                 };
                 let owners = recovering
-                    .recover_moves(vec![completed.clone()], &close_ids)
+                    .recover_moves(vec![completed.clone()], &close_ids, &BTreeSet::new())
                     .await
                     .unwrap();
                 assert!(!owners.moves.contains(&id));
@@ -9640,73 +9645,6 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             .unwrap()
             .is_none()
     );
-}
-
-/// A finished reviewer is destroyed, not left as a stopped sub-agent of the
-/// session that asked for the review (the shape the earlier suspend-only close
-/// left behind). Its usage stays in the accounting table.
-#[cfg(unix)]
-#[tokio::test]
-async fn destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting() {
-    const NAME: &str = "destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting";
-    const CHILD: &str = "MJ_TEST_DESTROY_FINISHED_REVIEWER";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), NAME),
-        )
-        .env(CHILD, "1")
-        .isolated_store(directory.path())
-        .env(
-            mj_core::config::SESSION_INDEX_ENV,
-            directory.path().join("sessionwiki"),
-        )
-        .env("HOME", &home)
-        .env("XDG_DATA_HOME", home.join(".local/share"))
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .run();
-        return;
-    }
-    let _writer = mj_controller::database::install_isolated_test_writer();
-    let workspace = mj_controller::database::create_workspace("Reviewer destroy").unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let parent_id = "0123456789abcdef0123456789abcdef";
-    let reviewer_id = "44444444444444444444444444444444";
-    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
-    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(parent_id),
-    }));
-    mj_controller::database::save_session(&parent).unwrap();
-    let reviewer = runtime_test_session(reviewer_id, &workspace.id, SessionState::Stopped);
-    let mut relation = runtime_test_subagent(reviewer_id, parent_id);
-    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
-    relation.task_name = "review".into();
-    mj_controller::database::save_subagent_session(&reviewer, &relation).unwrap();
-
-    let state = test_runtime_state_loading_the_store();
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        state.destroy_reviewer_child(reviewer_id.to_owned()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let stored = mj_controller::database::load_state().unwrap();
-    assert!(!stored.sessions.contains_key(reviewer_id));
-    assert!(!stored.subagents.contains_key(reviewer_id));
-    assert!(stored.sessions.contains_key(parent_id));
-    let connection = rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
-    let accounted: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM subagent_accounting WHERE child_session_id=?1 AND task_name='review'",
-            [reviewer_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(accounted, 1);
 }
 
 /// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test
@@ -10297,6 +10235,22 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Missing).await;
 
+    let closed_id = "closed-borrower";
+    let workspace = &parent
+        .state
+        .session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .workspace_id;
+    let closed = runtime_test_session(closed_id, workspace, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+    let data = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(&data, closed_id, "detail", "{}")
+        .unwrap();
+
     let failure = tokio::time::timeout(
         Duration::from_secs(60),
         parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
@@ -10306,6 +10260,8 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     assert!(failure.is_err());
 
     let stored = mj_controller::database::load_state().unwrap();
+    assert!(stored.sessions.contains_key(closed_id));
+    assert!(data.join("tool-details/closed-borrower.mjtd").exists());
     let record = &stored.sessions[LATCH_RELAY_SESSION];
     assert_eq!(record.state, SessionState::Running, "{record:?}");
     assert!(
@@ -10396,6 +10352,7 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
         stored.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Stopped
     );
+    assert!(!stored.sessions.contains_key(stopped_id));
     assert!(
         !stored.sessions.contains_key(WORKING_CHILD)
             && !stored.subagents.contains_key(WORKING_CHILD),
@@ -11108,9 +11065,57 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
         )
         .unwrap()
     );
+    let closed_id = "closed-borrower";
+    let closed = runtime_test_session(closed_id, &workspace.id, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, parent_id),
+    )
+    .unwrap();
+    let item = Arc::new(mj_core::transcript::TranscriptItem {
+        stable_id: "message".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: mj_core::transcript::TranscriptBody::System {
+            text: "closed child history".into(),
+        },
+    });
+    let mut projection = mj_core::state::MaterializedSession::empty(closed_id);
+    projection.applied_event_ordinal = 1;
+    projection.applied_event_digest = format!("{:064x}", 1);
+    projection.transcript.push(item.clone());
+    mj_controller::database::save_materialized_session(&projection).unwrap();
+    let data_dir = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(
+        &data_dir,
+        closed_id,
+        &item.stable_id,
+        &serde_json::to_string(&item.body).unwrap(),
+    )
+    .unwrap();
+    let detail = data_dir
+        .join("tool-details")
+        .join(format!("{closed_id}.mjtd"));
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    let mut view = ready_startup_view();
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.window = mj_core::state::ProjectionWindow::of(&projection);
+    snapshot.materialized = projection;
+    state.owner().publish_view(closed_id.into(), view);
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    let cursor = replica.cursor.clone().unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, &cursor),
+        mj_client::runtime_feed::SessionTailReply::Tail { .. }
+    ));
+    assert!(detail.is_file());
     tokio::time::timeout(
         Duration::from_secs(60),
         state.suspend_session(parent_id.to_owned()),
@@ -11118,6 +11123,23 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     .await
     .unwrap()
     .unwrap();
+
+    replica
+        .apply(state.runtime_changes(Some(cursor), false).await.unwrap())
+        .unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, replica.cursor.as_ref().unwrap()),
+        mj_client::runtime_feed::SessionTailReply::NoTail
+    ));
+    assert!(state.session_record(closed_id).is_none());
+    assert!(!state.owner().sessions.contains_key(closed_id));
+    assert!(!state.owner().transcripts.contains_key(closed_id));
+    assert!(
+        mj_controller::database::load_materialized_session(closed_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!detail.exists());
 
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
@@ -11175,10 +11197,7 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         stored.subagents.contains_key(child_id),
         "the relation stays"
     );
-    assert!(
-        worker_root.exists(),
-        "the shared environment retains the child's private root"
-    );
+    assert!(!worker_root.exists());
     assert!(
         !root.path().join("started").exists(),
         "the parked child's worker was not started"
@@ -11442,10 +11461,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             stored.sessions[LATCH_RELAY_SESSION].state,
             SessionState::Stopped
         );
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
-        );
+        assert!(!worker_root.exists());
         let history = mj_controller::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
@@ -11514,6 +11530,19 @@ async fn exercise_child_close_with_a_nested_workspace(
         worker_root: worker_root.clone(),
     }));
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
+    let profile = mj_controller::targets::local_nested_profile_root(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&profile).unwrap();
+    let detail_data = mj_core::config::data_dir();
+    let detail_body = mj_core::transcript::TranscriptBody::System {
+        text: "spilled child detail".into(),
+    };
+    let (offset, len) = mj_controller::database::tool_details::append_tool_detail(
+        &detail_data,
+        LATCH_RELAY_SESSION,
+        "detail",
+        &serde_json::to_string(&detail_body).unwrap(),
+    )
+    .unwrap();
     let reports = repository
         .path()
         .join(".mj/agents")
@@ -11670,9 +11699,18 @@ async fn exercise_child_close_with_a_nested_workspace(
         let closed = &stored.sessions[LATCH_RELAY_SESSION];
         assert_eq!(closed.state, SessionState::Stopped);
         assert!(closed.target.is_none() && closed.checkpoint.is_none());
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
+        assert!(!worker_root.exists());
+        assert!(!profile.exists());
+        assert_eq!(
+            mj_controller::database::tool_details::read_tool_detail(
+                &detail_data,
+                LATCH_RELAY_SESSION,
+                "detail",
+                offset,
+                len,
+            )
+            .unwrap(),
+            detail_body,
         );
     }
     assert_eq!(stored.sessions[parent_id], parent);
@@ -12314,35 +12352,6 @@ async fn interrupted_runtime_fragments_never_publish_partial_state() {
     let (mut stream, _) = listener.accept().await.unwrap();
     assert!(mj_client::daemon::read_response(&mut stream).await.is_err());
     sender.await.unwrap();
-}
-
-#[tokio::test]
-async fn recovered_drafts_append_to_committed_edits_and_failed_writes_do_not_publish() {
-    let Some(_writer) = startup_prompt_test_store(
-        "recovered_drafts_append_to_committed_edits_and_failed_writes_do_not_publish",
-    ) else {
-        return;
-    };
-    let manager = TestRemoteManager::new().await;
-    let state = test_runtime_state_with_manager(&manager);
-    insert_starting_session(&state, "original");
-    mj_controller::database::set_session_draft_input("session-1", "newer client edit").unwrap();
-    let (first, second) = tokio::join!(
-        state.append_draft_input("session-1", "first"),
-        state.append_draft_input("session-1", "second")
-    );
-    first.unwrap();
-    second.unwrap();
-    let saved = state.session_record("session-1").unwrap().draft_input;
-    assert!(saved.starts_with("newer client edit\n\n"));
-    assert!(saved.contains("first") && saved.contains("second"));
-    assert!(
-        state
-            .append_draft_input("missing", "lost input")
-            .await
-            .is_err()
-    );
-    assert!(state.session_record("missing").is_none());
 }
 
 #[tokio::test]
@@ -13813,6 +13822,36 @@ fn startup_image_draft(label: &str, reference: &mj_core::attachment::AttachmentR
 }
 
 #[tokio::test]
+async fn oversized_startup_prompt_is_refused_before_persistence() {
+    let Some(_writer) =
+        startup_prompt_test_store("oversized_startup_prompt_is_refused_before_persistence")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let mut action = queued_prompt_action("oversized");
+    let DaemonAction::QueueStartupPrompt { prompt, .. } = &mut action else {
+        unreachable!()
+    };
+    *prompt = vec![ContentBlock::Text(TextContent::new(
+        "x".repeat(mj_core::relay::RELAY_COMMAND_BYTE_BUDGET),
+    ))];
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let result = handle_action(action, &metadata, &state, &CancellationToken::new()).await;
+    let Err(error) = result else {
+        panic!("oversized startup prompt was accepted");
+    };
+    assert!(error.is::<mj_core::relay::RelayBudgetExceeded>());
+    assert!(
+        mj_controller::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable() {
     const NAME: &str =
         "startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_durable";
@@ -13858,7 +13897,8 @@ async fn startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_
         pending("unrelated-startup", true)
     ]);
     let existing = format!("{}{}", mj_core::draft::CHAT_DRAFT_PREFIX, saved);
-    mj_controller::database::set_session_draft_input("session-1", &existing).unwrap();
+    mj_controller::database::test_fixtures::seed_session_draft_input("session-1", &existing)
+        .unwrap();
     let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     let cancellation = CancellationToken::new();
     let action = DaemonAction::QueueStartupPrompt {
@@ -14106,18 +14146,11 @@ async fn startup_image_refusal_recovers_complete_drafts_and_invalid_merges_stay_
         "a conflicting replay must retain the original accepted receipt"
     );
     assert_eq!(session_draft_input(&state), recovered_before_conflict);
-    // Store integration also covers plain/encoded in both directions and an
-    // invalid envelope retaining the entire refused durable payload.
-    for (left, right) in [
-        ("new typing", recovered.as_str()),
-        (recovered.as_str(), "more typing"),
-    ] {
-        mj_controller::database::set_session_draft_input("session-1", left).unwrap();
-        state.append_draft_input("session-1", right).await.unwrap();
-        mj_core::draft::validate_reference_draft(&session_draft_input(&state)).unwrap();
-    }
-    mj_controller::database::set_session_draft_input("session-1", "mjolnir-chat-draft-v1:broken")
-        .unwrap();
+    mj_controller::database::test_fixtures::seed_session_draft_input(
+        "session-1",
+        "mjolnir-chat-draft-v1:broken",
+    )
+    .unwrap();
     mj_controller::database::enqueue_startup_deliveries(vec![
         mj_controller::database::StartupDelivery {
             session_id: "session-1".into(),
@@ -14289,7 +14322,7 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
         .await
         .unwrap();
     // A daemon handoff interrupts resumable work; it is not a user refusal.
-    mj_controller::database::set_session_draft_input(session_id, "").unwrap();
+    mj_controller::database::test_fixtures::seed_session_draft_input(session_id, "").unwrap();
     let reservation = state.startup_delivery_gate(session_id).lock_owned().await;
     handle_action(
         queued_prompt_action("keep through handoff"),
@@ -14353,7 +14386,7 @@ async fn startup_failed_and_cancelled_moves_restore_images_instead_of_using_reta
     .into_iter()
     .enumerate()
     {
-        mj_controller::database::set_session_draft_input("session-1", "").unwrap();
+        mj_controller::database::test_fixtures::seed_session_draft_input("session-1", "").unwrap();
         let mut session = state.session_record("session-1").unwrap();
         session.state = SessionState::Running;
         mj_controller::database::save_session(&session).unwrap();
@@ -17753,4 +17786,460 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
     assert_eq!(saved.state, SessionState::Parked);
     assert_eq!(saved.target, record.target);
     assert!(!start_marker.exists());
+}
+
+fn seed_legacy_detached_draft(
+    workspace_id: &str,
+    session_id: Option<&str>,
+    source: &str,
+    owner_pid: Option<u32>,
+    text: &str,
+) -> rusqlite::Result<()> {
+    let connection = rusqlite::Connection::open(mj_controller::database::database_path())?;
+    connection.execute(
+        "INSERT INTO detached_drafts
+            (draft_id, workspace_id, session_id, source, owner_pid, saved_at, text)
+         VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?5)",
+        rusqlite::params![workspace_id, session_id, source, owner_pid, text],
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_draft_rpc_lists_previews_recovers_and_discards() {
+    const NAME: &str = "workspace_draft_rpc_lists_previews_recovers_and_discards";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let workspace = mj_controller::database::create_workspace("Draft RPC").unwrap();
+    let mut session = runtime_test_session("draft-session", &workspace.id, SessionState::Stopped);
+    session.draft_input = "inherited seed".into();
+    mj_controller::database::save_session(&session).unwrap();
+    let text = format!(
+        r#"mjolnir-chat-draft-v1:{{"text":"some\n   readable {}"}}"#,
+        "界".repeat(210)
+    );
+    mj_controller::database::save_terminal_draft(
+        &session.id,
+        "other terminal",
+        std::process::id(),
+        7,
+        mj_core::storage::DetachedSessionDraft {
+            text: text.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = mj_core::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, CancellationToken::new()).await
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
+        .await
+        .unwrap();
+    let groups = client.list_workspace_drafts().await.unwrap();
+    let draft = &groups[0].drafts[0];
+    assert_eq!(draft.session_title.as_deref(), Some(session.listed_title()));
+    assert!(draft.preview.starts_with("some readable 界"));
+    assert_eq!(draft.preview.chars().count(), 201);
+    assert!(draft.preview.ends_with('…'));
+    let snapshot = super::guards::workspace_snapshot(&workspace.id).unwrap();
+    assert_eq!(snapshot.drafts[0].preview, draft.preview);
+
+    let recovered = client.recover_draft(draft.id.clone()).await.unwrap();
+    assert_eq!(recovered, (session.id.clone(), text.clone(), Some(7)));
+    assert_eq!(
+        client.recover_draft(draft.id.clone()).await.unwrap(),
+        recovered
+    );
+    assert_eq!(
+        mj_controller::database::load_state().unwrap().sessions[&session.id].draft_input,
+        "inherited seed",
+    );
+
+    client
+        .persist_terminal_draft(
+            "receiving terminal".into(),
+            session.id.clone(),
+            std::process::id(),
+            1,
+            mj_core::storage::DetachedSessionDraft {
+                text,
+                retired_drafts: vec![mj_core::storage::RetiredDetachedDraft {
+                    draft_id: draft.id.clone(),
+                    revision: recovered.2,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(client.recover_draft(draft.id.clone()).await.is_err());
+    let transferred = client.list_workspace_drafts().await.unwrap();
+    assert_eq!(transferred[0].drafts.len(), 1);
+    assert_eq!(transferred[0].drafts[0].source, "receiving terminal");
+    assert_eq!(transferred[0].drafts[0].preview, draft.preview);
+    assert_eq!(
+        client
+            .discard_drafts(
+                workspace.id.clone(),
+                Some(transferred[0].drafts[0].id.clone())
+            )
+            .await
+            .unwrap(),
+        1
+    );
+
+    for text in ["single discard", "bulk 1", "bulk 2"] {
+        seed_legacy_detached_draft(&workspace.id, None, "legacy", None, text).unwrap();
+    }
+    let drafts = mj_controller::database::list_detached_drafts(&workspace.id).unwrap();
+    let id = drafts
+        .iter()
+        .find(|draft| draft.text == "single discard")
+        .unwrap()
+        .id
+        .clone();
+    for (draft_id, expected) in [(Some(id), 1), (None, 2)] {
+        assert_eq!(
+            client
+                .discard_drafts(workspace.id.clone(), draft_id)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(
+        mj_controller::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    drop(client);
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn retired_harness_requires_explicit_destroy() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_DESTROY";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "retired_harness_requires_explicit_destroy",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "retired-harness-destroy")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let mut session = test_fixtures::checkpoint_test_session("retired-destroy");
+    session.state = SessionState::Destroying;
+    database::save_session(&session).unwrap();
+    test_fixtures::retire_test_harness(&session.id).unwrap();
+    let mut state = test_runtime_state_loading_the_store();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(database::subscribe_committed_state().unwrap());
+
+    let snapshots = state.subscribe_browser_views().unwrap();
+    {
+        let snapshot = snapshots.borrow();
+        assert!(snapshot.sessions.get(&session.id).is_none());
+        assert!(snapshot.retired_session_ids.contains(&session.id));
+    }
+
+    state.recover_destruction(session.id.clone()).await.unwrap();
+    let retained = database::load_retired_harness_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.owned_environment.unwrap().phase,
+        database::EnvironmentPhase::Active
+    );
+
+    let started = state
+        .admit_session_lifecycle(SessionLifecycleRequest::DestroyStopped {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(started.result)
+        .await
+        .unwrap();
+    assert!(
+        database::load_retired_harness_session(&session.id)
+            .unwrap()
+            .is_none()
+    );
+    state.browser_views(None).unwrap();
+    assert!(!snapshots.borrow().retired_session_ids.contains(&session.id));
+}
+
+#[tokio::test]
+async fn retired_harness_child_is_destroyed_during_parent_destruction_recovery() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const TEST: &str = "retired_harness_child_is_destroyed_during_parent_destruction_recovery";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_CHILD_DESTROY";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-child-destroy")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let parent = test_fixtures::checkpoint_test_session("supported-parent");
+    let child = test_fixtures::checkpoint_test_session("retired-child");
+    database::save_session(&parent).unwrap();
+    database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id)).unwrap();
+    database::test_fixtures::retire_test_harness(&child.id).unwrap();
+    assert_eq!(
+        database::begin_session_destroy(&parent.id)
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&child.id)
+    );
+
+    let state = test_runtime_state_loading_the_store();
+    state.recover_destruction(parent.id.clone()).await.unwrap();
+
+    assert!(
+        database::read_durable_session_record(&parent.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        database::load_retired_harness_session(&child.id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn retired_harness_child_is_stopped_before_its_parent_suspends() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const TEST: &str = "retired_harness_child_is_stopped_before_its_parent_suspends";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_CHILD_SUSPEND";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-child-suspend")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let parent = test_fixtures::checkpoint_test_session("supported-parent");
+    let child = test_fixtures::checkpoint_test_session("retired-child");
+    database::save_session(&parent).unwrap();
+    database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id)).unwrap();
+    database::test_fixtures::retire_test_harness(&child.id).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    assert!(
+        state
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .get(&child.id)
+            .is_none()
+    );
+    state
+        .stop_subagents_before_close(&parent.id, None)
+        .await
+        .unwrap();
+
+    assert!(
+        database::load_retired_harness_session(&child.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        database::session_environment(&parent.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        database::EnvironmentPhase::Active
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn retired_harness_stop_keeps_independent_descendants() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+    use mj_core::state::TargetLocator;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const TEST: &str = "retired_harness_stop_keeps_independent_descendants";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_INDEPENDENT_DESCENDANTS";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-independent-descendants")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+
+    for variant in ["supported", "retired"] {
+        let session = |role| {
+            let id = format!("{variant}-{role}");
+            let mut session = runtime_test_session(
+                &id,
+                mj_core::workspace::DEFAULT_WORKSPACE_ID,
+                SessionState::Running,
+            );
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: root.path().join(id),
+            }));
+            session
+        };
+        let parent = session("parent");
+        let child = session("borrower");
+        let sibling = session("sibling");
+        let bound = session("bound-grandchild");
+        let independent = session("independent-grandchild");
+        let worker_root = |id: &str| root.path().join(id);
+        let stopped_marker = |id: &str| root.path().join(format!("{id}.stopped"));
+        for id in [&child.id, &independent.id] {
+            let dir = worker_root(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let worker = dir.join("hel");
+            std::fs::write(
+                &worker,
+                "#!/bin/sh\n[ \"$3\" != --help ] || exit 0\ntouch \"$4.stopped\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = worker_root(&independent.id).join("work");
+        std::fs::write(&data, b"independent work").unwrap();
+
+        database::save_session(&parent).unwrap();
+        let mut borrower = runtime_test_subagent(&child.id, &parent.id);
+        borrower.orchestrator = true;
+        database::save_subagent_session(&child, &borrower).unwrap();
+        database::save_subagent_session(&sibling, &runtime_test_subagent(&sibling.id, &parent.id))
+            .unwrap();
+        database::save_subagent_session(&bound, &runtime_test_subagent(&bound.id, &child.id))
+            .unwrap();
+        database::register_subagent_with_startup(
+            &independent,
+            &runtime_test_subagent(&independent.id, &child.id),
+            Vec::new(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let shared = database::session_environment(&parent.id).unwrap().unwrap();
+        let before = database::session_environment(&independent.id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(before.id, shared.id);
+        test_fixtures::retire_test_harness(&child.id).unwrap();
+        if variant == "retired" {
+            test_fixtures::retire_test_harness(&bound.id).unwrap();
+            test_fixtures::retire_test_harness(&independent.id).unwrap();
+        }
+
+        let state = test_runtime_state_loading_the_store();
+        state
+            .stop_subagents_before_close(&sibling.id, None)
+            .await
+            .unwrap();
+        assert!(!stopped_marker(&child.id).exists());
+        assert!(worker_root(&child.id).exists());
+        assert_eq!(
+            database::session_environment(&child.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            shared.id
+        );
+        assert_eq!(
+            database::load_retired_harness_session(&child.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SessionState::Running
+        );
+
+        state
+            .stop_subagents_before_close(&parent.id, None)
+            .await
+            .unwrap();
+
+        assert!(stopped_marker(&child.id).exists());
+        assert!(!worker_root(&child.id).exists());
+        assert!(database::session_environment(&child.id).unwrap().is_none());
+        assert!(
+            database::load_retired_harness_session(&child.id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            database::environment_workers(&shared.id)
+                .unwrap()
+                .iter()
+                .any(|lease| lease.session_id == child.id)
+        );
+        assert!(
+            database::load_retired_harness_session(&bound.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            database::read_durable_session_record(&bound.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let after = database::session_environment(&independent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.phase, database::EnvironmentPhase::Active);
+        assert_eq!(
+            database::load_subagent(&independent.id)
+                .unwrap()
+                .unwrap()
+                .parent_session_id,
+            child.id
+        );
+        let independent_state = if variant == "retired" {
+            database::load_retired_harness_session(&independent.id)
+                .unwrap()
+                .unwrap()
+                .state
+        } else {
+            database::read_durable_session_record(&independent.id)
+                .unwrap()
+                .unwrap()
+                .state
+        };
+        assert_eq!(independent_state, SessionState::Running);
+        assert!(!stopped_marker(&independent.id).exists());
+        assert_eq!(std::fs::read(&data).unwrap(), b"independent work");
+    }
 }

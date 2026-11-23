@@ -21,8 +21,8 @@
 //! their media types, response bodies, or status meanings is a change to this
 //! API:
 //!
-//! - `GET /sessions/{session_id}/diff` answers a unified diff as
-//!   `text/x-diff; charset=utf-8`, comparing from the revision the caller names
+//! - `GET /sessions/{session_id}/diff` answers a diffstat or a unified patch
+//!   for selected paths as `text/x-diff; charset=utf-8`, comparing from the revision named
 //!   in `base` when it names one. With `json=true` it answers
 //!   `application/json` carrying `mj_checkpoint::archive::SessionDiff` instead,
 //!   a type that lives in the checkpoint crate, so changing its fields is also

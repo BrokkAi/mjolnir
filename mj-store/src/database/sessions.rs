@@ -912,6 +912,7 @@ pub fn settle_superseded_move_source(
     session: &SessionRecord,
     environment_id: Option<&str>,
     operation_id: &str,
+    suspended: bool,
 ) -> Result<()> {
     let session = session.clone();
     let environment_id = environment_id.map(str::to_owned);
@@ -923,7 +924,7 @@ pub fn settle_superseded_move_source(
             None,
             environment_id.as_deref(),
             None,
-            Some(&operation_id),
+            Some((&operation_id, suspended)),
         )
     })
 }
@@ -934,7 +935,7 @@ fn save_resumed_session_in_environment_to(
     container_size: Option<(&str, HostContainerSize)>,
     environment_id: Option<&str>,
     requests: Option<&SessionResumeOptions>,
-    close_move: Option<&str>,
+    close_move: Option<(&str, bool)>,
 ) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
@@ -999,7 +1000,7 @@ fn save_resumed_session_in_environment_to(
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
     }
-    if let Some(operation_id) = close_move {
+    if let Some((operation_id, _)) = close_move {
         super::session_move::resolve_cancelled_move_for_close_with(
             &tx,
             &session.id,
@@ -1007,7 +1008,15 @@ fn save_resumed_session_in_environment_to(
             &session.updated_at,
         )?;
     }
+    let purged = if close_move.is_some_and(|(_, suspended)| suspended)
+        && session.state == SessionState::Stopped
+    {
+        purge_borrowed_descendants_in_tx(&tx, &session.id, None)?
+    } else {
+        Vec::new()
+    };
     tx.commit()?;
+    tool_details::unlink_deleted_sessions(path, &purged);
     Ok(())
 }
 
@@ -1388,6 +1397,14 @@ pub fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
 /// A verified close of a restored destination also ends its cancelled Move.
 /// Check the old placement before publishing the terminal lifecycle state.
 pub fn save_closed_session(session: &SessionRecord) -> Result<()> {
+    save_closed_session_with(session, true)
+}
+
+pub fn save_temporary_close(session: &SessionRecord) -> Result<()> {
+    save_closed_session_with(session, false)
+}
+
+fn save_closed_session_with(session: &SessionRecord, suspended: bool) -> Result<()> {
     let session = session.clone();
     submit_database_write("save closed session", move |connection| {
         validate_session_record(&session)?;
@@ -1426,7 +1443,52 @@ pub fn save_closed_session(session: &SessionRecord) -> Result<()> {
                 [&session.id],
             )?;
         }
+        let purged = if suspended && session.state == SessionState::Stopped {
+            purge_borrowed_descendants_in_tx(&tx, &session.id, None)?
+        } else {
+            Vec::new()
+        };
         tx.commit()?;
+        tool_details::unlink_deleted_sessions(&database_path(), &purged);
+        Ok(())
+    })
+}
+
+/// Settle an explicit suspend without a fresh checkpoint.
+pub fn save_suspended_session(session: &SessionRecord) -> Result<()> {
+    validate_session_record(session)?;
+    ensure!(
+        session.state == SessionState::Stopped,
+        "suspend has not settled"
+    );
+    let session = session.clone();
+    submit_database_write("settle suspend", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        update_lifecycle_fields(&tx, &session)?;
+        let purged = purge_borrowed_descendants_in_tx(&tx, &session.id, None)?;
+        tx.commit()?;
+        tool_details::unlink_deleted_sessions(&database_path(), &purged);
+        Ok(())
+    })
+}
+
+/// An already-stopped parent needs no record rewrite. In particular, deferred
+/// cleanup can update its locator independently.
+pub fn settle_stopped_suspend(session_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    submit_database_write("settle already-stopped suspend", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id=?1 AND state='stopped')",
+                [&session_id],
+                |row| row.get::<_, bool>(0),
+            )?,
+            "suspend no longer names a stopped session"
+        );
+        let purged = purge_borrowed_descendants_in_tx(&tx, &session_id, None)?;
+        tx.commit()?;
+        tool_details::unlink_deleted_sessions(&database_path(), &purged);
         Ok(())
     })
 }
@@ -2284,61 +2346,73 @@ pub fn delete_session(session_id: &str) -> Result<()> {
 }
 
 pub(super) fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
-    let connection = open(path)?;
-    mj_core::config::validate_id("session", session_id)?;
-    connection.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
-    if let Err(error) =
-        tool_details::remove_session_tool_details(tool_details::data_dir_from(path), session_id)
-    {
-        tracing::warn!(session_id, error = %format!("{error:#}"), "session deleted but its tool detail file could not be removed");
-    }
-    Ok(())
-}
-
-/// Overwrite the unsent chat input carried across a detach. Unlike the read
-/// receipt this is not monotonic: a draft can shrink, and an empty string
-/// clears it.
-pub fn set_session_draft_input(session_id: &str, draft: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let draft = draft.to_owned();
-    submit_database_write("set_session_draft_input", move |_| {
-        set_session_draft_input_at(&database_path(), &session_id, &draft)
-    })
-}
-
-pub(super) fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &str) -> Result<()> {
     let mut connection = open(path)?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let updated = tx.execute(
-        "UPDATE sessions SET draft_input = ?2 WHERE session_id = ?1",
-        params![session_id, draft],
-    )?;
-    ensure!(updated == 1, "unknown session {session_id}");
+    let tx = connection.transaction()?;
+    delete_session_in_tx(&tx, session_id)?;
     tx.commit()?;
+    remove_deleted_session_tool_details(path, session_id);
     Ok(())
 }
 
-/// Append recovered input on the writer lane, preserving every preceding
-/// durable edit instead of combining with a stale daemon snapshot.
-pub fn append_session_draft_input(session_id: &str, text: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let text = text.to_owned();
-    submit_database_write("append_session_draft_input", move |connection| {
-        let tx = connection.transaction()?;
-        let existing: String = tx.query_row(
-            "SELECT draft_input FROM sessions WHERE session_id=?1",
-            [&session_id],
-            |row| row.get(0),
-        )?;
-        let merged = mj_core::draft::merge_drafts(&existing, &text)?;
-        let updated = tx.execute(
-            "UPDATE sessions SET draft_input=?2 WHERE session_id=?1",
-            params![session_id, merged],
-        )?;
-        ensure!(updated == 1, "unknown session {session_id}");
-        tx.commit()?;
-        Ok(())
-    })
+pub(super) fn remove_deleted_session_tool_details(path: &Path, session_id: &str) {
+    tool_details::unlink_deleted_sessions(path, &[session_id]);
+}
+
+fn delete_session_in_tx(tx: &Transaction<'_>, session_id: &str) -> Result<()> {
+    mj_core::config::validate_id("session", session_id)?;
+    tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
+    Ok(())
+}
+
+pub(super) fn purge_borrowed_descendants_in_tx(
+    tx: &Transaction<'_>,
+    root_session_id: &str,
+    exclude_environment_id: Option<&str>,
+) -> Result<Vec<String>> {
+    // Walk borrowed ancestry only. A candidate with a retained descendant
+    // must also survive, since subagent_sessions retains a parent reference.
+    let mut statement = tx.prepare(
+        "WITH RECURSIVE
+         borrowed(id, depth, path, owner, state, environment_id) AS (
+             SELECT ?1, 0, '/' || hex(?1) || '/', NULL, NULL, NULL
+             UNION ALL
+             SELECT a.child_session_id, b.depth + 1,
+                    b.path || hex(a.child_session_id) || '/', e.owner_session_id, s.state, e.environment_id
+             FROM borrowed b
+             JOIN subagent_sessions a ON a.parent_session_id=b.id
+             JOIN sessions s ON s.session_id=a.child_session_id
+             JOIN environment_bindings eb ON eb.session_id=s.session_id
+             JOIN environments e ON e.environment_id=eb.environment_id
+             WHERE e.owner_session_id <> s.session_id
+               AND instr(b.path, '/' || hex(a.child_session_id) || '/')=0
+         ),
+         candidates AS (
+             SELECT id, depth FROM borrowed
+             WHERE owner=?1 AND state IN ('stopped', 'error')
+               AND (?2 IS NULL OR environment_id <> ?2)
+         ),
+         retained(id) AS (
+             SELECT c.id FROM candidates c
+             JOIN subagent_sessions a ON a.parent_session_id=c.id
+             WHERE NOT EXISTS (SELECT 1 FROM candidates WHERE id=a.child_session_id)
+             UNION
+             SELECT c.id FROM retained r
+             JOIN subagent_sessions a ON a.child_session_id=r.id
+             JOIN candidates c ON c.id=a.parent_session_id
+         )
+         SELECT id FROM candidates
+         WHERE id NOT IN (SELECT id FROM retained)
+         ORDER BY depth DESC, id",
+    )?;
+    let ids = statement
+        .query_map(params![root_session_id, exclude_environment_id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in &ids {
+        delete_session_in_tx(tx, id)?;
+    }
+    Ok(ids)
 }
 
 /// Retire a submitted shared draft without erasing a newer client's edit.

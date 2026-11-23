@@ -2165,17 +2165,6 @@ impl RuntimeState {
         tracing::warn!(session_id, reason, "durable startup delivery paused");
     }
 
-    /// Restore input through the writer; the owner observes only committed data.
-    #[cfg(test)]
-    pub(super) async fn append_draft_input(&self, session_id: &str, text: &str) -> Result<()> {
-        let session_id = session_id.to_owned();
-        let text = text.to_owned();
-        blocking(move || mj_controller::database::append_session_draft_input(&session_id, &text))
-            .await?;
-        self.publish_revision();
-        Ok(())
-    }
-
     /// Stop every startup queue and wait for its drain to report, so the text
     /// it holds reaches the database while the writer is still running.
     pub(crate) async fn cancel_and_join_startup_prompts(&self) -> Result<()> {

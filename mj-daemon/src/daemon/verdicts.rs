@@ -1618,6 +1618,7 @@ mod tests {
             },
         };
         let mut committed = mj_controller::database::CommittedState {
+            retired_container_allocations: Default::default(),
             sequence: 1,
             state: Default::default(),
             moves: Default::default(),
@@ -1630,6 +1631,7 @@ mod tests {
         committed.turns.insert_shared(
             "child".into(),
             mj_controller::database::CommittedTurn {
+                queued_command_ids: Vec::new(),
                 state: (
                     mj_core::state::MaterializedExecutionState::Idle,
                     None,

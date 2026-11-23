@@ -226,6 +226,7 @@ pub fn run_with_config_path(
     if let Some(check) = session_environment_check() {
         checks.push(check);
     }
+    checks.extend(retired_harness_sessions_check());
     checks.extend(harness_checks(config, executor));
     checks.extend(subagent_policy_checks(config));
     checks.extend(secret_checks(config, config_path));
@@ -514,6 +515,78 @@ fn build_cache_release_check(
         format!(
             "On {}, run: {}. mbx also removes this output once it reaches its target.max_age.",
             latest.host, latest.remediation
+        ),
+    ))
+}
+
+fn retired_harness_sessions_check() -> Option<DoctorCheck> {
+    use mj_store::database::{EnvironmentPhase, database_path, load_retired_harness_sessions};
+    const ID: &str = "store.retired_harnesses";
+    const TITLE: &str = "Retired-harness sessions";
+
+    let sessions = match database_path().try_exists().and_then(|exists| {
+        if exists {
+            load_retired_harness_sessions().map_err(std::io::Error::other)
+        } else {
+            Ok(Vec::new())
+        }
+    }) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            return Some(DoctorCheck::warning(
+                ID,
+                TITLE,
+                format!("Could not check the session store: {error:#}"),
+                "Check access to the local session store, then rerun `mj doctor`.",
+            ));
+        }
+    };
+    if sessions.is_empty() {
+        return None;
+    }
+    let detail = sessions
+        .iter()
+        .map(|session| {
+            let (target, ownership) = match session.owned_environment.as_ref() {
+                Some(environment) if environment.phase == EnvironmentPhase::Active => (
+                    &environment.placement.target_template_id,
+                    "owns an active environment",
+                ),
+                Some(environment) if environment.phase == EnvironmentPhase::Retiring => (
+                    &environment.placement.target_template_id,
+                    "owns a retiring environment",
+                ),
+                _ => (
+                    &session.target_template_id,
+                    "no outstanding owned environment",
+                ),
+            };
+            format!(
+                "{} ({}, target {target}, {ownership})",
+                session.session_id, session.harness_kind
+            )
+        })
+        .collect::<Vec<_>>();
+    let destroy = sessions
+        .iter()
+        .map(|session| format!("`mj destroy --session {}`", session.session_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(DoctorCheck::warning(
+        ID,
+        TITLE,
+        format!(
+            "Found {} retired-harness {}. {}",
+            sessions.len(),
+            if sessions.len() == 1 {
+                "session"
+            } else {
+                "sessions"
+            },
+            detail.join(", ")
+        ),
+        format!(
+            "Use {destroy} to remove the selected session and its owned environment. To look for orphan workers, run `mj recover scan`."
         ),
     ))
 }

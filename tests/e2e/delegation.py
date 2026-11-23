@@ -684,7 +684,7 @@ def main():
             message = {"child_session_id": child, "message": "Wake after worktree removal."}
             result = tool(parent, "send_message", message, expect_error=True)
             assert str(worktree) in result["error"], result
-            assert "close_agent" in result["error"], result
+            assert "Use close to close this child" in result["error"], result
             assert "retry" not in result["error"] and "Broken pipe" not in result["error"], result
 
             startup = json.loads((worker_root / "worker-startup.json").read_text())
@@ -697,11 +697,11 @@ def main():
 
             listed = tool(parent, "list_agents")["agents"][0]
             assert listed["state"] == "error", listed
-            assert str(worktree) in listed["error"] and "close_agent" in listed["next_action"], listed
+            assert str(worktree) in listed["error"] and "Use close to close this child" in listed["next_action"], listed
             assert not listed.get("parked") and not listed.get("promptable"), listed
 
             result = tool(parent, "send_message", message, expect_error=True)
-            assert str(worktree) in result["error"] and "close_agent" in result["error"], result
+            assert str(worktree) in result["error"] and "Use close to close this child" in result["error"], result
             assert startup == json.loads((worker_root / "worker-startup.json").read_text())
             assert tool(parent, "close_agent", {"child_session_id": child})["closed"]
             print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),

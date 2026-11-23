@@ -1014,6 +1014,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         before_close: Option<super::lifecycle::BeforeClose>,
+        settlement: super::lifecycle::SuspendSettlement,
     ) -> Result<bool> {
         let Some(mut operation) = crate::database::load_move_operation(session_id)? else {
             return Ok(false);
@@ -1076,6 +1077,7 @@ impl Controller {
                             record,
                             None,
                             &operation.operation_id,
+                            settlement == super::lifecycle::SuspendSettlement::Suspend,
                         )
                     },
                 )?;
@@ -1203,6 +1205,7 @@ impl Controller {
                     &retained,
                     Some(&source_environment.id),
                     &operation.operation_id,
+                    settlement == super::lifecycle::SuspendSettlement::Suspend,
                 )?;
                 self.state.sessions.insert(session_id.to_owned(), retained);
             }
@@ -1258,6 +1261,7 @@ impl Controller {
                     .as_ref()
                     .map(|environment| environment.id.as_str()),
                 &operation.operation_id,
+                settlement == super::lifecycle::SuspendSettlement::Suspend,
             )?;
             self.state.sessions.insert(session_id.to_owned(), stopped);
         }
@@ -3032,6 +3036,7 @@ impl Controller {
             manager,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            super::lifecycle::SuspendSettlement::TemporaryStop,
         )
         .await?;
         Ok(())

@@ -393,8 +393,7 @@ impl Controller {
             .state
             .sessions
             .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
+            .with_context(|| format!("unknown session {session_id}"))?;
         ensure!(
             // The states an unfinished create's record can be in.
             crate::database::holds_create_intent(session.state),
@@ -406,16 +405,13 @@ impl Controller {
                 session_id,
                 &super::failed_launch_cleanup_executor(),
             )?;
-        } else if let Some(locator) = &session.target {
-            let backend = backend_locator(locator, &session, &self.config)?;
-            let root = targets::worker_root(&backend, session_id)?;
-            super::worker_binary::stop_worker(
-                &crate::worker_lifecycle::require(session_id)?,
+        } else {
+            super::environment::stop_borrower(
+                session_id,
+                &self.config,
                 &super::failed_launch_cleanup_executor(),
-                &backend,
-                &root,
             )
-            .context("stop the interrupted attempt's worker")?;
+            .context("clean up the interrupted attempt's worker")?;
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         if owns_environment {
@@ -500,16 +496,8 @@ impl Controller {
                 let outcome = (|| -> Result<()> {
                     if owns_environment {
                         self.retire_failed_create_environment(session_id, executor)?;
-                    } else if let Some(locator) = &previous.target {
-                        let backend = backend_locator(locator, &previous, &self.config)?;
-                        targets::verify_locator(&backend, session_id)?;
-                        let root = targets::worker_root(&backend, session_id)?;
-                        super::worker_binary::stop_worker(
-                            &crate::worker_lifecycle::require(session_id)?,
-                            executor,
-                            &backend,
-                            &root,
-                        )?;
+                    } else {
+                        super::environment::stop_borrower(session_id, &self.config, executor)?;
                     }
                     Ok(())
                 })();

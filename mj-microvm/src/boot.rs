@@ -18,7 +18,7 @@ const INIT_SCRIPT: &str = include_str!("guest-init.sh");
 
 /// Kernel modules the initrd carries: the boot, disk, vsock and network set
 /// first, then what nested containers and nftables use inside the guest.
-const GUEST_DRIVERS: &str = "virtio_pci virtio_blk virtio_net ext4 vmw_vsock_virtio_transport nsm overlay fuse tun veth bridge br_netfilter nf_tables nft_ct nft_nat nft_masq nft_chain_nat nft_compat nf_conntrack nf_nat nft_reject_inet nft_reject nf_reject_ipv4 xt_MASQUERADE xt_conntrack xt_addrtype xt_comment xt_mark xt_nat iptable_nat";
+pub(super) const GUEST_DRIVERS: &str = "virtio_pci virtio_blk virtio_net ext4 vmw_vsock_virtio_transport nsm overlay fuse tun veth bridge br_netfilter nf_tables nft_ct nft_nat nft_masq nft_chain_nat nft_compat nf_conntrack nf_nat nft_reject_inet nft_reject nf_reject_ipv4 xt_MASQUERADE xt_conntrack xt_addrtype xt_comment xt_mark xt_nat iptable_nat iptable_filter";
 
 /// Programs `/init` runs.
 const INIT_PROGRAMS: &str = "mount umount modprobe ip switch_root mkdir hostname cat cut sleep cp ls seq grep head tee echo ln chmod chown stat rm";
@@ -149,16 +149,30 @@ fn make_readable(assets: &BootAssets) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn render_init_script() -> String {
+    INIT_SCRIPT.replace("@GUEST_DRIVERS@", GUEST_DRIVERS)
+}
+
 fn build(scratch: &std::path::Path, kernel_version: &str) -> Result<()> {
     let boot_kernel = PathBuf::from(format!("/boot/vmlinuz-{kernel_version}"));
     fs::copy(&boot_kernel, scratch.join("vmlinuz"))
         .with_context(|| format!("copy {}", boot_kernel.display()))?;
     let init = scratch.join("init");
-    fs::write(&init, INIT_SCRIPT).context("write the guest init script")?;
+    fs::write(&init, render_init_script()).context("write the guest init script")?;
     fs::set_permissions(&init, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     let engine = std::env::current_exe().context("locate the engine binary")?;
     let initrd = scratch.join("initrd.img");
     let dracut = sys::find_tool("dracut")?;
+    // --add-drivers requires each name to resolve. Dracut accepts built-ins
+    // but fails on absent modules. Legacy IPv4 filtering may be disabled on
+    // kernels that provide only the nftables backend.
+    let modinfo = sys::find_tool("modinfo")?;
+    let legacy_filter = sys::run_unchecked(&modinfo, &["-k", kernel_version, "iptable_filter"])?;
+    let drivers = GUEST_DRIVERS
+        .split_whitespace()
+        .filter(|&driver| driver != "iptable_filter" || legacy_filter.status.success())
+        .collect::<Vec<_>>()
+        .join(" ");
     sys::run_checked(
         &dracut,
         &[
@@ -169,7 +183,7 @@ fn build(scratch: &std::path::Path, kernel_version: &str) -> Result<()> {
             "--modules",
             "bash",
             "--add-drivers",
-            GUEST_DRIVERS,
+            &drivers,
             "--install",
             INIT_PROGRAMS,
             "--include",

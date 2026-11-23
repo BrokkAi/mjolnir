@@ -1446,6 +1446,31 @@ fn load_checkpoints_selected(
     state: &mut State,
     id: Option<&str>,
 ) -> Result<()> {
+    let checkpoints = read_checkpoints(connection, id)?;
+    for (session_id, checkpoint) in checkpoints {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.checkpoint = Some(Box::new(checkpoint));
+        }
+    }
+    Ok(())
+}
+
+pub fn load_session_checkpoints() -> Result<Vec<(String, CheckpointMetadata)>> {
+    let connection = open_reader(&database_path())?;
+    read_checkpoints(&connection, None)
+}
+
+pub fn load_session_checkpoint(id: &str) -> Result<Option<CheckpointMetadata>> {
+    let connection = open_reader(&database_path())?;
+    Ok(read_checkpoints(&connection, Some(id))?
+        .pop()
+        .map(|(_, checkpoint)| checkpoint))
+}
+
+fn read_checkpoints(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<Vec<(String, CheckpointMetadata)>> {
     let predicate = if id.is_some() {
         " WHERE session_id=?1"
     } else {
@@ -1467,13 +1492,7 @@ fn load_checkpoints_selected(
             },
         ))
     })?;
-    for row in rows {
-        let (session_id, checkpoint) = row?;
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.checkpoint = Some(Box::new(checkpoint));
-        }
-    }
-    Ok(())
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Fill a missing snapshot without overwriting a concurrent writer. A deleted
@@ -1521,16 +1540,10 @@ fn decode_session(
     interns: &mut SessionInterns,
 ) -> rusqlite::Result<Option<SessionRecord>> {
     // A harness Mjolnir no longer supports can still own rows an earlier
-    // release wrote. Skip such a session with a warning rather than
-    // failing the whole listing and hiding every other session with it.
+    // release wrote. Retired sessions are visible through their separate
+    // store projection and have no typed runtime record.
     let harness_text: String = row.get(2)?;
     let Ok(harness_kind) = harness_text.parse() else {
-        let session_id: String = row.get(0)?;
-        tracing::warn!(
-            session_id,
-            harness = %harness_text,
-            "session harness is no longer supported; the session is not listed"
-        );
         return Ok(None);
     };
     Ok(Some(SessionRecord {

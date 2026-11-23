@@ -30,15 +30,24 @@ pub fn removable_profile_root(
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
+    if let TargetLocator::LocalBare { worker_root } = locator
+        && !profile.kind.nested_home()
+    {
+        return mj_core::target_path::text(&mj_core::target_path::join(
+            Path::new(worker_root),
+            Path::new("profile"),
+        ));
+    }
+    session_profile_root(locator, session_id)
+}
+
+/// The profile root to remove when the original harness profile is unknown.
+/// Local bare sessions with a non-nested home keep it inside the worker root.
+pub(super) fn session_profile_root(locator: &TargetLocator, session_id: &str) -> String {
     match locator {
-        TargetLocator::LocalBare { .. } if profile.kind.nested_home() => {
-            local_nested_profile_root(session_id)
-                .to_string_lossy()
-                .into_owned()
-        }
-        TargetLocator::LocalBare { worker_root } => mj_core::target_path::text(
-            &mj_core::target_path::join(Path::new(worker_root), Path::new("profile")),
-        ),
+        TargetLocator::LocalBare { .. } => local_nested_profile_root(session_id)
+            .to_string_lossy()
+            .into_owned(),
         TargetLocator::LocalPodman { .. }
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }

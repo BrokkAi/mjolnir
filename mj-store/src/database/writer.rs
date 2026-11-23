@@ -326,6 +326,9 @@ pub(super) fn start_database_writer_at(
             "failed to optimize SQLite query planner statistics; continuing startup"
         ),
     }
+    if let Err(error) = super::tool_details::sweep_orphaned_tool_details(&connection, path) {
+        tracing::warn!(error = %format!("{error:#}"), "could not finish orphaned tool detail sweep");
+    }
     let mut observed_revision = schema::read_schema_state(&connection)?.revision;
     let initial = CommittedState::bootstrap(&mut connection)?;
     let (committed, _) = tokio::sync::watch::channel(Ok(Arc::new(initial)));

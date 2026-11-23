@@ -843,7 +843,10 @@ mod tests {
                     Some(SessionState::Running)
                 );
                 assert!(crate::database::load_worker_restart(LATCH_RELAY_SESSION)?.is_some());
-                crate::database::set_session_draft_input(LATCH_RELAY_SESSION, "newer draft")?;
+                crate::database::test_fixtures::seed_session_draft_input(
+                    LATCH_RELAY_SESSION,
+                    "newer draft",
+                )?;
             }
             let stdout = if command.purpose == "detect target platform" {
                 format!(

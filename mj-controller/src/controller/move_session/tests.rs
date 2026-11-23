@@ -922,6 +922,98 @@ fn cross_target_move_yields_handoff_admission_during_source_stop_and_transfer() 
     });
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn recovering_a_ready_cross_target_move_retires_closed_source_transcripts() {
+    const NAME: &str = "recovering_a_ready_cross_target_move_retires_closed_source_transcripts";
+    let name = crate::controller::test_support::test_name(module_path!(), NAME);
+    if !super::test_fixtures::isolated_test_child(&name, "MJ_MOVE_CLOSED_CHILD_RECOVERY") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let session_id = "recovering-move-parent";
+    let mut parent = crate::controller::test_support::checkpoint_test_session(session_id);
+    parent.state = SessionState::Running;
+    parent.last_profile = "source".into();
+    parent.target_template_id = "local-bare".into();
+    // This source has a registered environment and no worker to retire.
+    parent.target = None;
+    parent.checkpoint = None;
+    crate::database::save_session(&parent).unwrap();
+    let register = |id: &str| {
+        let mut record = parent.clone();
+        record.id = id.into();
+        record.state = SessionState::Stopped;
+        let relation = serde_json::from_value(serde_json::json!({
+            "child_session_id": id, "parent_session_id": session_id, "task_name": "test",
+            "profile_id": "source", "working_directory": "", "initial_prompt": "test",
+            "request_key": id, "created_at": parent.created_at
+        }))
+        .unwrap();
+        crate::database::save_subagent_session(&record, &relation).unwrap();
+    };
+    register("source-borrower");
+    let mut operation = super::test_fixtures::source_recovery_operation(&parent);
+    operation.phase = MovePhase::DestinationStarting;
+    crate::database::save_move_operation(&operation).unwrap();
+
+    let mut destination = parent.clone();
+    destination.last_profile = "destination".into();
+    destination.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: root.path().join(session_id),
+    }));
+    // Reserve a distinct destination using the same environment transition
+    // as resuming a reclaimed source with a new worker placement.
+    let source = crate::database::session_environment(session_id)
+        .unwrap()
+        .unwrap();
+    crate::database::begin_environment_retirement(&source.id).unwrap();
+    crate::database::finish_environment_retirement(&source.id).unwrap();
+    destination.state = SessionState::Provisioning;
+    crate::database::save_session(&destination).unwrap();
+    destination.state = SessionState::Running;
+    crate::database::save_lifecycle_session(&destination).unwrap();
+    register("destination-borrower");
+    assert_ne!(
+        crate::database::session_environment(session_id)
+            .unwrap()
+            .unwrap()
+            .id,
+        source.id
+    );
+
+    let mut controller = crate::controller::Controller::load().unwrap();
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    let admission = crate::controller::test_support::session_admission(session_id);
+    // Recovery will fail at queue admission because there is no relay fixture
+    // on the ready destination. The ownership cut precedes queue admission.
+    controller
+        .recover_move_managed_controlled(
+            &admission,
+            operation,
+            &crate::targets::ProcessExecutor,
+            &channels.control,
+        )
+        .await
+        .unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+    let operation = crate::database::load_move_operation(session_id)
+        .unwrap()
+        .unwrap();
+    assert!(operation.queue_admission_started, "{operation:?}");
+    assert!(
+        crate::database::load_session_record("source-borrower")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        crate::database::load_session_record("destination-borrower")
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[test]
 fn parent_move_reports_only_workers_in_its_environment() {
     use mj_core::state::{SessionState, State};

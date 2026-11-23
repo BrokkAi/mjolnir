@@ -8,6 +8,7 @@ use mj_core::state::SessionRecord;
 #[test]
 fn child_progress_uses_the_published_turn_and_report_together() {
     let mut committed = mj_controller::database::CommittedState {
+        retired_container_allocations: Default::default(),
         sequence: 0,
         state: Default::default(),
         moves: Default::default(),
@@ -35,6 +36,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed.turns.insert_shared(
         "child".into(),
         mj_controller::database::CommittedTurn {
+            queued_command_ids: Vec::new(),
             state: (MaterializedExecutionState::Idle, None, Some(turn)),
             pending_form_times: Default::default(),
             failed_message: Some("owned failure details".into()),
@@ -1769,6 +1771,22 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
         "no push remote configured"
     );
     assert_eq!(refused("", ""), "branch export was refused by the target");
+}
+
+#[test]
+fn session_diff_reports_an_older_workers_usage_error_as_an_upgrade_refusal() {
+    let output = CommandOutput {
+        status: CLAP_USAGE_EXIT_CODE,
+        stdout: Vec::new(),
+        stderr: b"error: unexpected argument '--path=-literal' found".to_vec(),
+    };
+    match worker_output(output, "session diff") {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("session diff"));
+            assert!(reason.contains("resume the session to upgrade"));
+        }
+        other => panic!("expected an upgrade refusal, got {other:?}"),
+    }
 }
 
 fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {
