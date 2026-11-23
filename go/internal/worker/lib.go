@@ -5,8 +5,9 @@
 // mj-worker crate (`brokk-mj-worker-runtime`, library `mj_worker`).
 //
 // The crate's modules (acp, relay, worker_runtime, terminal, user_shell,
-// checkpoint, review, microvm and the rest) are files of this one package,
-// named as in mj-core's port: module `foo/bar.rs` is `foo_bar.go`.
+// checkpoint, review and the rest) are files of this one package, named as
+// in mj-core's port: module `foo/bar.rs` is `foo_bar.go`. The MicroVM engine
+// is the mj-microvm crate, Go package microvm.
 //
 // Rust's `crate::acp::RuntimeEvent` is a re-export of mj-core's; this package
 // uses core.RuntimeEvent directly. A bounded tokio mpsc sender of runtime

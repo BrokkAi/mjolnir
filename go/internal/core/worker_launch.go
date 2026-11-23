@@ -67,7 +67,7 @@ func InstalledHarnessHome(launchPath string) (home string, ok bool, err error) {
 }
 
 // HarnessRuntimePolicy is where a worker's ACP adapter and harness executable
-// come from. Locate turns a policy into a launch.
+// come from. harnessinstall.Locate turns a policy into a launch.
 type HarnessRuntimePolicy int
 
 const (
@@ -939,7 +939,7 @@ func WorkerLaunchConfigRead(path string) (WorkerLaunchConfig, error) {
 			delete(fields, "expected_runtime_identity")
 			delete(fields, "bifrost_binary")
 		}
-		cleaned, err := harnessMarshalJSON(value)
+		cleaned, err := relayMarshalJSON(value)
 		if err != nil {
 			return WorkerLaunchConfig{}, err
 		}

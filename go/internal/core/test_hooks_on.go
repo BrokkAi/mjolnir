@@ -4,6 +4,6 @@
 
 package core
 
-// testHooksEnabled is true in builds with the `testhooks` tag, Rust's
+// TestHooksEnabled is true in builds with the `testhooks` tag, Rust's
 // `test-hooks` feature.
-const testHooksEnabled = true
+const TestHooksEnabled = true

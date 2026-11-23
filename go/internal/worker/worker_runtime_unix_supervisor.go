@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 // proxyInitialInputTimeout is how long the relay proxy waits for its
@@ -295,20 +296,20 @@ const (
 
 func runACPSupervisorWithStreams(ctx context.Context, spec AcpSupervisorSpec, parentStdin io.Reader, parentStdout io.Writer) error {
 	if spec.HarnessLease != nil {
-		lease, err := core.AcquireSupervisorLease(*spec.HarnessLease)
+		lease, err := harnessinstall.AcquireSupervisorLease(*spec.HarnessLease)
 		if err != nil {
 			return err
 		}
 		defer lease.Drop()
 	}
 	if spec.NodeLease != nil {
-		lease, err := core.AcquireSupervisorLease(*spec.NodeLease)
+		lease, err := harnessinstall.AcquireSupervisorLease(*spec.NodeLease)
 		if err != nil {
 			return err
 		}
 		defer lease.Drop()
 	}
-	environment, err := core.WithOverrides(ctx, spec.Environment)
+	environment, err := harnessinstall.WithOverrides(ctx, spec.Environment)
 	if err != nil {
 		return err
 	}

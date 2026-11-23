@@ -288,9 +288,9 @@ const WorkerStartupFile = "worker-startup.json"
 
 // WorkerStartupStepLoginEnvironment is the startup step a worker records
 // while it reads the account's login-shell environment. That probe carries
-// its own deadline (LoginEnvironmentProbeTimeout), so the controller watching
-// a starting worker defers to the probe's deadline for this step instead of
-// applying its stall detection to it.
+// its own deadline (harnessinstall.LoginEnvironmentProbeTimeout), so the
+// controller watching a starting worker defers to the probe's deadline for
+// this step instead of applying its stall detection to it.
 const WorkerStartupStepLoginEnvironment = "login-environment"
 
 // WorkerExitFile is the file a dying worker daemon writes with the reason it

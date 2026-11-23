@@ -69,7 +69,9 @@ func IsPreparationCancelled(err error) bool {
 	return errors.As(err, &cancelled)
 }
 
-func scopedPreparationCancellation(ctx context.Context) (context.Context, bool) {
+// ScopedPreparationCancellation is the current preparation token, if the
+// caller is in a preparation scope.
+func ScopedPreparationCancellation(ctx context.Context) (context.Context, bool) {
 	token, ok := ctx.Value(preparationCancellationKey{}).(context.Context)
 	return token, ok
 }
@@ -77,7 +79,7 @@ func scopedPreparationCancellation(ctx context.Context) (context.Context, bool) 
 // PreparationCancellation is the preparation token of ctx, or one that never
 // fires.
 func PreparationCancellation(ctx context.Context) context.Context {
-	if token, ok := scopedPreparationCancellation(ctx); ok {
+	if token, ok := ScopedPreparationCancellation(ctx); ok {
 		return token
 	}
 	return context.Background()

@@ -19,6 +19,7 @@ import (
 	"github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
@@ -144,7 +145,7 @@ func goalFileExists(path string) bool {
 
 // Hard-won: 5c9e20e: guarded Codex identity rejection uses invalidRequest.
 func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
-	_ = core.InitializeFromParent()
+	_ = harnessinstall.InitializeFromParent()
 	type goalCase struct {
 		asking, running bool
 		answer          *bool
@@ -455,7 +456,7 @@ func TestGoalRecoveryResumesOnlyWhenNeededAndExplicitOpenAsks(t *testing.T) {
 }
 
 func TestGoalControlsWorkDuringPromptsAndPendingResumeWithLargeOutput(t *testing.T) {
-	_ = core.InitializeFromParent()
+	_ = harnessinstall.InitializeFromParent()
 	for _, harness := range []core.HarnessKind{core.HarnessKindCodex, core.HarnessKindClaude} {
 		for _, foreground := range []bool{false, true} {
 			root := t.TempDir()

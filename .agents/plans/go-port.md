@@ -46,6 +46,7 @@ User-visible output must match the Rust build. Prove it with golden files captur
 - [x] (2026-11-20) Layer 1: mj-transcript, mj-checkpoint, mj-review, mj-build-id ported (323 tests; 2 benchmark tests skip as in Rust), merged d98013ebf.
 - [x] (2026-11-20) Layer 2 declarations: mj-client (`go/internal/client`) and mj-worker (`go/internal/worker`) declared in 14 groups and merged (6a0035221); builds and vets, 971 bodies still `panic("unported: ...")`, no tests ported yet.
 - [x] (2026-11-23) Layer 2 bodies and tests: mj-client and mj-worker fully ported, 1030 tests, all Go packages pass (merged 1ba15ffb6 after three rounds). Six groups had finished before the 2026-11-20 stop and were reused from the workflow cache; eight reran. Some groups read Rust at 4273087e6, others at f470ca8f7; `go/PORTED_FROM` records the older one so the sync pass re-checks the difference.
+- [x] (2026-11-23) Mirrored Rust's crate extractions up to 3dde0c11b: `go/internal/harnessinstall` (mj-harness-install: harness_install, login_environment, program_path, session_image and their assets and fixtures, out of core) and `go/internal/microvm` (mj-microvm, out of worker). The guardian policy files were already in core. mj-worker-mcp and mj-worker-review, extracted in the same Rust commit, still live in `go/internal/worker`.
 - [ ] Sync pass: port the Rust changes made since each crate's base in `go/PORTED_FROM`.
 - [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
 - [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).
@@ -98,6 +99,10 @@ Stale worktrees from the stopped run may remain under `.claude/worktrees/`; they
 - Decision: the Go tree records, per crate, the Rust commit it was translated from (`go/PORTED_FROM`); `go/scripts/rust-changes.sh <crate>` shows what Rust changed since. Sync passes port those diffs.
   Rationale: Rust development continues during the port (about 30 commits touched ported crates within hours); without a recorded base the Go port silently falls behind.
   Date/Author: 2026-11-20, agent.
+
+- Decision: when Rust extracts modules into a new crate, the Go code that ports them moves to the new crate's package (git mv, same file names relative to the new crate), keeps the Go names it had, and `go/PORTED_FROM` records the new crate with the base the code was ported from; `go/scripts/rust-changes.sh` follows the old paths for it.
+  Rationale: later syncs map one Rust crate to one Go package. Renaming the collision-prefixed names (`LoginEnvironmentEnvironment`, `MicrovmVMRun`) would churn every importer for no behaviour change; the final cleanup can drop the prefixes.
+  Date/Author: 2026-11-23, agent.
 
 - Decision: parse with cobra but render help and usage errors with a small clap-layout renderer.
   Rationale: cobra is the established Go command-line library; the help text is user-visible behaviour and must match.

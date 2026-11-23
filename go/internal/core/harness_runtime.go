@@ -2,9 +2,9 @@
 
 // Exact harness versions used by Mjolnir-managed installations.
 //
-// Installation and process ownership live in `brokk-mj-worker`; this module
-// holds shared pin metadata and managed-install paths/manifests so the
-// controller and worker cannot silently disagree about an installation.
+// Installation lives in `brokk-mj-harness-install` (Go package
+// harnessinstall). This module holds shared pin metadata and managed-install
+// paths and manifests so the controller and worker agree on installations.
 
 package core
 
@@ -32,11 +32,11 @@ const (
 
 // NodeVersion is the exact Node.js release Mjolnir installs when the target
 // has no compatible runtime. Keep this in lockstep with
-// `assets/node/runtime.json`.
+// `mj-harness-install/assets/node/runtime.json`.
 const NodeVersion = "24.22.1"
 
-// MiseVersion: keep in lockstep with `assets/mise/runtime.json`. Static musl
-// binary hashes:
+// MiseVersion: keep in lockstep with
+// `mj-harness-install/assets/mise/runtime.json`. Static musl binary hashes:
 // https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
 const MiseVersion = "2026.11.9"
 

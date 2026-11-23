@@ -37,6 +37,7 @@ import (
 	"github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 // Shared is a value several owners share behind one lock: Rust's
@@ -696,7 +697,7 @@ type clearRollback struct {
 }
 
 func runInner(ctx context.Context, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent) error {
-	environment, err := core.WithOverrides(ctx, spec.Environment)
+	environment, err := harnessinstall.WithOverrides(ctx, spec.Environment)
 	if err != nil {
 		return err
 	}

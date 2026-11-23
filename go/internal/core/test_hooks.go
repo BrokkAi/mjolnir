@@ -57,7 +57,7 @@ func TestGlideEndpoint() (string, bool) {
 // ReachTestHook stops at the named crash boundary when an isolated test asks
 // for it through MJ_TEST_HOOK; in the default build it does nothing.
 func ReachTestHook(name string) error {
-	if !testHooksEnabled {
+	if !TestHooksEnabled {
 		return nil
 	}
 	return reachTestHookEnabled(name)

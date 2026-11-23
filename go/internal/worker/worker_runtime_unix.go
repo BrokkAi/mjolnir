@@ -42,6 +42,7 @@ import (
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 // acpEventChannelCapacity is the ACP runtime's event channel capacity.
@@ -102,8 +103,8 @@ type runningHarness struct {
 	// managedHarness and managedNode are runtime leases kept in long-lived
 	// ACP state so they cover supervisor replacement gaps as well as the
 	// lifetime of any individual supervisor.
-	managedHarness *core.ManagedHarness
-	managedNode    *core.ManagedNodeRuntime
+	managedHarness *harnessinstall.ManagedHarness
+	managedNode    *harnessinstall.ManagedNodeRuntime
 	// projectTools is stopped when the harness ends, before a closed session
 	// is checkpointed.
 	projectTools *backgroundInstall
@@ -601,7 +602,7 @@ func startBridge(ctx context.Context, cancel context.CancelFunc, setup *prepared
 	}
 	if setup.managedCacheRoot != nil {
 		gcContext, stopGC := context.WithCancel(context.Background())
-		core.SpawnGCOn(gcContext, *setup.managedCacheRoot, setup.harness)
+		harnessinstall.SpawnGCOn(gcContext, *setup.managedCacheRoot, setup.harness)
 		started.harnessGC = stopGC
 	}
 	commands := setup.commandsTx
@@ -1828,7 +1829,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 	baseEnvironment, err := boundedPreparationStep(ctx, &loginBudget, func(ctx context.Context) (map[string]string, error) {
 		resolveCtx, stop := context.WithTimeout(ctx, 10*time.Second)
 		defer stop()
-		environment, err := core.Resolve(resolveCtx)
+		environment, err := harnessinstall.Resolve(resolveCtx)
 		if err != nil && errors.Is(resolveCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			return nil, errors.New("login environment resolution exceeded its 10-second bound: deadline has elapsed")
 		}

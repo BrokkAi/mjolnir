@@ -26,6 +26,7 @@ import (
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 const projectToolsLogFile = "project-tools.log"
@@ -131,7 +132,7 @@ func projectToolsTryExists(path string) (bool, error) {
 func projectToolsRecipeRoots(ctx context.Context, roots []string) ([]string, error) {
 	found := []string{}
 	for _, root := range roots {
-		for _, file := range core.RecipeFiles {
+		for _, file := range harnessinstall.RecipeFiles {
 			path := filepath.Join(root, file)
 			exists, err := projectToolsTryExists(path)
 			if err != nil {
@@ -223,7 +224,7 @@ func projectToolsStatus(ctx context.Context, mise string, root string, environme
 
 func projectToolsMissingIn(ctx context.Context, mise string, root string, environment map[string]string) (projectToolsMissing, error) {
 	var files []string
-	for _, file := range core.RecipeFiles {
+	for _, file := range harnessinstall.RecipeFiles {
 		path := filepath.Join(root, file)
 		exists, err := projectToolsTryExists(path)
 		if err != nil {
@@ -279,7 +280,7 @@ func projectToolsMissingIn(ctx context.Context, mise string, root string, enviro
 		missing.statusFailure = &failure
 	}
 	if missing.isEmpty() {
-		hook, err := pendingPostinstallHook(ctx, root, core.ImageRecipeDir)
+		hook, err := pendingPostinstallHook(ctx, root, harnessinstall.ImageRecipeDir)
 		if err != nil {
 			return projectToolsMissing{}, err
 		}
@@ -318,7 +319,7 @@ func pendingPostinstallHook(ctx context.Context, root string, baked string) (*st
 	}
 	var hook *string
 	builtFromThisRecipe := true
-	for _, file := range core.RecipeFiles {
+	for _, file := range harnessinstall.RecipeFiles {
 		contents, present, err := read(filepath.Join(root, file))
 		if err != nil {
 			return nil, err
@@ -402,7 +403,7 @@ func unsatisfiedPackages(status any) []string {
 // environment and asks mise what each recipe checkout is missing. nil when
 // nothing is missing.
 func projectToolsPlan(ctx context.Context, workerRoot string, roots []string, environment map[string]string) (*projectToolsInstall, error) {
-	mise, err := core.EnsureMiseRuntime(ctx, environment)
+	mise, err := harnessinstall.EnsureMiseRuntime(ctx, environment)
 	if err != nil {
 		return nil, fmt.Errorf("install mise runtime: %w", err)
 	}

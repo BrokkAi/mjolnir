@@ -4,5 +4,5 @@
 
 package core
 
-// testHooksEnabled is false in the default build: ReachTestHook is a no-op.
-const testHooksEnabled = false
+// TestHooksEnabled is false in the default build: ReachTestHook is a no-op.
+const TestHooksEnabled = false

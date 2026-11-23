@@ -4,8 +4,9 @@
 // payloads.
 //
 // Names that collide with other mj-worker modules carry this module's
-// prefix: MoveWorkspaceInspect (microvm/vm's inspect keeps the name) and
-// MoveWorkspaceRestore (checkpoint/codex_goal's restore keeps it).
+// prefix: MoveWorkspaceInspect (microvm/vm's inspect kept the name while it
+// was part of this crate) and MoveWorkspaceRestore (checkpoint/codex_goal's
+// restore keeps it).
 
 package worker
 
