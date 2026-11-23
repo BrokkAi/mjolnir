@@ -206,7 +206,6 @@ impl DashboardState {
             create_managed_worktree: recipe.create_managed_worktree,
             subagents,
             oracle: Some(oracle),
-            supervisors: None,
             oracle_choice: None,
             review: self
                 .simple_mode

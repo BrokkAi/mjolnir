@@ -238,7 +238,7 @@ mod tests {
         let mut owned = session("owned-session", "project");
         owned.state = SessionState::Parked;
         let mut owned_relation = test_subagent(&parent.id, &owned.id);
-        owned_relation.supervisor = true;
+        owned_relation.orchestrator = true;
         register_subagent_with_startup(&owned, &owned_relation, Vec::new(), None, None, true)
             .unwrap();
         let mut borrowed = session("borrowed", "project");

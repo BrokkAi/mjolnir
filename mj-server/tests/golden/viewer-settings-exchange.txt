@@ -119,7 +119,7 @@
                 "label": "Sub-agents",
                 "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
                 "control": "page",
-                "summary": "Up to 6 at once"
+                "summary": "Up to 8 at once"
               },
               {
                 "path": [
@@ -494,7 +494,7 @@
                 "label": "Sub-agents",
                 "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
                 "control": "page",
-                "summary": "Up to 6 at once"
+                "summary": "Up to 8 at once"
               },
               {
                 "path": [
@@ -873,7 +873,7 @@
                 "label": "Sub-agents",
                 "help": "Add (model, effort) pairs per category (one per provider). Straightforward enables Mjolnir sub-agents.",
                 "control": "page",
-                "summary": "Up to 6 at once"
+                "summary": "Up to 8 at once"
               },
               {
                 "path": [
@@ -1002,8 +1002,8 @@
                 ],
                 "label": "Maximum concurrent children",
                 "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
+                "value": "8",
+                "placeholder": "8 (default)",
                 "number": true
               },
               {
@@ -1011,8 +1011,8 @@
                   "subagents",
                   "primary"
                 ],
-                "label": "Primary and supervisor",
-                "help": "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+                "label": "Primary and orchestrator",
+                "help": "Optional. Top-level primary sessions (bare `mj new`) and orchestrators.",
                 "control": "page",
                 "summary": "0 entries"
               },
@@ -1110,8 +1110,8 @@
                 ],
                 "label": "Maximum concurrent children",
                 "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
+                "value": "8",
+                "placeholder": "8 (default)",
                 "number": true
               },
               {
@@ -1119,8 +1119,8 @@
                   "subagents",
                   "primary"
                 ],
-                "label": "Primary and supervisor",
-                "help": "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+                "label": "Primary and orchestrator",
+                "help": "Optional. Top-level primary sessions (bare `mj new`) and orchestrators.",
                 "control": "page",
                 "summary": "0 entries"
               },
@@ -1442,8 +1442,8 @@
                 ],
                 "label": "Maximum concurrent children",
                 "control": "text",
-                "value": "6",
-                "placeholder": "6 (default)",
+                "value": "8",
+                "placeholder": "8 (default)",
                 "number": true
               },
               {
@@ -1451,8 +1451,8 @@
                   "subagents",
                   "primary"
                 ],
-                "label": "Primary and supervisor",
-                "help": "Optional. Top-level primary sessions (bare `mj new`) and supervisors.",
+                "label": "Primary and orchestrator",
+                "help": "Optional. Top-level primary sessions (bare `mj new`) and orchestrators.",
                 "control": "page",
                 "summary": "0 entries"
               },

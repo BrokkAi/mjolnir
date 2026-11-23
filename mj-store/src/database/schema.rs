@@ -3952,13 +3952,12 @@ mod reader_tests {
             ("none", Some(serde_json::json!({"mode": "none"})), true),
             ("absent", None, true),
         ] {
-            let mut session = super::super::tests::session(id, "project");
-            session.supervisors = enabled;
+            let session = super::super::tests::session(id, "project");
             state_io::insert_session(&transaction, &session).unwrap();
             transaction
                 .execute(
-                    "UPDATE sessions SET subagents = ?2 WHERE session_id = ?1",
-                    params![id, policy.as_ref().map(ToString::to_string)],
+                    "UPDATE sessions SET subagents = ?2, supervisors = ?3 WHERE session_id = ?1",
+                    params![id, policy.as_ref().map(ToString::to_string), enabled],
                 )
                 .unwrap();
             transaction
@@ -5711,7 +5710,7 @@ mod reader_tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         };
         super::super::usage::record_child_accounting(&connection, &relation, Some("subtle"))
             .unwrap();

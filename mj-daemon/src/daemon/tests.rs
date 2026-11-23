@@ -1713,7 +1713,6 @@ pub(crate) fn runtime_test_session(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -1779,7 +1778,7 @@ pub(super) fn runtime_test_subagent(
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     }
 }
 
@@ -1816,7 +1815,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
 }
 
 #[test]
-fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
+fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_orchestrator() {
     let primary = runtime_test_session("primary", "workspace", SessionState::Running);
     let parked_sup = runtime_test_session("parked-sup", "workspace", SessionState::Parked);
     let mut live_d2 = runtime_test_session("live-d2", "workspace", SessionState::Running);
@@ -1831,7 +1830,7 @@ fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
         ..mj_core::state::State::default()
     };
     let mut sup_record = runtime_test_subagent(&parked_sup.id, &primary.id);
-    sup_record.supervisor = true;
+    sup_record.orchestrator = true;
     let d2_record = runtime_test_subagent(&live_d2.id, &parked_sup.id);
     state.subagents = [sup_record, d2_record]
         .into_iter()
@@ -1846,11 +1845,11 @@ fn tree_wide_lifecycle_finds_live_depth_two_worker_under_parked_supervisor() {
     let children = state.active_child_session_ids(&primary.id);
     assert!(
         children.contains(&"live-d2".to_owned()),
-        "active_child_session_ids must include live depth-2 worker under parked supervisor: {children:?}"
+        "active_child_session_ids must include live depth-2 worker under parked orchestrator: {children:?}"
     );
     assert!(
         state.subagents_occupy_container(&primary.id),
-        "live depth-2 worker under parked supervisor occupies the primary's container"
+        "live depth-2 worker under parked orchestrator occupies the primary's container"
     );
 }
 
@@ -7597,7 +7596,6 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: true,
             remember_container_size: true,
@@ -8660,7 +8658,6 @@ esac
                 resource_allocation: None,
                 subagents: None,
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
             },
             source_profile_id: source.last_profile.clone(),
@@ -12383,7 +12380,6 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         operation_id: "retained-move".into(),
         selection: MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -13764,7 +13760,6 @@ pub(super) fn retained_startup_test_move(
         operation_id: "startup-durable-move".into(),
         selection: MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -14706,7 +14701,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
     let request = |kind, request_key: &str| mj_controller::controller::RegisterSubagentRequest {
         no_github_credentials: false,
         kind,
-        supervisor: false,
+        orchestrator: false,
         reviewer_launch: None,
         parent_session_id: parent_id.into(),
         task_name: "task".into(),

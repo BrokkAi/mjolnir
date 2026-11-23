@@ -167,7 +167,6 @@ fn cross_target_move_route_preview_and_commit_point_ownership() {
             resource_allocation: None,
             subagents: None,
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
         },
         source_profile_id: "p1".to_owned(),
@@ -954,7 +953,7 @@ fn parent_move_reports_only_workers_in_its_environment() {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: true,
-                    supervisor: owner == id,
+                    orchestrator: owner == id,
                     resume_with_parent: false,
                 }
                 .into(),

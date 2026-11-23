@@ -115,7 +115,7 @@ fn save_new_session_with_preferences_to(
     }
     let policy = session.subagents.clone().unwrap_or_default();
     if remember_subagent_policy && policy.updates_remembered_choice(session.harness_kind) {
-        save_subagent_preference(&tx, &session.last_profile, policy.clone())?;
+        save_subagent_preference(&tx, &session.last_profile, policy)?;
     }
     if remember_launch_choices {
         tx.execute(
@@ -123,65 +123,21 @@ fn save_new_session_with_preferences_to(
              ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
             params![session.last_profile, session.oracle],
         )?;
-        if policy.uses_mjolnir() {
-            save_supervisor_preference(&tx, &session.last_profile, session.supervisors)?;
-        }
     }
     tx.commit()?;
     Ok(())
 }
 
-// Milestone 3 removes the legacy preference and both halves of this bridge.
 fn save_subagent_preference(
     tx: &Transaction<'_>,
     profile: &str,
-    mut policy: mj_core::subagent::SubagentPolicy,
+    policy: mj_core::subagent::SubagentPolicy,
 ) -> Result<()> {
-    if let mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. } = &mut policy
-        && !*orchestrators
-    {
-        *orchestrators = tx
-            .query_row(
-                "SELECT enabled FROM supervisor_preference WHERE profile_id = ?1",
-                [profile],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-    }
     tx.execute(
         "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
          ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
         params![profile, serde_json::to_string(&policy)?],
     )?;
-    Ok(())
-}
-
-fn save_supervisor_preference(tx: &Transaction<'_>, profile: &str, enabled: bool) -> Result<()> {
-    tx.execute(
-        "INSERT INTO supervisor_preference(profile_id, enabled) VALUES(?1, ?2)
-         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
-        params![profile, enabled],
-    )?;
-    let json: Option<String> = tx
-        .query_row(
-            "SELECT policy FROM subagent_preference WHERE profile_id = ?1",
-            [profile],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(json) = json {
-        let mut policy = mj_core::subagent::parse_stored_policy(&json)?;
-        if let mj_core::subagent::SubagentPolicy::Mjolnir { orchestrators, .. } = &mut policy
-            && *orchestrators != enabled
-        {
-            *orchestrators = enabled;
-            tx.execute(
-                "UPDATE subagent_preference SET policy = ?2 WHERE profile_id = ?1",
-                params![profile, serde_json::to_string(&policy)?],
-            )?;
-        }
-    }
     Ok(())
 }
 
@@ -1594,16 +1550,6 @@ pub(super) fn rename_profile_references_at(
     )?;
     tx.execute(
         "DELETE FROM oracle_preference WHERE profile_id = ?1",
-        [old_id],
-    )?;
-    tx.execute(
-        "INSERT INTO supervisor_preference(profile_id, enabled)
-         SELECT ?2, enabled FROM supervisor_preference WHERE profile_id = ?1
-         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
-        params![old_id, new_id],
-    )?;
-    tx.execute(
-        "DELETE FROM supervisor_preference WHERE profile_id = ?1",
         [old_id],
     )?;
     tx.commit()?;

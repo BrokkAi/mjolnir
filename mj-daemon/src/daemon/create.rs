@@ -338,7 +338,7 @@ impl RuntimeState {
         self.start_subagent_session(mj_controller::controller::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: relation.kind,
-            supervisor: relation.supervisor,
+            orchestrator: relation.orchestrator,
             reviewer_launch: relation.reviewer_launch.clone(),
             parent_session_id: relation.parent_session_id.clone(),
             task_name: relation.task_name.clone(),
@@ -566,7 +566,6 @@ impl RuntimeState {
         let (policy, delegation_notice) = match validation {
             Err(error)
                 if implicit_mjolnir
-                    && request.supervisors != Some(true)
                     && let Some(refusal) = mj_core::refusal::Refusal::of(&error)
                     && refusal.code() == Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) =>
             {
@@ -644,7 +643,6 @@ impl RuntimeState {
                     no_later_history: request.no_later_history,
                     subagents: Some(policy),
                     oracle: request.oracle,
-                    supervisors: request.supervisors,
                     oracle_choice: request.oracle_choice,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
@@ -1220,7 +1218,6 @@ mod delegation_replay_tests {
         let request = |profile_id: &str, subagents, remember_launch_choices| {
             mj_client::daemon::CreateSessionRequest {
                 oracle: Some(false),
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices,
                 remember_container_size: false,
@@ -1449,7 +1446,6 @@ mod delegation_replay_tests {
                 .last_subagent_policy_for("codex");
             let request = mj_client::daemon::CreateSessionRequest {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: remember,
                 remember_container_size: false,
@@ -1626,7 +1622,6 @@ mod delegation_replay_tests {
         });
         let request = mj_client::daemon::CreateSessionRequest {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,
@@ -1657,22 +1652,17 @@ mod delegation_replay_tests {
             title: "must not register".into(),
             session_title_override: None,
         };
-        let mut supervisors_requested = request.clone();
-        supervisors_requested.subagents = None;
-        supervisors_requested.supervisors = Some(true);
-        for request in [request, supervisors_requested] {
-            let error = runtime
-                .start_create_session(request)
-                .await
-                .expect_err("a refusal");
-            let refusal = mj_core::refusal::Refusal::of(&error).expect("a request refusal");
-            assert!(refusal.message().contains("[subagents.straightforward]"));
-            assert!(refusal.message().contains("--subagent-straightforward"));
-            assert_eq!(
-                refusal.code(),
-                Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
-            );
-        }
+        let error = runtime
+            .start_create_session(request)
+            .await
+            .expect_err("a refusal");
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("a request refusal");
+        assert!(refusal.message().contains("[subagents.straightforward]"));
+        assert!(refusal.message().contains("--subagent-straightforward"));
+        assert_eq!(
+            refusal.code(),
+            Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
+        );
         assert!(runtime.active_lifecycles().is_empty());
         let state = mj_controller::database::load_state().unwrap();
         assert_eq!(state.sessions.len(), 1);
@@ -1725,7 +1715,7 @@ mod delegation_replay_tests {
                 .start_subagent_session(mj_controller::controller::RegisterSubagentRequest {
                     no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
-                    supervisor: false,
+                    orchestrator: false,
                     reviewer_launch: None,
                     parent_session_id: "parent".into(),
                     task_name: "must reuse original".into(),

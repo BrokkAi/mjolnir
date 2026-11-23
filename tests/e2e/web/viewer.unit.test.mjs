@@ -1322,7 +1322,7 @@ test('Create remembers delegation per profile and restores Mjolnir after an unav
   context.snapshot.profiles.push({ id: 'claude-profile', harness_kind: 'claude' }, { id: 'grok-profile', harness_kind: 'grok' });
   context.snapshot.last_subagent_policies = {
     '': { mode: 'none' },
-    profile: { mode: 'mjolnir', straightforward: { model: 'codex-model' } },
+    profile: { mode: 'mjolnir', orchestrators: true, straightforward: { model: 'codex-model' } },
     'claude-profile': { mode: 'native' },
     'grok-profile': { mode: 'mjolnir', straightforward: { model: 'grok-model' } },
   };
@@ -1340,7 +1340,7 @@ test('Create remembers delegation per profile and restores Mjolnir after an unav
   assert.deepEqual(JSON.parse(result), {
     claude: { mode: 'native' },
     unavailable: { mode: 'native' },
-    restored: { mode: 'mjolnir', straightforward: { model: 'codex-model' } },
+    restored: { mode: 'mjolnir', orchestrators: true, straightforward: { model: 'codex-model' } },
   });
   assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(rememberedDelegationPolicy('missing'))", context)), { mode: 'none' }, 'legacy empty key is the fallback');
 });

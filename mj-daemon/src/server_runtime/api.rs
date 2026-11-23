@@ -1342,8 +1342,8 @@ impl ApiBackend {
                             .exports
                             .session_record(parent_session_id)
                             .context("parent session disappeared")?;
-                        let requested_supervisor =
-                            *task_type == mj_core::subagent::SubagentTaskType::Supervisor;
+                        let requested_orchestrator =
+                            *task_type == mj_core::subagent::SubagentTaskType::Orchestrator;
                         let parent_subagent = blocking("load parent subagent record", {
                             let parent_id = parent_session_id.to_owned();
                             move || mj_controller::database::load_subagent(&parent_id)
@@ -1352,19 +1352,14 @@ impl ApiBackend {
                         mj_core::subagent::validate_subagent_parent(
                             parent_subagent.as_ref(),
                             mj_core::subagent::SubagentKind::Worker,
-                            requested_supervisor,
+                            requested_orchestrator,
                         )?;
-                        if requested_supervisor {
+                        if requested_orchestrator {
                             ensure!(
-                                parent.supervisors,
-                                "supervisors are not enabled for this session"
-                            );
-                            ensure!(
-                                parent
-                                    .subagents
-                                    .as_ref()
-                                    .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
-                                "supervisors require Mjolnir delegation"
+                                parent.subagents.as_ref().is_some_and(
+                                    mj_core::subagent::SubagentPolicy::orchestrators_enabled
+                                ),
+                                "orchestrators are not enabled for this session"
                             );
                         }
                         let execution_policy =
@@ -1435,7 +1430,8 @@ impl ApiBackend {
                     .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                         no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
-                        supervisor: *task_type == mj_core::subagent::SubagentTaskType::Supervisor,
+                        orchestrator: *task_type
+                            == mj_core::subagent::SubagentTaskType::Orchestrator,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
                         task_name: task_name.clone(),
@@ -1744,8 +1740,8 @@ impl ApiBackend {
                         ),
                         crate::daemon::ChildReview::Closed => {}
                     }
-                    if record.supervisor {
-                        let active = self.supervisor_active_children(&child_id).await?;
+                    if record.orchestrator {
+                        let active = self.orchestrator_active_children(&child_id).await?;
                         if !active.is_empty() {
                             let list = active
                                 .iter()
@@ -1847,11 +1843,7 @@ impl ApiBackend {
                 .subagents
                 .get(&child)
                 .context("child relationship no longer exists")?;
-            controller.ensure_subagent_slot_available_for(
-                &relation.parent_session_id,
-                Some(&child),
-                relation.supervisor,
-            )
+            controller.ensure_subagent_slot_available(&relation.parent_session_id, Some(&child))
         })
         .await?;
         Arc::clone(&self.exports)
@@ -2356,12 +2348,12 @@ pub(crate) struct ActiveChildSummary {
     pub task_name: String,
 }
 
-pub(crate) fn supervisor_active_children_sync(
-    supervisor_id: &str,
+pub(crate) fn orchestrator_active_children_sync(
+    orchestrator_id: &str,
 ) -> Result<Vec<ActiveChildSummary>> {
-    let children = mj_controller::database::list_subagents(supervisor_id)?;
+    let children = mj_controller::database::list_subagents(orchestrator_id)?;
     let pending_finished =
-        mj_controller::database::pending_subagent_finished_children(supervisor_id)?;
+        mj_controller::database::pending_subagent_finished_children(orchestrator_id)?;
     let state = mj_controller::database::load_state()?;
     let mut active = Vec::new();
     for child in children {
@@ -2384,13 +2376,13 @@ pub(crate) fn supervisor_active_children_sync(
 }
 
 impl ApiBackend {
-    pub(crate) async fn supervisor_active_children(
+    pub(crate) async fn orchestrator_active_children(
         &self,
-        supervisor_id: &str,
+        orchestrator_id: &str,
     ) -> Result<Vec<ActiveChildSummary>> {
-        let supervisor_id = supervisor_id.to_owned();
-        blocking("load supervisor active children", move || {
-            supervisor_active_children_sync(&supervisor_id)
+        let orchestrator_id = orchestrator_id.to_owned();
+        blocking("load orchestrator active children", move || {
+            orchestrator_active_children_sync(&orchestrator_id)
         })
         .await
     }
@@ -2425,10 +2417,10 @@ impl ApiBackend {
                 // A child whose review is open is still pending: it may end
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
-            } else if child.relation.supervisor
-                && !self.supervisor_active_children(&id).await?.is_empty()
+            } else if child.relation.orchestrator
+                && !self.orchestrator_active_children(&id).await?.is_empty()
             {
-                ChildDisposition::NotNews("the supervisor awaits its sub-agents")
+                ChildDisposition::NotNews("the orchestrator awaits its sub-agents")
             } else {
                 if inputs.queue_known() {
                     for failed in inputs.failed_deliveries(&id) {
@@ -3583,13 +3575,12 @@ fn list_targets(
         .get(parent_id)
         .context("parent session disappeared")?;
     ensure!(
-        parent.supervisors
-            && parent
-                .subagents
-                .as_ref()
-                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir)
+        parent
+            .subagents
+            .as_ref()
+            .is_some_and(mj_core::subagent::SubagentPolicy::orchestrators_enabled)
             && !projection.subagents.contains_key(parent_id),
-        "list_targets requires supervisors enabled on a parent using Mjolnir delegation"
+        "list_targets requires orchestrators enabled on a parent using Mjolnir delegation"
     );
     let metadata = &projection.metadata;
     let config = &metadata.config;
@@ -3661,7 +3652,7 @@ fn listed_agent_role(
     relation: &mj_core::subagent::SubagentRecord,
     category: Option<&str>,
 ) -> &'static str {
-    if relation.supervisor || matches!(category, Some("supervisor" | "orchestrator")) {
+    if relation.orchestrator || matches!(category, Some("supervisor" | "orchestrator")) {
         "orchestrator"
     } else if category == Some("subtle") {
         "subtle"

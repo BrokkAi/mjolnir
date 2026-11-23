@@ -857,7 +857,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         };
         database::save_subagent_session(&child, &relation).unwrap();
         let mut grandchild = child.clone();

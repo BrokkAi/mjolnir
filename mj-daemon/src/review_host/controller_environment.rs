@@ -179,7 +179,7 @@ impl ReviewEnvironment for ControllerEnvironment {
                 mj_controller::controller::RegisterSubagentRequest {
                     no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Reviewer,
-                    supervisor: false,
+                    orchestrator: false,
                     reviewer_launch: Some(launch),
                     parent_session_id: session_id.to_owned(),
                     task_name: "review".to_owned(),

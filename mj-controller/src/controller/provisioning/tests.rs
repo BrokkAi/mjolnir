@@ -498,7 +498,6 @@ fn stale_worker_fails_before_any_container_is_created() {
             "stale worker",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,
@@ -589,7 +588,6 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "failed image",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,
@@ -1003,7 +1001,7 @@ fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         },
         Vec::new(),
         None,
@@ -1065,7 +1063,6 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "missing Node",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,
@@ -1140,7 +1137,6 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let mut session = SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
@@ -1340,7 +1336,6 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             "cancelled launch",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 skip_remembering_subagent_policy: false,

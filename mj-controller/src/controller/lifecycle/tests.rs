@@ -686,7 +686,7 @@ fn failed_subagent_relation(session_id: &str) -> mj_core::subagent::SubagentReco
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-        supervisor: false,
+        orchestrator: false,
     }
 }
 

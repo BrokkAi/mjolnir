@@ -114,7 +114,7 @@ pub fn compose(facts: &InstructionContext<'_>, index: Result<&str, &str>) -> Str
                 matches!(
                     socket.role,
                     crate::subagent::SubagentMcpRole::Child
-                        | crate::subagent::SubagentMcpRole::Supervisor
+                        | crate::subagent::SubagentMcpRole::Orchestrator
                 )
             });
             sections.push("When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.".into());
@@ -198,12 +198,12 @@ static BRIEF_WRITER_HANDOFF: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// A supervisor's server instructions: it owns its delegated slice, may delegate
+/// A orchestrator's server instructions: it owns its delegated slice, may delegate
 /// straightforward/subtle workers, must wait for or close all its workers before
 /// calling `handback`, and must call `handback` once to report back to its parent.
-pub static SUPERVISOR_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+pub static ORCHESTRATOR_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "You are a Mjolnir supervisor sub-agent. You own your delegated slice and may delegate `straightforward` or `subtle` worker sub-agents via `spawn`, monitor them with `list_agents`, follow up with `send_message`, and cancel them with `close`. You cannot spawn nested supervisors or oracles. While your workers run, you may end your turn with a brief waiting status; your session stays live and Mjolnir delivers each worker's report as a message when it finishes. Wait for or close all of your running workers before calling `handback`, then call `handback` once as your last action to report back to your parent. Your first prompt names your report directory. {}",
+        "You are a Mjolnir orchestrator sub-agent. You own your delegated slice and may delegate `straightforward` or `subtle` worker sub-agents via `spawn`, monitor them with `list_agents`, follow up with `send_message`, and cancel them with `close`. You cannot spawn nested orchestrators or oracles. While your workers run, you may end your turn with a brief waiting status; your session stays live and Mjolnir delivers each worker's report as a message when it finishes. Wait for or close all of your running workers before calling `handback`, then call `handback` once as your last action to report back to your parent. Your first prompt names your report directory. {}",
         crate::subagent::HANDBACK_REPORT_RULES.as_str()
     )
 });
@@ -218,7 +218,7 @@ pub fn standing_instructions(
             CODEX_SERVER_INSTRUCTIONS.as_str()
         }
         SubagentMcpRole::Parent => SERVER_INSTRUCTIONS.as_str(),
-        SubagentMcpRole::Supervisor => SUPERVISOR_INSTRUCTIONS.as_str(),
+        SubagentMcpRole::Orchestrator => ORCHESTRATOR_INSTRUCTIONS.as_str(),
         SubagentMcpRole::MessageOnly | SubagentMcpRole::FetchOnly => MESSAGE_ONLY_INSTRUCTIONS,
         SubagentMcpRole::Child => match review_role {
             Some(role) => review_child_output_contract(role),

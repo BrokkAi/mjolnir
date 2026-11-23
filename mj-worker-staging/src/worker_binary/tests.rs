@@ -5385,8 +5385,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
-        supervisor: false,
-        supervisors_enabled: false,
+        orchestrator: false,
+        orchestrators_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5559,8 +5559,8 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
-        supervisor: false,
-        supervisors_enabled: false,
+        orchestrator: false,
+        orchestrators_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -6657,6 +6657,16 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
         .unwrap();
         launch.harness = harness;
         launch.harness_home = "/session".into();
+        if harness == HarnessKind::OpenCode {
+            launch.reviewer_launch = None;
+            launch.subagent_kind = Some(mj_core::subagent::SubagentKind::Worker);
+            launch.handback_tool = true;
+            launch.orchestrator = true;
+            launch.environment.insert(
+                mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+                "1".into(),
+            );
+        }
         launch.environment.insert(
             mj_core::subagent::CHILD_REPORT_DIR_ENV.into(),
             "/session/reports".into(),

@@ -224,8 +224,8 @@ pub struct ParentTools {
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
     /// no `task_type` and every child uses the straightforward choice.
     pub subtle_subagents: bool,
-    /// Whether a top-level parent's `spawn` offers `task_type = "supervisor"`.
-    pub supervisors_enabled: bool,
+    /// Whether a top-level parent's `spawn` offers `task_type = "orchestrator"`.
+    pub orchestrators_enabled: bool,
 }
 
 impl Default for ParentTools {
@@ -234,7 +234,7 @@ impl Default for ParentTools {
             oracle: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
-            supervisors_enabled: false,
+            orchestrators_enabled: false,
         }
     }
 }
@@ -377,7 +377,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     mut options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
-    let report_budget = if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) {
+    let report_budget = if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Orchestrator) {
         ChildReportBudget::from_socket(&socket)?
     } else {
         None
@@ -385,7 +385,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     let launch = read_launch_settings(&socket);
     if let Some(launch) = &launch {
         options.oracle |= launch["oracle"] == true;
-        options.supervisors_enabled |= launch["supervisors_enabled"] == true;
+        options.orchestrators_enabled |= launch["supervisors_enabled"] == true;
     }
     let review_role = launch
         .as_ref()
@@ -404,11 +404,11 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         review_role.map(mj_core::session_instructions::review_child_output_contract);
     let tools = match role {
         SubagentMcpRole::Parent => tool_definitions_with_options(harness, options),
-        SubagentMcpRole::Supervisor => {
-            let mut sup_options = options;
-            sup_options.oracle = false;
-            sup_options.supervisors_enabled = false;
-            let mut tools = tool_definitions_with_options(harness, sup_options);
+        SubagentMcpRole::Orchestrator => {
+            let mut orchestrator_options = options;
+            orchestrator_options.oracle = false;
+            orchestrator_options.orchestrators_enabled = false;
+            let mut tools = tool_definitions_with_options(harness, orchestrator_options);
             let mut handback = child_tool_definitions().remove(0);
             if let Some(budget) = &report_budget {
                 let description = handback["description"].as_str().unwrap();
@@ -589,7 +589,7 @@ fn call_with_budget_and_options(
     if params.name == "ask_oracle" && !options.oracle {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
-    if params.name == "list_targets" && !options.supervisors_enabled {
+    if params.name == "list_targets" && !options.orchestrators_enabled {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
@@ -643,18 +643,18 @@ fn call_with_budget_and_options(
             let task_type = match args.task_type {
                 Some(task_type) => task_type,
                 None if !options.subtle_subagents
-                    && !(role == SubagentMcpRole::Parent && options.supervisors_enabled) =>
+                    && !(role == SubagentMcpRole::Parent && options.orchestrators_enabled) =>
                 {
                     mj_core::subagent::SubagentTaskType::Straightforward
                 }
                 None => bail!("missing field `task_type`"),
             };
-            if task_type == mj_core::subagent::SubagentTaskType::Supervisor {
-                if role == SubagentMcpRole::Supervisor {
-                    bail!("supervisors cannot spawn nested supervisors (maximum depth is 2)");
+            if task_type == mj_core::subagent::SubagentTaskType::Orchestrator {
+                if role == SubagentMcpRole::Orchestrator {
+                    bail!("orchestrators cannot spawn nested orchestrators (maximum depth is 2)");
                 }
-                if role != SubagentMcpRole::Parent || !options.supervisors_enabled {
-                    bail!("supervisors are not enabled for this session");
+                if role != SubagentMcpRole::Parent || !options.orchestrators_enabled {
+                    bail!("orchestrators are not enabled for this session");
                 }
             }
             SubagentToolAction::Spawn {
@@ -702,7 +702,7 @@ fn call_with_budget_and_options(
                 child_session_id: args.child_session_id,
             }
         }
-        "handback" if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) => {
+        "handback" if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Orchestrator) => {
             if let Some(budget) = ChildReportBudget::from_socket(socket)?
                 && let Err(error) = budget.check()
             {
@@ -843,7 +843,7 @@ const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem u
 
 /// The parent's `spawn` tool. With only the straightforward type configured
 /// there is no choice to make, so it has no `task_type`.
-fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
+fn spawn_tool(subtle_subagents: bool, orchestrators_enabled: bool) -> Value {
     let (lead, selection) = if subtle_subagents {
         (
             SPAWN_TWO_TASK_TYPES,
@@ -859,7 +859,7 @@ fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
         "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
     });
     let mut required = vec!["task_name", "instructions"];
-    if subtle_subagents || supervisors_enabled {
+    if subtle_subagents || orchestrators_enabled {
         let mut task_types = vec!["straightforward"];
         let mut description = String::from(
             "`straightforward` is for bounded work with a single clear path, such as locating and mapping code, running exact build, test, or gate commands, and small mechanical edits.",
@@ -870,10 +870,10 @@ fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
                 " `subtle` gets a smarter, more expensive agent for multi-file implementation, multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, or work with a high risk of subtle bugs.",
             );
         }
-        if supervisors_enabled {
-            task_types.push("supervisor");
+        if orchestrators_enabled {
+            task_types.push("orchestrator");
             description.push_str(
-                " `supervisor` starts a depth-1 supervisor from the primary pool that can delegate its own workers.",
+                " `orchestrator` starts a depth-1 orchestrator from the primary pool that can delegate its own workers.",
             );
         }
         properties["task_type"] =
@@ -909,7 +909,7 @@ fn tool_definitions_with_options(
         "additionalProperties":false
     });
     let mut tools = vec![
-        spawn_tool(options.subtle_subagents, options.supervisors_enabled),
+        spawn_tool(options.subtle_subagents, options.orchestrators_enabled),
         read_only(tool(
             "list_agents",
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
@@ -926,7 +926,7 @@ fn tool_definitions_with_options(
     if options.oracle {
         tools.push(ask_oracle_tool());
     }
-    if options.supervisors_enabled {
+    if options.orchestrators_enabled {
         tools.insert(2, read_only(tool(
             "list_targets",
             "List enabled execution targets, their default container sizes, and recent and hourly host capacity observations.",
@@ -1223,14 +1223,14 @@ mod tests {
         oracle: false,
         agent_mailboxes_enabled: false,
         subtle_subagents: true,
-        supervisors_enabled: false,
+        orchestrators_enabled: false,
     };
 
     const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
         oracle: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: false,
-        supervisors_enabled: false,
+        orchestrators_enabled: false,
     };
 
     fn spawn_definition(options: ParentTools) -> Value {
@@ -1256,7 +1256,7 @@ mod tests {
         assert!(description.contains(
             "multi-file implementation, multi-stage operational runs or troubleshooting"
         ));
-        assert!(!description.contains("`supervisor`"));
+        assert!(!description.contains("`orchestrator`"));
     }
 
     #[test]
@@ -1603,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn list_targets_schema_and_calls_require_a_supervisor_enabled_parent() {
+    fn list_targets_schema_and_calls_require_an_orchestrator_enabled_parent() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("control.sock");
         let launch = socket.with_file_name("launch.json");
@@ -1611,7 +1611,7 @@ mod tests {
             (SubagentMcpRole::Parent, true, true),
             (SubagentMcpRole::Parent, false, false),
             (SubagentMcpRole::Child, true, false),
-            (SubagentMcpRole::Supervisor, true, false),
+            (SubagentMcpRole::Orchestrator, true, false),
         ] {
             std::fs::write(&launch, json!({"supervisors_enabled": enabled}).to_string()).unwrap();
             let (_, tools) = mcp_exchange(|input, output| {
@@ -1634,7 +1634,7 @@ mod tests {
                 &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
                 |_| Duration::from_millis(1),
                 ParentTools {
-                    supervisors_enabled: enabled,
+                    orchestrators_enabled: enabled,
                     ..Default::default()
                 },
             )
@@ -1912,7 +1912,7 @@ mod tests {
                         }
                         assert!(!description.contains("child_session_id"));
                     }
-                    SubagentMcpRole::Parent | SubagentMcpRole::Supervisor => {
+                    SubagentMcpRole::Parent | SubagentMcpRole::Orchestrator => {
                         let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
                         let props = &spawn["inputSchema"]["properties"];
                         assert!(props.get("files").is_none() && props.get("context").is_none());
@@ -2405,7 +2405,7 @@ mod tests {
             None,
             ParentTools {
                 oracle: true,
-                supervisors_enabled: true,
+                orchestrators_enabled: true,
                 ..Default::default()
             },
         );

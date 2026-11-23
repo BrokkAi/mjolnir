@@ -97,7 +97,8 @@ pub enum SubagentTaskType {
     Straightforward,
     Subtle,
     Oracle,
-    Supervisor,
+    #[serde(rename = "supervisor", alias = "orchestrator")]
+    Orchestrator,
 }
 
 impl SubagentTaskType {
@@ -106,7 +107,7 @@ impl SubagentTaskType {
             Self::Straightforward => "straightforward",
             Self::Subtle => "subtle",
             Self::Oracle => "oracle",
-            Self::Supervisor => "supervisor",
+            Self::Orchestrator => "orchestrator",
         }
     }
 }
@@ -117,6 +118,15 @@ impl SubagentPolicy {
     }
     pub fn uses_mjolnir(&self) -> bool {
         matches!(self, Self::Mjolnir { .. })
+    }
+    pub fn orchestrators_enabled(&self) -> bool {
+        matches!(
+            self,
+            Self::Mjolnir {
+                orchestrators: true,
+                ..
+            }
+        )
     }
     pub fn override_choice(
         &self,
@@ -130,7 +140,7 @@ impl SubagentPolicy {
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
-                SubagentTaskType::Oracle | SubagentTaskType::Supervisor => None,
+                SubagentTaskType::Oracle | SubagentTaskType::Orchestrator => None,
             },
             _ => None,
         }
@@ -168,7 +178,7 @@ impl SubagentPolicy {
         if !harness.supports_delegation_tools() {
             Self::Native
         } else if let Some(record) = subagent {
-            if record.supervisor {
+            if record.orchestrator {
                 let mut policy = self.clone();
                 if let Self::Mjolnir { orchestrators, .. } = &mut policy {
                     *orchestrators = false;
@@ -341,9 +351,9 @@ pub fn delegation_policy(limit: usize, offers_subtle: bool) -> String {
         .replace("$N", &limit.to_string())
 }
 
-/// The supervisor's delegation policy document.
-pub fn supervisor_delegation_policy() -> &'static str {
-    include_str!("../assets/supervisor-delegation.md")
+/// The orchestrator's delegation policy document.
+pub fn orchestrator_delegation_policy() -> &'static str {
+    include_str!("../assets/orchestrator-delegation.md")
 }
 
 /// Identity of one finish already sent to the parent in a notification.
@@ -939,10 +949,14 @@ pub struct SubagentRecord {
     /// reads as false and keeps reporting through its last message.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handback_tool: bool,
-    /// Whether this depth-1 worker is a supervisor that may delegate to
-    /// depth-2 non-supervisor workers.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisor: bool,
+    /// Whether this depth-1 worker is an orchestrator that may delegate
+    /// to depth-2 workers.
+    #[serde(
+        rename = "supervisor",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub orchestrator: bool,
     /// The parent suspended this child and should resume it with its own worker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume_with_parent: bool,
@@ -977,8 +991,13 @@ pub struct SubagentMetadata {
     pub reported_finish: Option<SubagentFinishIdentity>,
     #[serde(default)]
     pub handback_tool: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisor: bool,
+    #[serde(
+        rename = "supervisor",
+        alias = "orchestrator",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub orchestrator: bool,
 }
 
 impl From<&SubagentRecord> for SubagentMetadata {
@@ -997,7 +1016,7 @@ impl From<&SubagentRecord> for SubagentMetadata {
             noticed_turn: record.noticed_turn,
             reported_finish: record.reported_finish.clone(),
             handback_tool: record.handback_tool,
-            supervisor: record.supervisor,
+            orchestrator: record.orchestrator,
         }
     }
 }
@@ -1024,7 +1043,7 @@ impl SubagentMetadata {
         record.noticed_turn = self.noticed_turn;
         record.reported_finish = self.reported_finish.clone();
         record.handback_tool = self.handback_tool;
-        record.supervisor = self.supervisor;
+        record.orchestrator = self.orchestrator;
     }
 
     /// Build a `SubagentRecord` view for shared validation and launch helpers.
@@ -1046,7 +1065,7 @@ impl SubagentMetadata {
             noticed_turn: self.noticed_turn,
             reported_finish: self.reported_finish.clone(),
             handback_tool: self.handback_tool,
-            supervisor: self.supervisor,
+            orchestrator: self.orchestrator,
         }
     }
 }
@@ -1056,22 +1075,24 @@ impl SubagentMetadata {
 pub fn validate_subagent_parent(
     parent_subagent: Option<&SubagentRecord>,
     requested_kind: SubagentKind,
-    requested_supervisor: bool,
+    requested_orchestrator: bool,
 ) -> anyhow::Result<()> {
-    if requested_supervisor && requested_kind != SubagentKind::Worker {
-        anyhow::bail!("only worker sub-agents can be supervisors");
+    if requested_orchestrator && requested_kind != SubagentKind::Worker {
+        anyhow::bail!("only worker sub-agents can be orchestrators");
     }
     if requested_kind == SubagentKind::Reviewer {
         return Ok(());
     }
     match parent_subagent {
         None => Ok(()),
-        Some(parent) if parent.kind == SubagentKind::Worker && parent.supervisor => {
-            if requested_supervisor {
-                anyhow::bail!("supervisors cannot spawn nested supervisors (maximum depth is 2)");
+        Some(parent) if parent.kind == SubagentKind::Worker && parent.orchestrator => {
+            if requested_orchestrator {
+                anyhow::bail!(
+                    "orchestrators cannot spawn nested orchestrators (maximum depth is 2)"
+                );
             }
             if requested_kind == SubagentKind::Oracle {
-                anyhow::bail!("supervisors cannot spawn oracles");
+                anyhow::bail!("orchestrators cannot spawn oracles");
             }
             Ok(())
         }
@@ -1123,7 +1144,8 @@ pub enum SubagentMcpRole {
     #[default]
     #[serde(alias = "fixed_parent")]
     Parent,
-    Supervisor,
+    #[serde(rename = "supervisor", alias = "orchestrator")]
+    Orchestrator,
     MessageOnly,
     FetchOnly,
     Child,
@@ -1146,7 +1168,7 @@ impl SubagentMcpRole {
         ]
         .map(str::to_owned)
         .into();
-        if matches!(self, Self::Child | Self::FetchOnly | Self::Supervisor) {
+        if matches!(self, Self::Child | Self::FetchOnly | Self::Orchestrator) {
             args.extend(["--role".to_owned(), self.id().to_owned()]);
         }
         args
@@ -1156,7 +1178,7 @@ impl SubagentMcpRole {
     pub fn id(self) -> &'static str {
         match self {
             Self::Parent => "parent",
-            Self::Supervisor => "supervisor",
+            Self::Orchestrator => "orchestrator",
             Self::MessageOnly => "message_only",
             Self::FetchOnly => "fetch_only",
             Self::Child => "child",
@@ -1177,7 +1199,7 @@ impl SubagentMcpRole {
                 "fetch",
                 "ask_oracle",
             ],
-            Self::Supervisor => &[
+            Self::Orchestrator => &[
                 "spawn",
                 "list_agents",
                 "send_message",
@@ -1205,7 +1227,7 @@ impl std::str::FromStr for SubagentMcpRole {
         match value {
             "parent" => Ok(Self::Parent),
             "fixed_parent" => Ok(Self::Parent),
-            "supervisor" => Ok(Self::Supervisor),
+            "orchestrator" | "supervisor" => Ok(Self::Orchestrator),
             "message_only" => Ok(Self::MessageOnly),
             "fetch_only" => Ok(Self::FetchOnly),
             "child" => Ok(Self::Child),
@@ -2379,10 +2401,10 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-                supervisor: false,
+                orchestrator: false,
             };
-            let mut supervisor = worker.clone();
-            supervisor.supervisor = true;
+            let mut orchestrator = worker.clone();
+            orchestrator.orchestrator = true;
             let enabled = SubagentPolicy::Mjolnir {
                 orchestrators: true,
                 straightforward: None,
@@ -2390,7 +2412,7 @@ mod tests {
             };
             assert_eq!(enabled.for_launch(harness, None), enabled);
             assert!(matches!(
-                enabled.for_launch(harness, Some(&supervisor)),
+                enabled.for_launch(harness, Some(&orchestrator)),
                 SubagentPolicy::Mjolnir {
                     orchestrators: false,
                     ..
@@ -2411,20 +2433,20 @@ mod tests {
                     policy.for_launch(harness, Some(&worker)),
                     SubagentPolicy::None
                 );
-                assert_eq!(policy.for_launch(harness, Some(&supervisor)), policy);
+                assert_eq!(policy.for_launch(harness, Some(&orchestrator)), policy);
                 assert_eq!(policy.for_launch(harness, None), policy);
             }
-            // Depth-2 invariant: top-level -> supervisor ok; supervisor -> worker ok;
-            // supervisor -> supervisor/oracle refused; worker -> worker refused.
+            // Depth-2 invariant: top-level -> orchestrator ok; orchestrator -> worker ok;
+            // orchestrator -> orchestrator/oracle refused; worker -> worker refused.
             assert!(validate_subagent_parent(None, SubagentKind::Worker, true).is_ok());
             assert!(
-                validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, false).is_ok()
+                validate_subagent_parent(Some(&orchestrator), SubagentKind::Worker, false).is_ok()
             );
             assert!(
-                validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, true).is_err()
+                validate_subagent_parent(Some(&orchestrator), SubagentKind::Worker, true).is_err()
             );
             assert!(
-                validate_subagent_parent(Some(&supervisor), SubagentKind::Oracle, false).is_err()
+                validate_subagent_parent(Some(&orchestrator), SubagentKind::Oracle, false).is_err()
             );
             assert!(validate_subagent_parent(Some(&worker), SubagentKind::Worker, false).is_err());
             assert!(validate_subagent_parent(Some(&worker), SubagentKind::Reviewer, false).is_ok());
@@ -3557,6 +3579,27 @@ mod tests {
         let encoded = serde_json::to_value(&action).unwrap();
         for key in ["profile_id", "model", "effort"] {
             assert!(encoded["params"].get(key).is_none());
+        }
+
+        for spelling in ["supervisor", "orchestrator"] {
+            let mut request = encoded.clone();
+            request["params"]["task_type"] = spelling.into();
+            let action: SubagentToolAction = serde_json::from_value(request).unwrap();
+            assert!(matches!(
+                action,
+                SubagentToolAction::Spawn {
+                    task_type: SubagentTaskType::Orchestrator,
+                    ..
+                }
+            ));
+            assert_eq!(
+                serde_json::to_value(action).unwrap()["params"]["task_type"],
+                "supervisor"
+            );
+            assert_eq!(
+                spelling.parse::<SubagentMcpRole>().unwrap(),
+                SubagentMcpRole::Orchestrator
+            );
         }
         assert_eq!(
             serde_json::from_str::<SubagentMcpRole>("\"fixed_parent\"").unwrap(),

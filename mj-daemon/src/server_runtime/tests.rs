@@ -388,7 +388,6 @@ fn move_recovery_fixture() -> mj_core::state::MoveOperation {
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -752,7 +751,7 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             }
             .into(),
         );
@@ -1253,7 +1252,7 @@ fn golden_phone_session_snapshot() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );
@@ -2087,7 +2086,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );
@@ -2229,7 +2228,6 @@ fn prompt_action() -> ControllerAction {
 fn new_action() -> ControllerAction {
     ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -2260,7 +2258,6 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -3087,7 +3084,7 @@ fn child_worker_turn_and_attention_publish_together_and_update_the_parent() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );

@@ -374,9 +374,9 @@ struct MoveArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
-    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
-    #[arg(long, value_parser = ["enabled", "disabled"])]
-    supervisors: Option<String>,
+    /// Enable orchestrators (requires Mjolnir delegation).
+    #[arg(long)]
+    orchestrators: bool,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -1372,6 +1372,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
+        args.orchestrators,
     )?;
     let oracle_choice = api_commands::oracle_override(
         args.subagent_oracle.as_deref(),
@@ -1444,13 +1445,9 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         _ => None,
     };
     let sized_by_flags = resource_allocation.is_some();
-    let selection = MoveSelection {
+    let mut selection = MoveSelection {
         subagents,
         oracle: oracle_enabled,
-        supervisors: args
-            .supervisors
-            .as_deref()
-            .map(|choice| choice == "enabled"),
         oracle_choice,
         consent: mj_core::suspend_consent::SuspendConsent {
             discard_untracked: if args.discard_untracked {
@@ -1474,7 +1471,30 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         resource_allocation,
         clear_resource_allocation: args.clear_resources,
     };
-    let preparation = match daemon.prepare_move_session(selection).await {
+    let prepared = async {
+        // With no policy or model flags, the opt-in only changes the
+        // orchestrator choice in the session's existing policy.
+        if args.orchestrators
+            && args.subagents.is_none()
+            && args.subagent_straightforward.is_none()
+            && args.subagent_subtle.is_none()
+            && let Some(record) = daemon.session_record(args.session.clone()).await?
+            && let Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward,
+                subtle,
+                ..
+            }) = record.subagents
+        {
+            selection.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward,
+                subtle,
+                orchestrators: true,
+            });
+        }
+        daemon.prepare_move_session(selection).await
+    }
+    .await;
+    let preparation = match prepared {
         Ok(preparation) => preparation,
         Err(error) => {
             if args.json {
@@ -3232,7 +3252,6 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,

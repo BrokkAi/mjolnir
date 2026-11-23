@@ -83,7 +83,7 @@ impl ApiBackend {
             .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: SubagentKind::Oracle,
-                supervisor: false,
+                orchestrator: false,
                 reviewer_launch: None,
                 parent_session_id: primary_id.to_owned(),
                 task_name: "oracle".into(),

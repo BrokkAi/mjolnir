@@ -104,15 +104,6 @@ impl DashboardState {
         wizard.preparing = true;
         wizard.preparation_error = None;
         let subagents = wizard.subagent_change(self);
-        let supervisors = wizard
-            .subagents
-            .supervisors_available()
-            .then(|| self.session_record(&wizard.session_id))
-            .flatten()
-            .and_then(|record| {
-                (record.supervisors != wizard.subagents.supervisors)
-                    .then_some(wizard.subagents.supervisors)
-            });
         let action = DashboardAction::MoveSession {
             subagents,
             oracle: wizard
@@ -123,7 +114,6 @@ impl DashboardState {
                 .and_then(|record| {
                     (record.oracle != wizard.subagents.oracle).then_some(wizard.subagents.oracle)
                 }),
-            supervisors,
             oracle_choice: None,
             consent: mj_core::suspend_consent::SuspendConsent::default(),
             skip_keep_paths: Vec::new(),
@@ -209,7 +199,6 @@ impl DashboardState {
             let action = DashboardAction::MoveSession {
                 subagents: selection.subagents.clone(),
                 oracle: selection.oracle,
-                supervisors: selection.supervisors,
                 oracle_choice: selection.oracle_choice.clone(),
                 consent: selection.consent.clone(),
                 skip_keep_paths: selection.skip_keep_paths.clone(),

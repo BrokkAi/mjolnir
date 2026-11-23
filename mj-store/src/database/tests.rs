@@ -6659,7 +6659,7 @@ pub(super) fn test_subagent(parent_id: &str, child_id: &str) -> SubagentRecord {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     }
 }
 
@@ -8263,69 +8263,52 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
 }
 
 #[test]
-fn supervisors_preference_survives_reopen_and_profile_rename() {
+fn schema_orchestrator_policy_survives_reopen_and_profile_rename() {
     use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("supervisors.sqlite3");
-    let mut record = session("sup-parent", "project");
+    let path = directory.path().join("orchestrators.sqlite3");
+    let mut record = session("parent", "project");
+    record.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: true,
+        straightforward: None,
+        subtle: None,
+    });
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert!(
+        state.sessions[&record.id]
+            .subagents
+            .as_ref()
+            .unwrap()
+            .orchestrators_enabled()
+    );
+    assert!(state.last_subagent_policies[&record.last_profile].orchestrators_enabled());
+
+    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
+    let renamed = load_state_from(&path).unwrap();
+    assert!(renamed.last_subagent_policies["renamed"].orchestrators_enabled());
+    assert!(
+        !renamed
+            .last_subagent_policies
+            .contains_key(&record.last_profile)
+    );
+
+    let mut record = renamed.sessions[&record.id].clone();
     record.subagents = Some(SubagentPolicy::Mjolnir {
         orchestrators: false,
         straightforward: None,
         subtle: None,
     });
-    record.supervisors = true;
-    save_new_session_to(&path, &record, None, true, false).unwrap();
-    let conn = open(&path).unwrap();
-    let schema = schema::read_schema_state(&conn).unwrap();
-    assert_eq!(schema.revision, SCHEMA_VERSION);
-    assert_eq!(
-        schema.minimum_compatible,
-        Some(schema::MINIMUM_COMPATIBLE_VERSION)
-    );
-    let state = load_state_from(&path).unwrap();
-    assert!(state.sessions[&record.id].supervisors);
-    let assert_policy = |state: &State, enabled| {
-        for policy in [
-            state.sessions[&record.id].subagents.as_ref().unwrap(),
-            &state.last_subagent_policies[&record.last_profile],
-        ] {
-            assert!(matches!(
-                policy,
-                SubagentPolicy::Mjolnir { orchestrators, .. } if *orchestrators == enabled
-            ));
-        }
-    };
-    assert_policy(&state, true);
-    assert_eq!(
-        state.last_supervisor_choices.get(&record.last_profile),
-        Some(&true)
-    );
-    rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
-    let renamed = load_state_from(&path).unwrap();
-    assert_eq!(renamed.last_supervisor_choices.get("renamed"), Some(&true));
-    assert!(
-        !renamed
-            .last_supervisor_choices
-            .contains_key(&record.last_profile)
-    );
-    let mut record = renamed.sessions[&record.id].clone();
-    record.supervisors = false;
     save_new_session_to(&path, &record, None, true, false).unwrap();
     let disabled = load_state_from(&path).unwrap();
-    assert!(matches!(
-        disabled.sessions[&record.id].subagents,
-        Some(SubagentPolicy::Mjolnir {
-            orchestrators: false,
-            ..
-        })
-    ));
-    assert!(matches!(
-        disabled.last_subagent_policies[&record.last_profile],
-        SubagentPolicy::Mjolnir {
-            orchestrators: false,
-            ..
-        }
-    ));
+    assert!(
+        !disabled.sessions[&record.id]
+            .subagents
+            .as_ref()
+            .unwrap()
+            .orchestrators_enabled()
+    );
+    assert!(!disabled.last_subagent_policies["renamed"].orchestrators_enabled());
 }
 
 #[test]

@@ -2765,7 +2765,7 @@ async fn prepare_and_start_harness(
                             oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
-                            supervisors_enabled: false,
+                            orchestrators_enabled: false,
                         },
                         review_tools,
                         managed_subagent,
