@@ -706,6 +706,8 @@ pub struct SessionRegistration {
 pub struct SessionLaunchOptions {
     /// Allow this interactive launch to seed later new-session forms.
     pub remember_launch_choices: bool,
+    /// An automatic fallback is not a delegation choice made by the user.
+    pub skip_remembering_subagent_policy: bool,
     /// Save the selected container size for this physical host.
     pub remember_container_size: bool,
     pub create_managed_worktree: Option<bool>,
@@ -997,6 +999,7 @@ impl Controller {
         let options_oracle_explicit = options.oracle_choice.is_some();
         let SessionLaunchOptions {
             remember_launch_choices,
+            skip_remembering_subagent_policy,
             remember_container_size,
             create_managed_worktree,
             at,
@@ -1238,14 +1241,18 @@ impl Controller {
         // Creation authors the whole record, so it writes the whole row. The
         // record reaches memory only once it is durable: a session this process
         // alone knows about is one the database can never resume or clean up.
-        crate::database::save_new_session(
+        let remember_subagent_policy = remember_launch_choices && !skip_remembering_subagent_policy;
+        crate::database::save_new_session_with_preferences(
             &record,
             selected_container_size.clone(),
-            remember_launch_choices,
-            remember_container_size,
+            crate::database::NewSessionPreferences {
+                remember_launch_choices,
+                remember_container_size,
+                remember_subagent_policy,
+            },
         )?;
         let policy = record.subagents.clone().unwrap_or_default();
-        if remember_launch_choices && policy.updates_remembered_choice(record.harness_kind) {
+        if remember_subagent_policy && policy.updates_remembered_choice(record.harness_kind) {
             self.state
                 .last_subagent_policies
                 .insert(profile_id.to_owned(), policy);

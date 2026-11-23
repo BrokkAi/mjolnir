@@ -145,13 +145,13 @@ pub(crate) struct NewArgs {
     #[arg(long)]
     effort: Option<String>,
     /// Delegation policy: native, mjolnir, or none (no delegation tools).
-    /// Omitted uses Native.
+    /// Defaults to mjolnir, with a notice when unavailable and native or none is used.
     #[arg(long)]
     subagents: Option<String>,
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
-    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
+    /// Supervisor sub-agent availability for this session (requires Mjolnir delegation).
     #[arg(long, value_parser = ["enabled", "disabled"])]
     supervisors: Option<String>,
     /// Override the configured model for straightforward Mjolnir sub-agents.

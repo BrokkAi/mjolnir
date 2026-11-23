@@ -469,11 +469,15 @@ ancestors. Directories you attach with `additional_mounts` are not checked.
 {"subagents": {"mode": "mjolnir"}}
 ```
 
-Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
-Omitted policy defaults to Native, or to `none` for a DSH profile, which refuses
-`native` because DSH has no sub-agents of its own. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and
-a straightforward choice, either global or a session override. A subtle choice
-is optional:
+Choose `native` for harness delegation, `mjolnir` for Mjolnir-managed children,
+or `none` to turn off delegation. When omitted, Mjolnir is the default. If it is
+unconfigured or unavailable, the session uses `native` where supported and
+`none` on DSH and Antigravity. The response includes a `notice` describing the
+fallback. A named DSH or Antigravity profile refuses an explicit `native`
+choice. An explicit Mjolnir policy or `"supervisors": true` requires Mjolnir
+delegation to be available. Mjolnir delegation supports Claude, Codex, DSH,
+OpenCode, and Antigravity parents and requires a straightforward choice, either
+global or a session override. A subtle choice is optional.
 
 ```json
 {"subagents": {"mode": "mjolnir", "subtle": {"model": "gpt-6-luna", "effort": "max"}}}
@@ -484,7 +488,8 @@ omitted type uses its global choice. A session may override one type and use
 global configuration for the other. Omit `effort` to use the harness default;
 `adaptive` is invalid. The selected model and effort must be available to the
 enabled profiles.
-An unavailable choice answers `422` with code `subagent_choice_unavailable`.
+When Mjolnir delegation is required and unavailable, the response is `422` with
+code `subagent_choice_unavailable`.
 Move can explicitly change the policy; omission retains it. Legacy `none`
 policies and child sessions remain readable. Per-profile defaults are ignored.
 
