@@ -870,88 +870,10 @@ pub fn install_worker_profile_files(
             ] {
                 execute_checked(executor, command)?;
             }
+            return Ok(());
         }
-        targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id, .. }
-        | targets::TargetLocator::AppleContainer { container_id, .. } => {
-            let engine = match locator {
-                targets::TargetLocator::LocalPodman { .. } => "podman",
-                targets::TargetLocator::LocalDocker { .. } => "docker",
-                targets::TargetLocator::AppleContainer { .. } => "container",
-                _ => unreachable!("matched local container target"),
-            };
-            let launch_installed = format!("{worker_root}/launch.json");
-            let ownership_installed = format!("{worker_root}/ownership.json");
-            let owned = [
-                launch_installed.as_str(),
-                ownership_installed.as_str(),
-                profile_home,
-            ];
-            let mut commands = vec![
-                CommandSpec::new(
-                    engine,
-                    [
-                        "exec".into(),
-                        container_id.clone(),
-                        "mkdir".into(),
-                        "-p".into(),
-                        worker_root.into(),
-                        profile_home.into(),
-                    ],
-                )
-                .purpose("create target worker directories"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "cp".into(),
-                        launch_config.to_string_lossy().into_owned(),
-                        format!("{container_id}:{launch_installed}"),
-                    ],
-                )
-                .purpose("upload worker launch configuration"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "cp".into(),
-                        ownership.to_string_lossy().into_owned(),
-                        format!("{container_id}:{ownership_installed}"),
-                    ],
-                )
-                .purpose("upload worker ownership marker"),
-                CommandSpec::new(
-                    engine,
-                    [
-                        "cp".into(),
-                        format!("{}/.", profile_stage.display()),
-                        format!("{container_id}:{profile_home}"),
-                    ],
-                )
-                .purpose("upload harness profile allowlist"),
-                CommandSpec::new(
-                    engine,
-                    container_upload_ownership_args(engine, container_id, worker_root, &owned),
-                )
-                .purpose("match uploaded files to the worker directory owner"),
-            ];
-            commands.push(
-                CommandSpec::new(
-                    engine,
-                    [
-                        "exec".into(),
-                        container_id.clone(),
-                        "chmod".into(),
-                        "-R".into(),
-                        "go-rwx".into(),
-                        profile_home.into(),
-                    ],
-                )
-                .purpose("restrict harness profile permissions"),
-            );
-            for command in commands {
-                execute_checked(executor, command)?;
-            }
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. } => {
+        targets::TargetLocator::AwsEc2 { ssh, .. }
+        | targets::TargetLocator::SshBare { ssh, .. } => {
             install_worker_over_ssh(
                 executor,
                 ssh,
@@ -962,158 +884,141 @@ pub fn install_worker_profile_files(
                 profile_stage,
                 shared_paths,
             )?;
+            return Ok(());
         }
-        targets::TargetLocator::SshBare { ssh, .. } => {
-            install_worker_over_ssh(
-                executor,
-                ssh,
-                worker_root,
-                profile_home,
-                launch_config,
-                ownership,
-                profile_stage,
-                shared_paths,
-            )?;
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshAppleContainer {
-            ssh, container_id, ..
-        }
-        | targets::TargetLocator::SshNitro {
-            ssh, container_id, ..
-        } => {
-            let engine = locator
-                .container_engine()
-                .expect("matched a remote container target");
-            let upload = format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING);
-            execute_checked(
-                executor,
-                crate::targets::ssh_command(
-                    SshTrafficClass::Control,
-                    ssh,
-                    ["mkdir", "-p", &upload],
-                )
+        _ => {}
+    }
+    let endpoint = locator.container_endpoint().expect("container locator");
+    let targets::ContainerEndpoint {
+        engine,
+        ssh,
+        container_id,
+    } = endpoint;
+    let upload = ssh.map(|_| format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING));
+    if let (Some(ssh), Some(upload)) = (ssh, &upload) {
+        execute_checked(
+            executor,
+            crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["mkdir", "-p", upload])
                 .purpose("create remote upload staging"),
+        )?;
+        for (source, name) in [
+            (launch_config, "launch.json"),
+            (ownership, "ownership.json"),
+        ] {
+            upload_worker_file(
+                executor,
+                ssh,
+                source,
+                &format!("{upload}/{name}"),
+                "upload remote container worker file",
             )?;
-            for (source, name) in [
-                (launch_config, "launch.json"),
-                (ownership, "ownership.json"),
-            ] {
-                upload_worker_file(
-                    executor,
-                    ssh,
-                    source,
-                    &format!("{upload}/{name}"),
-                    "upload remote container worker file",
-                )?;
+        }
+        let staged_profile = format!("{upload}/profile");
+        match engine {
+            // A Nitro guest does not share its profile objects with the
+            // hypervisor account or another guest.
+            targets::MICROVM_ENGINE => {
+                upload_legacy_profile_archive(executor, ssh, profile_stage, &staged_profile, &[])?;
             }
-            let staged_profile = format!("{upload}/profile");
-            match locator {
-                // A Nitro guest does not share its profile objects with the
-                // hypervisor account or another guest.
-                targets::TargetLocator::SshNitro { .. } => {
-                    upload_legacy_profile_archive(
-                        executor,
-                        ssh,
-                        profile_stage,
-                        &staged_profile,
-                        &[],
-                    )?;
-                }
-                _ => upload_profile_archive(
-                    executor,
-                    ssh,
-                    profile_stage,
-                    &staged_profile,
-                    shared_paths,
-                )?,
+            _ => {
+                upload_profile_archive(executor, ssh, profile_stage, &staged_profile, shared_paths)?
             }
-            let launch_installed = format!("{worker_root}/launch.json");
-            let ownership_installed = format!("{worker_root}/ownership.json");
-            let owned = [
-                launch_installed.as_str(),
-                ownership_installed.as_str(),
-                profile_home,
-            ];
-            let mut remote = vec![
-                vec![
-                    engine.into(),
-                    "exec".into(),
-                    container_id.clone(),
-                    "mkdir".into(),
-                    "-p".into(),
-                    worker_root.into(),
-                    profile_home.into(),
-                ],
-                vec![
-                    engine.into(),
-                    "cp".into(),
-                    format!("{upload}/launch.json"),
-                    format!("{container_id}:{launch_installed}"),
-                ],
-                vec![
-                    engine.into(),
-                    "cp".into(),
-                    format!("{upload}/ownership.json"),
-                    format!("{container_id}:{ownership_installed}"),
-                ],
-                // Apple's `container cp` copies a relative `dir/.` as `dir`
-                // itself, nesting the profile one level too deep; only an
-                // absolute source copies the contents, as Docker and Podman
-                // do for either form. The staging path is home-relative.
-                vec![
-                    "sh".into(),
-                    "-c".into(),
-                    format!(
-                        r#"exec {} cp "$HOME/$1/." "$2""#,
-                        targets::engine_shell_words(engine)
-                    ),
-                    "mj-profile-copy".into(),
-                    format!("{upload}/profile"),
-                    format!("{container_id}:{profile_home}"),
-                ],
-                std::iter::once(engine.to_owned())
-                    .chain(container_upload_ownership_args(
-                        engine,
-                        container_id,
-                        worker_root,
-                        &owned,
-                    ))
-                    .collect(),
-            ];
-            remote.extend([
-                vec![
-                    engine.into(),
-                    "exec".into(),
-                    container_id.clone(),
-                    "chmod".into(),
-                    "-R".into(),
-                    "go-rwx".into(),
-                    profile_home.into(),
-                ],
-                vec!["rm".into(), "-rf".into(), "--".into(), upload.clone()],
-            ]);
-            // Staging removal stays a final success-only step, as before.
-            let steps = remote.into_iter().map(|args| {
+        }
+    }
+
+    let launch_installed = format!("{worker_root}/launch.json");
+    let ownership_installed = format!("{worker_root}/ownership.json");
+    let copy = |source: String, destination: &str| {
+        CommandSpec::new(
+            engine,
+            ["cp".into(), source, format!("{container_id}:{destination}")],
+        )
+    };
+    // Apple requires an absolute source for the contents-copy suffix `/.`.
+    // Resolve the home-relative staging path on the SSH host.
+    let profile_copy = match &upload {
+        Some(upload) => CommandSpec::new(
+            "sh",
+            [
+                "-c".into(),
+                format!(
+                    r#"exec {} cp "$HOME/$1/." "$2""#,
+                    targets::engine_shell_words(engine)
+                ),
+                "mj-profile-copy".into(),
+                format!("{upload}/profile"),
+                format!("{container_id}:{profile_home}"),
+            ],
+        ),
+        None => copy(format!("{}/.", profile_stage.display()), profile_home),
+    };
+    let staged_file = |file: &Path, name| match &upload {
+        Some(upload) => format!("{upload}/{name}"),
+        None => file.to_string_lossy().into_owned(),
+    };
+    let container_exec = |args: Vec<String>| {
+        CommandSpec::new(
+            engine,
+            ["exec".into(), container_id.into()].into_iter().chain(args),
+        )
+    };
+    let commands = [
+        container_exec(vec![
+            "mkdir".into(),
+            "-p".into(),
+            worker_root.into(),
+            profile_home.into(),
+        ])
+        .purpose("create target worker directories"),
+        copy(staged_file(launch_config, "launch.json"), &launch_installed)
+            .purpose("upload worker launch configuration"),
+        copy(
+            staged_file(ownership, "ownership.json"),
+            &ownership_installed,
+        )
+        .purpose("upload worker ownership marker"),
+        profile_copy.purpose("upload harness profile allowlist"),
+        CommandSpec::new(
+            engine,
+            container_upload_ownership_args(
+                engine,
+                container_id,
+                worker_root,
+                &[&launch_installed, &ownership_installed, profile_home],
+            ),
+        )
+        .purpose("match uploaded files to the worker directory owner"),
+        container_exec(vec![
+            "chmod".into(),
+            "-R".into(),
+            "go-rwx".into(),
+            profile_home.into(),
+        ])
+        .purpose("restrict harness profile permissions"),
+    ];
+    if let (Some(ssh), Some(upload)) = (ssh, upload) {
+        // Remove the staging only after all install steps succeed.
+        let steps = commands
+            .into_iter()
+            .chain([CommandSpec::new("rm", ["-rf", "--", &upload])])
+            .map(|command| {
                 targets::CommandStep::new(
                     "install remote container worker",
-                    targets::with_engine_argv(args),
+                    targets::with_engine_argv(
+                        std::iter::once(command.program)
+                            .chain(command.args)
+                            .collect(),
+                    ),
                 )
             });
-            execute_checked(
-                executor,
-                crate::targets::ssh_command_owned(
-                    SshTrafficClass::Bulk,
-                    ssh,
-                    targets::step_script(steps),
-                )
+        execute_checked(
+            executor,
+            targets::ssh_command_owned(SshTrafficClass::Bulk, ssh, targets::step_script(steps))
                 .purpose("install remote container worker"),
-            )?;
+        )?;
+    } else {
+        for command in commands {
+            execute_checked(executor, command)?;
         }
     }
     Ok(())

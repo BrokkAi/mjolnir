@@ -234,7 +234,10 @@ pub(super) async fn require_api_auth(
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim);
     if bearer.is_some_and(|token| {
-        constant_time_eq(state.api_token.as_bytes(), token.as_bytes()) && !token.is_empty()
+        !token.is_empty()
+            && (constant_time_eq(state.api_token.as_bytes(), token.as_bytes())
+                || (!state.loopback_token.is_empty()
+                    && constant_time_eq(state.loopback_token.as_bytes(), token.as_bytes())))
     }) {
         return Ok(next.run(request).await);
     }

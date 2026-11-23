@@ -121,7 +121,30 @@ func (c *Canvas) display(x, y int, boost float32) [3]uint8 {
 // dissolve, cells give way to the background in dithered order and glow
 // briefly just before they go.
 func (c *Canvas) blit(area uv.Rectangle, buf *uv.Buffer, dissolve *Dissolve) {
-	panic("unported: mj-tui/src/splash/canvas.rs Canvas::blit")
+	for row := range area.Dy() {
+		for column := range area.Dx() {
+			cell := uv.EmptyCell
+			var boost float32 = 1.0
+			if dissolve != nil {
+				remaining := bayer(column, row) - dissolve.progress
+				if remaining < 0.0 {
+					chat.Style{Bg: dissolve.background}.ApplyTo(&cell.Style)
+					buf.SetCell(area.Min.X+column, area.Min.Y+row, &cell)
+					continue
+				}
+				boost += 2.5 * max(1.0-remaining/0.15, 0.0)
+			}
+			top := c.display(column, row*2, boost)
+			bottom := c.display(column, row*2+1, boost)
+			if top == bottom {
+				chat.Style{Bg: splashColor(bottom)}.ApplyTo(&cell.Style)
+			} else {
+				cell.Content = "▀"
+				chat.Style{Fg: splashColor(top), Bg: splashColor(bottom)}.ApplyTo(&cell.Style)
+			}
+			buf.SetCell(area.Min.X+column, area.Min.Y+row, &cell)
+		}
+	}
 }
 
 // Field is a scalar light field with max blending, for strokes that cross
@@ -143,5 +166,23 @@ func (f *Field) get(x, y int) float32 {
 // segment draws a glowing segment between two pixel positions: a solid
 // core of core pixels and an exponential halo of glow pixels.
 func (f *Field) segment(a, b [2]float32, core, glow, intensity float32) {
-	panic("unported: mj-tui/src/splash/canvas.rs Field::segment")
+	reach := core + glow*3.0
+	left := asUsize(max(splashFloor(min(a[0], b[0])-reach), 0.0))
+	top := asUsize(max(splashFloor(min(a[1], b[1])-reach), 0.0))
+	right := min(asUsize(max(splashCeil(max(a[0], b[0])+reach), 0.0)), f.width)
+	bottom := min(asUsize(max(splashCeil(max(a[1], b[1])+reach), 0.0)), f.height)
+	dx, dy := b[0]-a[0], b[1]-a[1]
+	lengthSquared := max(dx*dx+dy*dy, 1e-6)
+	for y := top; y < bottom; y++ {
+		for x := left; x < right; x++ {
+			px, py := float32(x)+0.5-a[0], float32(y)+0.5-a[1]
+			along := splashClamp((px*dx+py*dy)/lengthSquared, 0.0, 1.0)
+			distance := splashHypot(px-dx*along, py-dy*along)
+			value := intensity *
+				(smoothstep(core+0.8, core*0.5, distance) +
+					0.45*splashExp(-distance/glow))
+			slot := &f.values[y*f.width+x]
+			*slot = max(*slot, value)
+		}
+	}
 }

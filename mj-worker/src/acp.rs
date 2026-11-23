@@ -1055,6 +1055,46 @@ async fn emit_runtime_event(
         .map_err(|_| anyhow!("relay event coordinator stopped"))
 }
 
+/// Publish human evidence before handing control back to the harness.
+async fn emit_elicitation_resolution(
+    events: &mpsc::Sender<RuntimeEvent>,
+    turn_context: &mj_transcript::turn_context::TurnContext,
+    form: &ElicitationRequest,
+    action: &str,
+    response: Option<&ElicitationResponse>,
+) -> Result<()> {
+    let permit = events
+        .reserve()
+        .await
+        .map_err(|_| anyhow!("relay event coordinator stopped"))?;
+    let reply = response.map(|response| form.reply_text(response));
+    let answers = response
+        .filter(|response| **response != ElicitationResponse::Cancel)
+        .map(|response| form.trusted_answers(response));
+    let input = mj_core::guardian::TrustedUserInput::from_elicitation(
+        format!("pending:0:{}", form.id),
+        &form.id,
+        Some(form),
+        action,
+        reply.as_deref(),
+        answers.as_deref(),
+    );
+    let publish = || {
+        permit.send(RuntimeEvent::ElicitationResolved {
+            elicitation_id: form.id.clone(),
+            action: action.to_owned(),
+            reply,
+            answers,
+        })
+    };
+    if let Some(input) = input {
+        turn_context.record_pending_trusted_user_input(&form.id, input, publish);
+    } else {
+        publish();
+    }
+    Ok(())
+}
+
 /// Emit the runtime events for a finished `session/close` request.
 ///
 /// A harness that answers "method not found" does not implement

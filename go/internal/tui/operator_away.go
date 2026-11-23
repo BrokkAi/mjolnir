@@ -5,6 +5,10 @@
 package tui
 
 import (
+	"fmt"
+	"math"
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
@@ -103,7 +107,19 @@ func (d *AwayDialog) prepare() {}
 func (d *AwayDialog) layerDetail() string { return "" }
 
 func (d *DashboardState) SetOperatorPresence(presence core.OperatorPresence) {
-	panic("unported: mj-tui/src/operator_away.rs DashboardState::set_operator_presence")
+	revision := d.operatorPresence.revision()
+	_, returning := d.operatorPresence.(OperatorPresenceReturning)
+	if presence.Revision < revision || (presence.Revision == revision && returning) {
+		return
+	}
+	_, here := d.operatorPresence.(OperatorPresenceHere)
+	if !presence.Away {
+		d.operatorPresence = OperatorPresenceHere{Revision: presence.Revision}
+	} else if presence.Revision > revision || here {
+		d.CancelComponentPointer()
+		d.paneMenu = nil
+		d.operatorPresence = OperatorPresenceAway{Revision: presence.Revision, Dialog: newAwayDialog()}
+	}
 }
 
 // OperatorPresenceRevision associates background completions with the
@@ -115,7 +131,18 @@ func (d *DashboardState) OperatorPresenceRevision() uint64 {
 // OperatorAwayRequestFinished applies the result of an away request; err is
 // Rust's Err(String), nil for Ok.
 func (d *DashboardState) OperatorAwayRequestFinished(away bool, revision uint64, err error) {
-	panic("unported: mj-tui/src/operator_away.rs DashboardState::operator_away_request_finished")
+	if err != nil {
+		if current, returning := d.operatorPresence.(OperatorPresenceReturning); !away && returning && current.Revision == revision {
+			d.operatorPresence = OperatorPresenceAway{Revision: revision, Dialog: newAwayDialog()}
+		}
+		verb := "leave"
+		if away {
+			verb = "enter"
+		}
+		d.SetFailureNotice(fmt.Sprintf("Could not %s AFK mode: %v", verb, err))
+	}
+	// Replies cannot replace the versioned feed: a later presence revision
+	// may already describe another client's new AFK period.
 }
 
 func (d *DashboardState) awayDialog() *AwayDialog {
@@ -126,11 +153,155 @@ func (d *DashboardState) awayDialog() *AwayDialog {
 }
 
 func (d *DashboardState) handleAwayEvent(event tea.Msg) DashboardAction {
-	panic("unported: mj-tui/src/operator_away.rs DashboardState::handle_away_event")
+	away, ok := d.operatorPresence.(OperatorPresenceAway)
+	if !ok {
+		return DashboardActionNone{}
+	}
+	dialog := away.Dialog
+	scroll, scrolled := 0, false
+	switch event := event.(type) {
+	case tea.KeyPressMsg:
+		scrolled = true
+		switch chat.KeyPressCode(event) {
+		case tea.KeyDown:
+			scroll = dialog.scroll + 1
+		case tea.KeyUp:
+			scroll = max(dialog.scroll-1, 0)
+		case tea.KeyPgDown:
+			scroll = dialog.scroll + 5
+		case tea.KeyPgUp:
+			scroll = max(dialog.scroll-5, 0)
+		case tea.KeyHome:
+			scroll = 0
+		case tea.KeyEnd:
+			scroll = dialog.maxScroll
+		default:
+			scrolled = false
+		}
+	case tea.MouseWheelMsg:
+		scrolled = true
+		switch event.Button {
+		case tea.MouseWheelDown:
+			scroll = dialog.scroll + 3
+		case tea.MouseWheelUp:
+			scroll = max(dialog.scroll-3, 0)
+		default:
+			scrolled = false
+		}
+	}
+	if scrolled {
+		dialog.scroll = min(scroll, dialog.maxScroll)
+		d.lastEventConsumed = true
+		return DashboardActionNone{}
+	}
+	result := dialog.form.Handle(event)
+	// The overlay owns all input; nothing may edit the preserved draft.
+	d.lastEventConsumed = true
+	switch action := result.Action.(type) {
+	case chat.InteractionCancel[AwayControl]:
+	case chat.InteractionActivate[AwayControl]:
+		if action.ID != AwayControlReturn {
+			return DashboardActionNone{}
+		}
+	default:
+		return DashboardActionNone{}
+	}
+	d.operatorPresence = OperatorPresenceReturning{Revision: away.Revision}
+	return DashboardActionSetOperatorAway{Away: false}
 }
 
 // operatorAwayRender is Rust's operator_away::render (prefixed:
 // notifications_pane also declares render).
 func operatorAwayRender(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState, dialog *AwayDialog, surfaces *chat.FrameSurfaces) {
-	panic("unported: mj-tui/src/operator_away.rs render")
+	var popup uv.Rectangle
+	if area.Dx() < 16 || area.Dy() < 8 {
+		// The normal two-cell modal margin would leave no readable body.
+		frame.RenderWidget(chat.Clear{}, area)
+		surfaces.Push(chat.SurfaceFrameFixed(chat.SurfaceIdModalBody{}, borderedContent(area)))
+		popup = area
+	} else {
+		popup = centeredModal(frame, surfaces, 80, 21, area)
+	}
+	inner := chat.RectInner(popup, chat.Margin{Horizontal: 2, Vertical: 1})
+	form := &dialog.form
+	form.BeginFrame()
+	title := dismissibleModalTitle(&form.Form, popup, " AFK ", chat.Title(true), true)
+	frame.RenderWidget(chat.Modal().WithTitle(title), popup)
+	art := &unicodeArt
+	if chat.SymbolsFor(dashboard.config.Get().Advanced.Symbols) == core.SymbolSetAscii {
+		art = &asciiArt
+	}
+	palette := chat.ThemePalette()
+	artLines := make([]chat.Line, 0, len(art))
+	artWidth := 0
+	for _, row := range art {
+		line := chat.LineFrom(
+			chat.StyledSpan(row[0], chat.Style{}.Foreground(palette.Secondary).Bold()),
+			chat.RawSpan(" "),
+			chat.StyledSpan(row[1], chat.Style{}.Foreground(palette.Warning).Bold()),
+			chat.RawSpan(" "),
+			chat.StyledSpan(row[2], chat.Style{}.Foreground(palette.Text).Bold()),
+		)
+		artWidth = max(artWidth, line.Width())
+		artLines = append(artLines, line)
+	}
+	lines := []chat.Line{chat.RawLine("")}
+	if inner.Dx() >= artWidth && inner.Dy() >= 15 {
+		lines = append(lines, artLines...)
+	} else {
+		lines = append(lines, chat.StyledLine("AFK", chat.Title(true)))
+	}
+	lines = append(lines,
+		chat.RawLine(""),
+		chat.StyledLine(operatorAwayExplanation, chat.Muted()),
+		chat.RawLine(""),
+	)
+	var waiting []*core.SessionRecord
+	for _, entry := range dashboard.AttentionQueue() {
+		if entry.Level != AttentionLevelWaiting {
+			continue
+		}
+		if session := dashboard.state.Get().Sessions.GetShared(entry.SessionID); session != nil {
+			waiting = append(waiting, session)
+		}
+	}
+	if len(waiting) == 0 {
+		lines = append(lines, chat.StyledLine("No sessions are waiting for you.", chat.Muted()))
+	} else {
+		// Left-align the list within itself, then let the centered paragraph
+		// center the block: pad every row to the widest row's width.
+		block := []chat.Line{chat.StyledLine("Waiting for you:", chat.Muted())}
+		limit := min(max(inner.Dy()/4, 1), 5)
+		for _, session := range waiting[:min(limit, len(waiting))] {
+			block = append(block, chat.StyledLine(
+				truncateToCells("  "+session.ListedTitle(), inner.Dx(), TruncatePlain),
+				chat.Muted(),
+			))
+		}
+		if len(waiting) > limit {
+			block = append(block, chat.StyledLine(fmt.Sprintf("  and %d more", len(waiting)-limit), chat.Muted()))
+		}
+		// Padding past the body width would wrap a short row onto a blank line.
+		blockWidth := 0
+		for _, line := range block {
+			blockWidth = max(blockWidth, line.Width())
+		}
+		blockWidth = min(blockWidth, inner.Dx())
+		for _, line := range block {
+			padding := max(blockWidth-line.Width(), 0)
+			line.Spans = append(line.Spans, chat.RawSpan(strings.Repeat(" ", padding)))
+			lines = append(lines, line)
+		}
+	}
+	lines = append(lines,
+		chat.RawLine(""),
+		chat.StyledLine("Close this window to come back.", chat.Muted()),
+	)
+	paragraph := chat.NewParagraph(chat.TextFrom(lines...)).
+		WithAlignment(chat.AlignmentCenter).
+		WithWrap(chat.Wrap{Trim: false})
+	maxScroll := max(paragraph.LineCount(max(inner.Dx(), 1))-inner.Dy(), 0)
+	dialog.maxScroll = maxScroll
+	frame.RenderWidget(paragraph.WithScroll(min(dialog.scroll, maxScroll, math.MaxUint16), 0), inner)
+	form.EndFrame(AwayControlReturn)
 }

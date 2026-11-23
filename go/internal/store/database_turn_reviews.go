@@ -10,6 +10,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,11 +175,64 @@ func ActiveReviewGroups() ([]ActiveReviewGroupState, error) {
 }
 
 func activeReviewGroupsIn(path string) ([]ActiveReviewGroupState, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs active_review_groups_in")
+	connection, err := openReader(path)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := valuesQueryMap(connection, `SELECT session_id FROM turn_review_state
+             WHERE EXISTS(SELECT 1 FROM json_each(open_reviews)
+                          WHERE json_extract(value, '$.group') IS NOT NULL)
+             ORDER BY session_id`, nil, func(rows *sql.Rows) (string, error) {
+		var id string
+		err := rows.Scan(&id)
+		return id, err
+	})
+	connection.Close()
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]ActiveReviewGroupState, 0, len(ids))
+	for _, id := range ids {
+		state, err := turnReviewStateIn(path, id)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, ActiveReviewGroupState{SessionID: id, State: state})
+	}
+	return groups, nil
 }
 
 func turnReviewStateIn(path, sessionID string) (core.TurnReviewState, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs turn_review_state_in")
+	connection, err := openReader(path)
+	if err != nil {
+		return core.TurnReviewState{}, err
+	}
+	defer connection.Close()
+	var openReviews string
+	var pushFindings, declinedFindings *string
+	found, err := valuesOptional(connection.QueryRow("SELECT open_reviews, push_findings, declined_findings FROM turn_review_state WHERE session_id = ?1", sessionID).
+		Scan(&openReviews, &pushFindings, &declinedFindings))
+	if err != nil {
+		return core.TurnReviewState{}, err
+	}
+	if !found {
+		return core.TurnReviewState{}, nil
+	}
+	var state core.TurnReviewState
+	if err := json.Unmarshal([]byte(openReviews), &state.OpenReviews); err != nil {
+		return core.TurnReviewState{}, fmt.Errorf("parse stored open reviews: %w", err)
+	}
+	if pushFindings != nil {
+		if err := json.Unmarshal([]byte(*pushFindings), &state.PushFindings); err != nil {
+			return core.TurnReviewState{}, fmt.Errorf("parse stored push findings: %w", err)
+		}
+	}
+	if declinedFindings != nil {
+		if err := json.Unmarshal([]byte(*declinedFindings), &state.DeclinedFindings); err != nil {
+			return core.TurnReviewState{}, fmt.Errorf("parse stored declined findings: %w", err)
+		}
+	}
+	return state, nil
 }
 
 // storedOpenReviews is the stored open_reviews list for state: the reviews
@@ -190,7 +244,7 @@ func storedOpenReviews(state *core.TurnReviewState) (string, error) {
 			open = append(open, &state.OpenReviews[index])
 		}
 	}
-	encoded, err := json.Marshal(open)
+	encoded, err := databaseMarshalJSON(open)
 	if err != nil {
 		return "", err
 	}
@@ -200,14 +254,20 @@ func storedOpenReviews(state *core.TurnReviewState) (string, error) {
 // SaveTurnReviewState records review state and atomically queues newly
 // settled findings while other reviewers are pending.
 func SaveTurnReviewState(sessionID string, state *core.TurnReviewState) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs save_turn_review_state")
+	_, err := submitDatabaseWrite("save_turn_review_state", func(*Connection) (struct{}, error) {
+		return struct{}{}, saveTurnReviewStateIn(DatabasePath(), sessionID, state)
+	})
+	return err
 }
 
 // SaveReviewerOutcome records review state together with the reports the
 // host settled roles from. A save that carries no reports keeps the text
 // already stored.
 func SaveReviewerOutcome(sessionID string, state *core.TurnReviewState, reports []AcceptedReport) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs save_reviewer_outcome")
+	_, err := submitDatabaseWrite("save_reviewer_outcome", func(*Connection) (struct{}, error) {
+		return struct{}{}, saveReviewerOutcomeIn(DatabasePath(), sessionID, state, reports)
+	})
+	return err
 }
 
 // CloseTurnReviewState clears the review reviewID from the row and records
@@ -215,7 +275,10 @@ func SaveReviewerOutcome(sessionID string, state *core.TurnReviewState, reports 
 // because a cancelled review's stored group can still carry the verdict it
 // was about to deliver.
 func CloseTurnReviewState(sessionID, reviewID string, state *core.TurnReviewState, resolution core.FinishedReviewResolution) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs close_turn_review_state")
+	_, err := submitDatabaseWrite("close_turn_review_state", func(*Connection) (struct{}, error) {
+		return struct{}{}, closeTurnReviewStateIn(DatabasePath(), sessionID, reviewID, state, resolution)
+	})
+	return err
 }
 
 func saveTurnReviewStateIn(path, sessionID string, state *core.TurnReviewState) error {
@@ -238,11 +301,88 @@ type reviewClose struct {
 }
 
 func saveTurnReviewStateInWith(path, sessionID string, state *core.TurnReviewState, close *reviewClose, reports []AcceptedReport) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs save_turn_review_state_in_with")
+	connection, err := open(path)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	transaction, err := connection.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	previous, err := previousActiveGroups(transaction, sessionID)
+	if err != nil {
+		return err
+	}
+	var events []core.MailboxEvent
+	for index := range state.OpenReviews {
+		current := state.OpenReviews[index].ActiveGroup
+		if current == nil {
+			continue
+		}
+		var prior *core.ActiveReviewGroup
+		for groupIndex := range previous {
+			if previous[groupIndex].Driver.ReviewID == current.Driver.ReviewID {
+				prior = &previous[groupIndex]
+				break
+			}
+		}
+		events = append(events, PartialReviewEvents(sessionID, prior, current)...)
+	}
+	if err := recordReviewReports(transaction, sessionID, previous, state, close, reports); err != nil {
+		return err
+	}
+	if err := saveTurnReviewStateWith(transaction, sessionID, state); err != nil {
+		return err
+	}
+	queued := false
+	if len(events) > 0 {
+		var unpark bool
+		if err := transaction.QueryRow("SELECT EXISTS(SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)", sessionID).Scan(&unpark); err != nil {
+			return err
+		}
+		for _, event := range events {
+			encoded, err := databaseMarshalJSON(event)
+			if err != nil {
+				return err
+			}
+			enqueued, err := EnqueueMailboxEventWith(transaction, event.Key, sessionID, string(encoded), event.Wake, unpark)
+			if err != nil {
+				return err
+			}
+			queued = queued || enqueued.Inserted()
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return err
+	}
+	if queued {
+		NotifyMailboxOutboxChanged()
+	}
+	return nil
 }
 
 func previousActiveGroups(conn Queryer, sessionID string) ([]core.ActiveReviewGroup, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs previous_active_groups")
+	var previous string
+	found, err := valuesOptional(conn.QueryRow("SELECT open_reviews FROM turn_review_state WHERE session_id=?1", sessionID).Scan(&previous))
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return []core.ActiveReviewGroup{}, nil
+	}
+	var reviews []core.OpenReview
+	if err := json.Unmarshal([]byte(previous), &reviews); err != nil {
+		return nil, fmt.Errorf("parse previous open reviews: %w", err)
+	}
+	groups := []core.ActiveReviewGroup{}
+	for _, review := range reviews {
+		if review.ActiveGroup != nil {
+			groups = append(groups, *review.ActiveGroup)
+		}
+	}
+	return groups, nil
 }
 
 // recordReviewReports keeps the durable per-role report in step with review
@@ -254,7 +394,54 @@ func previousActiveGroups(conn Queryer, sessionID string) ([]core.ActiveReviewGr
 // belong to another command and would pair unrelated text with a settled
 // verdict.
 func recordReviewReports(conn Queryer, sessionID string, previous []core.ActiveReviewGroup, state *core.TurnReviewState, close *reviewClose, reports []AcceptedReport) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs record_review_reports")
+	var current []*core.ActiveReviewGroup
+	for index := range state.OpenReviews {
+		if group := state.OpenReviews[index].ActiveGroup; group != nil {
+			current = append(current, group)
+		}
+	}
+	// A stored group is finished when the saved state no longer lists it. A
+	// close decision describes the review it names; a group that left without
+	// being named, such as one a restart abandoned, has only its own driver
+	// to answer.
+	for index := range previous {
+		prior := &previous[index]
+		stillOpen := false
+		for _, group := range current {
+			if group.Driver.ReviewID == prior.Driver.ReviewID {
+				stillOpen = true
+				break
+			}
+		}
+		if stillOpen {
+			continue
+		}
+		if err := syncReviewReport(conn, sessionID, prior, nil); err != nil {
+			return err
+		}
+		if err := finalizeReviewReport(conn, sessionID, prior, previousResolution(prior, close)); err != nil {
+			return err
+		}
+	}
+	for _, group := range current {
+		var settled []*AcceptedReport
+		for index := range reports {
+			if reports[index].ReviewID == group.Driver.ReviewID {
+				settled = append(settled, &reports[index])
+			}
+		}
+		if err := syncReviewReport(conn, sessionID, group, settled); err != nil {
+			return err
+		}
+		// The close decision, not the presence of an earlier row, decides
+		// that this review is finished: a first save may already be it.
+		if close != nil && close.reviewID == group.Driver.ReviewID {
+			if err := finalizeReviewReport(conn, sessionID, group, close.resolution); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // previousResolution is the resolution for a review that is being cleared.
@@ -273,15 +460,84 @@ func previousResolution(previous *core.ActiveReviewGroup, close *reviewClose) co
 // explicit close: a delivered verdict means completed or failed, and no
 // verdict means the review was cancelled.
 func inferredResolution(group *core.ActiveReviewGroup) core.FinishedReviewResolution {
-	panic("unported: mj-store/src/database/turn_reviews.rs inferred_resolution")
+	if resolved, ok := group.Driver.Phase.(core.TurnReviewPhaseResolved); ok && resolved.Resolution == core.ResolutionCancelled {
+		return core.FinishedReviewResolutionCancelled
+	}
+	switch group.Driver.LastVerdict.(type) {
+	case nil:
+		return core.FinishedReviewResolutionCancelled
+	case core.ReviewVerdictFailed:
+		return core.FinishedReviewResolutionFailed
+	default:
+		return core.FinishedReviewResolutionCompleted
+	}
 }
 
 func syncReviewReport(conn Queryer, sessionID string, group *core.ActiveReviewGroup, reports []*AcceptedReport) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs sync_review_report")
+	now := core.EpochMillis()
+	for ordinal, slot := range group.Driver.Roles {
+		var child *string
+		for _, registration := range group.Registrations {
+			if registration.Role == slot.Role {
+				if registration.ChildSessionID != nil && *registration.ChildSessionID != "" {
+					child = registration.ChildSessionID
+				}
+				break
+			}
+		}
+		profile := ""
+		var model, effort *string
+		if ordinal < len(group.Reviewers) {
+			reviewer := group.Reviewers[ordinal]
+			profile, model, effort = reviewer.Profile, reviewer.Main.Model, reviewer.Main.Effort
+		}
+		var handback *string
+		for _, report := range reports {
+			if report.Role == slot.Role {
+				handback = &report.Text
+				break
+			}
+		}
+		var verdict *string
+		if slot.Outcome != nil {
+			encoded, err := databaseMarshalJSON(slot.Outcome)
+			if err != nil {
+				return err
+			}
+			text := string(encoded)
+			verdict = &text
+		}
+		if _, err := conn.Exec(`INSERT INTO review_reports(
+                 parent_session_id, review_id, role, ordinal, command_id,
+                 child_session_id, profile, model, effort, handback, verdict,
+                 updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(parent_session_id, review_id, role) DO UPDATE SET
+                 ordinal = excluded.ordinal,
+                 command_id = excluded.command_id,
+                 child_session_id = COALESCE(excluded.child_session_id, review_reports.child_session_id),
+                 profile = CASE
+                     WHEN excluded.profile <> '' THEN excluded.profile
+                     ELSE review_reports.profile
+                 END,
+                 model = COALESCE(excluded.model, review_reports.model),
+                 effort = COALESCE(excluded.effort, review_reports.effort),
+                 handback = COALESCE(excluded.handback, review_reports.handback),
+                 verdict = COALESCE(excluded.verdict, review_reports.verdict),
+                 updated_at_ms = excluded.updated_at_ms`,
+			sessionID, group.Driver.ReviewID, slot.Role, int64(ordinal), slot.CommandID,
+			child, profile, model, effort, handback, verdict, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func finalizeReviewReport(conn Queryer, sessionID string, group *core.ActiveReviewGroup, resolution core.FinishedReviewResolution) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs finalize_review_report")
+	_, err := conn.Exec(`UPDATE review_reports SET finished_at_ms=?3, resolution=?4
+         WHERE parent_session_id=?1 AND review_id=?2 AND finished_at_ms IS NULL`,
+		sessionID, group.Driver.ReviewID, core.EpochMillis(), resolutionText(resolution))
+	return err
 }
 
 func resolutionText(resolution core.FinishedReviewResolution) string {
@@ -315,18 +571,133 @@ func FinishedReviewOf(sessionID string, reviewID *string) (*FinishedReview, erro
 }
 
 func finishedReviewIn(path, sessionID string, reviewID *string) (*FinishedReview, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs finished_review_in")
+	connection, err := openReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	review := &FinishedReview{SessionID: sessionID}
+	var resolution string
+	found, err := valuesOptional(connection.QueryRow(`SELECT review_id, MAX(finished_at_ms), resolution
+             FROM review_reports
+             WHERE parent_session_id=?1
+               AND finished_at_ms IS NOT NULL
+               AND (?2 IS NULL OR review_id=?2)
+             GROUP BY review_id
+             ORDER BY MAX(finished_at_ms) DESC, review_id DESC
+             LIMIT 1`, sessionID, reviewID).Scan(&review.ReviewID, &review.FinishedAtMs, &resolution))
+	if err != nil || !found {
+		return nil, err
+	}
+	type roleRow struct {
+		role, commandID, profile                string
+		ordinal                                 int64
+		child, model, effort, handback, verdict *string
+	}
+	rows, err := valuesQueryMap(connection, `SELECT role, ordinal, command_id, child_session_id, profile, model,
+                effort, handback, verdict
+         FROM review_reports
+         WHERE parent_session_id=?1 AND review_id=?2
+         ORDER BY ordinal, role`, []any{sessionID, review.ReviewID}, func(rows *sql.Rows) (roleRow, error) {
+		var row roleRow
+		err := rows.Scan(&row.role, &row.ordinal, &row.commandID, &row.child, &row.profile, &row.model,
+			&row.effort, &row.handback, &row.verdict)
+		return row, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	review.Roles = []FinishedReviewRole{}
+	for _, row := range rows {
+		role := FinishedReviewRole{
+			Role:           row.role,
+			Label:          fmt.Sprintf("Reviewer %d", row.ordinal+1),
+			CommandID:      row.commandID,
+			ChildSessionID: row.child,
+			Profile:        row.profile,
+			Model:          row.model,
+			Effort:         row.effort,
+			Handback:       row.handback,
+		}
+		if row.verdict != nil {
+			verdict, err := core.UnmarshalReviewVerdict([]byte(*row.verdict))
+			if err != nil {
+				return nil, fmt.Errorf("parse stored reviewer verdict: %w", err)
+			}
+			role.Verdict = verdict
+		}
+		if role.Turn, err = reviewerTurn(connection, row.child); err != nil {
+			return nil, err
+		}
+		review.Roles = append(review.Roles, role)
+	}
+	if review.Resolution, err = resolutionFromText(resolution); err != nil {
+		return nil, err
+	}
+	return review, nil
 }
 
 // reviewerTurn is the one review turn a reviewer child ran. Accounting
 // outlives the child's session row, which is why this is still readable
 // after the child is destroyed.
 func reviewerTurn(conn Queryer, child *string) (*core.MaterializedTurnOutcome, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs reviewer_turn")
+	if child == nil {
+		return nil, nil
+	}
+	var body string
+	found, err := valuesOptional(conn.QueryRow(`SELECT body FROM session_turn_usage
+             WHERE session_id=?1
+             ORDER BY completed_ordinal DESC
+             LIMIT 1`, *child).Scan(&body))
+	if err != nil || !found {
+		return nil, err
+	}
+	turn, err := deserializeTurnOutcome(body)
+	if err != nil {
+		return nil, err
+	}
+	return &turn, nil
 }
 
 func saveTurnReviewStateWith(conn Queryer, sessionID string, state *core.TurnReviewState) error {
-	panic("unported: mj-store/src/database/turn_reviews.rs save_turn_review_state_with")
+	openReviews, err := storedOpenReviews(state)
+	if err != nil {
+		return err
+	}
+	var pushFindings, declinedFindings *string
+	if len(state.PushFindings) > 0 {
+		encoded, err := databaseMarshalJSON(state.PushFindings)
+		if err != nil {
+			return err
+		}
+		text := string(encoded)
+		pushFindings = &text
+	}
+	if len(state.DeclinedFindings) > 0 {
+		encoded, err := databaseMarshalJSON(state.DeclinedFindings)
+		if err != nil {
+			return err
+		}
+		text := string(encoded)
+		declinedFindings = &text
+	}
+	_, err = conn.Exec(`INSERT INTO turn_review_state(
+             session_id, baselines, reviewed_through_ordinal, open_reviews,
+             pending_forward, child_session_id, push_findings, pending_followup, forward_attempts,
+             declined_findings
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(session_id) DO UPDATE SET
+             baselines = excluded.baselines,
+             reviewed_through_ordinal = excluded.reviewed_through_ordinal,
+             open_reviews = excluded.open_reviews,
+             pending_forward = excluded.pending_forward,
+             child_session_id = excluded.child_session_id,
+             push_findings = excluded.push_findings,
+             pending_followup = 0,
+             forward_attempts = excluded.forward_attempts,
+             declined_findings = excluded.declined_findings`,
+		sessionID, "{}", 0, openReviews, nil, nil, pushFindings, 0, 0, declinedFindings)
+	return err
 }
 
 // ClearInterruptedTurnReviews clears legacy interrupted reviews while
@@ -335,9 +706,37 @@ func saveTurnReviewStateWith(conn Queryer, sessionID string, state *core.TurnRev
 // Durable push groups resume independently. Preparation markers without a
 // group are cleared and reported so the user can request review again.
 func ClearInterruptedTurnReviews() ([]string, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs clear_interrupted_turn_reviews")
+	return submitDatabaseWrite("clear_interrupted_turn_reviews", func(*Connection) ([]string, error) {
+		return clearInterruptedTurnReviewsIn(DatabasePath())
+	})
 }
 
 func clearInterruptedTurnReviewsIn(path string) ([]string, error) {
-	panic("unported: mj-store/src/database/turn_reviews.rs clear_interrupted_turn_reviews_in")
+	connection, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	interrupted, err := valuesQueryMap(connection, `SELECT session_id FROM turn_review_state
+                 WHERE pending_forward IS NOT NULL
+                    OR EXISTS(SELECT 1 FROM json_each(open_reviews)
+                              WHERE json_extract(value, '$.group') IS NULL)`, nil, func(rows *sql.Rows) (string, error) {
+		var id string
+		err := rows.Scan(&id)
+		return id, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if interrupted == nil {
+		interrupted = []string{}
+	}
+	if _, err := connection.Exec(`UPDATE turn_review_state
+             SET open_reviews = (SELECT json_group_array(json(value)) FROM json_each(open_reviews)
+                                 WHERE json_extract(value, '$.group') IS NOT NULL)
+             WHERE EXISTS(SELECT 1 FROM json_each(open_reviews)
+                          WHERE json_extract(value, '$.group') IS NULL)`); err != nil {
+		return nil, err
+	}
+	return interrupted, nil
 }

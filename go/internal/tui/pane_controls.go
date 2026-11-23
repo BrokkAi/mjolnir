@@ -6,11 +6,16 @@ package tui
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
+	"github.com/BrokkAi/mjolnir/go/internal/client"
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // PaneOperation is what one pane-menu row does. Every variant is
@@ -131,18 +136,83 @@ type PaneMenu struct {
 }
 
 func (d *DashboardState) showPaneMenu(title string, entries []paneMenuEntry, destinations bool) {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::show_pane_menu")
+	form := chat.NewDialog[int]()
+	form.Register(0, chat.ControlKindChoiceList{Len: len(entries), Selected: 0}, uv.Rectangle{}, true)
+	form.SetMenu(true)
+	form.SetListActivation(0, chat.ListActivationSingleClick)
+	form.EndFrame(0)
+	d.CancelComponentPointer()
+	d.paneMenu = &PaneMenu{
+		title:        title,
+		entries:      entries,
+		form:         form,
+		destinations: destinations,
+	}
 }
 
 func (d *DashboardState) beginWorkspaceDropdown() {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::begin_workspace_dropdown")
+	if d.workspaceDropdownArea == nil {
+		return
+	}
+	anchor := *d.workspaceDropdownArea
+	ids := d.workspaceIDs()
+	active, hasActive := d.ActiveWorkspaceID()
+	selected := 0
+	if hasActive {
+		selected = max(slices.Index(ids, active), 0)
+	}
+	entries := make([]paneMenuEntry, 0, len(ids))
+	for _, id := range ids {
+		label := d.workspaceDisplayName(id)
+		if hasActive && id == active {
+			label = label + " (current)"
+		}
+		entries = append(entries, paneMenuEntry{label: label, operation: PaneOperationWorkspace(id)})
+	}
+	if len(entries) == 0 {
+		return
+	}
+	d.showPaneMenu("Workspaces", entries, false)
+	if menu := d.paneMenu; menu != nil {
+		menu.anchor = &anchor
+		menu.form.SetSelected(0, selected)
+	}
+	d.focus = FocusWorkspaces
+	d.workspaceControlFocus = WorkspaceControlFocusTabs
+	d.setSessionActionFocus(nil)
 }
 
 // beginCapacityDisksMenu opens the selected capacity row's filesystem
 // details beneath its Disks cell, using the rendered button geometry as the
 // anchor.
 func (d *DashboardState) beginCapacityDisksMenu(index int) {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::begin_capacity_disks_menu")
+	if index < 0 || index >= len(d.capacityDisksAreas) || d.capacityDisksAreas[index] == nil {
+		return
+	}
+	anchor := *d.capacityDisksAreas[index]
+	ids := slices.Sorted(maps.Keys(d.capacityDetails))
+	if index >= len(ids) {
+		return
+	}
+	detail := d.capacityDetails[ids[index]]
+	targetID := detail.Reading.ID
+	rows := capacityDisksMenuLines(&detail)
+	if len(rows) == 0 {
+		return
+	}
+	entries := make([]paneMenuEntry, 0, len(rows))
+	for _, line := range rows {
+		entries = append(entries, paneMenuEntry{label: line.String(), operation: PaneOperationInformation{}})
+	}
+	d.showPaneMenu("Disks", entries, false)
+	if menu := d.paneMenu; menu != nil {
+		menu.anchor = &anchor
+		menu.displayRows = rows
+		menu.capacityTarget = &targetID
+	}
+	d.focus = FocusTargets
+	d.setSessionActionFocus(nil)
+	d.capacityIndex = index
 }
 
 func (d *DashboardState) capacityDisksMenuOpen(targetID string) bool {
@@ -155,7 +225,47 @@ func (d *DashboardState) capacityDisksMenuOpen(targetID string) bool {
 // Profiles page. Clicking the title opens it, and so does . while the pane
 // has the keyboard. Sessions has its own buttons, so it has no title menu.
 func (d *DashboardState) beginSupportPaneMenu(pane SupportPane) {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::begin_support_pane_menu")
+	type setting struct {
+		label   string
+		command CommandId
+	}
+	var index int
+	var title string
+	var settings []setting
+	switch pane {
+	case SupportPaneTargets:
+		index, title = 1, "Targets"
+		settings = []setting{
+			{"Runtimes…", CommandIdManageTargets},
+			{"Machines…", CommandIdManageMachines},
+			{"CPU by session…", CommandIdSessionCpuReport},
+		}
+	case SupportPaneQuota:
+		index, title = 2, "Profiles"
+		settings = []setting{
+			{"Settings…", CommandIdManageProfiles},
+			{"Usage by session…", CommandIdSessionUsageReport},
+		}
+	default:
+		return
+	}
+	entries := []paneMenuEntry{{label: "Refresh", operation: PaneOperationCommand(CommandIdRefresh)}}
+	for _, entry := range settings {
+		entries = append(entries, paneMenuEntry{label: entry.label, operation: PaneOperationCommand(entry.command)})
+	}
+	d.showPaneMenu(title, entries, false)
+	// The title's first cell: one in from the pane's left edge, after the
+	// border's corner or the minimized row's rule.
+	var anchor *uv.Rectangle
+	if d.paneAreas != nil {
+		if area := d.paneAreas[index]; area.Dx() > 1 && area.Dy() > 0 {
+			cell := uv.Rect(area.Min.X+1, area.Min.Y, 1, 1)
+			anchor = &cell
+		}
+	}
+	if menu := d.paneMenu; menu != nil {
+		menu.anchor = anchor
+	}
 }
 
 // beginQuotaRowMenu is the right-click menu on a Quota profile row: refresh
@@ -178,7 +288,27 @@ func (d *DashboardState) beginQuotaRowMenu(profileID string, at uv.Position) {
 // act on that row's session, never on the selected one. A harness-native
 // child has no row and no record of its own, so it gets no menu.
 func (d *DashboardState) beginSessionRowMenu(sessionID string, at uv.Position) {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::begin_session_row_menu")
+	if d.IsNativeAgent(sessionID) || !d.state.Get().Sessions.ContainsKey(sessionID) {
+		return
+	}
+	label, command := "Dismiss notification", CommandIdDismissNotification
+	if _, waiting := d.waitingChildOf(sessionID); waiting {
+		label, command = "Open sub-agent question", CommandIdOpenWaitingQuestion
+	}
+	entries := []paneMenuEntry{
+		{label, PaneOperationSessionCommand{SessionID: sessionID, ID: command}},
+		{"Copy session ID", PaneOperationSessionCommand{SessionID: sessionID, ID: CommandIdCopySessionId}},
+		{"New session with these settings", PaneOperationNewSessionLike(sessionID)},
+	}
+	firstEnabled := max(slices.IndexFunc(entries, func(entry paneMenuEntry) bool {
+		return d.paneOperationEnabled(entry.operation)
+	}), 0)
+	d.showPaneMenu("Session", entries, false)
+	if menu := d.paneMenu; menu != nil {
+		anchor := uv.Rect(at.X, at.Y, 1, 1)
+		menu.anchor = &anchor
+		menu.form.SetSelected(0, firstEnabled)
+	}
 }
 
 // dismissibleSessionsIn is the sessions in workspaceID whose notification
@@ -290,11 +420,172 @@ func (d *DashboardState) toggleSessionPin(session string) DashboardAction {
 }
 
 func (d *DashboardState) beginPaneMenu(pane PaneId) {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::begin_pane_menu")
+	entries := []paneMenuEntry{
+		{"Split right", PaneOperationSplit{Pane: pane, Direction: chat.DirectionHorizontal}},
+		{"Split down", PaneOperationSplit{Pane: pane, Direction: chat.DirectionVertical}},
+	}
+	if focused := d.FocusedPane(); focused != pane {
+		entries = append(entries, paneMenuEntry{"Swap with focused pane", PaneOperationSwap{Source: focused, Target: pane}})
+	}
+	if pane != d.BrowsePane() {
+		if session, ok := d.PaneSession(pane); ok {
+			entries = append(entries, paneMenuEntry{"Unpin", PaneOperationUnpin(session)})
+		} else if session, ok := d.SelectedSessionID(); ok {
+			entries = append(entries, paneMenuEntry{"Pin selected here", PaneOperationPinHere{SessionID: session, Pane: pane}})
+		}
+		entries = append(entries, paneMenuEntry{"Close pane", PaneOperationClose(pane)})
+	}
+	entries = append(entries, paneMenuEntry{"Zoom / unzoom", PaneOperationZoom(pane)})
+	d.showPaneMenu("Pane", entries, false)
 }
 
 func (d *DashboardState) handlePaneMenuEvent(event tea.Msg) DashboardAction {
-	panic("unported: mj-tui/src/pane_controls.rs DashboardState::handle_pane_menu_event")
+	d.lastEventConsumed = true
+	if menu := d.paneMenu; menu != nil && menu.capacityTarget != nil {
+		closes := false
+		switch event := event.(type) {
+		case tea.KeyPressMsg:
+			closes = chat.KeyPressCode(event) == 'd'
+		case tea.MouseClickMsg:
+			mouse := event.Mouse()
+			closes = mouse.Button == tea.MouseLeft && menu.anchor != nil && rectContains(*menu.anchor, mouse.X, mouse.Y)
+		}
+		if closes {
+			d.paneMenu = nil
+			return DashboardActionNone{}
+		}
+	}
+	menu := d.paneMenu
+	if menu == nil {
+		return DashboardActionNone{}
+	}
+	direct := -1
+	if mouseEvent, ok := event.(tea.MouseMsg); ok && menu.destinations {
+		mouse := mouseEvent.Mouse()
+		if !rectContains(menu.popup, mouse.X, mouse.Y) {
+			hit := slices.IndexFunc(menu.entries, func(entry paneMenuEntry) bool {
+				pinHere, ok := entry.operation.(PaneOperationPinHere)
+				if !ok {
+					return false
+				}
+				return slices.ContainsFunc(d.conversationPaneAreas, func(area conversationPaneArea) bool {
+					return area.pane == pinHere.Pane &&
+						(rectContains(area.transcript, mouse.X, mouse.Y) || rectContains(area.prompt, mouse.X, mouse.Y))
+				})
+			})
+			_, press := mouseEvent.(tea.MouseClickMsg)
+			_, release := mouseEvent.(tea.MouseReleaseMsg)
+			if press && mouse.Button == tea.MouseLeft && hit >= 0 {
+				menu.pressedDestination = &hit
+				return DashboardActionNone{}
+			}
+			if release && mouse.Button == tea.MouseLeft && menu.pressedDestination != nil {
+				pressed := *menu.pressedDestination
+				menu.pressedDestination = nil
+				if hit != pressed {
+					return DashboardActionNone{}
+				}
+				direct = pressed
+			}
+		}
+	}
+	if key, ok := event.(tea.KeyPressMsg); ok {
+		if code := chat.KeyPressCode(key); code >= '1' && code <= '9' {
+			direct = int(code - '1')
+		}
+	}
+	var interaction chat.Interaction[int]
+	if direct < 0 {
+		interaction = menu.form.Handle(event).Action
+	}
+	if _, cancel := interaction.(chat.InteractionCancel[int]); cancel {
+		d.paneMenu = nil
+		return DashboardActionNone{}
+	}
+	selected := direct
+	if selected < 0 {
+		if activate, ok := interaction.(chat.InteractionActivate[int]); ok && activate.ID == 0 {
+			selected, _ = menu.form.Selected(0)
+		}
+	}
+	if selected < 0 || selected >= len(menu.entries) {
+		return DashboardActionNone{}
+	}
+	operation := menu.entries[selected].operation
+	if !d.paneOperationEnabled(operation) {
+		return DashboardActionNone{}
+	}
+	d.paneMenu = nil
+	d.lastRowClick = nil
+	switch operation := operation.(type) {
+	case PaneOperationSplit:
+		return DashboardActionSplitConversation{Pane: operation.Pane, Direction: operation.Direction}
+	case PaneOperationPinSplit:
+		return DashboardActionOpenSessionInSplit{SessionID: operation.SessionID, Direction: operation.Direction}
+	case PaneOperationPinHere:
+		return DashboardActionPinSession{SessionID: operation.SessionID, Pane: operation.Pane}
+	case PaneOperationUnpin:
+		return DashboardActionUnpinSession{SessionID: string(operation)}
+	case PaneOperationChooseEmpty:
+		session := string(operation)
+		entries := []paneMenuEntry{}
+		for index, pane := range d.emptyPinPanes() {
+			entries = append(entries, paneMenuEntry{
+				label:     fmt.Sprintf("%d: Pin in empty pane", index+1),
+				operation: PaneOperationPinHere{SessionID: session, Pane: pane},
+			})
+		}
+		d.conversationZoomed = false
+		d.showPaneMenu("Choose empty pane (click or number)", entries, true)
+		return DashboardActionNone{}
+	case PaneOperationSwap:
+		d.SwapConversationPanes(operation.Source, operation.Target)
+		return DashboardActionConversationPanesChanged{FocusMoved: false}
+	case PaneOperationZoom:
+		d.FocusPane(PaneId(operation))
+		return d.zoomPaneCommand()
+	case PaneOperationClose:
+		return DashboardActionClosePane{Pane: PaneId(operation)}
+	case PaneOperationCommand:
+		return d.runAvailableCommand(CommandId(operation))
+	case PaneOperationInformation:
+		return DashboardActionNone{}
+	case PaneOperationPreferProfile:
+		return DashboardActionPreferLoadBalancingProfile{ProfileID: string(operation)}
+	case PaneOperationClearLoadBalancing:
+		if len(d.config.Get().Quota.Prefer) == 0 {
+			return DashboardActionNone{}
+		}
+		return DashboardActionClearLoadBalancingPreferences{}
+	case PaneOperationRefreshProfile:
+		return DashboardActionProbeQuotaProfile{ProfileID: string(operation)}
+	case PaneOperationProfileUsage:
+		profile := string(operation)
+		d.beginSessionUsageReport(&profile)
+		return DashboardActionNone{}
+	case PaneOperationSessionCommand:
+		return d.runSessionCommand(operation.SessionID, operation.ID)
+	case PaneOperationNewSessionLike:
+		return d.beginNewSessionLike(string(operation))
+	case PaneOperationClearWorkspaceNotifications:
+		dismissals := []client.DaemonPair[string, core.NotificationDismissal]{}
+		for _, sessionID := range d.dismissibleSessionsIn(string(operation)) {
+			if target, ok := d.submitNotificationDismissal(sessionID); ok {
+				dismissals = append(dismissals, client.DaemonPair[string, core.NotificationDismissal]{First: sessionID, Second: target})
+			}
+		}
+		if len(dismissals) == 0 {
+			return DashboardActionNone{}
+		}
+		return DashboardActionDismissNotifications{Dismissals: dismissals}
+	case PaneOperationWorkspace:
+		if slices.Contains(d.workspaceIDs(), string(operation)) {
+			return DashboardActionSelectWorkspace{WorkspaceID: string(operation)}
+		}
+		return DashboardActionNone{}
+	default:
+		return DashboardActionNone{}
+	}
 }
 
 const paneChromeSuffix = "| Conversation "
@@ -335,7 +626,30 @@ func paneChromeWidth(dashboard *DashboardState, pane PaneId, width int) int {
 // native child's title started under the label, so the row read "Browse |
 // Conversation d · availability unknown" (R12-3).
 func childPaneTitle(dashboard *DashboardState, pane PaneId, width int, name string, status []string) chat.Line {
-	panic("unported: mj-tui/src/pane_controls.rs child_pane_title")
+	lead := paneChromeWidth(dashboard, pane, width)
+	room := max(max(max(width-2, 0)-lead, 0)-paneTitleReserve(dashboard, width, 0), 0)
+	var fitted *chat.Line
+	for shown := len(status); shown >= 0; shown-- {
+		var title strings.Builder
+		title.WriteString(" " + name)
+		for _, word := range status[:shown] {
+			title.WriteString(" · ")
+			title.WriteString(word)
+		}
+		title.WriteString(" ")
+		line := chat.RawLine(title.String())
+		if line.Width() <= room {
+			fitted = &line
+			break
+		}
+	}
+	if fitted == nil {
+		line := chat.TruncateLineToWidth(chat.RawLine(" "+name+" "), room)
+		fitted = &line
+	}
+	spans := []chat.Span{chat.RawSpan(strings.Repeat(" ", lead))}
+	spans = append(spans, fitted.Spans...)
+	return chat.LineFrom(spans...)
 }
 
 // paneChromeChipsReserve is how many columns from the right of a pane's
@@ -360,16 +674,219 @@ func paneTitleReserve(dashboard *DashboardState, width int, reserve int) int {
 }
 
 func renderPaneChrome(frame *chat.Frame, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/pane_controls.rs render_pane_chrome")
+	for _, paneArea := range dashboard.conversationPaneAreas {
+		pane, transcript := paneArea.pane, paneArea.transcript
+		width := transcript.Dx()
+		if width < 12 || transcript.Dy() == 0 {
+			continue
+		}
+		session, hasSession := dashboard.PaneSession(pane)
+		var badge *uint32
+		if hasSession {
+			if id, ok := dashboard.PinID(session); ok {
+				badge = &id
+			}
+		}
+		label := paneChromeLabel(dashboard, pane)
+		style := chat.Muted()
+		if badge != nil {
+			style = chat.Style{}.Foreground(chat.PinColor(*badge))
+		}
+		badgeStyle := style
+		if selected, ok := dashboard.SelectedSessionID(); dashboard.Focus() == FocusSessions && hasSession && ok && session == selected {
+			badgeStyle = style.Add(chat.ModifierBold | chat.ModifierUnderlined)
+		}
+		// A label cut short ends in an ellipsis rather than a stray letter.
+		header := chat.TruncateLineToWidth(
+			chat.LineFrom(
+				chat.StyledSpan(" "+label+" ", badgeStyle),
+				chat.StyledSpan(paneChromeSuffix, chat.Muted()),
+			),
+			width-12,
+		)
+		frame.RenderWidget(
+			chat.NewParagraph(chat.TextFrom(header)),
+			uv.Rect(transcript.Min.X+1, transcript.Min.Y, width-12, 1),
+		)
+		form := &dashboard.surfaceForm
+		zoomReserve := 0
+		if dashboard.ConversationZoomed() {
+			zoomReserve = 3
+		}
+		pinGlyph := chat.ThemeGlyphs().Pin
+		if badge != nil {
+			pinGlyph = chat.ThemeGlyphs().Pinned
+		}
+		for _, chip := range []struct {
+			control SurfaceControl
+			offset  int
+			glyph   string
+		}{
+			{SurfaceControlPaneMenu(pane), 7, chat.ThemeGlyphs().RowMenu},
+			{SurfaceControlPanePin(pane), 10, pinGlyph},
+		} {
+			area := uv.Rect(max(transcript.Max.X-(chip.offset+zoomReserve), 0), transcript.Min.Y, 3, 1)
+			form.Register(chip.control, chat.ControlKindButton{}, area, true)
+			// Paint all three cells, so nothing underneath shows through.
+			frame.RenderWidget(chat.NewParagraph(chat.RawText(" "+chip.glyph+" ")).WithStyle(style), area)
+		}
+		if dashboard.paneShowsPinHint(pane) && transcript.Dy() > 2 {
+			area := uv.Rect(transcript.Min.X+1, transcript.Min.Y+1, min(19, width-2), 1)
+			_, selected := dashboard.SelectedSessionID()
+			form.Register(SurfaceControlPinHere(pane), chat.ControlKindButton{}, area, selected)
+			frame.RenderWidget(chat.NewParagraph(chat.RawText("Pin selected here")).WithStyle(chat.Title(true)), area)
+		}
+	}
 }
 
 // dropdownPopup is where a dropdown sits: under the title it hangs from, as
 // wide as its longest line needs. It opens upward when there is no room
 // below, as for a minimized pane, whose one row sits just above the footer.
 func dropdownPopup(area uv.Rectangle, anchor uv.Rectangle, title string, items []chat.Line) uv.Rectangle {
-	panic("unported: mj-tui/src/pane_controls.rs dropdown_popup")
+	// The title sits on the top border between the two corners.
+	content := chat.RawLine(title).Width() + 2
+	for _, item := range items {
+		content = max(content, item.Width())
+	}
+	width := min(max(content+4, 16), area.Dx())
+	wantedHeight := min(len(items)+2, area.Dy())
+	below := max(area.Max.Y-anchor.Max.Y, 0)
+	above := max(anchor.Min.Y-area.Min.Y, 0)
+	openBelow := below >= wantedHeight || below >= above
+	room := above
+	if openBelow {
+		room = below
+	}
+	height := max(min(wantedHeight, room), 1)
+	x := max(min(anchor.Min.X, max(area.Max.X-width, 0)), area.Min.X)
+	y := max(anchor.Min.Y-height, 0)
+	if openBelow {
+		y = anchor.Max.Y
+	}
+	return uv.Rect(x, y, width, height)
 }
 
 func renderPaneMenu(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/pane_controls.rs render_pane_menu")
+	menu := dashboard.paneMenu
+	if menu == nil {
+		return
+	}
+	var items []chat.Line
+	if menu.displayRows != nil {
+		items = slices.Clone(menu.displayRows)
+	} else {
+		items = make([]chat.Line, 0, len(menu.entries))
+		for _, entry := range menu.entries {
+			if workspace, ok := entry.operation.(PaneOperationWorkspace); ok {
+				if badge := attentionBadge(dashboard.workspaceAttentionSummary(string(workspace))); badge != nil {
+					// Keep attention ahead of names so clipping cannot hide it.
+					items = append(items, chat.LineFrom(*badge, chat.RawSpan(" "+entry.label)))
+					continue
+				}
+			}
+			items = append(items, chat.RawLine(entry.label))
+		}
+	}
+	var popup uv.Rectangle
+	switch {
+	case menu.anchor != nil:
+		popup = dropdownPopup(area, *menu.anchor, menu.title, items)
+	case menu.destinations:
+		// Open inside the first destination pane, under its "[1] Pin here"
+		// marker, so the chooser sits beside the panes it names; without a
+		// drawn pane, centre it like any other menu.
+		width := min(area.Dx(), 44)
+		height := min(area.Dy(), len(menu.entries)+2)
+		var anchor *uv.Rectangle
+		for _, entry := range menu.entries {
+			pinHere, ok := entry.operation.(PaneOperationPinHere)
+			if !ok {
+				continue
+			}
+			index := slices.IndexFunc(dashboard.conversationPaneAreas, func(area conversationPaneArea) bool {
+				return area.pane == pinHere.Pane
+			})
+			if index >= 0 {
+				transcript := dashboard.conversationPaneAreas[index].transcript
+				anchor = &transcript
+				break
+			}
+		}
+		if anchor != nil {
+			x := min(anchor.Min.X+1, max(area.Max.X-width, 0))
+			y := min(anchor.Min.Y+3, max(area.Max.Y-height, 0))
+			popup = uv.Rect(max(x, area.Min.X), max(y, area.Min.Y), width, height)
+		} else {
+			popup = uv.Rect(area.Min.X+(area.Dx()-width)/2, area.Min.Y+(area.Dy()-height)/2, width, height)
+		}
+	default:
+		width := min(area.Dx(), 44)
+		height := min(area.Dy(), len(menu.entries)+2)
+		popup = uv.Rect(area.Min.X+(area.Dx()-width)/2, area.Min.Y+(area.Dy()-height)/2, width, height)
+	}
+	if menu.destinations {
+		for index, entry := range menu.entries {
+			pinHere, ok := entry.operation.(PaneOperationPinHere)
+			if !ok {
+				continue
+			}
+			at := slices.IndexFunc(dashboard.conversationPaneAreas, func(area conversationPaneArea) bool {
+				return area.pane == pinHere.Pane
+			})
+			if at < 0 {
+				continue
+			}
+			transcript := dashboard.conversationPaneAreas[at].transcript
+			frame.RenderWidget(
+				chat.NewParagraph(chat.RawText(fmt.Sprintf(" [%d] Pin here ", index+1))).WithStyle(chat.Selection(true)),
+				uv.Rect(transcript.Min.X+1, transcript.Min.Y+2, max(transcript.Dx()-2, 0), 1),
+			)
+		}
+	}
+	menu.popup = popup
+	form := &menu.form
+	selected, _ := form.Selected(0)
+	form.BeginFrame()
+	form.SetBounds(popup)
+	block := chat.Modal().WithTitle(chat.RawLine(menu.title))
+	inner := block.Inner(popup)
+	frame.RenderWidget(chat.Clear{}, popup)
+	frame.RenderWidget(block, popup)
+	rowMap := make([]*int, len(items))
+	for index := range rowMap {
+		row := index
+		rowMap[index] = &row
+	}
+	if menu.displayRows != nil {
+		selected = min(selected, max(len(items)-1, 0))
+		enabled := make([]bool, len(items))
+		for index := range enabled {
+			enabled[index] = true
+		}
+		chat.ChoiceListRenderWithRows(frame, inner, items, selected, rowMap, enabled, &form.Form, 0)
+		form.SetMenu(true)
+		form.SetListActivation(0, chat.ListActivationDoubleClick)
+		offset := form.ListOffset(0)
+		rows := make([]chat.Line, 0, len(items))
+		for index, line := range items {
+			if index == selected {
+				highlight := chat.Style{}.Background(chat.ThemePalette().Selection).Add(chat.ModifierBold)
+				if chat.ReverseVideo() {
+					highlight = chat.Style{}.Add(chat.ModifierReversed | chat.ModifierBold)
+				}
+				line = line.PatchStyle(highlight)
+			}
+			rows = append(rows, line)
+		}
+		frame.RenderWidget(chat.NewParagraph(chat.TextFrom(rows...)).WithScroll(offset, 0), inner)
+	} else {
+		enabled := make([]bool, 0, len(menu.entries))
+		for _, entry := range menu.entries {
+			enabled = append(enabled, dashboard.paneOperationEnabled(entry.operation))
+		}
+		chat.ChoiceListRenderWithRows(frame, inner, items, selected, rowMap, enabled, &form.Form, 0)
+		form.SetMenu(true)
+		form.SetListActivation(0, chat.ListActivationSingleClick)
+	}
+	form.EndFrame(0)
 }

@@ -11543,6 +11543,7 @@ fn answered_elicitation_starts_a_new_auxiliary_reply_before_unlabelled_chunks() 
             elicitation_id: "option-question".into(),
             action: "accept".into(),
             reply: Some("implement".into()),
+            answers: None,
         })
         .unwrap();
     relay.record_session_update(serde_json::from_value(serde_json::json!({

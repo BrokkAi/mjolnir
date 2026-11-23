@@ -3,7 +3,7 @@
 use super::*;
 use mj_core::guardian::{
     Assessment, GUARDIAN_REVIEW_TIMEOUT, GUARDIAN_TRANSCRIPT_BYTES, GuardianReviewRequest, Outcome,
-    parse_assessment, planned_action, reviewer_instructions_acp,
+    PriorGuardianReview, parse_assessment, planned_action, reviewer_instructions_acp,
 };
 
 mod reviewer;
@@ -22,6 +22,7 @@ pub(super) struct ReviewEvidence {
     /// Their identities, to tell a new message from the history's window
     /// moving.
     pub(super) user_message_ids: Vec<String>,
+    trusted_user_input_ids: Vec<String>,
 }
 
 impl ReviewEvidence {
@@ -45,6 +46,11 @@ impl ReviewEvidence {
         let user_instructions_omitted = authorization
             .as_ref()
             .is_none_or(|history| !history.authorization_complete);
+        let trusted_user_inputs = turn_context.trusted_user_inputs();
+        let trusted_user_input_ids = trusted_user_inputs
+            .iter()
+            .map(|input| input.id.clone())
+            .collect();
         Self {
             request: GuardianReviewRequest {
                 request_id: tool_call_id.to_owned(),
@@ -56,8 +62,12 @@ impl ReviewEvidence {
                 project_instructions,
                 transcript: turn_context.render_transcript(GUARDIAN_TRANSCRIPT_BYTES),
                 action: action.clone(),
+                trusted_user_inputs,
+                prior_reviews: turn_context.prior_guardian_reviews(),
+                retry_reason: None,
             },
             user_message_ids,
+            trusted_user_input_ids,
         }
     }
 
@@ -68,15 +78,22 @@ impl ReviewEvidence {
         self.user_message_ids
             .iter()
             .any(|id| !earlier.user_message_ids.contains(id))
+            || self
+                .trusted_user_input_ids
+                .iter()
+                .any(|id| !earlier.trusted_user_input_ids.contains(id))
     }
 }
 
 /// How the guardian answered one permission request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum GuardianDecision {
-    Allow,
+    Allow {
+        review: PriorGuardianReview,
+    },
     Deny {
         rationale: String,
+        review: PriorGuardianReview,
     },
     /// The guardian could not decide; the person answers the ordinary form,
     /// which shows this reason.

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -1953,6 +1954,16 @@ func installationHome(path string) string {
 		return volume + separator + normalized
 	}
 	return volume + normalized
+}
+
+// Equal is HarnessProfile's derived PartialEq: every field equal, the
+// environment compared as Environment.Equal compares it.
+func (h HarnessProfile) Equal(other HarnessProfile) bool {
+	if !h.Environment.Equal(other.Environment) {
+		return false
+	}
+	h.Environment, other.Environment = Environment{}, Environment{}
+	return reflect.DeepEqual(h, other)
 }
 
 // QuotaProvider reads the harness's own provider configuration. Call on a

@@ -2,7 +2,11 @@
 package tui
 
 import (
+	"cmp"
+	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -48,20 +52,97 @@ func (r *CapacityTableRow) height() int {
 // capacityTableRows is one row per host or fleet the dashboard has a
 // capacity reading for.
 func capacityTableRows(dashboard *DashboardState, nowEpochSeconds uint64) []CapacityTableRow {
-	panic("unported: mj-tui/src/render/capacity.rs capacity_table_rows")
+	details := capacityDetailsInKeyOrder(dashboard)
+	rows := make([]CapacityTableRow, 0, len(details))
+	for _, detail := range details {
+		// Every listed target is unavailable: say so once for the host and
+		// draw nothing else (no capacity, no Disks button).
+		if allListedTargetsUnavailable(detail.Reading.TargetIDs, dashboard) {
+			rows = append(rows, CapacityTableRow{
+				host:    detail.Reading.Host,
+				targets: chat.StyledLine("unavailable", chat.Muted()),
+			})
+			continue
+		}
+		staleness, stale := detail.Reading.Staleness(nowEpochSeconds)
+		cpu, memory := capacityCPUAndMemory(detail, stale)
+		row := CapacityTableRow{
+			host:    detail.Reading.Host,
+			targets: capacityTargetLabels(detail.Reading.TargetIDs, dashboard),
+			cpu:     cpu,
+			memory:  memory,
+			disks:   capacityDisksCell(dashboard, detail),
+		}
+		if stale {
+			row.staleness = &staleness
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// capacityDetailsInKeyOrder is the dashboard's capacity details in key
+// order, the order Rust's BTreeMap values() yields and capacityIndex counts
+// in.
+func capacityDetailsInKeyOrder(dashboard *DashboardState) []*client.RuntimeHostCapacity {
+	keys := slices.Sorted(maps.Keys(dashboard.capacityDetails))
+	details := make([]*client.RuntimeHostCapacity, len(keys))
+	for i, key := range keys {
+		detail := dashboard.capacityDetails[key]
+		details[i] = &detail
+	}
+	return details
 }
 
 // allListedTargetsUnavailable reports whether the row lists targets and
 // every one of them is unavailable.
 func allListedTargetsUnavailable(targetIDs []string, dashboard *DashboardState) bool {
-	panic("unported: mj-tui/src/render/capacity.rs all_listed_targets_unavailable")
+	listed := listedCapacityTargets(targetIDs, dashboard)
+	if len(listed) == 0 {
+		return false
+	}
+	for _, id := range listed {
+		if _, missing := dashboard.targetMissingLine(id); !missing {
+			return false
+		}
+	}
+	return true
 }
 
 // capacityCPUAndMemory is the CPU and RAM cells of one row. A host reports
 // how much of each is in use; a fleet has no percentage of its own and
 // reports what it is running.
 func capacityCPUAndMemory(detail *client.RuntimeHostCapacity, stale bool) (chat.Line, chat.Line) {
-	panic("unported: mj-tui/src/render/capacity.rs capacity_cpu_and_memory")
+	if detail.Refreshing {
+		return chat.StyledLine("refreshing"+chat.ThemeGlyphs().Ellipsis, chat.Muted()), chat.Line{}
+	}
+	unavailable := func() chat.Line { return chat.StyledLine("unavailable", chat.Muted()) }
+	reading := &detail.Reading
+	switch {
+	case reading.Kind == core.DeploymentCapacityKindHost && reading.HasReading:
+		percentCell := func(usedPercent uint8, ok bool) chat.Line {
+			if !ok {
+				return unavailable()
+			}
+			color := chat.ThemePalette().Muted
+			if !stale {
+				color = headroomColor(100 - min(usedPercent, 100))
+			}
+			return chat.StyledLine(fmt.Sprintf("%d%%", usedPercent), chat.Style{}.Foreground(color))
+		}
+		var cpu chat.Line
+		if reading.CPUPercent != nil {
+			cpu = percentCell(*reading.CPUPercent, true)
+		} else {
+			cpu = percentCell(0, false)
+		}
+		return cpu, percentCell(reading.MemoryPercent())
+	case reading.Kind == core.DeploymentCapacityKindAwsFleet && reading.FleetInstances != nil:
+		cpu, memory := reading.CPUAndMemory()
+		return chat.RawLine(cpu), chat.RawLine(memory)
+	default:
+		return unavailable(), chat.Line{}
+	}
 }
 
 // capacityDisksCell is the Disks cell of one row. Free space comes from the
@@ -72,7 +153,40 @@ func capacityCPUAndMemory(detail *client.RuntimeHostCapacity, stale bool) (chat.
 // filesystem in the worst condition, as `/srv low ▾`. Details are in the
 // anchored dropdown.
 func capacityDisksCell(dashboard *DashboardState, detail *client.RuntimeHostCapacity) chat.Line {
-	panic("unported: mj-tui/src/render/capacity.rs capacity_disks_cell")
+	reading := &detail.Reading
+	if len(reading.Filesystems) == 0 {
+		return chat.Line{}
+	}
+	mark := chat.ThemeGlyphs().Dropdown
+	if dashboard.capacityDisksMenuOpen(reading.ID) {
+		mark = chat.ThemeGlyphs().Dropup
+	}
+	// The worst condition, then the least space left; Rust's max_by_key
+	// keeps the last of equal elements.
+	var worst *core.HostFilesystemRow
+	for i := range reading.Filesystems {
+		filesystem := &reading.Filesystems[i]
+		if filesystem.Condition == core.StorageConditionOk {
+			continue
+		}
+		if worst == nil {
+			worst = filesystem
+			continue
+		}
+		order := filesystem.Condition.Compare(worst.Condition)
+		if order == 0 {
+			order = cmp.Compare(worst.AvailableBytes, filesystem.AvailableBytes)
+		}
+		if order >= 0 {
+			worst = filesystem
+		}
+	}
+	if worst == nil {
+		return chat.RawLine("Disks " + mark)
+	}
+	return chat.StyledLine(
+		fmt.Sprintf("%s%s %s", reading.FilesystemPlace(worst), core.StorageConditionFlag(worst.Condition), mark),
+		storageConditionStyle(worst.Condition))
 }
 
 // storageConditionStyle is the colour a filesystem's condition draws in.
@@ -90,7 +204,19 @@ func storageConditionStyle(condition core.StorageCondition) chat.Style {
 // capacityDisksMenuLines is the filesystem details for the dropdown, styled
 // like the former expanded rows.
 func capacityDisksMenuLines(detail *client.RuntimeHostCapacity) []chat.Line {
-	panic("unported: mj-tui/src/render/capacity.rs capacity_disks_menu_lines")
+	reading := &detail.Reading
+	lines := make([]chat.Line, len(reading.Filesystems))
+	for i := range reading.Filesystems {
+		filesystem := &reading.Filesystems[i]
+		lines[i] = chat.StyledLine(
+			fmt.Sprintf("%s %s free of %s%s",
+				reading.FilesystemPlace(filesystem),
+				formatResourceBytes(filesystem.AvailableBytes),
+				formatResourceBytes(filesystem.TotalBytes),
+				core.StorageConditionFlag(filesystem.Condition)),
+			storageConditionStyle(filesystem.Condition))
+	}
+	return lines
 }
 
 // capacityTableLines is the lines the Targets table draws: one line per
@@ -155,7 +281,106 @@ func capacityTableWidth(dashboard *DashboardState) int {
 // surface, where the pane carries its size controls and its title opens the
 // pane's menu.
 func renderCapacity(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState, size *core.PaneSize) {
-	panic("unported: mj-tui/src/render/capacity.rs render_capacity")
+	nowEpochSeconds := uint64(max(time.Now().Unix(), 0))
+	rows := capacityTableRows(dashboard, nowEpochSeconds)
+	columnWidths := capacityColumnWidths(rows)
+	focused := dashboard.focus == FocusTargets
+	// On the combined surface (size is set) the title opens the pane's
+	// menu, and says so with a dropdown mark.
+	label := paneTitleLabel("Targets", size != nil)
+	pressed := false
+	if size != nil {
+		titleBudget := paneTitleContentWidth(area.Dx(), dashboard.paneMaximizeEnabled(SupportPaneTargets))
+		pressed = registerPaneTitleMenu(dashboard, SupportPaneTargets, uv.Rect(
+			area.Min.X+1,
+			area.Min.Y,
+			min(chat.RawLine(label).Width(), math.MaxUint16, titleBudget),
+			min(area.Dy(), 1)))
+	}
+	title := chat.RawSpan(label)
+	if pressed {
+		title = chat.StyledSpan(label, chat.Selection(true))
+	}
+	block := chat.Panel(focused).WithTitle(chat.LineFrom(title))
+	if size != nil {
+		block = block.WithTitle(paneSizeControls(*size, dashboard.paneMaximizeEnabled(SupportPaneTargets)))
+	}
+	// A row never asks for more lines than the pane has room for. The table
+	// scrolls a selected row into view by dropping whole rows from the top
+	// of the page, and a row taller than the content area makes it drop the
+	// selected row itself, so a notice that does not fit waits for room
+	// instead of costing the readings their line.
+	viewport := max(area.Dy()-sessionTableChromeHeight, 0)
+	rowHeights := make([]int, len(rows))
+	disksButtons := make([]int, len(rows))
+	notices := make([]string, len(rows))
+	tableRows := make([]TableRow, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		rowHeights[i] = min(row.height(), max(viewport, 1))
+		disksButtons[i] = row.disksButtonWidth()
+		if rowHeights[i] > 1 && row.staleness != nil {
+			notices[i] = *row.staleness
+		}
+		tableRows[i] = NewTableRow(
+			TableCellFromString(row.host).WithStyle(chat.Style{}.Bold()),
+			TableCellFromLine(row.targets).WithStyle(chat.Muted()),
+			TableCellFromLine(row.cpu),
+			TableCellFromLine(row.memory),
+			TableCellFromLine(row.disks),
+		).WithHeight(min(rowHeights[i], math.MaxUint16))
+	}
+	constraints := make([]chat.Constraint, len(columnWidths))
+	for i, width := range columnWidths {
+		constraints[i] = chat.ConstraintLength(width)
+	}
+	highlightStyle := chat.Style{}
+	highlightSymbol := "  "
+	if focused {
+		highlightStyle = chat.Selection(true)
+		highlightSymbol = chat.ThemeGlyphs().Selected
+	}
+	table := NewTable(tableRows, constraints).
+		WithColumnSpacing(capacityColumnSpacing).
+		WithHeader(NewTableRowFromStrings(capacityHeaders[:]...).WithStyle(chat.Muted().Patch(chat.Raised()))).
+		WithRowHighlightStyle(highlightStyle).
+		WithHighlightSymbol(highlightSymbol).
+		WithHighlightSpacing(TableHighlightSpacingAlways).
+		WithBlock(block)
+	offset := chat.ClampOffsetToLastPage(dashboard.targetsScroll, rowHeights, viewport)
+	if takeSelectionRecenter(dashboard, FocusTargets) {
+		offset = chat.CenteredOffset(dashboard.capacityIndex, rowHeights, viewport)
+	}
+	var selected *int
+	if len(dashboard.capacityDetails) > 0 {
+		index := dashboard.capacityIndex
+		selected = &index
+	}
+	state := TableState{}.WithOffset(offset).WithSelected(selected)
+	table.RenderStateful(area, frame.Buffer(), &state)
+	// The notice lines are drawn after the table, which laid out the rows
+	// they belong to.
+	columns := capacityColumns(area, columnWidths)
+	registerDisksButtons(dashboard, &columns, disksButtons, rowHeights, state.Offset())
+	renderCapacityNotices(frame, &columns, notices, rowHeights, state.Offset())
+	if len(dashboard.capacityDetails) == 0 {
+		message := "Waiting for target readings."
+		if len(dashboard.config.Get().Targets) == 0 {
+			message = "Add a target in Settings."
+		}
+		frame.RenderWidget(
+			chat.NewParagraph(chat.RawText(message)).WithStyle(chat.Muted()).WithWrap(chat.Wrap{Trim: true}),
+			uv.Rect(area.Min.X+3, area.Min.Y+2, max(area.Dx()-4, 0), max(area.Dy()-3, 0)))
+	}
+	dashboard.targetsScroll = state.Offset()
+	total, above := 0, 0
+	for i, height := range rowHeights {
+		total += height
+		if i < state.Offset() {
+			above += height
+		}
+	}
+	renderSessionScrollbar(frame, area, total, above, max(area.Dy()-sessionTableChromeHeight, 0))
 }
 
 // CapacityColumns is the inner area of the Targets table and the columns
@@ -200,13 +425,46 @@ func capacityColumns(area uv.Rectangle, columnWidths []int) CapacityColumns {
 // pane's inner edge and is cut with an ellipsis, so a long notice costs width
 // the table already has instead of widening the pane.
 func renderCapacityNotices(frame *chat.Frame, columns *CapacityColumns, notices []string, rowHeights []int, offset int) {
-	panic("unported: mj-tui/src/render/capacity.rs render_capacity_notices")
+	targets := columns.targets()
+	width := max(columns.inner.Max.X-targets.Min.X, 0)
+	if width == 0 {
+		return
+	}
+	// The first row sits under the border and the heading row.
+	y := columns.inner.Min.Y + 1
+	for index := offset; index < min(len(notices), len(rowHeights)); index++ {
+		if y >= columns.inner.Max.Y {
+			break
+		}
+		noticeY := y + 1
+		if notice := notices[index]; notice != "" && noticeY < columns.inner.Max.Y {
+			text := truncateToCells(notice, width, TruncateSummary)
+			frame.RenderWidget(
+				chat.NewParagraph(chat.TextFrom(chat.StyledLine(text, chat.Muted()))),
+				uv.Rect(targets.Min.X, noticeY, width, 1))
+		}
+		y += min(rowHeights[index], math.MaxUint16)
+	}
 }
 
 // registerDisksButtons registers each visible row's Disks summary as the
 // button that opens its filesystem dropdown.
 func registerDisksButtons(dashboard *DashboardState, columns *CapacityColumns, buttons []int, rowHeights []int, offset int) {
-	panic("unported: mj-tui/src/render/capacity.rs register_disks_buttons")
+	disks := columns.disks()
+	y := columns.inner.Min.Y + 1
+	areas := make([]*uv.Rectangle, len(buttons))
+	for index := offset; index < min(len(buttons), len(rowHeights)); index++ {
+		if y >= columns.inner.Max.Y {
+			break
+		}
+		if width := min(buttons[index], disks.Dx()); width > 0 {
+			buttonArea := uv.Rect(disks.Min.X, y, width, 1)
+			dashboard.surfaceForm.Register(SurfaceControlCapacityDisks(index), chat.ControlKindButton{}, buttonArea, true)
+			areas[index] = &buttonArea
+		}
+		y += min(rowHeights[index], math.MaxUint16)
+	}
+	dashboard.capacityDisksAreas = areas
 }
 
 // headroomColor is the colour the quota bar gives a percentage of headroom

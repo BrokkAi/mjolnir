@@ -129,6 +129,9 @@ func (d *DashboardState) SetPaneSize(pane SupportPane, size core.PaneSize) {
 	d.clampSelections()
 	if d.paneSizes != previous {
 		if workspaceID, ok := d.ActiveWorkspaceID(); ok {
+			if d.workspacePaneSizesModified == nil {
+				d.workspacePaneSizesModified = map[string]struct{}{}
+			}
 			d.workspacePaneSizesModified[workspaceID] = struct{}{}
 		}
 	}
@@ -177,7 +180,11 @@ func (d *DashboardState) SessionsMinimized() bool {
 // because it does not carry the complete request list and must not
 // invalidate a local draft.
 func (d *DashboardState) PendingElicitations(sessionID string) (uint64, []core.ElicitationRequest, bool) {
-	panic("unported: mj-tui/src/dashboard_panes.rs pending_elicitations")
+	detail, ok := (*d.sessionDetails.Get())[sessionID]
+	if !ok || detail == nil || detail.pendingElicitationsAppliedEventOrdinal == nil {
+		return 0, nil, false
+	}
+	return *detail.pendingElicitationsAppliedEventOrdinal, detail.pendingElicitations, true
 }
 
 func (d *DashboardState) focusedRowsVisible() bool {

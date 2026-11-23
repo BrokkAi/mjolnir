@@ -16,8 +16,8 @@ pub fn handles_exit_plan_mode(harness: HarnessKind, method: &str) -> bool {
     harness == HarnessKind::Grok && is_exit_plan_mode_method(method)
 }
 
-pub fn plan_review_id(sequence: u64) -> String {
-    format!("{PLAN_REVIEW_ID_PREFIX}{sequence}")
+pub fn plan_review_id(bridge_id: &str, sequence: u64) -> String {
+    format!("{PLAN_REVIEW_ID_PREFIX}{bridge_id}-{sequence}")
 }
 
 pub fn is_plan_review_id(id: &str) -> bool {

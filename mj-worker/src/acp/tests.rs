@@ -2534,6 +2534,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         elicitation_id,
         action,
         reply,
+        answers,
     } = resolution
     else {
         unreachable!()
@@ -2558,6 +2559,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
             elicitation_id,
             action,
             reply,
+            answers,
         })
         .unwrap();
     let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");
@@ -8799,6 +8801,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                     elicitation_id,
                     action,
                     reply,
+                    ..
                 } => {
                     assert!(reply.is_none(), "harness withdrawal is not a user reply");
                     break (requested, (elicitation_id, action));
@@ -8809,8 +8812,9 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     })
     .await
     .expect("a withdrawn form resolves");
-    assert_eq!(requested.as_deref(), Some("elicitation-1"));
-    assert_eq!(resolved, ("elicitation-1".to_owned(), "cancel".to_owned()));
+    let requested = requested.expect("the runtime published the form");
+    assert!(requested.starts_with("elicitation-"));
+    assert_eq!(resolved, (requested, "cancel".to_owned()));
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
     bridge.abort();

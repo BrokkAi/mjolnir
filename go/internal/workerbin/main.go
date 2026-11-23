@@ -12,17 +12,27 @@
 package workerbin
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
+	"log/slog"
 	"os"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 	"github.com/BrokkAi/mjolnir/go/internal/worker"
+	"github.com/BrokkAi/mjolnir/go/internal/workermcp"
 )
 
 // cli is the worker's command line (Rust's clap-derived `Cli`; cli.go
@@ -464,7 +474,24 @@ func recordWorkerLastWords() {
 // and does not return on success; the re-executed process, marked with
 // `--login-environment-ready`, adopts its parent's snapshot.
 func bootstrapLoginEnvironment(parsed *cli, owner *worker.WorkerRootOwner) error {
-	panic("unported: mj-worker-bin/src/main.rs bootstrap_login_environment")
+	if parsed.loginEnvironmentReady {
+		return harnessinstall.InitializeFromParent()
+	}
+	args := parsed.command.(commandWorker)
+	var needsLogin bool
+	switch command := args.command.(type) {
+	case workerCommandRun:
+		launch, err := core.WorkerLaunchConfigRead(command.config)
+		if err != nil {
+			return err
+		}
+		needsLogin = launch.RunMode != core.WorkerRunModeCheckpointOnly
+	case workerCommandPrepareHarness, workerCommandDiscoverConfig, workerCommandDiff, workerCommandPushBranch:
+		needsLogin = true
+	default:
+		return nil
+	}
+	return bootstrapLoginEnvironmentReexec(args.command, needsLogin, owner)
 }
 
 // envVars is std::env::vars(): the process environment as name and value.
@@ -496,14 +523,170 @@ func envMap() map[string]string {
 // standard error; any other error is logged, recorded in a worker run's exit
 // record, printed as Rust's main prints an error, and exits 1.
 func Main() int {
-	panic("unported: mj-worker-bin/src/main.rs main")
+	if testHooksFeature {
+		core.EnableTestHooks()
+		if os.Getenv("MJ_CHAOS_ISOLATED") == "1" {
+			if endpoint, ok := os.LookupEnv("MJ_TEST_GLIDE_ENDPOINT"); ok {
+				core.SetTestGlideEndpoint(endpoint)
+			}
+		}
+	}
+	if len(os.Args) > 1 && os.Args[1] == "microvm" {
+		if err := runMicrovm(); err != nil {
+			return reportMainError(err)
+		}
+		return 0
+	}
+	if err := installStderrLogging(); err != nil {
+		return reportMainError(err)
+	}
+	parsed, err := parseCli(os.Args)
+	if err != nil {
+		var usage *clapError
+		if errors.As(err, &usage) {
+			return usage.print()
+		}
+		return reportMainError(err)
+	}
+	args := parsed.command.(commandWorker)
+	var owner *worker.WorkerRootOwner
+	if run, ok := args.command.(workerCommandRun); ok {
+		owner, err = acquireRootOwner(run.root, parsed.workerRootLockFD, parsed.loginEnvironmentReady)
+		if err != nil {
+			return reportMainError(err)
+		}
+	}
+	// A detached worker's only channel is its root directory, so the exit
+	// record has to cover the whole of startup: a panic or an error in the
+	// login-environment bootstrap happens before runCommand and would
+	// otherwise leave nothing behind at all.
+	exitRoot := ""
+	if owner != nil {
+		exitRoot = owner.Root()
+		installWorkerLastWords(exitRoot)
+		worker.RecordStartupStep(exitRoot, "start")
+	}
+	err = func() error {
+		if exitRoot != "" {
+			defer recordWorkerLastWords()
+		}
+		return runWorker(parsed, exitRoot, owner)
+	}()
+	var refused exportRefused
+	if errors.As(err, &refused) {
+		// A refusal is a precondition the caller can fix, so it leaves the
+		// process with its own exit code and the reason; the daemon turns
+		// that pair into a 409 rather than a 500. The reason goes to
+		// standard output, which carries nothing else now, because standard
+		// error also carries this process's log. It goes to standard error
+		// as well for a daemon that predates reading it from standard
+		// output.
+		core.DiagnosticStdout("%s", refused)
+		core.DiagnosticStderr("%s", refused)
+		return checkpoint.ExportRefusedExitCode
+	}
+	if err != nil {
+		slog.Error("Mjolnir worker exited with an error", "error", err.Error())
+		if exitRoot != "" {
+			var refusal *string
+			if found, ok := core.RefusalOf(err); ok {
+				message := found.Message()
+				refusal = &message
+			}
+			writeWorkerExitRecordDetails(exitRoot, worker.WorkerExitReason(err), refusal, harnessStartupFailure(err))
+		}
+	} else if exitRoot != "" {
+		writeWorkerExitRecord(exitRoot, "worker stopped")
+	}
+	// Rust drops the root's ownership as main returns, before it reports.
+	if owner != nil {
+		owner.Release()
+	}
+	if err != nil {
+		return reportMainError(err)
+	}
+	return 0
+}
+
+// harnessStartupFailure is the WorkerHarnessStartupFailure err carries, if
+// any.
+func harnessStartupFailure(err error) *core.WorkerHarnessStartupFailure {
+	var failure core.WorkerHarnessStartupFailure
+	if errors.As(err, &failure) {
+		return &failure
+	}
+	var pointer *core.WorkerHarnessStartupFailure
+	if errors.As(err, &pointer) && pointer != nil {
+		return pointer
+	}
+	return nil
 }
 
 // reportMainError prints err as Rust prints the error a `main` returns
 // (`Error: ` and anyhow's Debug form, its causes under "Caused by:") and
 // returns the exit status 1.
 func reportMainError(err error) int {
-	panic("unported: mj-worker-bin/src/main.rs main (error report)")
+	_, _ = io.WriteString(os.Stderr, "Error: "+anyhowDebug(err)+"\n")
+	return 1
+}
+
+// anyhowDebug is anyhow's Debug form of err: its outermost message, then
+// each cause under "Caused by:", numbered when there is more than one.
+func anyhowDebug(err error) string {
+	chain := errorChain(err)
+	text := chain[0]
+	causes := chain[1:]
+	if len(causes) == 0 {
+		return text
+	}
+	text += "\n\nCaused by:"
+	for index, cause := range causes {
+		prefix, indent := "    ", "    "
+		if len(causes) > 1 {
+			prefix, indent = fmt.Sprintf("%5d: ", index), "       "
+		}
+		text += "\n" + prefix + strings.ReplaceAll(cause, "\n", "\n"+indent)
+	}
+	return text
+}
+
+// errorChain is err's messages from the outermost to its root cause, each
+// without the causes it wraps: a layer `context: cause` made with %w is
+// "context" followed by the chain of cause. A layer whose text does not end
+// with its cause's is kept whole and ends the chain, and so is an error of
+// Go's standard library (an *fs.PathError reads as one io::Error does).
+func errorChain(err error) []string {
+	var messages []string
+	for err != nil {
+		text := err.Error()
+		next := errors.Unwrap(err)
+		if next == nil || !isContextLayer(err) {
+			return append(messages, text)
+		}
+		own, ok := strings.CutSuffix(text, ": "+next.Error())
+		if !ok {
+			return append(messages, text)
+		}
+		messages = append(messages, own)
+		err = next
+	}
+	return messages
+}
+
+// isContextLayer reports whether err adds context over the error it wraps:
+// fmt's %w wrapper, or a Mjolnir error type. Standard library wrappers such
+// as *fs.PathError are one error whose text names their cause.
+func isContextLayer(err error) bool {
+	kind := reflect.TypeOf(err)
+	for kind.Kind() == reflect.Pointer {
+		kind = kind.Elem()
+	}
+	path := kind.PkgPath()
+	if path == "fmt" {
+		return true
+	}
+	first, _, _ := strings.Cut(path, "/")
+	return strings.Contains(first, ".")
 }
 
 // workerRuntimeThreads is the number of threads that run Go code at once in
@@ -534,7 +717,251 @@ func runWorker(parsed *cli, exitRoot string, owner *worker.WorkerRootOwner) erro
 
 // runCommand dispatches one parsed command to the worker library.
 func runCommand(ctx context.Context, parsed command, owner *worker.WorkerRootOwner) error {
-	panic("unported: mj-worker-bin/src/main.rs run_command")
+	args := parsed.(commandWorker)
+	switch command := args.command.(type) {
+	case workerCommandRun:
+		worker.LeadProcessGroup()
+		if err := startOrphanReaper(); err != nil {
+			return err
+		}
+		// Main defers the panic record and writes the exit record for every
+		// error this returns.
+		if owner == nil {
+			return errors.New("worker run has no root ownership")
+		}
+		launch, err := core.WorkerLaunchConfigRead(command.config)
+		if err != nil {
+			return err
+		}
+		return worker.RunDaemonOwned(ctx, owner, launch)
+	case workerCommandPrepareHarness:
+		launch, err := core.WorkerLaunchConfigRead(command.config)
+		if err != nil {
+			return err
+		}
+		return worker.PrepareManagedHarness(ctx, launch)
+	case workerCommandProxy:
+		return worker.Proxy(ctx, command.root)
+	case workerCommandDiscoverConfig:
+		data, err := os.ReadFile(command.spec)
+		if err != nil {
+			return err
+		}
+		var spec core.ProfileProbeSpec
+		if err := json.Unmarshal(data, &spec); err != nil {
+			return err
+		}
+		config, err := worker.DiscoverProfileConfig(ctx, spec)
+		if err != nil {
+			return err
+		}
+		return printJSONLine(config)
+	case workerCommandAcpSupervisor:
+		spec, err := worker.AcpSupervisorSpecRead(command.spec)
+		if err != nil {
+			return err
+		}
+		return worker.RunACPSupervisor(ctx, spec)
+	case workerCommandAuthorizedKeys:
+		switch keys := command.command.(type) {
+		case authorizedKeysCommandInstall:
+			return worker.InstallKey(keys.path, keys.operationID, keys.from, keys.command, keys.publicKey)
+		case authorizedKeysCommandRemove:
+			_, err := worker.RemoveKey(keys.path, keys.operationID)
+			return err
+		case authorizedKeysCommandReconcile:
+			keep := make(map[string]struct{}, len(keys.keepOperations))
+			for _, operation := range keys.keepOperations {
+				keep[operation] = struct{}{}
+			}
+			removed, err := worker.ReconcileKeys(keys.path, keep)
+			if err != nil {
+				return err
+			}
+			return writeStdout([]byte(strconv.Itoa(removed) + "\n"))
+		}
+	case workerCommandExportMoveStream:
+		stdout := bufio.NewWriter(os.Stdout)
+		if _, err := checkpoint.WriteMoveStream(stdout, command.archive, command.keepDir, command.skip); err != nil {
+			return err
+		}
+		return flushStdout(stdout)
+	case workerCommandReceiveMoveStream:
+		receipt, err := checkpoint.ReceiveMoveStream(bufio.NewReader(os.Stdin), command.archive, command.expectedSHA256, command.keepDir)
+		if err != nil {
+			return err
+		}
+		return printJSONLine(receipt)
+	case workerCommandLiveness:
+		liveness, err := worker.WorkerStopLiveness(command.root)
+		if err != nil {
+			return err
+		}
+		return writeStdout([]byte(liveness.Token() + "\n"))
+	case workerCommandHolder:
+		pid, ok, err := worker.Holder(command.root)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return writeStdout([]byte(strconv.FormatUint(uint64(pid), 10) + "\n"))
+		}
+		return nil
+	case workerCommandStop:
+		grace := worker.TermGrace
+		if command.kill {
+			grace = 0
+		}
+		return worker.WorkerStopStop(command.root, grace)
+	case workerCommandQuiesce:
+		return requestQuiesce(command.root, command.operation, command.checkout, command.childSessions)
+	case workerCommandIdentityAlive:
+		alive, err := core.WorkerIdentity{Pid: command.pid, Start: command.start}.IsAlive()
+		if err != nil {
+			return err
+		}
+		if alive {
+			return writeStdout([]byte("alive\n"))
+		}
+		return writeStdout([]byte("dead\n"))
+	case workerCommandBuildID:
+		return writeStdout([]byte(core.WorkerBuildID() + "\n"))
+	case workerCommandSuspendPreflight:
+		result, err := worker.SuspendPreflightFromSpecFile(command.spec)
+		if err != nil {
+			return err
+		}
+		return printJSONLine(result)
+	case workerCommandExportCheckpoint:
+		exported, err := worker.ExportFromSpecFile(command.spec)
+		if err != nil {
+			var refused checkpoint.SnapshotRefused
+			if errors.As(err, &refused) {
+				return exportRefused(refused.Error())
+			}
+			return err
+		}
+		return printJSONLine(exported)
+	case workerCommandCaptureCheckpoint:
+		captured, err := worker.CaptureFromSpecReader(bufio.NewReader(os.Stdin))
+		if err != nil {
+			return err
+		}
+		return printJSONLine(captured)
+	case workerCommandPackCheckpoint:
+		packed, err := worker.PackFromSpecReader(bufio.NewReader(os.Stdin))
+		if err != nil {
+			return err
+		}
+		return printJSONLine(packed)
+	case workerCommandRestoreCheckpoint:
+		switch {
+		case command.missingParent:
+			return worker.RestoreMissingFromSpecFile(command.spec, command.relaySeed)
+		case command.missingCheckout:
+			return worker.RestoreCheckoutFromSpecFile(command.spec)
+		default:
+			return worker.RestoreFromSpecFile(command.spec)
+		}
+	case workerCommandDiscardQueuedPrompts:
+		return worker.DiscardQueuedPromptsBeforeStart(command.root, command.sessionID, command.commandID)
+	case workerCommandInstallResource:
+		return checkpoint.InstallResourceStream(os.Stdin, command.destination)
+	case workerCommandMemoryMcp:
+		return workermcp.MemoryMCPRunMCPStdio(command.historySocket)
+	case workerCommandMailboxHook:
+		format := worker.HookOutputFormatStandard
+		if command.format == "antigravity" {
+			format = worker.HookOutputFormatAntigravity
+		}
+		return worker.MailboxHookRunWithFormat(command.socket, command.event, format)
+	case workerCommandMailboxRequest:
+		return worker.MailboxHookRequest(command.socket)
+	case workerCommandSubagentMcp:
+		if command.reviewServer {
+			return workermcp.RunReviewMCPStdio(command.socket, command.harness, command.role)
+		}
+		return workermcp.SubagentMCPRunMCPStdio(command.socket, command.harness, command.role, workermcp.ParentTools{
+			Oracle:               false,
+			SubtleSubagents:      command.subtleSubagents,
+			OrchestratorsEnabled: false,
+		})
+	case workerCommandDiff:
+		result, failure := checkpoint.SessionDiffDetails(checkpoint.SystemGit{}, command.repository, command.base, command.branch)
+		if failure != nil {
+			return exportError(failure)
+		}
+		if command.json {
+			data, err := serdeJSON(result)
+			if err != nil {
+				return err
+			}
+			return writeStdout(data)
+		}
+		return writeStdout([]byte(result.Diff))
+	case workerCommandReadFile:
+		data, err := checkpoint.ReadSessionFile(command.root, command.path)
+		if err != nil {
+			return exportError(err)
+		}
+		return writeStdout(data)
+	case workerCommandFetch:
+		mode := checkpoint.FetchModeContent
+		if command.list {
+			mode = checkpoint.FetchModeListing
+		}
+		spool, err := checkpoint.CreateFetchSpool()
+		if err != nil {
+			return err
+		}
+		fetched, err := checkpoint.FetchSessionPath(command.path, command.roots, command.temp, mode, spool)
+		if err != nil {
+			return exportError(err)
+		}
+		defer fetched.Close()
+		if err := core.ReachTestHook("fetch_source_ready"); err != nil {
+			return err
+		}
+		stdout := bufio.NewWriter(os.Stdout)
+		if _, err := fetched.WriteTo(stdout); err != nil {
+			return err
+		}
+		return flushStdout(stdout)
+	case workerCommandStoreFetch:
+		kind := checkpoint.FetchedKindFile
+		if command.directory {
+			kind = checkpoint.FetchedKindDirectory
+		}
+		saved, err := checkpoint.FetchedPathStore(kind, command.source, os.TempDir(), command.session, command.length, os.Stdin)
+		if err != nil {
+			return err
+		}
+		data, err := serdeJSON(saved)
+		if err != nil {
+			return err
+		}
+		return writeStdout(data)
+	case workerCommandWriteFile:
+		if _, err := checkpoint.WriteSessionFileFromReader(command.root, command.path, os.Stdin, command.length, command.overwrite); err != nil {
+			return exportError(err)
+		}
+		return nil
+	case workerCommandPushBranch:
+		pushed, failure := checkpoint.PushBranch(checkpoint.SystemGit{}, command.repository, command.branch)
+		if failure != nil {
+			return pushError(failure)
+		}
+		return printJSONLine(pushed)
+	}
+	return fmt.Errorf("unhandled worker command %T", args.command)
+}
+
+// flushStdout flushes a buffered standard output.
+func flushStdout(stdout *bufio.Writer) error {
+	if err := stdout.Flush(); err != nil {
+		return fmt.Errorf("flush standard output: %w", err)
+	}
+	return nil
 }
 
 // exportRefused is a precondition an export could not meet, carried out of
@@ -595,5 +1022,32 @@ func printJSONLine(value any) error {
 // serdeJSON is serde_json::to_vec: encoding/json's output without its HTML
 // escapes (`<`, `>`, `&`, U+2028 and U+2029 stay as written).
 func serdeJSON(value any) ([]byte, error) {
-	panic("unported: mj-worker-bin/src/main.rs serde_json::to_string")
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	encoded := bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))
+	// encoding/json always escapes U+2028 and U+2029; serde_json writes
+	// them as they are. Every backslash in the output starts an escape, so
+	// walking escape by escape finds exactly those two.
+	if !bytes.Contains(encoded, []byte(`\u202`)) {
+		return encoded, nil
+	}
+	out := make([]byte, 0, len(encoded))
+	for index := 0; index < len(encoded); index++ {
+		if encoded[index] != '\\' || index+1 >= len(encoded) {
+			out = append(out, encoded[index])
+			continue
+		}
+		if rest := encoded[index+1:]; bytes.HasPrefix(rest, []byte("u2028")) || bytes.HasPrefix(rest, []byte("u2029")) {
+			out = utf8.AppendRune(out, rune(0x2020+int(rest[4]-'0')))
+			index += 5
+			continue
+		}
+		out = append(out, encoded[index], encoded[index+1])
+		index++
+	}
+	return out, nil
 }

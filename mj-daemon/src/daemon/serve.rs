@@ -33,19 +33,15 @@ pub(super) fn spawn_phone_server(
     config: mj_core::config::PhoneConfig,
     cancellation: CancellationToken,
     state: Arc<RuntimeState>,
-    worker: SessionManagerControl,
-    services: super::delegation::Services,
+    mut options: crate::server::ServerOptions,
 ) -> tokio::task::JoinHandle<()> {
     state.set_phone_status(WebViewerStatus::Starting);
+    // The API runtime owns shared resources used by both listeners. A
+    // shutdown of the phone listener must not cancel that runtime.
+    options.shutdown = options.shutdown.child_token();
     mj_core::runtime::spawn(async move {
         let push = crate::daemon::push_delivery::run(state.clone());
-        let server = crate::server_runtime::run_server(
-            (&config).into(),
-            cancellation.clone(),
-            worker,
-            state.clone(),
-            services,
-        );
+        let server = crate::server_runtime::serve_phone((&config).into(), options, state.clone());
         tokio::pin!(server);
         tokio::pin!(push);
         let result = tokio::select! {

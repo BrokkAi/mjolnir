@@ -1252,15 +1252,20 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
         }
+        RuntimeEvent::GuardianReviewed { review } => {
+            relay.record_observation(RelayObservation::GuardianReviewed { review })?;
+        }
         RuntimeEvent::ElicitationResolved {
             elicitation_id,
             action,
             reply,
+            answers,
         } => {
             relay.record_observation(RelayObservation::ElicitationResolved {
                 elicitation_id,
                 action,
                 reply,
+                answers,
             })?;
         }
         RuntimeEvent::PromptFinished {
