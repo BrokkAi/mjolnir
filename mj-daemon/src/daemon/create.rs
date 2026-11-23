@@ -532,7 +532,7 @@ impl RuntimeState {
                 }
                 if let Some(reason) = steps
                     .iter()
-                    .filter(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
+                    .filter(|step| step.phase == "failed")
                     .find_map(|step| step.error.as_deref())
                 {
                     self.report_reviewer_startup_rejection(&relation.child_session_id, reason);

@@ -1130,9 +1130,7 @@ impl RuntimeState {
                 {
                     return;
                 }
-                // The queue is still registered, so this round ended in a
-                // failure. A step that keeps failing is abandoned rather than
-                // retried forever: a parent waiting on a child gets an answer.
+                // The queue is still registered because this round failed.
                 failed_rounds += 1;
                 if failed_rounds >= STARTUP_STEP_ATTEMPTS {
                     runtime.abandon_startup_step(&drain_session).await;
@@ -1234,22 +1232,7 @@ impl RuntimeState {
             // Initial worker input is already in the worker's FIFO. This
             // daemon owns only its durable receipt monitoring, including after
             // a fast first turn has finished and the child has parked.
-            let worker_initial = delivers
-                && self
-                    .owner()
-                    .controller()
-                    .state
-                    .subagents
-                    .get(session_id)
-                    .is_some_and(|child| {
-                        step.group_id.as_deref()
-                            == Some(
-                                mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
-                                    &child.request_key,
-                                )
-                                .as_str(),
-                            )
-                    });
+            let worker_initial = delivers && self.is_seeded_child_startup(session_id, &step);
             let ready = if !delivers || worker_initial {
                 None
             } else {
@@ -1417,28 +1400,25 @@ impl RuntimeState {
                 };
                 let ordinal = match outcome {
                     Ok(ordinal) => ordinal,
-                    Err(error) => {
+                    Err(error)
                         if error.is::<super::startup_followup::StartupRejected>()
-                            && let Some(group_id) = step.group_id.clone()
-                        {
-                            let id = session_id.to_owned();
-                            let reason = format!("{error:#}");
-                            let persisted = reason.clone();
-                            match blocking(move || {
-                                mj_controller::database::fail_startup_group(
-                                    &id, &group_id, &persisted,
-                                )
-                            })
-                            .await
-                            {
-                                // Re-read the durable rejection so the same
-                                // path settles it after daemon replacement.
-                                Ok(()) => continue,
-                                Err(persistence) => {
-                                    tracing::error!(session_id, %persistence, "could not persist startup rejection");
-                                }
+                            && step.group_id.is_some() =>
+                    {
+                        let reason = format!("{error:#}");
+                        let group_id = step.group_id.as_deref().expect("grouped startup");
+                        match self.reject_startup(session_id, group_id, &reason).await {
+                            Ok(true) => continue,
+                            // Proceed to observing the seeded brief without resubmitting it.
+                            Ok(false) if worker_initial => None,
+                            Ok(false) => return,
+                            Err(error) => {
+                                self.fail_startup_queue(session_id, &format!("{error:#}"))
+                                    .await;
+                                return;
                             }
                         }
+                    }
+                    Err(error) => {
                         let refused = error
                             .downcast_ref::<mj_client::session::Refused>()
                             .is_some();
@@ -1491,10 +1471,25 @@ impl RuntimeState {
                 }
             }
             if step.phase == "rejecting"
-                && step.group_id.is_some()
-                && let Some(reason) = &step.error
+                && let Some(group_id) = step.group_id.as_deref()
             {
-                self.reject_startup(session_id, reason).await;
+                let reason = step.error.as_deref().unwrap_or("session startup failed");
+                match self.reject_startup(session_id, group_id, reason).await {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        self.fail_startup_queue(
+                            session_id,
+                            "child worker already accepted work; persisted startup rejection held",
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(error) => {
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
+                            .await;
+                        return;
+                    }
+                }
             }
             let settled_id = command_id;
             let final_phase = match step.phase.as_str() {
@@ -1542,7 +1537,7 @@ impl RuntimeState {
                 self.startup_configuration_context(session_id, key, value)
             )))
         };
-        let mut deadline = None;
+        let mut backoff = Duration::from_millis(100);
         loop {
             let id = session_id.to_owned();
             let command = command_id.to_owned();
@@ -1583,40 +1578,16 @@ impl RuntimeState {
                 }
                 _ => unreachable!("validated worker input"),
             }
-            match self.session_state(session_id) {
-                Some(SessionState::Running | SessionState::Disconnected) => {
-                    // Provisioning marks Running only after native readiness.
-                    // Bound receipt delivery even after a lost connection,
-                    // without timing downloads or other provisioning work.
-                    deadline.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + Duration::from_secs(60)
-                    });
-                }
-                Some(
-                    SessionState::Provisioning
-                    | SessionState::StartupCleanup
-                    | SessionState::Checkpointing,
-                ) => {}
-                state => {
-                    let reason = self
-                        .owner()
-                        .controller()
-                        .state
-                        .sessions
-                        .get(session_id)
-                        .and_then(|record| record.last_error.clone())
-                        .unwrap_or_else(|| {
-                            format!("session is {state:?} before its worker receipt")
-                        });
-                    return Err(failure(reason));
-                }
+            let state = self.session_state(session_id);
+            if super::subagent_park::startup_worker_is_terminal(state) {
+                let reason = self
+                    .session_record(session_id)
+                    .and_then(|record| record.last_error)
+                    .unwrap_or_else(|| format!("session is {state:?} before its worker receipt"));
+                return Err(failure(reason));
             }
-            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-                return Err(failure(
-                    "the worker did not complete this initial input within 60 seconds".into(),
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(1));
         }
     }
 
@@ -2006,6 +1977,27 @@ impl RuntimeState {
         Ok(ordinal)
     }
 
+    fn is_seeded_child_startup(
+        &self,
+        session_id: &str,
+        step: &mj_controller::database::StartupDelivery,
+    ) -> bool {
+        self.owner()
+            .controller()
+            .state
+            .subagents
+            .get(session_id)
+            .is_some_and(|child| {
+                step.group_id.as_deref()
+                    == Some(
+                        mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                            &child.request_key,
+                        )
+                        .as_str(),
+                    )
+            })
+    }
+
     /// A step that failed `STARTUP_STEP_ATTEMPTS` rounds in a row is given
     /// up: an API group fails so its client's wait answers, a user's prompt
     /// goes back to the draft, and anything else is marked failed. The drain
@@ -2024,6 +2016,10 @@ impl RuntimeState {
                 return;
             }
         };
+        // A retry budget cannot establish the outcome of worker-owned input.
+        if self.is_seeded_child_startup(session_id, &step) {
+            return;
+        }
         let reason = format!(
             "startup delivery gave up after {STARTUP_STEP_ATTEMPTS} attempts: {}",
             self.startup_prompts
@@ -2033,17 +2029,10 @@ impl RuntimeState {
                 .and_then(|queue| queue.last_error.clone())
                 .unwrap_or_else(|| "delivery kept failing".to_owned())
         );
-        if let Some(group_id) = step.group_id.clone() {
-            let id = session_id.to_owned();
-            let persisted = reason.clone();
-            if let Err(error) = blocking(move || {
-                mj_controller::database::fail_startup_group(&id, &group_id, &persisted)
-            })
-            .await
-            {
+        if let Some(group_id) = step.group_id {
+            if let Err(error) = self.reject_startup(session_id, &group_id, &reason).await {
                 tracing::error!(session_id, %error, "could not fail an abandoned startup group");
             }
-            self.reject_startup(session_id, &reason).await;
             return;
         }
         let decoded: Option<StartupStep> = serde_json::from_str(&step.step_json).ok();
@@ -2110,40 +2099,64 @@ impl RuntimeState {
         self.push_notice(session_id, reason);
     }
 
-    /// An API startup group failed for good: its step was refused, or kept
-    /// failing until it was given up. Stop a sub-agent whose first prompt
-    /// cannot run and record the failure for `wait` and `list_agents`.
-    /// The worker can already have journaled the prompt in its initial FIFO.
-    async fn reject_startup(self: &Arc<Self>, session_id: &str, reason: &str) {
-        tracing::warn!(session_id, reason, "session startup failed");
-        self.push_notice(session_id, format!("Session startup failed: {reason}"));
-        let create = self
-            .owner()
-            .lifecycle
-            .get(session_id)
-            .filter(|active| active.kind == LifecycleKind::Create && active.is_running())
-            .map(|active| active.result.clone());
-        if let Some(create) = create
-            && Self::wait_lifecycle_result(create).await.is_err()
-        {
-            // Create owns startup teardown and records the failure.
-            return;
-        }
-        self.fail_subagent_start(session_id, reason).await;
-        self.report_reviewer_startup_rejection(session_id, reason);
-    }
-
-    pub(super) fn report_reviewer_startup_rejection(&self, session_id: &str, reason: &str) {
-        if self
-            .owner()
+    fn is_reviewer_child(&self, session_id: &str) -> bool {
+        self.owner()
             .controller()
             .state
             .subagents
             .get(session_id)
             .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Reviewer)
-        {
-            // A rejected initial command ends the role even when worker
-            // cleanup had to stop short (for example, a disconnected worker).
+    }
+
+    pub(super) async fn reject_startup(
+        self: &Arc<Self>,
+        session_id: &str,
+        group_id: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let is_initial_child_startup = self
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .get(session_id)
+            .is_some_and(|child| {
+                child.kind == mj_core::subagent::SubagentKind::Reviewer
+                    || group_id
+                        == mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                            &child.request_key,
+                        )
+            });
+        if is_initial_child_startup {
+            let create = self
+                .owner()
+                .lifecycle
+                .get(session_id)
+                .filter(|active| active.kind == LifecycleKind::Create && active.is_running())
+                .map(|active| active.result.clone());
+            if let Some(create) = create {
+                let _ = Self::wait_lifecycle_result(create).await;
+            }
+            if !self
+                .fail_subagent_start(session_id, group_id, reason)
+                .await?
+            {
+                return Ok(false);
+            }
+        } else {
+            let id = session_id.to_owned();
+            let group = group_id.to_owned();
+            let cause = reason.to_owned();
+            blocking(move || mj_controller::database::fail_startup_group(&id, &group, &cause))
+                .await?;
+        }
+        tracing::warn!(session_id, reason, "session startup failed");
+        self.push_notice(session_id, format!("Session startup failed: {reason}"));
+        Ok(true)
+    }
+
+    pub(super) fn report_reviewer_startup_rejection(&self, session_id: &str, reason: &str) {
+        if self.is_reviewer_child(session_id) {
             self.review_host().child_ended(
                 session_id.to_owned(),
                 format!("the reviewer's startup failed: {reason}"),

@@ -633,9 +633,10 @@ fn migrate_zcode_harness_kind(connection: &Connection) -> Result<()> {
             }
         }
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !super::schema::has_foreign_key_violation_for_tables(
+                &transaction,
+                &["sessions", "hidden_native_sessions"],
+            )?,
             "foreign key violation in ZCode migration"
         );
         transaction.execute_batch(
@@ -981,8 +982,7 @@ fn migrate_destroying_session_state(connection: &Connection) -> Result<()> {
     let foreign_keys = connection.execute_batch("PRAGMA foreign_keys = ON;");
     migration.context("migrate durable destroying session state")?;
     foreign_keys.context("restore foreign key enforcement after schema migration")?;
-    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
-    if statement.exists([])? {
+    if super::schema::has_foreign_key_violation_for_tables(connection, &["sessions"])? {
         bail!("foreign key violation after migrating durable destroying session state");
     }
     Ok(())
@@ -1046,8 +1046,7 @@ fn migrate_grok_harness_kind(connection: &Connection) -> Result<()> {
     let foreign_keys = connection.execute_batch("PRAGMA foreign_keys = ON;");
     migration.context("migrate sessions table for the Grok Build harness")?;
     foreign_keys.context("restore foreign key enforcement after schema migration")?;
-    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
-    if statement.exists([])? {
+    if super::schema::has_foreign_key_violation_for_tables(connection, &["sessions"])? {
         bail!("foreign key violation after migrating the sessions harness list");
     }
     Ok(())
@@ -1124,8 +1123,7 @@ fn migrate_stopped_session_state(connection: &Connection) -> Result<()> {
     let foreign_keys = connection.execute_batch("PRAGMA foreign_keys = ON;");
     migration.context("migrate sessions table for the stopped session state")?;
     foreign_keys.context("restore foreign key enforcement after schema migration")?;
-    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
-    if statement.exists([])? {
+    if super::schema::has_foreign_key_violation_for_tables(connection, &["sessions"])? {
         bail!("foreign key violation after migrating the stopped session state");
     }
     Ok(())
@@ -1172,9 +1170,10 @@ fn migrate_muse_harness_kind(connection: &Connection) -> Result<()> {
             }
         }
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !super::schema::has_foreign_key_violation_for_tables(
+                &transaction,
+                &["sessions", "hidden_native_sessions"],
+            )?,
             "foreign key violation in Muse migration"
         );
         transaction.execute_batch("INSERT INTO schema_migrations(version, applied_at) VALUES (27, strftime('%Y-%m-%dT%H:%M:%fZ','now')); PRAGMA user_version = 27;")?;
@@ -1244,8 +1243,10 @@ fn migrate_deepseek_harness_kind(connection: &Connection) -> Result<()> {
     let foreign_keys = connection.execute_batch("PRAGMA foreign_keys = ON;");
     migration.context("migrate sessions table for DeepSeek Harness")?;
     foreign_keys.context("restore foreign key enforcement after schema migration")?;
-    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
-    if statement.exists([])? {
+    if super::schema::has_foreign_key_violation_for_tables(
+        connection,
+        &["sessions", "hidden_native_sessions"],
+    )? {
         bail!("foreign key violation after migrating the DeepSeek Harness list");
     }
     Ok(())

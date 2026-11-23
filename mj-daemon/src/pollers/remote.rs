@@ -753,7 +753,9 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
             let result = async {
                 mj_client::daemon::connect_existing()
                     .await?
-                    .stop_background_task(session_id, background_task_id)
+                    .http()
+                    .await?
+                    .stop_background_task(&session_id, background_task_id)
                     .await
             }
             .await

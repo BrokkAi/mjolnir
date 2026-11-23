@@ -216,8 +216,18 @@ class LiveModels:
 
                 def assess(errors):
                     turn_prompt = partial(prompt, errors=errors) if errors else prompt
-                    output, record = self.run_turn(
+                    output, record, fetch_errors = self.run_turn(
                         runner, sid, snapshot, directory, model, profile, files, turn_prompt, repair=bool(errors))
+                    if fetch_errors:
+                        diagnostics = [
+                            f"output.json was not written ({'; '.join(fetch_errors)}); "
+                            "enumerate every qualifying in-scope row and write the complete JSON object to output.json"
+                        ]
+                        keys = {("answer-capture",)}
+                        stage = "answer-capture"
+                        if not restricted:
+                            driver.save(directory / f"turn-{record['turn']}-validation.json", {"errors": diagnostics})
+                        return None, diagnostics, keys, stage
                     output_path.write_bytes(output)
                     if not restricted:
                         (directory / f"turn-{record['turn']}-output.json").write_bytes(output)
@@ -304,9 +314,15 @@ class LiveModels:
         if usage.get("session_id") != sid:
             raise ValueError("usage belongs to a different fidelity session")
         resolved = model_usage(usage, command, turn, model, self.claude_version, directory)
-        output = runner.command("fetch", "--session", sid, "--path", f"{scratch}/output.json", "--stdout")
+        if restricted:
+            output = runner.command("fetch", "--session", sid, "--path", f"{scratch}/output.json", "--stdout")
+            fetch_errors = []
+        else:
+            output, fetch_errors = runner.capture_answer(
+                sid, f"{scratch}/output.json", directory / f"turn-{turn}-capture"
+            )
         record = {"session": sid, "turn": turn, "model": model, "version": resolved, "effort": EFFORT}
-        return output, record
+        return output, record, fetch_errors
 
     def enumerate_rows(self, repo, commit, text):
         key = text.split()[0][1:]

@@ -1195,12 +1195,12 @@ async fn run_command(
             acknowledge_writable_layer_loss,
             cancel,
         }) => {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             if cancel {
-                daemon.cancel_container_upgrade(session).await?;
+                daemon.cancel_container_upgrade(&session).await?;
                 println!("cancelled pending container upgrade");
             } else {
-                let preview = daemon.preview_container_upgrade(session).await?;
+                let preview = daemon.preview_container_upgrade(&session).await?;
                 println!(
                     "Current image: {} ({})\nTarget image: {} ({})\n{}",
                     preview.current_image,
@@ -1211,7 +1211,7 @@ async fn run_command(
                 );
                 if acknowledge_writable_layer_loss {
                     daemon
-                        .upgrade_container(mj_core::state::ContainerUpgradeRequest {
+                        .upgrade_container(&mj_core::state::ContainerUpgradeRequest {
                             selection: preview,
                             acknowledge_writable_layer_loss: true,
                         })
@@ -1561,7 +1561,9 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             bail!("container settings replacement cancelled");
         }
         daemon
-            .upgrade_container(mj_core::state::ContainerUpgradeRequest {
+            .http()
+            .await?
+            .upgrade_container(&mj_core::state::ContainerUpgradeRequest {
                 selection: *preview,
                 acknowledge_writable_layer_loss: true,
             })
