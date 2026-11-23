@@ -357,7 +357,8 @@ func (d *SubagentDraft) refreshCreate(profile string, config *core.Config, remem
 		d.profileID = &id
 		d.chosenPolicy = nil
 		d.lastMjolnirPolicy = nil
-		d.policy = core.SubagentPolicy{}
+		// SubagentPolicy's Rust default is Native.
+		d.policy = core.SubagentPolicy{Mode: core.SubagentPolicyNative}
 		if remembered != nil {
 			d.policy = *remembered
 		}
