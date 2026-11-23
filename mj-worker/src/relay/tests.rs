@@ -8896,6 +8896,86 @@ fn mailbox_wake_waits_for_checkpoint_close_and_cancellation() {
 }
 
 #[test]
+fn held_claude_interrupt_remains_valid_across_the_prompt_boundary() {
+    use super::background::{AirTaskEntry, AirTaskState};
+
+    for (target, finish_first) in [
+        (
+            TurnInterruptTarget::ActivePrompt {
+                command_id: "original-prompt".into(),
+            },
+            false,
+        ),
+        (
+            TurnInterruptTarget::QueuedRestart {
+                command_id: mj_core::continuation::restart_continuation_id("original"),
+            },
+            true,
+        ),
+        (
+            TurnInterruptTarget::CapacityRetry {
+                command_id: CapacityRetry::new(1, 7, 0).command_id,
+            },
+            true,
+        ),
+    ] {
+        let command_id = match &target {
+            TurnInterruptTarget::ActivePrompt { command_id }
+            | TurnInterruptTarget::QueuedRestart { command_id }
+            | TurnInterruptTarget::CapacityRetry { command_id } => command_id.clone(),
+            _ => unreachable!(),
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        submit_relay(&mut relay, &command_id, prompt("first task"));
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1, "{command_id} should be running");
+        assert_eq!(claimed[0].command_id, command_id);
+        submit_relay(&mut relay, "queued-followup", prompt("next task"));
+        relay.air_tasks.insert(
+            "held-native".into(),
+            AirTaskEntry {
+                session_id: "native".into(),
+                task_id: "held-native".into(),
+                state: AirTaskState::HeldTurn,
+            },
+        );
+        assert!(relay.has_held_claude_turn());
+        let controls = relay.operational_state().turn_controls.unwrap();
+        let interrupt = controls.interrupt.unwrap();
+        assert_eq!(interrupt, RelayCommand::CancelTurn);
+        assert_eq!(controls.primary.unwrap().command, interrupt);
+        assert_eq!(
+            relay
+                .submit_command("stale-interrupt", RelayCommand::CancelTurnTarget { target })
+                .unwrap()
+                .unwrap_err()
+                .message,
+            "Turn or queue changed; refresh the available controls"
+        );
+
+        if finish_first {
+            // Completing the prompt promotes the held native turn.
+            finish_prompt(&mut relay, &command_id);
+            assert!(!relay.has_held_claude_turn());
+            assert!(relay.snapshot.harness_turn.unwrap().autonomous);
+        }
+        submit_relay(&mut relay, "interrupt", interrupt);
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "interrupt");
+        assert_eq!(claimed[0].command, RelayCommand::CancelTurn);
+        assert_eq!(queued_command_ids(&relay), ["queued-followup"]);
+    }
+}
+
+#[test]
 fn interrupt_queued_recovery_follows_only_the_same_promoted_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();

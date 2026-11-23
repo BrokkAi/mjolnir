@@ -10150,8 +10150,9 @@ function bindTurnControlButton(target, binding) {
     if (!session) return;
     const menu = target.closest('details');
     if (menu) menu.open = false;
-    if (owned.command) await submitTurnControl(session, owned.command);
-    else if (owned.legacy) await sendAction({ action: 'interrupt-turn', session_id: owned.sessionId });
+    if (owned.command?.type === 'cancel_turn' || (!owned.command && owned.legacy)) {
+      await sendAction({ action: 'interrupt-turn', session_id: owned.sessionId });
+    } else if (owned.command) await submitTurnControl(session, owned.command);
   };
 }
 
@@ -10171,7 +10172,7 @@ function renderTurnControl(session) {
   bindTurnControlButton(cancelTurnButton, { sessionId: session.id, command: control.command, legacy: !session.turn_controls });
   const actions = document.querySelector('#turn-actions');
   const interrupt = document.querySelector('#interrupt-turn');
-  actions.hidden = held || !control.interrupt || ['cancel_turn_for', 'cancel_turn_target'].includes(control.command?.type);
+  actions.hidden = held || !control.interrupt || ['cancel_turn', 'cancel_turn_for', 'cancel_turn_target'].includes(control.command?.type);
   interrupt.disabled = pendingTurnControls.has(session.id);
   bindTurnControlButton(interrupt, { sessionId: session.id, command: control.interrupt });
   let panel = document.querySelector('#turn-control-status');

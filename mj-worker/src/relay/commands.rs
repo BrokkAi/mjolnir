@@ -192,6 +192,16 @@ impl DurableRelay {
             })
     }
 
+    fn resolve_turn_interrupt_command(&self) -> Option<RelayCommand> {
+        let target = self.resolve_turn_interrupt_target()?;
+        if matches!(target, TurnInterruptTarget::ActivePrompt { .. }) && self.has_held_claude_turn()
+        {
+            // Claude has finished the prompt in ACP and started an autonomous turn.
+            return Some(RelayCommand::CancelTurn);
+        }
+        Some(RelayCommand::CancelTurnTarget { target })
+    }
+
     /// One serialized owner chooses the actions we publish and admit.
     pub(super) fn turn_controls(&self) -> TurnControls {
         let mut controls = TurnControls {
@@ -200,7 +210,7 @@ impl DurableRelay {
             interrupt: None,
             message: None,
         };
-        let Some(target) = self.resolve_turn_interrupt_target() else {
+        let Some(interrupt) = self.resolve_turn_interrupt_command() else {
             if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
                 controls.message = Some("A checkpoint is in progress.".into());
             } else if self.turn_cancellation_pending()
@@ -219,7 +229,6 @@ impl DurableRelay {
             }
             return controls;
         };
-        let interrupt = RelayCommand::CancelTurnTarget { target };
         controls.interrupt = Some(interrupt.clone());
         if let Some(steering) = self.snapshot.steering.as_ref().filter(|s| s.holds_queue()) {
             controls.status = if steering.status == SteeringStatus::Unconfirmed {
@@ -337,7 +346,9 @@ impl DurableRelay {
                      Some(TurnInterruptTarget::ActivePrompt { command_id: active }))
                     if command_id == active && mj_core::relay::is_capacity_retry_command(command_id));
 
-                if current.as_ref() != Some(target) && !promoted {
+                let held_claude_turn = matches!(current, Some(TurnInterruptTarget::ActivePrompt { .. }))
+                    && self.has_held_claude_turn();
+                if held_claude_turn || (current.as_ref() != Some(target) && !promoted) {
                     return Err("Turn or queue changed; refresh the available controls".into());
                 }
             }

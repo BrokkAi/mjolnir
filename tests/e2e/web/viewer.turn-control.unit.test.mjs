@@ -51,3 +51,34 @@ test('exact targets stay bound without an active prompt', () => {
   }
   assert.equal(state({ capabilities: { interrupt_turn: false }, targeted_turn_control_supported: true, active_prompt_id: 'next-prompt' }).interrupt, null);
 });
+
+test('the held Claude interrupt uses the main button and the interrupt-turn action', async () => {
+  const command = { type: 'cancel_turn' };
+  const session = { id: 'claude', active_prompt_id: 'finished-prompt',
+    turn_controls: { status: 'ready', primary: { kind: 'interrupt', command }, interrupt: command } };
+  const button = () => ({ addEventListener() {}, closest: () => null });
+  const visibility = new Map();
+  const cancelTurnButton = { ...button(), classList: { toggle: (name, hidden) => visibility.set(name, Boolean(hidden)) } };
+  const menu = {};
+  const elements = { '#turn-actions': menu, '#interrupt-turn': button(), '#turn-control-status': { replaceChildren() {} } };
+  const sent = [];
+  const viewer = vm.createContext({
+    currentSession: session.id,
+    sessionById: () => session,
+    cancelTurnButton,
+    isLoadingConversationSession: () => false,
+    document: { querySelector: selector => elements[selector] },
+    sendAction: async action => sent.push({ ...action }),
+    submitTurnControl: async () => assert.fail('raw CancelTurn must use interrupt-turn'),
+  });
+  const declarations = source.indexOf('const pendingTurnControls =');
+  const bind = source.indexOf('function bindTurnControlButton');
+  const renderEnd = source.indexOf('function renderConversationHeader', bind);
+  vm.runInContext(source.slice(declarations, end) + '\n' + source.slice(bind, renderEnd), viewer);
+
+  viewer.renderTurnControl(session);
+  assert.equal(visibility.get('hidden'), false);
+  assert.equal(menu.hidden, true);
+  await cancelTurnButton.onclick();
+  assert.deepEqual(sent, [{ action: 'interrupt-turn', session_id: session.id }]);
+});

@@ -464,13 +464,8 @@ async fn an_autonomous_spawn_waits_for_the_prompt_boundary_unless_it_already_end
             );
             assert!(relay.claim_pending_commands(true).unwrap().is_empty());
             let controls = relay.operational_state().turn_controls.unwrap();
-            let interrupt = RelayCommand::CancelTurnTarget {
-                target: mj_core::relay::TurnInterruptTarget::ActivePrompt {
-                    command_id: "prompt-1".into(),
-                },
-            };
-            assert_eq!(controls.interrupt, Some(interrupt.clone()));
-            assert_eq!(controls.primary.unwrap().command, interrupt);
+            assert_eq!(controls.interrupt, Some(RelayCommand::CancelTurn));
+            assert_eq!(controls.primary.unwrap().command, RelayCommand::CancelTurn);
         }
         peer.probe
             .result(&prompt, json!({"stopReason":"end_turn"}))
