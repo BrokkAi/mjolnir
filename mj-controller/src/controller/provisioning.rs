@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 
+use mj_checkpoint::archive::ArchiveManifest;
 use mj_core::config::{TargetTemplate, atomic_write, data_dir};
 use mj_core::state::{SessionState, State, TargetLocator};
 use mj_session_runtime::host_git_config::controller_git_settings;
@@ -25,6 +26,12 @@ use super::readiness::{connect_started_worker, wait_for_native_session_in_stage}
 use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now};
 use crate::launch_timing::LaunchPhaseTimer;
+
+#[derive(Clone, Copy)]
+pub(super) enum RepositorySeed<'a> {
+    ConfiguredBundle,
+    Restore(Option<&'a ArchiveManifest>),
+}
 
 /// How many sub-agent children may be brought up inside one container at the
 /// same time.
@@ -282,7 +289,7 @@ impl Controller {
                 executor,
                 github_token.as_deref(),
                 ProvisioningFailureDisposition::Preserve,
-                None,
+                RepositorySeed::ConfiguredBundle,
                 remember_launch_choices,
                 &|| false,
             )
@@ -629,7 +636,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
-        move_manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
+        repository_seed: RepositorySeed<'_>,
     ) -> Result<()> {
         let repositories = self
             .provision_session_target_with_failure_disposition(
@@ -637,7 +644,7 @@ impl Controller {
                 executor,
                 github_token,
                 failure_disposition,
-                move_manifest,
+                repository_seed,
                 // Resume is the only production caller; it reopens a
                 // directory the user already chose, so it keeps the history.
                 true,
@@ -661,7 +668,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
-        move_manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
+        repository_seed: RepositorySeed<'_>,
         remember_launch_choices: bool,
         interrupted: &(dyn Fn() -> bool + Sync),
     ) -> Result<RepositorySetup> {
@@ -767,7 +774,7 @@ impl Controller {
             }
             let mut bundle = if project_directory.is_some() {
                 None
-            } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
+            } else if let RepositorySeed::Restore(move_manifest) = repository_seed {
                 // Move's verified snapshot owns the checkout being restored.
                 // The session's ordinary checkpoint may predate this checkout.
                 let history_cutoff_origin_delta =
