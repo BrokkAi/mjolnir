@@ -553,7 +553,7 @@ impl DashboardState {
             return None;
         }
         match key.code {
-            KeyCode::Esc if self.sessions_filter.is_some() => {
+            KeyCode::Esc if self.sessions_filter.is_some() && self.child_workspace.is_none() => {
                 self.clear_sessions_filter();
                 return Some(());
             }
