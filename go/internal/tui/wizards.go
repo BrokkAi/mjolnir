@@ -9,7 +9,12 @@
 package tui
 
 import (
+	"cmp"
+	"fmt"
+	"maps"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -220,7 +225,45 @@ func (ProfilePickerItemProvider) isProfilePickerItem() {}
 func (ProfilePickerItemProfile) isProfilePickerItem()  {}
 
 func newWizardProfileItems(dashboard *DashboardState, expanded map[core.QuotaProvider]struct{}) []ProfilePickerItem {
-	panic("unported: mj-tui/src/wizards.rs new_wizard_profile_items")
+	hasAuto := dashboard.newWizardHasAutoPrimary()
+	var items []ProfilePickerItem
+	if hasAuto {
+		items = append(items, ProfilePickerItemAuto{})
+	}
+	type member struct {
+		profileIndex int
+		id           string
+	}
+	var providers []core.QuotaProvider
+	groups := map[core.QuotaProvider][]member{}
+	index := 0
+	for id, profile := range dashboard.offeredProfiles() {
+		provider := profileProvider(id, &profile, &dashboard.quotaProviders)
+		if _, seen := groups[provider]; !seen {
+			providers = append(providers, provider)
+		}
+		groups[provider] = append(groups[provider], member{profileIndex: index + wizardBoolIndex(hasAuto), id: id})
+		index++
+	}
+	// Rust walks the groups as a BTreeMap, in provider order.
+	slices.SortFunc(providers, compareQuotaProviders)
+	for _, provider := range providers {
+		items = append(items, ProfilePickerItemProvider{Provider: provider})
+		if _, open := expanded[provider]; open {
+			for _, member := range groups[provider] {
+				items = append(items, ProfilePickerItemProfile{ProfileIndex: member.profileIndex, ID: member.id})
+			}
+		}
+	}
+	return items
+}
+
+// wizardBoolIndex is Rust's `usize::from(bool)`.
+func wizardBoolIndex(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (w *NewWizard) toggleProvider(provider core.QuotaProvider) {
@@ -237,7 +280,22 @@ func (w *NewWizard) toggleProvider(provider core.QuotaProvider) {
 // newWizardProviderForProfile is NewWizard::provider_for_profile: the
 // provider of the profile row at profileIndex, nil for the Auto row.
 func newWizardProviderForProfile(dashboard *DashboardState, profileIndex int) core.QuotaProvider {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::provider_for_profile")
+	hasAuto := dashboard.newWizardHasAutoPrimary()
+	if hasAuto && profileIndex == 0 {
+		return nil
+	}
+	offeredIndex := profileIndex - wizardBoolIndex(hasAuto)
+	if offeredIndex < 0 {
+		return nil
+	}
+	index := 0
+	for id, profile := range dashboard.offeredProfiles() {
+		if index == offeredIndex {
+			return profileProvider(id, &profile, &dashboard.quotaProviders)
+		}
+		index++
+	}
+	return nil
 }
 
 // effectiveFocusedProvider is the focused provider header if it still
@@ -245,7 +303,16 @@ func newWizardProviderForProfile(dashboard *DashboardState, profileIndex int) co
 // replace a `(resolving)` group with the resolved provider; clearing a stale
 // focus keeps the picker in sync.
 func (w *NewWizard) effectiveFocusedProvider(dashboard *DashboardState) core.QuotaProvider {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::effective_focused_provider")
+	focused := w.focusedProvider
+	if focused == nil {
+		return nil
+	}
+	for id, profile := range dashboard.offeredProfiles() {
+		if profileProvider(id, &profile, &dashboard.quotaProviders) == focused {
+			return focused
+		}
+	}
+	return nil
 }
 
 // newWizardIsResolvingProvider is NewWizard::is_resolving_provider.
@@ -269,7 +336,10 @@ func (w *NewWizard) selectedProvider(dashboard *DashboardState) core.QuotaProvid
 }
 
 func (w *NewWizard) selectedProfileID(dashboard *DashboardState) (string, bool) {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::selected_profile_id")
+	if w.selectedProvider(dashboard) != nil {
+		return "", true
+	}
+	return dashboard.newWizardProfileID(w.profile)
 }
 
 func (w *NewWizard) selectedProfileLabel(dashboard *DashboardState) string {
@@ -284,12 +354,111 @@ func (w *NewWizard) selectedProfileLabel(dashboard *DashboardState) string {
 // provider header, its current provider is expanded so the selected profile
 // is never hidden after asynchronous provider resolution.
 func (w *NewWizard) effectiveExpandedProviders(dashboard *DashboardState) map[core.QuotaProvider]struct{} {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::effective_expanded_providers")
+	expanded := maps.Clone(w.expandedProviders)
+	if expanded == nil {
+		expanded = map[core.QuotaProvider]struct{}{}
+	}
+	if w.effectiveFocusedProvider(dashboard) == nil {
+		if provider := newWizardProviderForProfile(dashboard, w.profile); provider != nil {
+			expanded[provider] = struct{}{}
+		}
+	}
+	return expanded
 }
 
 // equal is Rust's PartialEq for NewWizard: every field but the form.
 func (w *NewWizard) equal(other *NewWizard) bool {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::eq")
+	return wizardSubagentDraftsEqual(w.subagents, other.subagents) &&
+		wizardOptionalEqual(w.worktreeOptions, other.worktreeOptions) &&
+		w.createManagedWorktree == other.createManagedWorktree &&
+		w.workspaceID == other.workspaceID &&
+		w.step == other.step &&
+		w.profile == other.profile &&
+		maps.Equal(w.expandedProviders, other.expandedProviders) &&
+		w.focusedProvider == other.focusedProvider &&
+		w.bundle == other.bundle &&
+		w.target == other.target &&
+		w.profileStepSkipped == other.profileStepSkipped &&
+		w.targetStepSkipped == other.targetStepSkipped &&
+		w.mounts.equal(&other.mounts) &&
+		w.projectPicker.equal(other.projectPicker) &&
+		w.newBundleSelected == other.newBundleSelected &&
+		slices.Equal(w.newBundleRepositories, other.newBundleRepositories) &&
+		w.newBundleSource.Equal(&other.newBundleSource) &&
+		w.bundleCreationInFlight == other.bundleCreationInFlight &&
+		w.bundleRemovalInFlight == other.bundleRemovalInFlight &&
+		wizardOptionalStringsEqual(w.bundleRemovalOutcome, other.bundleRemovalOutcome) &&
+		w.projectDirectory.Equal(&other.projectDirectory) &&
+		wizardOptionalStringsEqual(w.projectDirectoryError, other.projectDirectoryError) &&
+		slices.Equal(w.projectHistory, other.projectHistory) &&
+		w.projectHistoryIndex == other.projectHistoryIndex &&
+		w.resourceAllocation == other.resourceAllocation &&
+		w.rememberContainerSize == other.rememberContainerSize &&
+		wizardOptionalStringsEqual(w.sizingError, other.sizingError) &&
+		w.resourceEditor.Equal(&other.resourceEditor) &&
+		wizardRemoteRepositoriesEqual(w.remoteRepositories, other.remoteRepositories) &&
+		w.remotePreflightInFlight == other.remotePreflightInFlight &&
+		wizardOptionalStringsEqual(w.remotePreflightError, other.remotePreflightError)
+}
+
+// wizardOptionalEqual compares two Rust `Option<T>` values of a comparable T.
+func wizardOptionalEqual[T comparable](left, right *T) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+// wizardRemoteRepositoriesEqual compares two `Option<Vec<RemoteRepositoryPreview>>`
+// values.
+func wizardRemoteRepositoriesEqual(left, right *[]RemoteRepositoryPreview) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return slices.EqualFunc(*left, *right, func(a, b RemoteRepositoryPreview) bool {
+		return a.RepositoryID == b.RepositoryID && a.FetchURL == b.FetchURL &&
+			a.DefaultBranch == b.DefaultBranch && slices.Equal(a.PushURLs, b.PushURLs)
+	})
+}
+
+// wizardSubagentDraftsEqual is SubagentDraft's derived PartialEq.
+func wizardSubagentDraftsEqual(left, right *SubagentDraft) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.oracle == right.oracle &&
+		wizardSubagentChoicesEqual(left.oracleChoice, right.oracleChoice) &&
+		left.oracleConfigured == right.oracleConfigured &&
+		left.orchestratorsConfigured == right.orchestratorsConfigured &&
+		wizardSubagentPoliciesEqual(&left.policy, &right.policy) &&
+		wizardOptionalSubagentPoliciesEqual(left.chosenPolicy, right.chosenPolicy) &&
+		left.hasRememberedPolicy == right.hasRememberedPolicy &&
+		wizardOptionalSubagentPoliciesEqual(left.lastMjolnirPolicy, right.lastMjolnirPolicy) &&
+		left.combo == right.combo &&
+		reflect.DeepEqual(left.discovery, right.discovery) &&
+		wizardOptionalEqual(left.harness, right.harness) &&
+		wizardOptionalStringsEqual(left.profileID, right.profileID)
+}
+
+func wizardSubagentChoicesEqual(left, right *core.SubagentChoice) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Model == right.Model && wizardOptionalStringsEqual(left.Effort, right.Effort)
+}
+
+func wizardSubagentPoliciesEqual(left, right *core.SubagentPolicy) bool {
+	return left.Mode == right.Mode &&
+		wizardSubagentChoicesEqual(left.Straightforward, right.Straightforward) &&
+		wizardSubagentChoicesEqual(left.Subtle, right.Subtle) &&
+		left.Orchestrators == right.Orchestrators
+}
+
+func wizardOptionalSubagentPoliciesEqual(left, right *core.SubagentPolicy) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return wizardSubagentPoliciesEqual(left, right)
 }
 
 // MountWizard is the attachment editor shared by both wizards.
@@ -348,16 +517,56 @@ func (m *MountWizard) forbidOverlay() {
 }
 
 func (m *MountWizard) availableHistory() []string {
-	panic("unported: mj-tui/src/wizards.rs MountWizard::available_history")
+	var available []string
+	for _, source := range m.history {
+		taken := false
+		for index, mount := range m.mounts {
+			if (m.editingMount == nil || *m.editingMount != index) && mount.Source == source {
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			available = append(available, source)
+		}
+	}
+	return available
 }
 
 func (m *MountWizard) addValidatedMount() {
-	panic("unported: mj-tui/src/wizards.rs MountWizard::add_validated_mount")
+	mount := core.AdditionalMount{
+		Source:      m.source.String(),
+		Destination: m.destination.String(),
+		Access:      m.access,
+	}
+	if m.editingMount != nil {
+		index := *m.editingMount
+		m.editingMount = nil
+		m.mounts[index] = mount
+	} else {
+		m.mounts = append(m.mounts, mount)
+	}
+	m.source.Clear()
+	m.destination.Clear()
+	m.historySelection = 0
+	m.access = core.MountAccessRo
+	m.source.DismissCompletion()
+	m.error = nil
 }
 
 // equal is Rust's derived PartialEq for MountWizard.
 func (m *MountWizard) equal(other *MountWizard) bool {
-	panic("unported: mj-tui/src/wizards.rs MountWizard::eq")
+	return m.source.Equal(&other.source) &&
+		m.destination.Equal(&other.destination) &&
+		m.access == other.access &&
+		m.accessCombo == other.accessCombo &&
+		slices.Equal(m.mounts, other.mounts) &&
+		slices.Equal(m.history, other.history) &&
+		m.selectedMount == other.selectedMount &&
+		m.historySelection == other.historySelection &&
+		maps.Equal(m.forcedSources, other.forcedSources) &&
+		wizardOptionalStringsEqual(m.error, other.error) &&
+		wizardOptionalEqual(m.editingMount, other.editingMount)
 }
 
 func (w *NewWizard) selectedWorktreeOptions(config *core.Config) (core.ManagedWorktreeOptions, bool) {
@@ -375,19 +584,70 @@ func (w *NewWizard) selectedReviewTurnsOff(config *core.Config) bool {
 // selectedDirectoryCheck is the directory check, only while it still
 // matches the selection.
 func (w *NewWizard) selectedDirectoryCheck(config *core.Config) (core.ManagedWorktreeOptions, bool, bool) {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::selected_directory_check")
+	targetID := nthKey(config.Targets, w.target)
+	check := w.worktreeOptions
+	if check == nil || check.TargetID != targetID || check.Directory != strings.TrimSpace(w.projectDirectory.Value()) {
+		return core.ManagedWorktreeOptions{}, false, false
+	}
+	return check.Options, check.ReviewTurnsOff, true
 }
 
 func (w *NewWizard) prepareDialogState() {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::prepare_dialog_state")
+	form := &w.form
+	form.SetDismissActions([]WizardControl{WizardControlCancel, WizardControlBack})
+	var escape *WizardControl
+	if w.step == WizardStepMounts || w.step == WizardStepNewBundle {
+		back := WizardControlBack
+		escape = &back
+	}
+	form.SetEscapeAction(escape)
+	form.SetDismissalScope(WizardControlBack, "attachment editor")
+	form.TrackDraftPart("attachments", []string{fmt.Sprintf("%v", w.mounts.mounts)})
+	if w.step == WizardStepMounts {
+		form.TrackDraftPart("attachment editor", []string{
+			w.mounts.source.String(),
+			w.mounts.destination.String(),
+			fmt.Sprintf("%v", w.mounts.access),
+		})
+	}
+	if w.step == WizardStepProjectDirectory {
+		form.TrackDraftPart("project", []string{w.projectDirectory.String()})
+	}
+	if w.step == WizardStepNewBundle {
+		form.TrackDraftPart("repositories", []string{
+			w.newBundleSource.String(),
+			fmt.Sprintf("%q", w.newBundleRepositories),
+		})
+	}
 }
 
 func (w *ResumeWizard) prepareDialogState() {
-	panic("unported: mj-tui/src/wizards.rs ResumeWizard::prepare_dialog_state")
+	form := &w.form
+	form.TrackDraftPart("queued work", []string{strconv.FormatBool(w.discardQueue)})
+	form.SetDismissActions([]WizardControl{WizardControlCancel, WizardControlBack})
+	var escape *WizardControl
+	if w.step == WizardStepMounts || w.step == WizardStepNewBundle {
+		back := WizardControlBack
+		escape = &back
+	}
+	form.SetEscapeAction(escape)
+	form.SetDismissalScope(WizardControlBack, "attachment editor")
+	form.TrackDraftPart("attachments", []string{fmt.Sprintf("%v", w.mounts.mounts)})
+	if w.step == WizardStepMounts {
+		form.TrackDraftPart("attachment editor", []string{
+			w.mounts.source.String(),
+			w.mounts.destination.String(),
+			fmt.Sprintf("%v", w.mounts.access),
+		})
+	}
 }
 
 func (w *ResumeWizard) hasQueuedWork(dashboard *DashboardState) bool {
-	panic("unported: mj-tui/src/wizards.rs ResumeWizard::has_queued_work")
+	if w.preparation != nil {
+		return len(w.preparation.QueuedCommands) > 0
+	}
+	detail, ok := (*dashboard.sessionDetails.Get())[w.sessionID]
+	return ok && len(detail.queuedPrompts) > 0
 }
 
 // ResumeSource is what the resume wizard will start.
@@ -451,7 +711,27 @@ type ResumeWizard struct {
 
 // equal is Rust's PartialEq for ResumeWizard: every field but the form.
 func (w *ResumeWizard) equal(other *ResumeWizard) bool {
-	panic("unported: mj-tui/src/wizards.rs ResumeWizard::eq")
+	return wizardSubagentDraftsEqual(w.subagents, other.subagents) &&
+		w.sessionID == other.sessionID &&
+		w.source == other.source &&
+		w.title == other.title &&
+		w.workspaceID == other.workspaceID &&
+		w.moving == other.moving &&
+		reflect.DeepEqual(w.preparation, other.preparation) &&
+		w.preparing == other.preparing &&
+		wizardOptionalEqual(w.preparationRequestID, other.preparationRequestID) &&
+		wizardOptionalStringsEqual(w.preflightError, other.preflightError) &&
+		wizardOptionalStringsEqual(w.preparationError, other.preparationError) &&
+		w.step == other.step &&
+		w.profile == other.profile &&
+		w.target == other.target &&
+		w.profileStepSkipped == other.profileStepSkipped &&
+		w.targetStepSkipped == other.targetStepSkipped &&
+		w.mounts.equal(&other.mounts) &&
+		w.resourceAllocation == other.resourceAllocation &&
+		wizardOptionalStringsEqual(w.sizingError, other.sizingError) &&
+		w.resourceEditor.Equal(&other.resourceEditor) &&
+		w.discardQueue == other.discardQueue
 }
 
 func removeSelectedMount(mounts *MountWizard) {
@@ -479,7 +759,22 @@ func prepareMountEditor(mounts *MountWizard) {
 // It answers false when there is nothing to edit, in which case the wizard
 // must stay on its current step.
 func prepareSelectedMountEditor(mounts *MountWizard) bool {
-	panic("unported: mj-tui/src/wizards.rs prepare_selected_mount_editor")
+	if len(mounts.mounts) == 0 {
+		return false
+	}
+	index := mounts.selectedMount
+	mounts.historySelection = 0
+	mount := mounts.mounts[index]
+	mounts.source = chat.PathInputFromValue(mount.Source)
+	mounts.destination = chat.PathInputFromValue(mount.Destination)
+	mounts.access = mount.Access
+	if _, unavailable := mounts.overlayUnavailable(); unavailable {
+		mounts.forbidOverlay()
+	}
+	mounts.error = nil
+	mounts.editingMount = &index
+	mounts.source.DismissCompletion()
+	return true
 }
 
 func beginMountEditor(wizard WizardDraft) {
@@ -504,15 +799,52 @@ func openMountEditor(wizard WizardDraft) {
 // validateMountEntry is why the entry under edit cannot be attached, or
 // false when it can.
 func validateMountEntry(mounts *MountWizard) (string, bool) {
-	panic("unported: mj-tui/src/wizards.rs validate_mount_entry")
+	if err := core.ValidateAbsoluteInput(strings.TrimSpace(mounts.source.Value())); err != nil {
+		return err.Error(), true
+	}
+	mount := core.AdditionalMount{
+		Source:      mounts.source.String(),
+		Destination: mounts.destination.String(),
+		Access:      mounts.access,
+	}
+	if err := core.ValidateMountDestination(mount.Destination); err != nil {
+		return err.Error(), true
+	}
+	for index, existing := range mounts.mounts {
+		if (mounts.editingMount == nil || *mounts.editingMount != index) && existing.Destination == mount.Destination {
+			return fmt.Sprintf("%s is already an attached directory destination.", mount.Destination), true
+		}
+	}
+	return "", false
 }
 
 func (w *NewWizard) addNewBundleRepository() bool {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::add_new_bundle_repository")
+	source := strings.TrimSpace(w.newBundleSource.Value())
+	if source == "" {
+		return false
+	}
+	if !slices.Contains(w.newBundleRepositories, source) {
+		w.newBundleRepositories = append(w.newBundleRepositories, source)
+	}
+	w.newBundleSelected = len(w.newBundleRepositories) - 1
+	w.newBundleSource.Clear()
+	w.form.Focus(WizardControlNewBundleSource)
+	return true
 }
 
 func (w *NewWizard) removeSelectedNewBundleRepository() bool {
-	panic("unported: mj-tui/src/wizards.rs NewWizard::remove_selected_new_bundle_repository")
+	if len(w.newBundleRepositories) == 0 {
+		return false
+	}
+	index := min(w.newBundleSelected, len(w.newBundleRepositories)-1)
+	w.newBundleRepositories = slices.Delete(w.newBundleRepositories, index, index+1)
+	w.newBundleSelected = min(w.newBundleSelected, max(len(w.newBundleRepositories)-1, 0))
+	if len(w.newBundleRepositories) == 0 {
+		w.form.Focus(WizardControlNewBundleSource)
+	} else {
+		w.form.Focus(WizardControlNewBundleRepositories)
+	}
+	return true
 }
 
 func (w *NewWizard) newBundleSourcesForSubmit() []string {
@@ -535,7 +867,42 @@ func nthBundleKey(config *core.Config, recency []client.LaunchRecency, index int
 // mostRecentConfiguredSession is the newest launch whose profile, project
 // and target are all still configured. New-session defaults start from it.
 func mostRecentConfiguredSession(config *core.Config, recency []client.LaunchRecency) *client.LaunchRecency {
-	panic("unported: mj-tui/src/wizards.rs most_recent_configured_session")
+	var newest *client.LaunchRecency
+	var newestCreated *int64
+	for index := range recency {
+		launch := &recency[index]
+		if _, ok := config.EnabledProfile(launch.LastProfile); !ok {
+			continue
+		}
+		if _, ok := config.Bundles[launch.BundleID]; !ok {
+			continue
+		}
+		if _, ok := config.Targets[launch.TargetTemplateID]; !ok {
+			continue
+		}
+		var created *int64
+		if ms, ok := createdAtMs(launch.NewestCreatedAt); ok {
+			created = &ms
+		}
+		// Rust's max_by_key keeps the last of equal maxima; None sorts first.
+		if newest == nil || wizardCompareOptionalMs(created, newestCreated) >= 0 {
+			newest, newestCreated = launch, created
+		}
+	}
+	return newest
+}
+
+// wizardCompareOptionalMs is the Ord of `Option<i64>`: None before any value.
+func wizardCompareOptionalMs(left, right *int64) int {
+	switch {
+	case left == nil && right == nil:
+		return 0
+	case left == nil:
+		return -1
+	case right == nil:
+		return 1
+	}
+	return cmp.Compare(*left, *right)
 }
 
 // createdAtMs is created_at as Unix milliseconds, when it parses as RFC
@@ -549,20 +916,100 @@ func createdAtMs(createdAt string) (int64, bool) {
 }
 
 func bundleIDsByRecentCreation(config *core.Config, recency []client.LaunchRecency) []string {
-	panic("unported: mj-tui/src/wizards.rs bundle_ids_by_recent_creation")
+	latestCreatedAt := map[string]int64{}
+	for _, launch := range recency {
+		if _, ok := config.Bundles[launch.BundleID]; !ok {
+			continue
+		}
+		created, ok := createdAtMs(launch.NewestCreatedAt)
+		if !ok {
+			continue
+		}
+		if latest, seen := latestCreatedAt[launch.BundleID]; !seen || created > latest {
+			latestCreatedAt[launch.BundleID] = created
+		}
+	}
+	bundleIDs := slices.Sorted(maps.Keys(config.Bundles))
+	latest := func(id string) *int64 {
+		if created, ok := latestCreatedAt[id]; ok {
+			return &created
+		}
+		return nil
+	}
+	slices.SortStableFunc(bundleIDs, func(left, right string) int {
+		return cmp.Or(wizardCompareOptionalMs(latest(right), latest(left)), strings.Compare(left, right))
+	})
+	return bundleIDs
 }
 
 func targetLabel(target core.TargetTemplate) string {
-	panic("unported: mj-tui/src/wizards.rs target_label")
+	switch target.(type) {
+	case core.TargetTemplateLocalBare:
+		return "localhost"
+	case core.TargetTemplateLocalPodman:
+		return "local Podman"
+	case core.TargetTemplateLocalDocker:
+		return "local Docker"
+	case core.TargetTemplateAppleContainer:
+		return "Apple container"
+	case core.TargetTemplateAwsEc2:
+		return "AWS EC2"
+	case core.TargetTemplateSshBare:
+		return "named SSH machine"
+	case core.TargetTemplateSshPodman:
+		return "Podman over SSH"
+	case core.TargetTemplateSshDocker:
+		return "Docker over SSH"
+	case core.TargetTemplateSshAppleContainer:
+		return "Apple container over SSH"
+	case core.TargetTemplateSshNitro:
+		return "EC2 Nitro sandbox"
+	}
+	panic(fmt.Sprintf("unknown target template %T", target))
 }
 
 // resourceAllocationDescription is the compute a session gets, on its own,
 // as the review's Compute row shows it. A nil allocation is fixed or
 // default resources.
 func resourceAllocationDescription(allocation core.SessionResourceAllocation) string {
-	panic("unported: mj-tui/src/wizards.rs resource_allocation_description")
+	switch allocation := allocation.(type) {
+	case core.SessionResourceAllocationContainer:
+		return fmt.Sprintf("%d CPU / %s", allocation.Cpus, formatResourceBytes(allocation.MemoryBytes))
+	case core.SessionResourceAllocationAwsEc2:
+		return fmt.Sprintf("%s · %d CPU / %s", allocation.InstanceType, allocation.Vcpus, formatResourceBytes(allocation.MemoryBytes))
+	}
+	return "fixed/default resources"
 }
 
 func defaultResourceDestination(target core.TargetTemplate, source string, existing []core.AdditionalMount) string {
-	panic("unported: mj-tui/src/wizards.rs default_resource_destination")
+	defaultDestination := core.DefaultMountDestination(source, existing)
+	ec2, ok := target.(core.TargetTemplateAwsEc2)
+	if !ok {
+		return defaultDestination
+	}
+	basename, ok := resumePathFileName(defaultDestination)
+	if !ok {
+		basename = "resource"
+	}
+	// EC2 paths are POSIX paths on a Windows controller too.
+	home := "/root"
+	if ec2.SSHUser != "root" {
+		home = core.Join("/home", ec2.SSHUser)
+	}
+	resources := core.Join(home, "mj-resources")
+	taken := func(candidate string) bool {
+		return slices.ContainsFunc(existing, func(resource core.AdditionalMount) bool {
+			return resource.Destination == candidate
+		})
+	}
+	base := core.Join(resources, basename)
+	if !taken(base) {
+		return base
+	}
+	for number := 2; ; number++ {
+		candidate := core.Join(resources, fmt.Sprintf("%s-%d", basename, number))
+		if !taken(candidate) {
+			return candidate
+		}
+	}
 }

@@ -20,6 +20,9 @@
 package tui
 
 import (
+	"fmt"
+	"slices"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
@@ -187,7 +190,9 @@ func draftHasBack(wizard WizardDraft) bool {
 }
 
 func declareSandboxOffer(dashboard *DashboardState, wizard WizardDraft, form *chat.Dialog[WizardControl]) {
-	panic("unported: mj-tui/src/wizards/draft.rs declare_sandbox_offer")
+	if offer := dashboard.sandboxOffer(wizard); offer != nil && offer.alternative != nil {
+		form.DeclareWithEnabled(WizardControlUseSandboxedTarget, chat.ControlKindButton{}, true)
+	}
 }
 
 func declareReviewAttachments(form *chat.Dialog[WizardControl], mounts *MountWizard) {
@@ -204,7 +209,16 @@ func declareReviewAttachments(form *chat.Dialog[WizardControl], mounts *MountWiz
 // the draft must be able to use the selected target, and a sized target
 // must have a valid allocation.
 func targetAdvanceEnabled(dashboard *DashboardState, wizard WizardDraft) bool {
-	panic("unported: mj-tui/src/wizards/draft.rs target_advance_enabled")
+	targets := dashboard.config.Get().Targets
+	targetID := nthKey(targets, wizard.Target())
+	if _, rejected := wizard.TargetRejection(dashboard, targetID); rejected {
+		return false
+	}
+	if wizard.ResourceAllocation() != nil {
+		return true
+	}
+	target, ok := targets[targetID]
+	return !ok || !targetIsSized(target)
 }
 
 func (w *NewWizard) Step() WizardStep                   { return w.step }
@@ -246,7 +260,7 @@ func (w *NewWizard) SizingMut() (*core.SessionResourceAllocation, **string) {
 }
 
 func (w *NewWizard) IntoMode() Mode {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::into_mode")
+	return ModeNew{w}
 }
 
 // PreviousAllocation: a new session has no earlier size to restore.
@@ -307,7 +321,45 @@ func (w *NewWizard) SubmitReview(dashboard *DashboardState) DashboardAction {
 // ActivateExtra: the bundle creator and the project directory belong to
 // creation alone. Back is handed back so the shared step machine runs it.
 func (w *NewWizard) ActivateExtra(dashboard *DashboardState, id WizardControl) (DashboardAction, bool) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::activate_extra")
+	if w.step == WizardStepProfile && (id == WizardControlProfileList || id == WizardControlNext) {
+		if provider := w.effectiveFocusedProvider(dashboard); provider != nil && newWizardIsResolvingProvider(provider) {
+			return dashboard.keep(w), true
+		}
+	}
+	if w.step == WizardStepReview && w.subagents.activate(id) {
+		return dashboard.keep(w), true
+	}
+	if w.step == WizardStepNewBundle {
+		return dashboard.activateNewBundleControl(w, id), true
+	}
+	if w.step == WizardStepTarget && id == WizardControlRememberContainerSize {
+		w.rememberContainerSize = !w.rememberContainerSize
+		return dashboard.keep(w), true
+	}
+	if w.step == WizardStepBundle && id == WizardControlAdd {
+		dashboard.invalidateNewRemotePreflight(w)
+		w.openProjects(dashboard)
+		return dashboard.keep(w), true
+	}
+	if w.step == WizardStepBundle && id == WizardControlRemoveBundle {
+		return dashboard.beginBundleRemoval(w), true
+	}
+	if id == WizardControlBack {
+		return nil, false
+	}
+	if w.step == WizardStepProjectDirectory {
+		if index, ok := id.RecentProjectIndex(); ok {
+			if index < len(w.projectHistory) {
+				w.projectHistoryIndex = index
+				w.projectDirectory = chat.PathInputFromValue(w.projectHistory[index])
+				w.projectDirectoryError = nil
+				w.form.Focus(WizardControlProjectDirectory)
+			}
+			return dashboard.keep(w), true
+		}
+		return dashboard.validateNewProject(w), true
+	}
+	return nil, false
 }
 
 func (w *NewWizard) Advance(dashboard *DashboardState) DashboardAction {
@@ -318,7 +370,48 @@ func (w *NewWizard) Advance(dashboard *DashboardState) DashboardAction {
 // source belong to creation alone. Up and Down on the project directory walk
 // the host's remembered directories.
 func (w *NewWizard) ApplyExtraFieldEdit(dashboard *DashboardState, id WizardControl, edit chat.FieldEdit) bool {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::apply_extra_field_edit")
+	switch id {
+	case WizardControlProjectDirectory:
+		if key, ok := edit.(chat.FieldEditKey); ok && len(w.projectHistory) > 0 {
+			code := chat.KeyPressCode(key.Key)
+			if code == tea.KeyUp || code == tea.KeyDown {
+				if code == tea.KeyUp {
+					if w.projectHistoryIndex == 0 {
+						w.projectHistoryIndex = len(w.projectHistory) - 1
+					} else {
+						w.projectHistoryIndex--
+					}
+				} else {
+					w.projectHistoryIndex = (w.projectHistoryIndex + 1) % len(w.projectHistory)
+				}
+				w.projectDirectory = chat.PathInputFromValue(w.projectHistory[w.projectHistoryIndex])
+				w.projectDirectoryError = nil
+				return true
+			}
+		}
+		if chat.PathFieldApply(&w.projectDirectory, edit) == chat.EditOutcomeChanged {
+			w.projectDirectoryError = nil
+			dashboard.recordEventHandled()
+		}
+		return true
+	case WizardControlProjectQuery:
+		if chat.PathFieldApply(&w.projectPicker.query, edit) == chat.EditOutcomeChanged {
+			w.projectPicker.githubQueryChanged()
+			w.projectPicker.focusResults = false
+			dashboard.recordEventHandled()
+		}
+		return true
+	case WizardControlNewBundleSource:
+		if w.bundleCreationInFlight {
+			return true
+		}
+		if chat.PathFieldApply(&w.newBundleSource, edit) == chat.EditOutcomeChanged {
+			w.projectPicker.creationError = nil
+			dashboard.recordEventHandled()
+		}
+		return true
+	}
+	return false
 }
 
 // PreparesTargetOnSelect: every target is offered, and the size is prepared
@@ -333,11 +426,105 @@ func (w *NewWizard) RouteExtraInteraction(interaction chat.Interaction[WizardCon
 }
 
 func (w *NewWizard) ApplyExtraInteraction(dashboard *DashboardState, interaction chat.Interaction[WizardControl]) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::apply_extra_interaction")
+	if w.step == WizardStepTarget {
+		if toggle, ok := interaction.(chat.InteractionToggle[WizardControl]); ok && toggle.ID == WizardControlRememberContainerSize {
+			w.rememberContainerSize = !w.rememberContainerSize
+			dashboard.recordEventHandled()
+			return
+		}
+	}
+	if w.step == WizardStepReview {
+		if _, applied := w.subagents.apply(interaction); applied {
+			dashboard.recordEventHandled()
+			return
+		}
+	}
+	switch interaction := interaction.(type) {
+	case chat.InteractionToggle[WizardControl]:
+		switch interaction.ID {
+		case WizardControlProfileList:
+			if provider := w.focusedProvider; provider != nil {
+				w.toggleProvider(provider)
+				dashboard.recordEventHandled()
+			}
+		case WizardControlProjectMultiple:
+			w.projectPicker.multiple = !w.projectPicker.multiple
+			if !w.projectPicker.multiple {
+				if w.newBundleSelected < len(w.newBundleRepositories) {
+					source := w.newBundleRepositories[w.newBundleSelected]
+					w.newBundleSource.SetValue(source)
+					w.chooseProjectTab(dashboard, ProjectTabUrl)
+					w.form.Focus(WizardControlNewBundleSource)
+				}
+				w.newBundleRepositories = nil
+			}
+			dashboard.recordEventHandled()
+		case WizardControlCreateManagedWorktree:
+			if options, ok := w.selectedWorktreeOptions(dashboard.config.Get()); ok && options.Available {
+				w.createManagedWorktree = !w.createManagedWorktree
+				dashboard.recordEventHandled()
+			}
+		}
+	case chat.InteractionSelect[WizardControl]:
+		switch interaction.ID {
+		case WizardControlBundleList:
+			if w.bundle != interaction.Index {
+				w.NoteDraftChange(dashboard, DraftChangeBundleSelected)
+			}
+			w.bundle = interaction.Index
+		case WizardControlProjectResults:
+			w.projectPicker.selected = interaction.Index
+		case WizardControlNewBundleRepositories:
+			next := min(interaction.Index, max(len(w.newBundleRepositories)-1, 0))
+			focused, ok := w.form.Focused()
+			if w.newBundleSelected != next || !ok || focused != WizardControlNewBundleRepositories {
+				w.newBundleSelected = next
+				w.form.Focus(WizardControlNewBundleRepositories)
+			}
+		}
+	}
 }
 
 func (w *NewWizard) HandleExtraShortcut(dashboard *DashboardState, key tea.KeyMsg) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::handle_extra_shortcut")
+	if focused, ok := w.form.Focused(); w.step != WizardStepProfile || !ok || focused != WizardControlProfileList {
+		return
+	}
+	press, ok := key.(tea.KeyPressMsg)
+	if !ok {
+		return
+	}
+	switch chat.KeyPressCode(press) {
+	case tea.KeyRight, 'l':
+		provider := w.focusedProvider
+		if provider == nil {
+			return
+		}
+		if _, expanded := w.expandedProviders[provider]; !expanded {
+			if w.expandedProviders == nil {
+				w.expandedProviders = map[core.QuotaProvider]struct{}{}
+			}
+			w.expandedProviders[provider] = struct{}{}
+			return
+		}
+		items := newWizardProfileItems(dashboard, w.expandedProviders)
+		position := slices.IndexFunc(items, func(item ProfilePickerItem) bool {
+			header, ok := item.(ProfilePickerItemProvider)
+			return ok && header.Provider == provider
+		})
+		if position >= 0 && position+1 < len(items) {
+			if profile, ok := items[position+1].(ProfilePickerItemProfile); ok {
+				w.focusedProvider = nil
+				w.profile = profile.ProfileIndex
+			}
+		}
+	case tea.KeyLeft, 'h':
+		if provider := w.focusedProvider; provider != nil {
+			delete(w.expandedProviders, provider)
+		} else if provider := newWizardProviderForProfile(dashboard, w.profile); provider != nil {
+			delete(w.expandedProviders, provider)
+			w.focusedProvider = provider
+		}
+	}
 }
 
 func (w *NewWizard) ProfileCount(dashboard *DashboardState) int {
@@ -356,7 +543,32 @@ func (w *NewWizard) ProfileListLen(dashboard *DashboardState) int {
 }
 
 func (w *NewWizard) ProfileListSelected(dashboard *DashboardState) int {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::profile_list_selected")
+	focused := w.effectiveFocusedProvider(dashboard)
+	expanded := w.effectiveExpandedProviders(dashboard)
+	items := newWizardProfileItems(dashboard, expanded)
+	if focused != nil {
+		if position := slices.IndexFunc(items, func(item ProfilePickerItem) bool {
+			header, ok := item.(ProfilePickerItemProvider)
+			return ok && header.Provider == focused
+		}); position >= 0 {
+			return position
+		}
+	}
+	hasAuto := dashboard.newWizardHasAutoPrimary()
+	if hasAuto && w.profile == 0 {
+		if position := slices.IndexFunc(items, func(item ProfilePickerItem) bool {
+			_, ok := item.(ProfilePickerItemAuto)
+			return ok
+		}); position >= 0 {
+			return position
+		}
+	} else if position := slices.IndexFunc(items, func(item ProfilePickerItem) bool {
+		profile, ok := item.(ProfilePickerItemProfile)
+		return ok && profile.ProfileIndex == w.profile
+	}); position >= 0 {
+		return position
+	}
+	return 0
 }
 
 func (w *NewWizard) ProfileAdvanceEnabled(dashboard *DashboardState) bool {
@@ -365,12 +577,28 @@ func (w *NewWizard) ProfileAdvanceEnabled(dashboard *DashboardState) bool {
 }
 
 func (w *NewWizard) SelectProfileRow(dashboard *DashboardState, row int, toggleProvider bool) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::select_profile_row")
+	items := newWizardProfileItems(dashboard, w.expandedProviders)
+	if row < 0 || row >= len(items) {
+		return
+	}
+	switch item := items[row].(type) {
+	case ProfilePickerItemAuto:
+		w.focusedProvider = nil
+		w.profile = 0
+	case ProfilePickerItemProfile:
+		w.focusedProvider = nil
+		w.profile = item.ProfileIndex
+	case ProfilePickerItemProvider:
+		w.focusedProvider = item.Provider
+		if toggleProvider {
+			w.toggleProvider(item.Provider)
+		}
+	}
 }
 
 // TargetRejection: a new session can start on any offered target.
 func (w *NewWizard) TargetRejection(dashboard *DashboardState, targetID string) (string, bool) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::target_rejection")
+	return dashboard.targetUnavailable(targetID)
 }
 
 // TargetCompatible: a new session can start on any target.
@@ -391,11 +619,44 @@ func (w *NewWizard) DismissUnfocusedExtraCompletions(focused *WizardControl) {
 // machine; a bundle source is a controller path only when it is a path at
 // all.
 func (w *NewWizard) FocusedExtraPathInput(dashboard *DashboardState) (*chat.PathInput, core.CompletionHost, core.CompletionKind) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::focused_extra_path_input")
+	focused, ok := w.form.Focused()
+	if !ok {
+		return nil, nil, 0
+	}
+	switch {
+	case focused == WizardControlProjectDirectory:
+		host := core.CompletionHostTarget{ID: nthKey(dashboard.config.Get().Targets, w.target)}
+		return &w.projectDirectory, host, core.CompletionKindDirectories
+	case focused == WizardControlNewBundleSource && core.LooksLikePath(w.newBundleSource.Value()):
+		return &w.newBundleSource, core.CompletionHostLocal{}, core.CompletionKindDirectories
+	}
+	return nil, nil, 0
 }
 
 func (w *NewWizard) DeclareExtraStep(dashboard *DashboardState, form *chat.Dialog[WizardControl]) {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::declare_extra_step")
+	bundles := dashboard.config.Get().Bundles
+	switch w.step {
+	case WizardStepBundle:
+		form.DeclareWithEnabled(
+			WizardControlBundleList,
+			chat.ControlKindChoiceList{Len: len(bundles), Selected: w.bundle},
+			len(bundles) > 0,
+		)
+		form.DeclareWithEnabled(WizardControlAdd, chat.ControlKindButton{}, true)
+		form.DeclareWithEnabled(WizardControlRemoveBundle, chat.ControlKindButton{}, len(bundles) > 0)
+		declareWizardButtons(form, w.HasBack(), len(bundles) > 0)
+	case WizardStepProjectDirectory:
+		form.DeclareWithEnabled(WizardControlProjectDirectory, w.projectDirectory.ControlKind(), true)
+		form.SetFieldUsesVerticalKeys(WizardControlProjectDirectory, len(w.projectHistory) > 0)
+		for index := range min(len(w.projectHistory), 5) {
+			form.DeclareWithEnabled(WizardControlRecentProject(index), chat.ControlKindButton{}, true)
+		}
+		declareWizardButtons(form, w.HasBack(), true)
+	case WizardStepNewBundle:
+		w.declareProjectControls(form)
+	default:
+		panic(fmt.Sprintf("%v is declared by declareWizardControls", w.step))
+	}
 }
 
 // InputLocked: creating a bundle rewrites the config, so the form is frozen
@@ -420,7 +681,23 @@ func (w *NewWizard) HandleStepEvent(dashboard *DashboardState, event tea.Msg) bo
 }
 
 func (w *NewWizard) DeclareReviewExtras(dashboard *DashboardState, form *chat.Dialog[WizardControl]) bool {
-	panic("unported: mj-tui/src/wizards/draft.rs NewWizard::declare_review_extras")
+	config := dashboard.config.Get()
+	target := config.Targets[nthKey(config.Targets, w.target)]
+	// Isolated targets have no worktree choice, so the control only exists
+	// for a bare project directory.
+	if core.IsBareProjectTarget(target) {
+		options, ok := w.selectedWorktreeOptions(config)
+		form.DeclareWithEnabled(WizardControlCreateManagedWorktree, chat.ControlKindCheckbox{}, ok && options.Available)
+	}
+	declareSandboxOffer(dashboard, w, form)
+	w.subagents.declare(form)
+	if core.OffersAttachedDirectories(target) {
+		declareReviewAttachments(form, &w.mounts)
+	}
+	_, checked := w.selectedWorktreeOptions(config)
+	ready := !core.IsBareProjectTarget(target) || checked || w.remotePreflightError != nil
+	_, subagentError := w.subagents.error()
+	return ready && !w.remotePreflightInFlight && !subagentError
 }
 
 func (w *ResumeWizard) Step() WizardStep                   { return w.step }
@@ -470,13 +747,16 @@ func (w *ResumeWizard) SizingMut() (*core.SessionResourceAllocation, **string) {
 }
 
 func (w *ResumeWizard) IntoMode() Mode {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::into_mode")
+	return ModeResume{w}
 }
 
 // PreviousAllocation: a resume starts from the size the session already ran
 // with.
 func (w *ResumeWizard) PreviousAllocation(dashboard *DashboardState) core.SessionResourceAllocation {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::previous_allocation")
+	if session := dashboard.SessionRecord(w.sessionID); session != nil {
+		return session.ResourceAllocation
+	}
+	return nil
 }
 
 func (w *ResumeWizard) ReenterReview(dashboard *DashboardState) DashboardAction {
@@ -493,7 +773,11 @@ func (w *ResumeWizard) ReenterReview(dashboard *DashboardState) DashboardAction 
 }
 
 func (w *ResumeWizard) ReviewHarness(dashboard *DashboardState) (core.HarnessKind, bool) {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::review_harness")
+	profiles := dashboard.resumeWizardProfiles(w)
+	if w.profile < 0 || w.profile >= len(profiles) {
+		return "", false
+	}
+	return profiles[w.profile].Kind, true
 }
 
 // ReviewBackStep: resume has no bundle or project step, so Back returns to
@@ -543,7 +827,9 @@ func (w *ResumeWizard) ApplyExtraFieldEdit(dashboard *DashboardState, id WizardC
 // cannot resume on would overwrite the size it already has with one it will
 // never use.
 func (w *ResumeWizard) PreparesTargetOnSelect(dashboard *DashboardState) bool {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::prepares_target_on_select")
+	targetID := nthKey(dashboard.config.Get().Targets, w.target)
+	_, rejected := dashboard.resumeTargetRejection(w.sessionID, targetID)
+	return !rejected
 }
 
 func (w *ResumeWizard) RouteExtraInteraction(interaction chat.Interaction[WizardControl]) chat.Interaction[WizardControl] {
@@ -551,13 +837,27 @@ func (w *ResumeWizard) RouteExtraInteraction(interaction chat.Interaction[Wizard
 }
 
 func (w *ResumeWizard) ApplyExtraInteraction(dashboard *DashboardState, interaction chat.Interaction[WizardControl]) {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::apply_extra_interaction")
+	if w.subagentChoiceApplies(dashboard) {
+		if changed, applied := w.subagents.apply(interaction); applied {
+			if changed {
+				invalidateMovePreparation(w)
+			}
+			dashboard.recordEventHandled()
+			return
+		}
+	}
+	if toggle, ok := interaction.(chat.InteractionToggle[WizardControl]); ok && toggle.ID == WizardControlDiscardQueue {
+		w.discardQueue = !w.discardQueue
+	}
 }
 
 // HandleExtraShortcut: `q` on the review toggles whether queued work is
 // discarded, but only when there is queued work to decide about.
 func (w *ResumeWizard) HandleExtraShortcut(dashboard *DashboardState, key tea.KeyMsg) {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::handle_extra_shortcut")
+	press, ok := key.(tea.KeyPressMsg)
+	if ok && chat.KeyPressCode(press) == 'q' && w.step == WizardStepReview && w.hasQueuedWork(dashboard) {
+		w.discardQueue = !w.discardQueue
+	}
 }
 
 func (w *ResumeWizard) ProfileCount(dashboard *DashboardState) int {
@@ -583,11 +883,12 @@ func (w *ResumeWizard) SelectProfileRow(dashboard *DashboardState, row int, togg
 }
 
 func (w *ResumeWizard) TargetRejection(dashboard *DashboardState, targetID string) (string, bool) {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::target_rejection")
+	return dashboard.resumeTargetRejection(w.sessionID, targetID)
 }
 
 func (w *ResumeWizard) TargetCompatible(dashboard *DashboardState, targetID string) bool {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::target_compatible")
+	_, incompatible := dashboard.resumeTargetIncompatibility(w.sessionID, targetID)
+	return !incompatible
 }
 
 func (w *ResumeWizard) DeclareExtraStep(dashboard *DashboardState, form *chat.Dialog[WizardControl]) {
@@ -612,7 +913,21 @@ func (w *ResumeWizard) FocusedExtraPathInput(dashboard *DashboardState) (*chat.P
 }
 
 func (w *ResumeWizard) DeclareReviewExtras(dashboard *DashboardState, form *chat.Dialog[WizardControl]) bool {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::declare_review_extras")
+	declareSandboxOffer(dashboard, w, form)
+	if w.subagentChoiceApplies(dashboard) {
+		w.subagents.declare(form)
+	}
+	config := dashboard.config.Get()
+	target := config.Targets[nthKey(config.Targets, w.target)]
+	if core.OffersAttachedDirectories(target) {
+		declareReviewAttachments(form, &w.mounts)
+	}
+	if w.hasQueuedWork(dashboard) {
+		form.DeclareWithEnabled(WizardControlDiscardQueue, chat.ControlKindCheckbox{}, true)
+	}
+	_, subagentError := w.subagents.error()
+	return (w.subagentChange(dashboard) == nil || !subagentError) &&
+		(!w.moving || w.preparation != nil || w.preparationError != nil)
 }
 
 func (w *ResumeWizard) noteDestinationChange() {
@@ -621,7 +936,11 @@ func (w *ResumeWizard) noteDestinationChange() {
 
 // destinationProfile is the profile this resume or move lands on.
 func (w *ResumeWizard) destinationProfile(dashboard *DashboardState) string {
-	panic("unported: mj-tui/src/wizards/draft.rs ResumeWizard::destination_profile")
+	profiles := dashboard.resumeWizardProfiles(w)
+	if w.profile < 0 || w.profile >= len(profiles) {
+		panic("resume wizard is only opened with a compatible profile")
+	}
+	return profiles[w.profile].ID
 }
 
 // keep puts a wizard draft back on screen unchanged.
