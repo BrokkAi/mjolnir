@@ -47,7 +47,7 @@ class SlopcopLogin(Regression):
         Lab.__init__(self, args.mj, "slopcop-login", 1397)
 
     def create_session(self, workspace, mounts, title):
-        status, response = self.request("POST", "/api/actions", {"action": "new", "workspace_id": workspace,
+        status, response = self.request("POST", "/api/v1/actions", {"action": "new", "workspace_id": workspace,
             "profile_id": "fake", "bundle_id": "fixture", "target_id": "podman", "title": title,
             "additional_mounts": mounts,
             "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3}})

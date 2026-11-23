@@ -7031,6 +7031,10 @@ func reconnectAfterUploadRefusal(ctx context.Context) (*DaemonClient, error) {
 	}
 }
 
+// DaemonReplyDebug is DaemonReply's Debug, for callers outside this package
+// that report an unexpected reply with `{reply:?}`.
+func DaemonReplyDebug(reply DaemonReply) string { return daemonReplyDebug(reply) }
+
 // daemonReplyDebug names a reply for "unexpected reply" errors, as Rust's
 // `{reply:?}` does.
 func daemonReplyDebug(reply DaemonReply) string {

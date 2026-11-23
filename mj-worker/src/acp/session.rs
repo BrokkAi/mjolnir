@@ -317,27 +317,37 @@ pub(super) async fn serve_session(
             }
         }
     });
-    let goal_recovery_supported = capability.as_ref().is_some_and(|capability| {
-        capability.supports(mj_core::goal::GoalControlAction::Pause)
-            && capability.supports(mj_core::goal::GoalControlAction::Resume)
-    }) && air_goal
-        .and_then(|goal| goal.get("resumePolicies"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|policies| policies.iter().any(|policy| policy == "pause"));
-    if capability
+    let goal_pause_supported = capability
         .as_ref()
-        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Resume))
-        && spec
-            .goal_recovery
-            .lock()
-            .expect("goal lock poisoned")
-            .asking()
-    {
-        ensure!(
-            goal_recovery_supported,
-            "the installed adapter cannot pause a goal before explicit resume; update the adapter"
-        );
-    }
+        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Pause))
+        && air_goal
+            .and_then(|goal| goal.get("resumePolicies"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|policies| policies.iter().any(|policy| policy == "pause"));
+    let goal_resume_supported = capability
+        .as_ref()
+        .is_some_and(|capability| capability.supports(mj_core::goal::GoalControlAction::Resume));
+    let reopening_codex = spec.harness == HarnessKind::Codex
+        && spec.resume_session.is_some()
+        && !session_open.replace_unused_codex_thread;
+    let (asking_goal_recovery, has_active_goal) = {
+        let recovery = spec.goal_recovery.lock().expect("goal lock poisoned");
+        (
+            recovery.asking(),
+            recovery
+                .state
+                .snapshot
+                .as_ref()
+                .is_some_and(mj_core::goal::GoalSnapshot::active),
+        )
+    };
+    let needs_goal_pause = (reopening_codex && capability.is_some() && has_active_goal)
+        || (goal_resume_supported && asking_goal_recovery);
+    ensure!(
+        !needs_goal_pause || goal_pause_supported,
+        "the installed adapter cannot pause a stored goal before reopening; update the adapter"
+    );
+    let goal_recovery_supported = goal_pause_supported && goal_resume_supported;
     goal::publish(
         spec,
         events,

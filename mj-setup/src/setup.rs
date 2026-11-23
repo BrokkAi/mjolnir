@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::doctor::{
-    ApplePlatform, CheckStatus, apple_container_runtime_check, current_apple_platform,
-    local_docker_runtime_check, local_podman_runtime_check,
+    CheckStatus, apple_container_runtime_check, local_docker_runtime_check,
+    local_podman_runtime_check,
 };
+use crate::targets::{ApplePlatform, current_apple_platform};
 use crate::targets::{CommandExecutor, CommandSpec};
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,

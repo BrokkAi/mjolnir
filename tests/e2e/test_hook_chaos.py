@@ -107,7 +107,7 @@ def start_session(lab: Lab, title: str) -> str:
     workspace = one_workspace(lab)
     status, _ = lab.request(
         "POST",
-        "/api/actions",
+        "/api/v1/actions",
         {
             "action": "new",
             "workspace_id": workspace["id"],
@@ -284,7 +284,7 @@ def run_hook(lab: Lab, hook: str) -> None:
         prompt = f"checkpoint hook {lab.seed}"
         status, _ = lab.request(
             "POST",
-            "/api/actions",
+            "/api/v1/actions",
             {"action": "prompt", "session_id": session_id, "text": prompt},
         )
         if status != 202:
@@ -293,7 +293,7 @@ def run_hook(lab: Lab, hook: str) -> None:
         wait_session(lab, title, {"running", "suspended"})
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
-            status, transcript = lab.request("GET", f"/api/conversations/{session_id}")
+            status, transcript = lab.request("GET", f"/api/v1/conversations/{session_id}")
             if status == 200 and isinstance(transcript, dict):
                 lines = [
                     line
@@ -318,7 +318,7 @@ def finish(lab: Lab) -> None:
             continue
         session_id = str(session["id"])
         status, _ = lab.request(
-            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
+            "POST", "/api/v1/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action for {session_id} returned {status}")

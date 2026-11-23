@@ -29,8 +29,8 @@ use super::snapshot::{
 use super::{
     DurableRelay, RELAY_ACTIVE_SEGMENT, RELAY_EVENT_BYTE_BUDGET, RELAY_EVENT_ENVELOPE_RESERVE,
     RELAY_HOT_EVENT_CAPACITY, RELAY_JOURNAL_DIR, RELAY_SEGMENT_BYTE_LIMIT,
-    RELAY_SNAPSHOT_BYTE_BUDGET, RELAY_SNAPSHOT_LAG_BYTE_LIMIT, RELAY_STATE_BYTE_BUDGET,
-    RELAY_STATE_FILE, RestoredRelaySeed, restored_relay_seed_path,
+    RELAY_SNAPSHOT_LAG_BYTE_LIMIT, RELAY_STATE_BYTE_BUDGET, RELAY_STATE_FILE, RestoredRelaySeed,
+    restored_relay_seed_path,
 };
 
 fn nonempty_journal_file(path: &Path) -> Result<bool> {
@@ -84,7 +84,6 @@ pub(crate) fn span_previous_digest(first: &RelayEvent) -> Option<String> {
 /// would run ahead of a journal that no longer exists.
 pub(crate) fn persist_relay_snapshot(root: &Path, snapshot: &RelaySnapshot) -> Result<()> {
     let body = serde_json::to_vec(snapshot)?;
-    ensure_byte_budget(body.len(), RELAY_SNAPSHOT_BYTE_BUDGET, "relay snapshot")?;
     mj_core::config::atomic_write_existing(&root.join(RELAY_STATE_FILE), &body)
 }
 
@@ -702,13 +701,29 @@ impl DurableRelay {
         command_id: Option<&str>,
         observation: RelayObservation,
     ) -> Result<u64> {
+        self.prepare_journal_append(command_id, &observation)?;
+        self.append_relay_event_after_checkpoint_hold(command_id, observation)
+    }
+
+    pub(super) fn prepare_journal_append(
+        &mut self,
+        command_id: Option<&str>,
+        observation: &RelayObservation,
+    ) -> Result<()> {
         if let Some(failure) = &self.journal_append_failure {
             bail!("relay journal appends disabled after failed rollback: {failure}");
         }
-        // Every journal write passes here, so this is the one place that
-        // decides whether a ready checkpoint barrier's hold survives it. What
-        // waited is journaled first, which also keeps arrival order.
-        self.end_checkpoint_hold_for(command_id, &observation)?;
+        // If this event ends the hold, deferred writes must be recorded first.
+        self.end_checkpoint_hold_for(command_id, observation)
+    }
+
+    /// Budget failures here precede journal commit. A submit ends any hold
+    /// separately so deferred writes cannot be mistaken for its own rejection.
+    pub(super) fn append_relay_event_after_checkpoint_hold(
+        &mut self,
+        command_id: Option<&str>,
+        observation: RelayObservation,
+    ) -> Result<u64> {
         let ordinal = self
             .snapshot
             .latest_ordinal
@@ -744,13 +759,12 @@ impl DurableRelay {
         ensure_byte_budget(encoded.len(), RELAY_EVENT_BYTE_BUDGET, "relay event")?;
         encoded.push(b'\n');
         // A transcript observation leaves everything but the frontier alone, so
-        // only a state-moving event pays for the staged snapshot copy and the
-        // two budget serializations that validate it.
+        // only a state-moving event stages the snapshot and checks its wire
+        // projection.
         let stage_snapshot = self.stages_snapshot(&event.observation);
         let staged = if stage_snapshot {
             let mut next_snapshot = self.snapshot.clone();
             apply_relay_event(&mut next_snapshot, &event)?;
-            ensure_serialized_budget(&next_snapshot, RELAY_SNAPSHOT_BYTE_BUDGET, "relay snapshot")?;
             ensure_serialized_budget(
                 &next_snapshot.operational_state(),
                 RELAY_STATE_BYTE_BUDGET,
@@ -1399,7 +1413,7 @@ impl DurableRelay {
             self.record_command_interrupted(
                 &command_id,
                 mj_core::event_outcome::OutcomeReason::WorkerRestarted,
-                "relay restarted while the ACP command was in flight; it was not replayed",
+                "worker restarted while the ACP command was in flight; it was not replayed",
             )?;
         }
         if restored_close {

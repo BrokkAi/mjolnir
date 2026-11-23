@@ -91,7 +91,7 @@ class CpuLab(Lab):
         self.git_output(["remote", "add", "origin", origin], self.project)
 
     def run_container_sibling(self, workspace, tui):
-        status, response = self.request("POST", "/api/actions", {
+        status, response = self.request("POST", "/api/v1/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "fixture", "target_id": "podman", "title": "container-cpu-sibling",
             "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3},
@@ -251,7 +251,7 @@ assert all(child.exitcode == 0 for child in children)
             self.run_container_sibling(workspace, tui)
             self.stop_daemon()
             return
-        status, _ = self.request("POST", "/api/actions", {"action": "new", "workspace_id": workspace, "profile_id": "fake", "bundle_id": "fixture", "target_id": "localhost", "title": "cpu-burner", "project_directory": str(self.project)})
+        status, _ = self.request("POST", "/api/v1/actions", {"action": "new", "workspace_id": workspace, "profile_id": "fake", "bundle_id": "fixture", "target_id": "localhost", "title": "cpu-burner", "project_directory": str(self.project)})
         assert status == 202
         snapshot = self.wait_snapshot(lambda snapshot: any(session.get("title") == "cpu-burner" and session.get("state") == "running" for session in snapshot.get("sessions", [])), "running CPU session")
         session_id = next(session["id"] for session in snapshot["sessions"] if session["title"] == "cpu-burner")

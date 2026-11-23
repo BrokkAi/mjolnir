@@ -75,6 +75,12 @@ impl From<&mj_core::config::TargetTemplate> for SessionHost {
     }
 }
 
+fn target_overrides(target_environment: &BTreeMap<String, String>) -> bool {
+    has_credential_source(target_environment)
+        || target_environment.contains_key("AWS_PROFILE")
+        || target_environment.contains_key("AWS_DEFAULT_PROFILE")
+}
+
 /// Why a session on this profile and host does not receive AWS credentials
 /// from the controller. One definition of the question, used by launch, the
 /// sync and `mj doctor`: `None` means it does. Explicit credentials in the
@@ -126,10 +132,7 @@ pub fn credentials_withheld(
         SessionHost::Ec2 => return Some(CredentialsWithheld::Ec2),
         SessionHost::Isolated => {}
     }
-    if has_credential_source(target_environment)
-        || target_environment.contains_key("AWS_PROFILE")
-        || target_environment.contains_key("AWS_DEFAULT_PROFILE")
-    {
+    if target_overrides(target_environment) {
         return Some(CredentialsWithheld::TargetEnvironment);
     }
     has_credential_source(profile.environment.resolved())
@@ -150,9 +153,9 @@ pub fn is_bedrock(profile: &HarnessProfile) -> bool {
 
 /// Why the profile's Codex configuration cannot be read, when a role is
 /// configured and it cannot. Unreadable is unknown, not "not Bedrock": the
-/// worker still runs the configuration it was staged with, so a profile with a
-/// role is treated as Bedrock until its configuration can be read, and an
-/// error is reported rather than the session's AWS credentials left unmanaged.
+/// worker still runs the configuration it was staged with. A fresh launch
+/// reports the selection error, and legacy sync keeps the session managed for
+/// withdrawal.
 fn unreadable_provider(profile: &HarnessProfile) -> Option<String> {
     if profile.aws.is_none() || profile.kind != mj_core::config::HarnessKind::Codex {
         return None;
@@ -200,48 +203,84 @@ pub fn source(
     selected_source(profile).map(Some)
 }
 
-/// [`source`] for the credential sync.
-///
-/// A profile without a role is the unscoped path, unchanged from before role
-/// scoping: the same source launch builds, resolved when the targets are built.
-///
-/// A profile with a role is the role-scoped path. Every session of the profile
-/// that Mjolnir may have staged credentials into is managed, whether or not it
-/// still receives any: a role configured for a profile means no session of it
-/// keeps host credentials, so the sync withdraws what does not match the role's
-/// scope, and `mints` says whether it also mints. The source carries a pointer
-/// to the harness configuration that may select the host's AWS profile; the
-/// mint reads it when it runs ([`resolve`]), because an edit to that file does
-/// not rebuild the targets, and a file that cannot be read fails that cycle
-/// closed. Raw local and EC2 sessions have no credentials of Mjolnir's to
-/// withdraw.
+/// Rebuild a launch using the AWS profile already installed on the worker.
+pub fn source_for_staged_profile(
+    profile: &HarnessProfile,
+    backend: &TargetLocator,
+    target_environment: &BTreeMap<String, String>,
+    staged_aws_profile: Option<&str>,
+) -> Result<Option<AwsCredentialSource>> {
+    let Some(pinned) = staged_aws_profile else {
+        return source(profile, backend, target_environment);
+    };
+    if SessionHost::from(backend) != SessionHost::Isolated {
+        return Ok(None);
+    }
+    let source = pinned_source(profile, target_environment, pinned);
+    Ok(source.mints.then_some(source))
+}
+
+/// A configured role keeps the session managed for withdrawal, even when
+/// explicit credentials take precedence or the legacy selection is unreadable.
 pub fn sync_source(
     profile: &HarnessProfile,
     backend: &TargetLocator,
     target_environment: &BTreeMap<String, String>,
+    staged_aws_profile: Option<&str>,
 ) -> Result<Option<AwsCredentialSource>> {
     if profile.aws.is_none() {
-        return source(profile, backend, target_environment);
+        return source_for_staged_profile(profile, backend, target_environment, staged_aws_profile);
     }
     let host = SessionHost::from(backend);
     if host != SessionHost::Isolated {
         return Ok(None);
     }
-    let mut source = base_source(profile);
-    source.mints = credentials_withheld(profile, host, target_environment).is_none();
-    Ok(Some(source))
+    if let Some(pinned) = staged_aws_profile {
+        return Ok(Some(pinned_source(profile, target_environment, pinned)));
+    }
+    if credentials_withheld(profile, host, target_environment).is_none()
+        && let Ok(source) = selected_source(profile)
+    {
+        return Ok(Some(source));
+    }
+    Ok(Some(AwsCredentialSource {
+        environment: profile.environment.resolved().clone(),
+        role: profile.aws.clone(),
+        mints: false,
+    }))
 }
 
-/// The source with the AWS profile the harness's configuration selects, read
-/// now. The role-scoped mint calls this each time. An error means the
-/// configuration cannot be read: nothing can be minted for that attempt.
-pub fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSource> {
-    let mut source = source.clone();
-    // Codex can select its AWS profile inside the provider table.
-    if let Some(selection) = &source.selection
+fn pinned_source(
+    profile: &HarnessProfile,
+    target_environment: &BTreeMap<String, String>,
+    pinned: &str,
+) -> AwsCredentialSource {
+    let mut environment = profile.environment.resolved().clone();
+    let mints = !target_overrides(target_environment) && !has_credential_source(&environment);
+    environment.remove("AWS_DEFAULT_PROFILE");
+    environment.insert("AWS_PROFILE".into(), pinned.to_owned());
+    AwsCredentialSource {
+        environment,
+        role: profile.aws.clone(),
+        mints,
+    }
+}
+
+/// Resolve the host identity used by the AWS CLI for fresh staging.
+/// Callers have already decided that the profile receives synced credentials.
+pub fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
+    let mut environment = profile.environment.resolved().clone();
+    let mut selected = environment
+        .get("AWS_PROFILE")
+        .or_else(|| environment.get("AWS_DEFAULT_PROFILE"))
+        .cloned()
+        .or_else(|| std::env::var("AWS_PROFILE").ok())
+        .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
+        .unwrap_or_else(|| "default".into());
+    if profile.kind == mj_core::config::HarnessKind::Codex
         && let Some(config) = mj_core::codex_provider::effective_config(
-            &selection.home,
-            selection.overlay.as_deref(),
+            &profile.home,
+            profile.codex_profile.as_deref(),
         )?
     {
         let config: toml::Value =
@@ -251,50 +290,18 @@ pub fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSource> {
                 .get("model_providers")
                 .and_then(|providers| providers.get(provider))
                 .and_then(|provider| provider.get("aws"))
-            && let Some(selected) = aws.get("profile").and_then(toml::Value::as_str)
+            && let Some(selected_profile) = aws.get("profile").and_then(toml::Value::as_str)
         {
-            source
-                .environment
-                .insert("AWS_PROFILE".into(), selected.into());
+            selected = selected_profile.to_owned();
         }
     }
-    Ok(source)
-}
-
-/// The environment the AWS CLI runs in to resolve this profile's identity on
-/// the controller host: the profile's own environment with the AWS profile
-/// it selects, read now. Callers have already decided that the profile
-/// receives synced credentials.
-pub fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
-    let mut source = resolve(&base_source(profile))?;
-    // Resolved, so nothing is left to read later.
-    source.selection = None;
-    Ok(source)
-}
-
-/// The profile's own environment with the AWS profile it names, before the
-/// harness's configuration is consulted.
-fn base_source(profile: &HarnessProfile) -> AwsCredentialSource {
-    let mut environment = profile.environment.resolved().clone();
-    let selected = environment
-        .get("AWS_PROFILE")
-        .or_else(|| environment.get("AWS_DEFAULT_PROFILE"))
-        .cloned()
-        .or_else(|| std::env::var("AWS_PROFILE").ok())
-        .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
-        .unwrap_or_else(|| "default".into());
+    environment.remove("AWS_DEFAULT_PROFILE");
     environment.insert("AWS_PROFILE".into(), selected);
-    AwsCredentialSource {
+    Ok(AwsCredentialSource {
         environment,
         role: profile.aws.clone(),
         mints: true,
-        selection: (profile.kind == mj_core::config::HarnessKind::Codex).then(|| {
-            mj_core::aws_credentials::AwsProfileSelection {
-                home: profile.home.clone(),
-                overlay: profile.codex_profile.clone(),
-            }
-        }),
-    }
+    })
 }
 
 pub fn export(
@@ -374,12 +381,8 @@ mod tests {
         }
     }
 
-    // An unreadable provider configuration is unknown, not "not Bedrock": a
-    // profile with a role stays managed by the sync, whose mint reads the file
-    // when it runs and fails closed on an error, while launch (which resolves
-    // it at once) fails. Nothing is captured in the sync's source.
     #[test]
-    fn an_unreadable_codex_configuration_fails_launch_and_the_mint_but_leaves_the_sync_managed() {
+    fn an_unreadable_legacy_codex_configuration_fails_launch_but_keeps_withdrawal() {
         let home = tempfile::tempdir().unwrap();
         let config = home.path().join("config.toml");
         let role = mj_core::config::AwsRoleConfig {
@@ -400,39 +403,67 @@ mod tests {
 
         std::fs::write(&config, "model_provider = [unterminated").unwrap();
         assert!(super::source(&profile, &container, &none).is_err());
-        let synced = sync_source(&profile, &container, &none)
+        let synced = sync_source(&profile, &container, &none, None)
             .unwrap()
             .expect("still managed");
-        assert!(synced.role.is_some() && synced.mints);
-        let why = format!("{:#}", resolve(&synced).unwrap_err());
-        assert!(why.contains("TOML parse error"), "{why}");
+        assert!(synced.role.is_some() && !synced.mints);
 
-        // Repaired, and it selects an AWS profile: the same source, with
-        // nothing rebuilt, resolves to it at the next mint.
         std::fs::write(
             &config,
             "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"team\"\n",
         )
         .unwrap();
         assert_eq!(
-            sync_source(&profile, &container, &none).unwrap().as_ref(),
-            Some(&synced)
+            sync_source(&profile, &container, &none, None)
+                .unwrap()
+                .unwrap()
+                .environment["AWS_PROFILE"],
+            "team"
         );
-        assert_eq!(resolve(&synced).unwrap().environment["AWS_PROFILE"], "team");
         assert_eq!(
             selected_source(&profile).unwrap().environment["AWS_PROFILE"],
             "team"
         );
 
+        for with_role in [true, false] {
+            if !with_role {
+                profile.aws = None;
+            }
+            profile
+                .environment
+                .insert("AWS_PROFILE".into(), "edited-env".into());
+            for contents in [
+                "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"edited-file\"",
+                "model_provider = [unterminated",
+            ] {
+                std::fs::write(&config, contents).unwrap();
+                let pinned = Some("original");
+                let launch = source_for_staged_profile(&profile, &container, &none, pinned)
+                    .unwrap()
+                    .unwrap();
+                let sync = sync_source(&profile, &container, &none, pinned)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(launch, sync);
+                assert_eq!(launch.environment["AWS_PROFILE"], "original");
+                assert_eq!(launch.role.is_some(), with_role);
+                assert!(launch.mints);
+            }
+        }
+
+        profile.aws = synced.role;
         // A raw local session has no credentials of Mjolnir's to manage.
         let raw = TargetLocator::LocalBare {
             worker_root: "/home/me/.local/share/hel/workers/s".into(),
         };
-        assert_eq!(sync_source(&profile, &raw, &none).unwrap(), None);
+        assert_eq!(sync_source(&profile, &raw, &none, None).unwrap(), None);
         // Without a role it is the unscoped path, as before role scoping.
         profile.aws = None;
         std::fs::write(&config, "model_provider = [unterminated").unwrap();
-        assert_eq!(sync_source(&profile, &container, &none).unwrap(), None);
+        assert_eq!(
+            sync_source(&profile, &container, &none, None).unwrap(),
+            None
+        );
     }
 
     // A role configured for a profile that no longer authenticates with the AWS
@@ -456,7 +487,7 @@ mod tests {
         };
         let none = BTreeMap::new();
 
-        let source = sync_source(&profile, &container, &none)
+        let source = sync_source(&profile, &container, &none, None)
             .unwrap()
             .expect("a configured role manages the profile's sessions");
         assert!(
@@ -468,7 +499,7 @@ mod tests {
             .environment
             .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
         assert!(
-            sync_source(&profile, &container, &none)
+            sync_source(&profile, &container, &none, None)
                 .unwrap()
                 .unwrap()
                 .mints
@@ -511,7 +542,6 @@ mod tests {
             ]),
             role: None,
             mints: true,
-            selection: None,
         };
         for generation in ["original", "renewed"] {
             std::fs::write(
@@ -599,7 +629,6 @@ mod tests {
             environment: BTreeMap::new(),
             role: None,
             mints: true,
-            selection: None,
         };
         let error = export(&source, &FailedExport).err().unwrap();
         assert!(!format!("{error:#}").contains("private-"));

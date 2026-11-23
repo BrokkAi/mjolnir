@@ -267,7 +267,7 @@ fn golden_path_completion() {
             .unwrap()
             .replace(escaped_root.trim_matches('"'), "/fixture");
         output.push_str(&format!(
-            "=== POST /api/paths/complete: {label} (JSON) ===\n{response}\n\n"
+            "=== POST /api/v1/paths/complete: {label} (JSON) ===\n{response}\n\n"
         ));
     }
     output.pop();
@@ -1515,7 +1515,7 @@ fn registration_saves_the_initial_task_before_provisioning() {
     let saved = crate::database::load_state().unwrap();
     assert_eq!(saved.sessions[&id].draft_input, prompt);
     assert_eq!(saved.sessions[&id].state, SessionState::Provisioning);
-    crate::database::set_session_draft_input(&id, "a newer draft").unwrap();
+    crate::database::test_fixtures::seed_session_draft_input(&id, "a newer draft").unwrap();
     crate::database::clear_session_draft_input_if_matches(&id, &prompt).unwrap();
     assert_eq!(
         crate::database::load_state().unwrap().sessions[&id].draft_input,

@@ -162,8 +162,8 @@
             {
               "kind": "podman",
               "label": "Podman",
-              "detail": "Podman preflight failed: could not run `podman --version` to check that Podman 4.0.0 or newer is installed: `podman` is not installed or not on PATH.",
-              "remediation": "Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See https://mjolnir.brokk.ai/podman/."
+              "detail": "Podman is supported on Linux hosts only; on macOS use Apple container or Docker.",
+              "remediation": null
             },
             {
               "kind": "docker",

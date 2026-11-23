@@ -157,6 +157,83 @@ pub(super) fn podman_output(stdout: impl AsRef<[u8]>) -> CommandOutput {
 }
 
 #[test]
+fn apple_container_status_and_start_follow_the_cli_exit_and_json_contract() {
+    const RUNNING: &[u8] = br#"{"client":{"appName":"container","build":"release","commit":"unspecified","version":"1.7.0"},"host":{"architecture":"arm64","cpus":8,"operatingSystem":"Version 27.0.1 (Build 26A434)"},"paths":{"appRoot":"/Users/jonathan/Library/Application Support/com.apple.container/","installRoot":"/opt/homebrew/Cellar/container/1.7.0/"},"resources":{"containersRunning":0,"containersTotal":0,"images":2},"server":{"appName":"container-apiserver","build":"release","commit":"unspecified","version":"1.7.0"},"status":"running"}"#;
+    let stopped = CommandOutput {
+        status: 1,
+        stdout: br#"{"status":"unregistered"}"#.to_vec(),
+        stderr: vec![],
+    };
+    let broken = CommandOutput {
+        status: 64,
+        stdout: vec![],
+        stderr: b"Error: Unknown option --format".to_vec(),
+    };
+    let remote = ssh();
+    for host in [None, Some(&remote)] {
+        let commands = |executor: &PodmanPreflightExecutor| {
+            executor
+                .seen
+                .borrow()
+                .iter()
+                .map(|command| {
+                    if let Some(ssh) = host {
+                        assert_eq!(command.program, "ssh");
+                        assert_eq!(command.args[command.args.len() - 2], ssh.destination);
+                        unwrapped_remote_line(command.args.last().unwrap()).replace('\'', "")
+                    } else {
+                        format!("{} {}", command.program, command.args.join(" "))
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let observe = PodmanPreflightExecutor::with_outputs([stopped.clone(), broken.clone()]);
+        assert!(matches!(
+            apple_container_runtime_status(host, &observe).unwrap(),
+            AppleContainerStatus::Stopped { .. }
+        ));
+        assert_eq!(
+            apple_container_runtime_status(host, &observe).unwrap(),
+            AppleContainerStatus::Broken {
+                status: 64,
+                detail: "Error: Unknown option --format".into(),
+            }
+        );
+        let broken_install = PodmanPreflightExecutor::with_outputs([broken.clone()]);
+        let error = ensure_apple_container_runtime(host, &broken_install).unwrap_err();
+        assert!(error.to_string().contains("status 64"));
+        assert_eq!(
+            commands(&broken_install),
+            ["container system status --format json"]
+        );
+
+        let start = PodmanPreflightExecutor::with_outputs([
+            stopped.clone(),
+            podman_output(b""),
+            podman_output(RUNNING),
+        ]);
+        assert_eq!(
+            ensure_apple_container_runtime(host, &start).unwrap(),
+            AppleContainerRuntime::Started
+        );
+        assert_eq!(
+            commands(&start),
+            [
+                "container system status --format json",
+                "container system start --enable-kernel-install",
+                "container system status --format json",
+            ]
+        );
+    }
+    let unreachable = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 255,
+        stdout: vec![],
+        stderr: b"ssh: Connection closed".to_vec(),
+    }]);
+    assert!(apple_container_runtime_status(Some(&remote), &unreachable).is_err());
+}
+
+#[test]
 fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
     use std::sync::mpsc;
 
@@ -216,7 +293,7 @@ fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
     };
     let (result_tx, result_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let result = ensure_apple_container_runtime(&executor);
+        let result = ensure_apple_container_runtime(None, &executor);
         result_tx.send(result).unwrap();
     });
 
@@ -336,7 +413,7 @@ fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
             .with_context(|| format!("run {} for {}", command.program, command.purpose))
         }
     }
-    let error = verify_local_podman(&NoPodman).unwrap_err();
+    let error = verify_podman(PodmanHost::Local, &NoPodman).unwrap_err();
     assert_eq!(
         failed_podman_postcondition(&error),
         Some(PodmanPostcondition::Version)
@@ -358,15 +435,11 @@ fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn podman_preflight_accepts_a_remote_rootless_podman_machine() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(rootless_machine_info()),
-    ]);
-
-    let preflight = verify_local_podman(&executor).expect("macOS Podman machine is supported");
-
-    assert_eq!(preflight.version, "5.4.2");
+fn local_podman_preflight_refuses_macos_without_running_podman() {
+    let executor = PodmanPreflightExecutor::with_outputs([]);
+    let error = verify_local_podman(&executor).unwrap_err();
+    assert!(error.is::<PodmanUnsupportedOnMacos>());
+    assert!(executor.seen.borrow().is_empty());
 }
 
 #[test]
@@ -376,7 +449,7 @@ fn podman_preflight_reports_a_rootful_podman_as_not_rootless() {
         podman_output(rootful_podman_info()),
     ]);
 
-    let error = verify_local_podman(&executor).unwrap_err();
+    let error = verify_podman(PodmanHost::Local, &executor).unwrap_err();
 
     assert_eq!(
         failed_podman_postcondition(&error),
@@ -389,7 +462,7 @@ fn podman_preflight_reports_a_rootful_podman_as_not_rootless() {
     );
     assert!(error.contains("reports rootful mode"), "{error}");
     assert!(
-        error.contains("podman machine set --rootful=false"),
+        error.contains("Run Mjolnir as the ordinary user"),
         "{error}"
     );
     assert!(
@@ -405,7 +478,7 @@ fn podman_preflight_reports_an_incomplete_uid_map() {
         podman_output(podman_info_json(true, false, &[(0, 1000, 1)])),
     ]);
 
-    let error = verify_local_podman(&executor).unwrap_err();
+    let error = verify_podman(PodmanHost::Local, &executor).unwrap_err();
 
     assert_eq!(
         failed_podman_postcondition(&error),
@@ -424,7 +497,7 @@ fn podman_preflight_rejects_a_remote_client_on_a_linux_host() {
         podman_output(rootless_machine_info()),
     ]);
 
-    let error = verify_local_podman(&executor).unwrap_err();
+    let error = verify_podman(PodmanHost::Local, &executor).unwrap_err();
 
     assert_eq!(
         failed_podman_postcondition(&error),
@@ -440,7 +513,7 @@ fn podman_preflight_reports_unparsable_info() {
         podman_output(b"not json\n"),
     ]);
 
-    let error = verify_local_podman(&executor).unwrap_err();
+    let error = verify_podman(PodmanHost::Local, &executor).unwrap_err();
 
     assert_eq!(
         failed_podman_postcondition(&error),
@@ -623,7 +696,9 @@ fn podman_preflight_rejects_unsupported_version_with_upgrade_remediation() {
     let executor =
         PodmanPreflightExecutor::with_outputs([podman_output(b"podman version 3.4.7\n")]);
 
-    let error = verify_local_podman(&executor).unwrap_err().to_string();
+    let error = verify_podman(PodmanHost::Local, &executor)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("Podman 4.0.0 or newer"));
     assert!(error.contains("apt install -y podman uidmap"));
     assert!(error.contains(PODMAN_DOCUMENTATION_URL));
@@ -639,7 +714,7 @@ fn podman_preflight_accepts_supported_four_series_releases() {
             podman_output(rootless_podman_info()),
         ]);
         assert_eq!(
-            verify_local_podman(&executor).unwrap().version,
+            verify_podman(PodmanHost::Local, &executor).unwrap().version,
             version,
             "Podman {version}"
         );
@@ -726,30 +801,27 @@ fn ssh_podman_preflight_warns_when_linger_check_is_unavailable() {
     assert!(warning.remediation.contains("service manager"));
 }
 
-/// A Mac reached over SSH runs Podman through its Podman machine, which
-/// `podman info` reports as a remote service, and has no `loginctl`. A Linux
-/// host that reports a remote service still points at another host's engine.
-// Hard-won: 2096c275d: an SSH Mac's Podman machine was refused as a remote engine.
 #[test]
-fn ssh_podman_preflight_accepts_the_podman_machine_of_a_mac_host_only() {
-    let machine_on = |platform: &str| {
-        let info = rootless_machine_info();
-        PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
-            ("version", 0, "podman version 6.1.4\n", ""),
-            ("platform", 0, platform, ""),
-            ("info", 0, &info, ""),
-            ("linger", 127, "", "sh: loginctl: command not found\n"),
-        ])])
-    };
+fn ssh_podman_preflight_refuses_darwin_and_remote_linux_engines() {
+    let mac = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[(
+        "platform", 0, "Darwin\n", "",
+    )])]);
+    assert!(
+        verify_ssh_podman(&ssh(), &mac)
+            .unwrap_err()
+            .is::<PodmanUnsupportedOnMacos>()
+    );
 
-    let preflight = verify_ssh_podman(&ssh(), &machine_on("Darwin\n")).unwrap();
-    assert_eq!(preflight.version, "6.1.4");
-    assert!(preflight.warnings.is_empty(), "{:?}", preflight.warnings);
-
-    let error = verify_ssh_podman(&ssh(), &machine_on("Linux\n"))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("serviceIsRemote=true"), "{error}");
+    let linux = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+        ("platform", 0, "Linux\n", ""),
+        ("version", 0, "podman version 6.1.4\n", ""),
+        ("info", 0, &rootless_machine_info(), ""),
+    ])]);
+    let error = verify_ssh_podman(&ssh(), &linux).unwrap_err();
+    assert_eq!(
+        failed_podman_postcondition(&error),
+        Some(PodmanPostcondition::Remote)
+    );
 }
 
 #[test]
@@ -1633,8 +1705,8 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         None,
     )
     .unwrap();
-    assert_eq!(apple.commands[1].args[0], "run");
-    assert!(!apple.commands[1].args.contains(&"--init".to_owned()));
+    assert_eq!(apple.commands[0].args[0], "run");
+    assert!(!apple.commands[0].args.contains(&"--init".to_owned()));
 }
 
 /// `never` means never, including the daemon's own background download.
@@ -5169,6 +5241,36 @@ fn ssh_apple_container_smoke_runs_and_removes_a_disposable_container_remotely() 
 }
 
 #[test]
+fn ssh_docker_darwin_smoke_uses_a_read_only_home_directory_attachment() {
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output("Darwin\n"),
+        podman_output("/Users/dev/.mj-docker-overlay-smoke-test123\n"),
+        podman_output(""),
+        podman_output(""),
+        podman_output(""),
+        podman_output(""),
+        podman_output(""),
+    ]);
+    let mode = run_setup_smoke_test(&ssh_docker_template(), SESSION, &executor).unwrap();
+    assert!(matches!(mode, Some(DockerAttachmentMode::ReadOnly { .. })));
+    let seen = executor.seen.borrow();
+    assert_eq!(seen.len(), 7);
+    let command = |index: usize| seen[index].args.last().unwrap();
+    assert!(command(0).contains("uname -s"));
+    assert!(command(1).contains("$HOME/.mj-docker-overlay-smoke-"));
+    assert!(!command(1).contains("/tmp"));
+    assert!(
+        command(2)
+            .contains("/Users/dev/.mj-docker-overlay-smoke-test123:/mnt/hel-overlay-smoke:ro")
+    );
+    assert!(command(3).contains("! printf"));
+    assert!(
+        command(6).contains("rm")
+            && command(6).contains("/Users/dev/.mj-docker-overlay-smoke-test123")
+    );
+}
+
+#[test]
 fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_cleanup_failure() {
     let fail = || CommandOutput {
         status: 1,
@@ -5176,6 +5278,7 @@ fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_
         stderr: b"injected failure".to_vec(),
     };
     let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output("Linux\nDocker Engine - Community\n"),
         podman_output("/tmp/mj-docker-overlay-smoke.test123\n"),
         podman_output(""),
         fail(),
@@ -5184,8 +5287,8 @@ fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_
     let error = run_setup_smoke_test(&ssh_docker_template(), SESSION, &executor).unwrap_err();
     assert!(format!("{error:#}").contains("cleanup also failed"));
     let seen = executor.seen.borrow();
-    assert_eq!(seen.len(), 4);
-    assert!(seen[3].args.last().unwrap().contains("docker rm --force"));
+    assert_eq!(seen.len(), 5);
+    assert!(seen[4].args.last().unwrap().contains("docker rm --force"));
     assert!(
         !seen
             .iter()
@@ -5259,7 +5362,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
 #[test]
 #[ignore = "requires a running Docker daemon and cached agent-dev image"]
 fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
-    let source = docker_overlay_smoke_directory().unwrap();
+    let source = docker_overlay_smoke_directory(cfg!(target_os = "macos")).unwrap();
     let session = format!(
         "vm-test-{}",
         source
@@ -5496,7 +5599,7 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         .expect("the cleanup runs a removal script");
     assert!(script.contains(&format!("/var/lib/hel/workers/{BORROWED_CHILD}")));
     assert!(script.contains(&format!("/var/lib/hel/profiles/{BORROWED_CHILD}")));
-    assert!(script.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(!script.contains(".local/share/hel/profiles/"));
     assert!(
         !script.contains(&format!("/var/lib/hel/workers/{SESSION}")),
         "a child must never remove its parent's worker root: {script}"
@@ -5505,6 +5608,22 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         !script.contains("podman rm") && !script.contains("docker rm"),
         "a child must never remove the borrowed container: {script}"
     );
+    let ssh_locator = TargetLocator::SshBare {
+        ssh: ssh(),
+        workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+        worker_id: Some(BORROWED_CHILD.into()),
+    };
+    let cleanup = borrowed_worker_cleanup_plan(&ssh_locator, BORROWED_CHILD).unwrap();
+    let command = cleanup.scripts()[0].args.last().unwrap();
+    let removal = command
+        .lines()
+        .find(|line| line.contains("rm -rf --"))
+        .unwrap();
+    assert!(removal.contains(&format!(".local/share/hel/workers/{BORROWED_CHILD}")));
+    assert!(removal.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(!removal.contains(SESSION));
+    assert!(!removal.contains("workspaces"));
+    assert!(!removal.contains("/var/lib/hel/profiles/"));
 }
 
 #[test]

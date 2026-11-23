@@ -1,0 +1,120 @@
+action: None
+=== new_session_profile_step_aligns_its_columns (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│                 │                claude-1  refreshing                                              │                 │
+│                 │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│                 │   ▾ MOONSHOT   kimi-1    refreshing                                              │                 │
+│                 │                kimi-1    refreshing                                              │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──── ▁   ▄   □ ╮
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+action: None
+=== new_session_profile_step_shows_weekly_and_five_hour_percentages (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│hel ───────────  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   ▾ ANTHROPIC  claude-1  63%         40%                                         │                 │
+│  Idle  podman   │                claude-1  63%         40%                                         │                 │
+│  │ No messages  │   ▾ OPENAI     codex-1   refreshing                                              │                 │
+│  │              │                codex-1   refreshing                                              │                 │
+│                 │                codex-2   refreshing                                              │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──── ▁   ▄   □ ╮
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │             ~?%*▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== resume_profile_step_aligns_its_columns (120x24) ===
+╭ Workspaces ───                                                                                        ────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────  ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮                 │
+╭ Sessions ─────  │                                                                                  │                 │
+│ Create   Open   │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
+│hel ───────────  │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)           │                 │
+│› ■ ACP pretty   │   codex-1   Codex        refreshing                                              │  ───────────────╯
+│  Stopped  podm  │   codex-2   Codex        refreshing                                              │  ───────────────╮
+│  │ No messages  │   kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)           │                 │
+│  │              │                                                                                  │                 │
+│                 │ Same agent: the conversation continues natively.                                 │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──── ▁   ▄   □ ╮
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   Cancel     Next                                                                │  ──────── ▁   ▄ ╮
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
+╰───────────────                                                                                        ───────────────╯
+Enter open · / s                                                                                        / ? palette
+=== a_missing_profile_is_left_out_of_the_profile_step_and_named (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│No sessions yet  │   PROVIDER     PROFILE   WEEKLY      5H                                          │                 │
+│Create new work  │   ▾ ANTHROPIC  claude-1  refreshing                                              │                 │
+│                 │                claude-1  refreshing                                              │                 │
+│                 │   ▸ OPENAI     codex-1   refreshing                                              │                 │
+│                 │                                                                                  │                 │
+│                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │                 │
+│                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │  ───────────────╯
+│                 │ › Profiles.                                                                      │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──── ▁   ▄   □ ╮
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
+│                                                                                                                      │
+╰───────────────                                                                                        ───────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette

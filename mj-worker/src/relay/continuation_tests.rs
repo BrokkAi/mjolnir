@@ -533,7 +533,11 @@ fn handback_reminder_admission_is_durable_and_deduplicated() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        relay.snapshot.active_prompt.as_ref().unwrap().prompt,
+        relay.snapshot.dispatches[&relay.snapshot.active_prompt.as_ref().unwrap().command_id]
+            .command
+            .prompt_blocks()
+            .unwrap()
+            .as_ref(),
         vec![agent_client_protocol::v1::schema::ContentBlock::from(
             mj_core::subagent::HANDBACK_REMINDER_TEXT.to_owned()
         )]

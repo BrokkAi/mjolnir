@@ -80,27 +80,27 @@ async function mount(page, {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/auth/session') return json({});
-    if (pathname === '/api/snapshot') {
+    if (pathname === '/api/v1/snapshot') {
       state.snapshots += 1;
       const wire = viewerWireSnapshot(state.snapshot);
       state.lastWireSnapshot = wire;
       state.streamInternedKeys = new Set(Object.keys(wire.interned));
       return json(wire);
     }
-    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    const detailPath = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/row$/);
     if (detailPath) {
       state.detailRequests.push(decodeURIComponent(detailPath[1]));
       if (state.holdDetail) await state.holdDetail;
       const detail = viewerDetailResponse(state.snapshot, decodeURIComponent(detailPath[1]));
       return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
-    if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
-    if (pathname === '/api/moves/prepare') {
+    if (pathname === '/api/v1/viewer/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
+    if (pathname === '/api/v1/moves/prepare') {
       state.movePreflights ||= [];
       state.movePreflights.push(route.request().postDataJSON());
       return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'fixture stops after preparation request' }) });
     }
-    if (pathname === '/api/actions') {
+    if (pathname === '/api/v1/actions') {
       const body = route.request().postDataJSON();
       if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
       state.actions.push(body);
@@ -361,7 +361,7 @@ async function captureResumeState(output, page, label, state, extra = null) {
     disabled: 'disabled' in node ? node.disabled : null,
   })));
   output.push(`controls: ${JSON.stringify(controls)}`);
-  if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions)}`);
+  if (state.actions.length) output.push(`action: POST /api/v1/actions ${JSON.stringify(state.actions)}`);
   if (state.wikiQueries.length) output.push(`request: GET /api/v1/wiki/search ${JSON.stringify(state.wikiQueries)}`);
   if (state.wikiRestores.length) output.push(`action: POST /api/v1/wiki/archive/restore ${JSON.stringify(state.wikiRestores)}`);
   if (extra !== null) output.push(`state: ${JSON.stringify(extra)}`);
@@ -551,7 +551,7 @@ test('golden_viewer_resume', async ({ context }) => {
   const barePage = await context.newPage();
   const preflightRequests = [];
   barePage.on('request', request => {
-    if (new URL(request.url()).pathname === '/api/preflight/resume') preflightRequests.push(request.postDataJSON());
+    if (new URL(request.url()).pathname === '/api/v1/preflight/resume') preflightRequests.push(request.postDataJSON());
   });
   const bareState = await mountSettled(barePage);
   await expect.poll(() => bareState.wikiQueries.at(-1)).toBe('');

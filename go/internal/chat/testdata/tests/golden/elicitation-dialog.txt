@@ -1,0 +1,684 @@
+=== Codex async question with a suggested answer (100x20) ===
+╭ × Question 1/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which AWS billing account? (required)                                                             │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│● Use the main-account role                                                                       │
+│○ Keep Bedrock billing in the CI account                                                          │
+│○ Additional answer or note                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Codex async question with a custom answer (100x20) ===
+╭ × Question 1/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which AWS billing account? (required)                                                             │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│○ Use the main-account role                                                                       │
+│○ Keep Bedrock billing in the CI account                                                          │
+│● Additional answer or note                                                                       │
+│> Use a third AWS billing account                                                                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Codex answers as submitted and as the harness receives them (100x20) ===
+╭ × Question 3/3 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which role name? (required)                                                                       │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│                                                                                                  │
+│> BedrockCI                                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_01_note": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} }
+harness: Ok(Accept { content: {"question_01": String("Use a third AWS billing account"), "question_02": String("CI"), "question_03": String("BedrockCI")} })
+
+=== Claude question starts with its first option picked (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│● Redis                                                                                           │
+│    In-memory store with persistence                                                              │
+│    maxmemory-policy allkeys-lru                                                                  │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude pick kept while writing Other (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│● Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Keep TTLs short                                                                                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude multi-select picks with Other text (100x20) ===
+╭ × Question 2/2 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☒ linux                                                                                           │
+│☒ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│    Type your own answer to add to your selection above (optional).                               │
+│> freebsd                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Claude answers as submitted and as the harness receives them (100x20) ===
+╭ × Question 2/2 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☒ linux                                                                                           │
+│☒ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│    Type your own answer to add to your selection above (optional).                               │
+│> freebsd                                                                                         │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} }
+harness: Ok(Accept { content: {"question_0": String("Redis"), "question_0_custom": String("Keep TTLs short"), "question_1": StringArray(["linux", "macos"]), "question_1_custom": String("freebsd")} })
+
+=== Claude default taken back, arrows to Other pick nothing on the way (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Valkey                                                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+submitted: Cancel
+
+=== Claude clicks and Space toggle the pick (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│✎ Other                                                                                           │
+│    Type your own answer, or add a note to the option you chose above (optional).                 │
+│> Valkey                                                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Space takes back default Redis: Ok({})
+click Redis: Ok({"question_0": String("Redis")})
+click Memcached: Ok({"question_0": String("Memcached")})
+click Memcached again, later: Ok({})
+Space on Redis: Ok({"question_0": String("Redis")})
+Space on Redis again: Ok({})
+click Other, write Valkey: Ok({"question_0_custom": String("Valkey")})
+
+=== Claude double-click picks the option and answers (100x20) ===
+╭ × Question 2/2 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Targets                                                                                           │
+│Which platforms should CI cover?                                                                  │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│☐ linux                                                                                           │
+│☐ macos                                                                                           │
+│☐ windows                                                                                         │
+│✎ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+recorded form: second click lands on "✎ Other"; Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+with Dragonfly after Memcached: second click lands on "○ Dragonfly"; Ok({"question_0": String("Memcached")}), answered=true, now on question 2, response=None
+
+=== Claude Enter on an option answers with what is there (100x20) ===
+╭ × Question 1/2 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Cache                                                                                             │
+│Which cache should the service use?                                                               │
+│                                                                                                  │
+│Please answer the following questions.                                                            │
+│○ Redis                                                                                           │
+│○ Memcached                                                                                       │
+│    Simple volatile cache                                                                         │
+│✎ Other                                                                                           │
+│    Valkey                                                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ move · Space pick · Enter answer · Alt+←/→ questions                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter on Memcached, nothing picked, Other blank: Ok({"question_0": String("Memcached")})
+Enter on Memcached, nothing picked, Other holds Valkey: Ok({"question_0_custom": String("Valkey")})
+
+=== Claude permission form uses the same three actions (100x14) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Permission (required)                                                                             │
+│                                                                                                  │
+│Claude Code requests permission:                                                                  │
+│Run cargo test                                                                                    │
+│● Yes                                                                                             │
+│○ Yes, and don't ask again for `cargo test` commands                                              │
+│○ No                                                                                              │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+skip: Ok(Decline)
+
+=== persistent permission form uses the same three actions (100x14) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Permission (required)                                                                             │
+│                                                                                                  │
+│Codex requests permission:                                                                        │
+│Reach crates.io                                                                                   │
+│● Yes, and allow this host in the future                                                          │
+│○ No, and block this host in the future                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+skip: Err("this permission request offers no one-time rejection to skip with; choose one of its options, or cancel to stop the turn")
+
+=== small question pane keeps the focused custom answer and actions (60x6) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
+│Question 1                                                │
+│> custom draft                                            │
+│  Answer & Next     Previous     Cancel                   │
+│Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · En│
+╰──────────────────────────────────────────────────────────╯
+focused value=[Multi({}), Text(TextInput { value: "custom draft", cursor: 12, kill_buffer: "", chain_kill: false, max_chars: None, filter: Any, multiline: false, preferred_column: None, history: None })]
+
+=== plan review before scrolling (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│plan-line-04                                                                                      │
+│plan-line-05                                                                                      │
+│plan-line-06                                                                                      │
+│plan-line-07                                                                                      │
+│plan-line-08                                                                                      │
+│plan-line-09                                                                                      │
+│plan-line-10                                                                                      │
+│plan-line-11                                                                                      │
+│plan-line-12                                                                                      │
+│plan-line-13                                                                                      │
+│plan-line-14                                                                                      │
+│plan-line-15                                                                                      │
+│plan-line-16                                                                                      │
+│plan-line-17                                                                                      │
+│plan-line-18                                                                                      │
+│plan-line-19                                                                                      │
+│plan-line-20                                                                                      │
+│1/1  Architecture (required)                                                                      │
+│● Implement                                                                                       │
+│    Approve and continue                                                                          │
+│○ Revise                                                                                          │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Text 1–21/80 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+focus index=0
+
+=== plan review after paging to the end (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-59                                                                                      │
+│plan-line-60                                                                                      │
+│plan-line-61                                                                                      │
+│plan-line-62                                                                                      │
+│plan-line-63                                                                                      │
+│plan-line-64                                                                                      │
+│plan-line-65                                                                                      │
+│plan-line-66                                                                                      │
+│plan-line-67                                                                                      │
+│plan-line-68                                                                                      │
+│plan-line-69                                                                                      │
+│plan-line-70                                                                                      │
+│plan-line-71                                                                                      │
+│plan-line-72                                                                                      │
+│plan-line-73                                                                                      │
+│plan-line-74                                                                                      │
+│plan-line-75                                                                                      │
+│plan-line-76                                                                                      │
+│plan-line-77                                                                                      │
+│plan-line-78                                                                                      │
+│plan-line-79                                                                                      │
+│1/1  Architecture (required)                                                                      │
+│● Implement                                                                                       │
+│    Approve and continue                                                                          │
+│○ Revise                                                                                          │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Text 60–80/80 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+focus index=0
+
+=== boolean checkbox click (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Architecture                                                                                      │
+│                                                                                                  │
+│Choose an architecture                                                                            │
+│☒ Yes                                                                                             │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+field value=Boolean(true)
+
+=== boolean field title click (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Architecture                                                                                      │
+│                                                                                                  │
+│Choose an architecture                                                                            │
+│☒ Yes                                                                                             │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+field value=Boolean(true)
+
+=== plan review implement option selected (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│1/1  Architecture (required)                                                                      │
+│● Implement                                                                                       │
+│    Approve and continue                                                                          │
+│○ Revise                                                                                          │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== revise option exposes inline feedback (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│1/1  Architecture (required)                                                                      │
+│○ Implement                                                                                       │
+│● Revise                                                                                          │
+│    Describe what the agent should change                                                         │
+│>                                                                                                 │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== revise submits its feedback with the selected action (100x30) ===
+╭ × Question 1/1 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│1/1  Architecture (required)                                                                      │
+│○ Implement                                                                                       │
+│● Revise                                                                                          │
+│    Describe what the agent should change                                                         │
+│> add a regression test                                                                           │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+action: Some(Accept { content: {"feedback": String("add a regression test"), "question_0": String("revise")} })
+
+=== paired custom answer starts on question one of three (100x30) ===
+╭ × Question 1/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 1                                                                                        │
+│Prompt 1                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+display fields=3
+
+=== paired custom answer advances to question two of three (100x30) ===
+╭ × Question 2/3 · 2 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 2                                                                                        │
+│Prompt 2                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+display fields=3
+
+=== last question keeps the same three actions (100x20) ===
+╭ × Question 3/3 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 3                                                                                        │
+│Prompt 3                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== previous returns to the confirmed answer (100x20) ===
+╭ × Question 2/3 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 2                                                                                        │
+│Prompt 2                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== unanswered warning keeps the same three actions (100x20) ===
+╭ × Unanswered questions ──────────────────────────────────────────────────────────────────────────╮
+│Submit with 1 unanswered questions?                                                               │
+│                                                                                                  │
+│1. Question 1                                                                                     │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Enter confirm · Esc go back                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== cancel remains available from the unanswered warning (100x20) ===
+╭ × Unanswered questions ──────────────────────────────────────────────────────────────────────────╮
+│Submit with 1 unanswered questions?                                                               │
+│                                                                                                  │
+│1. Question 1                                                                                     │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer & Next     Previous     Cancel                                                           │
+│                                                                                                  │
+│Enter confirm · Esc go back                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+action: Some(Cancel)

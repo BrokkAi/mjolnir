@@ -334,18 +334,30 @@ async fn builder(
 }
 
 async fn probe_builder(host: ImageHost, cancel: &CancellationToken) -> Result<()> {
-    let words: &[&str] = match host.engine() {
-        "container" => &["container", "system", "status"],
-        engine => &[engine, "info"],
-    };
-    let command = host.command(
-        words.iter().map(|word| (*word).to_owned()).collect(),
-        "check the container image builder".into(),
-    );
     let executor = mj_core::targets::CancellableProcessExecutor::new(Default::default())
         .with_cancellation(cancel.clone());
     mj_core::runtime::spawn_blocking(move || {
-        mj_targets::command_checks::execute_checked(&executor, command).map(|_| ())
+        use mj_targets::targets::{AppleContainerStatus, apple_container_runtime_status};
+        let ssh = match &host {
+            ImageHost::AppleContainer => None,
+            ImageHost::SshAppleContainer(ssh) => Some(ssh),
+            _ => {
+                let command = host.command(
+                    vec![host.engine().to_owned(), "info".to_owned()],
+                    "check the container image builder".into(),
+                );
+                return mj_targets::command_checks::execute_checked(&executor, command).map(|_| ());
+            }
+        };
+        match apple_container_runtime_status(ssh, &executor)? {
+            AppleContainerStatus::Running => Ok(()),
+            AppleContainerStatus::Stopped { detail } => {
+                bail!("Apple container service is stopped: {detail}")
+            }
+            AppleContainerStatus::Broken { status, detail } => {
+                bail!("Apple container status failed with status {status}: {detail}")
+            }
+        }
     })
     .await
     .context("join image builder probe")?

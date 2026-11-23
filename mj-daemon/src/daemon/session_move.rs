@@ -412,6 +412,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         operations: Vec<MoveOperation>,
         close_operations: &BTreeSet<String>,
+        retired_sessions: &BTreeSet<String>,
     ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
         let mut closes = BTreeSet::new();
@@ -442,6 +443,9 @@ impl RuntimeState {
         //   cleanup, worker probes, and relay connections never block startup.
         if let Ok(legacy_ops) = mj_controller::database::load_legacy_move_operations() {
             for (session_id, legacy_op) in legacy_ops {
+                if retired_sessions.contains(&session_id) {
+                    continue;
+                }
                 if legacy_op.is_resolved() {
                     let _ = mj_controller::database::delete_move_operation(&session_id);
                     continue;

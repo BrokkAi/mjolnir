@@ -485,7 +485,7 @@ class SteerLab:
         })
 
     def snapshot(self) -> dict:
-        status, value = self.viewer_request("GET", "/api/snapshot")
+        status, value = self.viewer_request("GET", "/api/v1/snapshot")
         if status != 200 or not isinstance(value, dict):
             raise ScenarioFailure(f"invalid viewer snapshot: HTTP {status} {value!r}")
         return value
@@ -642,7 +642,7 @@ class SteerLab:
                         },
                     },
                 }
-                status, response = self.viewer_request("POST", "/api/actions", body)
+                status, response = self.viewer_request("POST", "/api/v1/actions", body)
                 self.record(case, "explicit-steer", {
                     "status": status, "response": response,
                     "active_prompt_id": active, "queued_prompt_id": queued_id,

@@ -193,22 +193,20 @@ impl CommandExecutor for ShellHost {
 /// probes after it are still framed and judged.
 #[cfg(unix)]
 #[test]
-fn one_ssh_call_answers_every_runtime_check_of_an_apple_silicon_mac() {
+fn one_ssh_call_answers_every_runtime_check_including_a_stopped_apple_container() {
     let mac = ShellHost::new(&[
-        ("uname", "echo 'Darwin arm64'"),
-        // Podman that fails with 100 KiB of complaint.
-        (
-            "podman",
-            "i=0; while [ $i -lt 2048 ]; do printf '%050d\\n' $i >&2; i=$((i+1)); done; exit 1",
-        ),
+        ("uname", "echo 'Darwin  aarch64'"),
+        ("podman", r#"touch "${0%/*}/podman-invoked"; exit 1"#),
+        // Keep the later Apple results visible after more than a pipe buffer.
         (
             "docker",
-            r#"echo '{"ServerVersion":"27.3.1","OSType":"linux"}'"#,
+            r#"i=0; while [ $i -lt 2048 ]; do printf '%050d\n' $i >&2; i=$((i+1)); done
+echo '{"ServerVersion":"27.3.1","OSType":"linux"}'"#,
         ),
         ("sw_vers", "echo 26.1"),
         (
             "container",
-            "case \"$1\" in --version) echo 'container 1.2.3';; system) exit 0;; esac",
+            r#"case "$*" in --version) echo 'container 1.2.3';; 'system status --format json') echo '{"status":"unregistered"}'; exit 1;; *) exit 64;; esac"#,
         ),
     ]);
     let probe = probe_machine("mac", &ssh_machine("mac.example.test"), &mac).unwrap();
@@ -222,19 +220,16 @@ fn one_ssh_call_answers_every_runtime_check_of_an_apple_silicon_mac() {
             .unwrap()
     };
     assert_eq!(status(RuntimeKind::Bare).0, CheckStatus::Ready);
-    assert_eq!(status(RuntimeKind::Podman).0, CheckStatus::Fixable);
+    assert_eq!(status(RuntimeKind::Podman).0, CheckStatus::Unsupported);
+    assert!(!mac.stubs.path().join("podman-invoked").exists());
     let docker = status(RuntimeKind::Docker);
     assert_eq!(
         docker,
         (CheckStatus::Ready, "Docker 27.3.1 is available.".into())
     );
     let apple = status(RuntimeKind::AppleContainer);
-    assert_eq!(apple.0, CheckStatus::Ready, "{}", apple.1);
-    assert!(
-        apple.1.contains("1.2.3") && apple.1.contains("26.1"),
-        "{}",
-        apple.1
-    );
+    assert_eq!(apple.0, CheckStatus::Warning, "{}", apple.1);
+    assert!(apple.1.contains("starts it automatically"), "{}", apple.1);
     let (id, target) = probe
         .runtimes()
         .into_iter()
@@ -266,7 +261,7 @@ fn a_linux_machine_is_never_asked_for_apple_container() {
         .expect("a Linux host is told why it cannot run Apple container");
     assert_eq!(rejected.status, CheckStatus::Unsupported);
     assert!(
-        rejected.detail.contains("Apple-silicon"),
+        rejected.detail.contains("macOS only"),
         "{}",
         rejected.detail
     );

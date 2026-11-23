@@ -1014,6 +1014,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         before_close: Option<super::lifecycle::BeforeClose>,
+        settlement: super::lifecycle::SuspendSettlement,
     ) -> Result<bool> {
         let Some(mut operation) = crate::database::load_move_operation(session_id)? else {
             return Ok(false);
@@ -1076,6 +1077,7 @@ impl Controller {
                             record,
                             None,
                             &operation.operation_id,
+                            settlement == super::lifecycle::SuspendSettlement::Suspend,
                         )
                     },
                 )?;
@@ -1203,6 +1205,7 @@ impl Controller {
                     &retained,
                     Some(&source_environment.id),
                     &operation.operation_id,
+                    settlement == super::lifecycle::SuspendSettlement::Suspend,
                 )?;
                 self.state.sessions.insert(session_id.to_owned(), retained);
             }
@@ -1258,6 +1261,7 @@ impl Controller {
                     .as_ref()
                     .map(|environment| environment.id.as_str()),
                 &operation.operation_id,
+                settlement == super::lifecycle::SuspendSettlement::Suspend,
             )?;
             self.state.sessions.insert(session_id.to_owned(), stopped);
         }
@@ -3032,6 +3036,7 @@ impl Controller {
             manager,
             &mj_core::suspend_consent::SuspendConsent::default(),
             None,
+            super::lifecycle::SuspendSettlement::TemporaryStop,
         )
         .await?;
         Ok(())
@@ -3513,7 +3518,7 @@ impl Controller {
                                 .context("in-place Move session has no target locator")?;
                             let backend = super::backend_locator(locator, session, &self.config)?;
                             let worker_root = crate::targets::worker_root(&backend, &id)?;
-                            self.prepare_worker_files_for(
+                            let staged = self.prepare_worker_files_for(
                                 &id,
                                 &backend,
                                 &worker_root,
@@ -3521,6 +3526,7 @@ impl Controller {
                                 super::worker_binary::launch::WorkerFilePreparation::RefreshProfileOnly,
                                 super::worker_binary::launch::LaunchHistory::Stored,
                             )?;
+                            self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = staged.aws_profile;
                             let launch_config = self.current_worker_launch_config(&id, &backend)?;
                             rpc_sent = true;
                             conn.client
@@ -3562,7 +3568,7 @@ impl Controller {
                                     &source_backend,
                                     &source_worker_root,
                                     executor,
-                                    super::worker_binary::launch::WorkerFilePreparation::RefreshProfileOnly,
+                                    super::worker_binary::launch::WorkerFilePreparation::RestoreProfileOnly,
                                     super::worker_binary::launch::LaunchHistory::Stored,
                                 ) {
                                     Ok(_) => {

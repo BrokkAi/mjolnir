@@ -10,6 +10,7 @@
 use super::*;
 use crate::pollers::CapacityProbeSet;
 use mj_client::runtime_feed::RuntimeHostCapacity;
+use mj_controller::database::RetiredContainerAllocations;
 use mj_controller::targets::HostCapacityRow;
 use mj_core::config::{MemoryHardLimitReason, container_memory_hard_limit_reason};
 use mj_core::snapshot_map::SharedSnapshot;
@@ -583,12 +584,22 @@ impl RuntimeState {
         let admission_state = self.clone();
         let checked_input = input.clone();
         let capacity = blocking(move || {
-            let controller = Controller::load()?;
+            let (state, retired) = match mj_controller::database::committed_state()? {
+                Some(committed) => (
+                    committed.state.clone(),
+                    committed.retired_container_allocations.clone(),
+                ),
+                None => (
+                    mj_controller::database::load_state()?,
+                    mj_controller::database::load_retired_container_allocations()?,
+                ),
+            };
             Ok(capacity_with_reservations_after(
                 &checked_input,
-                controller.state.sessions.values(),
+                state.sessions.values(),
                 &admission_state.container_capacity_reservations(),
                 &replaced,
+                &retired,
             ))
         })
         .await?;
@@ -644,21 +655,29 @@ fn capacity_refusal(
     )
 }
 
-pub(crate) fn capacity_with_reservations<'a>(
+#[cfg(test)]
+fn capacity_with_reservations<'a>(
     input: &ContainerCapacityInput,
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
     reservations: &BTreeMap<String, ContainerCapacityReservation>,
 ) -> mj_core::state::HostContainerCapacity {
-    capacity_with_reservations_after(input, sessions, reservations, &BTreeSet::new())
+    capacity_with_reservations_after(
+        input,
+        sessions,
+        reservations,
+        &BTreeSet::new(),
+        &RetiredContainerAllocations::new(),
+    )
 }
 
 /// Capacity with reservations and sessions that are about to be replaced
 /// removed from the durable counts.
-pub(crate) fn capacity_with_reservations_after<'a>(
+fn capacity_with_reservations_after<'a>(
     input: &ContainerCapacityInput,
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
     reservations: &BTreeMap<String, ContainerCapacityReservation>,
     additionally_replaced: &BTreeSet<String>,
+    retired: &RetiredContainerAllocations,
 ) -> mj_core::state::HostContainerCapacity {
     let sessions = sessions.into_iter().collect::<Vec<_>>();
     let matching = reservations
@@ -678,6 +697,10 @@ pub(crate) fn capacity_with_reservations_after<'a>(
             .iter()
             .copied()
             .filter(|session| !reserved_ids.contains(session.id.as_str())),
+        retired
+            .values()
+            .flatten()
+            .map(|(target_id, allocation)| (target_id.as_str(), allocation.as_ref())),
     );
     let mut complete = capacity.complete;
     for (session_id, reservation) in matching {
@@ -800,6 +823,7 @@ pub(super) struct ContainerCapacityProjection {
     records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     owners: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     hosts: Vec<(String, ContainerCapacityInput)>,
+    retired: RetiredContainerAllocations,
     reservations: BTreeMap<String, ContainerCapacityReservation>,
     publication: mj_core::snapshot_map::SharedSnapshot<
         BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
@@ -811,6 +835,7 @@ impl ContainerCapacityProjection {
         &mut self,
         state: &RuntimeState,
         records: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+        retired: &RetiredContainerAllocations,
     ) -> mj_core::snapshot_map::SharedSnapshot<
         BTreeMap<String, mj_client::runtime_feed::RuntimeContainerCapacity>,
     > {
@@ -863,7 +888,11 @@ impl ContainerCapacityProjection {
             })
             .unwrap_or_default();
         let reservations = state.container_capacity_reservations();
-        if changed || self.hosts != hosts || self.reservations != reservations {
+        if changed
+            || self.hosts != hosts
+            || self.reservations != reservations
+            || self.retired.changes(retired).next().is_some()
+        {
             self.publication = hosts
                 .iter()
                 .map(|(id, input)| {
@@ -871,10 +900,12 @@ impl ContainerCapacityProjection {
                         id.clone(),
                         mj_client::runtime_feed::RuntimeContainerCapacity {
                             target_ids: input.target_ids.clone(),
-                            capacity: capacity_with_reservations(
+                            capacity: capacity_with_reservations_after(
                                 input,
                                 self.owners.values(),
                                 &reservations,
+                                &BTreeSet::new(),
+                                retired,
                             ),
                         },
                     )
@@ -882,6 +913,7 @@ impl ContainerCapacityProjection {
                 .collect::<BTreeMap<_, _>>()
                 .into();
             self.hosts = hosts;
+            self.retired = retired.clone();
             self.reservations = reservations;
         }
         self.publication.clone()
@@ -1773,8 +1805,13 @@ mod tests {
         };
         let replaced = BTreeSet::from([source.id.clone()]);
 
-        let capacity =
-            capacity_with_reservations_after(&input, [&source], &BTreeMap::new(), &replaced);
+        let capacity = capacity_with_reservations_after(
+            &input,
+            [&source],
+            &BTreeMap::new(),
+            &replaced,
+            &RetiredContainerAllocations::new(),
+        );
 
         assert!(!capacity.refuses(
             &mj_core::state::SessionResourceAllocation::Container {
@@ -1958,7 +1995,8 @@ mod tests {
             sessions.sessions.insert(stopped.id.clone(), stopped);
         }
         let mut publisher = ContainerCapacityProjection::default();
-        let projection = publisher.project(&state, &sessions.sessions);
+        let retired = RetiredContainerAllocations::new();
+        let projection = publisher.project(&state, &sessions.sessions, &retired);
 
         assert_eq!(
             projection["local"].capacity.committed,
@@ -1972,10 +2010,10 @@ mod tests {
         for index in 0..20 {
             sessions.sessions.get_mut("history-000001").unwrap().title = format!("history {index}");
             sessions.sessions.get_mut(&source.id).unwrap().title = format!("live {index}");
-            assert!(projection.ptr_eq(&publisher.project(&state, &sessions.sessions)));
+            assert!(projection.ptr_eq(&publisher.project(&state, &sessions.sessions, &retired)));
         }
         drop(lease);
-        let released = publisher.project(&state, &sessions.sessions);
+        let released = publisher.project(&state, &sessions.sessions, &retired);
         assert_eq!(released["local"].capacity.committed.cpus, 8);
         assert_eq!(
             projection["local"].capacity.committed.cpus, 9,
@@ -1983,7 +2021,7 @@ mod tests {
         );
         sessions.sessions.get_mut(&source.id).unwrap().state =
             mj_core::state::SessionState::Stopped;
-        let stopped = publisher.project(&state, &sessions.sessions);
+        let stopped = publisher.project(&state, &sessions.sessions, &retired);
         assert_eq!(stopped["local"].capacity.committed.cpus, 0);
         latest.send_modify(|readings| {
             readings
@@ -1995,9 +2033,96 @@ mod tests {
                 .unwrap()
                 .logical_cores = 12
         });
-        let resized = publisher.project(&state, &sessions.sessions);
+        let resized = publisher.project(&state, &sessions.sessions, &retired);
         assert_eq!(resized["local"].capacity.remaining.cpus, 12);
         targets.send_modify(|inputs| inputs.targets.clear());
-        assert!(publisher.project(&state, &sessions.sessions).is_empty());
+        assert!(
+            publisher
+                .project(&state, &sessions.sessions, &retired)
+                .is_empty()
+        );
+    }
+    #[test]
+    fn retired_harness_capacity_tracks_owned_containers_through_reclamation() {
+        use mj_controller::database::{self, test_fixtures};
+        use mj_controller::test_isolation::{IsolatedTest, test_name};
+        use mj_core::state::{HostContainerSize, TargetLocator};
+
+        const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_CAPACITY";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "retired_harness_capacity_tracks_owned_containers_through_reclamation",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-capacity")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = database::install_isolated_test_writer();
+        let input = ContainerCapacityInput {
+            target_ids: vec!["docker".into(), "podman".into()],
+            total: HostContainerSize {
+                cpus: 8,
+                memory_bytes: 16 << 30,
+            },
+            memory_is_pool: true,
+        };
+        let capacity = || {
+            let committed = database::committed_state().unwrap().unwrap();
+            capacity_with_reservations_after(
+                &input,
+                committed.state.sessions.values(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &committed.retired_container_allocations,
+            )
+        };
+
+        for (id, allocation) in [
+            (
+                "retired-sized",
+                Some(SessionResourceAllocation::Container {
+                    cpus: 2,
+                    memory_bytes: 4 << 30,
+                }),
+            ),
+            ("retired-unknown", None),
+        ] {
+            let mut session = test_fixtures::checkpoint_test_session(id);
+            session.state = mj_core::state::SessionState::Stopped;
+            session.target_template_id = "podman".into();
+            session.resource_allocation = allocation;
+            session.target = Some(Box::new(TargetLocator::LocalPodman {
+                container_id: format!("mj-{id}"),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            }));
+            database::save_session(&session).unwrap();
+            test_fixtures::retire_test_harness(id).unwrap();
+
+            let active = capacity();
+            assert_eq!(active.complete, session.resource_allocation.is_some());
+            if active.complete {
+                assert_eq!(
+                    active.committed,
+                    HostContainerSize {
+                        cpus: 2,
+                        memory_bytes: 4 << 30
+                    }
+                );
+            } else {
+                assert_eq!(active.remaining.memory_bytes, 0);
+            }
+            let environment = database::session_environment(id).unwrap().unwrap();
+            database::begin_environment_retirement(&environment.id).unwrap();
+            assert_eq!(capacity(), active);
+            database::finish_environment_retirement(&environment.id).unwrap();
+            let reclaimed = capacity();
+            assert!(reclaimed.complete);
+            assert_eq!(reclaimed.remaining, input.total);
+        }
     }
 }
