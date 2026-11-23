@@ -83,7 +83,63 @@ func glint(t float32, holding bool) (float32, bool) {
 // fontDraw is Rust's font::draw; the three splash `draw` functions carry
 // their module's name in the flat package.
 func fontDraw(canvas *Canvas, placement Title, t float32, holding bool) {
-	panic("unported: mj-tui/src/splash/font.rs draw")
+	front := sweep(t)
+	if front <= -6.0 {
+		return
+	}
+	glintAt, glinting := glint(t, holding)
+	var breath float32 = 1.0
+	if holding {
+		breath = 0.9 + 0.1*splashSin(t*4.0)
+	}
+	type litCell struct{ letter, row, column int }
+	var cells []litCell
+	for letter := range 7 {
+		for row := range glyphHeight {
+			for column := range glyphWidth {
+				if lit(letter, row, column) {
+					cells = append(cells, litCell{letter, row, column})
+				}
+			}
+		}
+	}
+	shown := func(letter, column int) bool {
+		x := letter*(glyphWidth+glyphGap) + column
+		return float32(x) < front
+	}
+	// A drop shadow first, so the letters stand off the rock.
+	for _, cell := range cells {
+		if shown(cell.letter, cell.column) {
+			fillBlock(canvas, placement, cell.letter, cell.row, cell.column, 1, func(under Rgb) Rgb {
+				return Rgb{under[0] * 0.2, under[1] * 0.2, under[2] * 0.2}
+			})
+		}
+	}
+	for _, cell := range cells {
+		if !shown(cell.letter, cell.column) {
+			continue
+		}
+		x := float32(cell.letter*(glyphWidth+glyphGap) + cell.column)
+		gold := mix(
+			Rgb{1.0, 0.86, 0.45},
+			Rgb{0.85, 0.42, 0.10},
+			float32(max(cell.row-2, 0))/6.0,
+		)
+		if cell.row == 0 || !lit(cell.letter, cell.row-1, cell.column) {
+			gold = Rgb{gold[0] * 1.3, gold[1] * 1.3, gold[2] * 1.3}
+		}
+		hot := 2.0 * splashExp(-(front-x)/2.5)
+		var shine float32
+		if glinting {
+			offset := x + float32(cell.row)*0.6 - glintAt
+			shine = 1.5 * splashExp(-(offset*offset)/4.0)
+		}
+		var litColor Rgb
+		for channel := range 3 {
+			litColor[channel] = gold[channel]*breath + hot + shine
+		}
+		fillBlock(canvas, placement, cell.letter, cell.row, cell.column, 0, func(Rgb) Rgb { return litColor })
+	}
 }
 
 func fillBlock(canvas *Canvas, placement Title, letter, row, column, offset int, paint func(Rgb) Rgb) {
