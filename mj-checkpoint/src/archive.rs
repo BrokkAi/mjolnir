@@ -38,63 +38,63 @@ const DEFLATE_LEVEL: i64 = 1;
 const ZSTD_LEVEL: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepositorySnapshot {
+pub struct RepositorySnapshot<T = Vec<u8>> {
     pub origin_delta_pack: Option<PathBuf>,
     pub metadata: RepositoryMetadata,
-    pub committed_bundle: Vec<u8>,
-    pub staged_patch: Vec<u8>,
-    pub unstaged_patch: Vec<u8>,
-    pub untracked_tar: Vec<u8>,
+    pub committed_bundle: T,
+    pub staged_patch: T,
+    pub unstaged_patch: T,
+    pub untracked_tar: T,
     /// Present exactly when `metadata.git_operation` is.
-    pub operation_payloads: Option<GitOperationPayloads>,
+    pub operation_payloads: Option<GitOperationPayloads<T>>,
     /// Linked worktrees inside the checkout, parents before children.
-    pub linked_worktrees: Vec<LinkedWorktreeSnapshot>,
+    pub linked_worktrees: Vec<LinkedWorktreeSnapshot<T>>,
 }
 
 /// What a linked worktree holds beyond the commits in the repository's bundle:
 /// the same dirty state the checkout itself captures.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkedWorktreeSnapshot {
+pub struct LinkedWorktreeSnapshot<T = Vec<u8>> {
     pub metadata: mj_core::archive::LinkedWorktreeMetadata,
-    pub staged_patch: Vec<u8>,
-    pub unstaged_patch: Vec<u8>,
-    pub untracked_tar: Vec<u8>,
+    pub staged_patch: T,
+    pub unstaged_patch: T,
+    pub untracked_tar: T,
     /// Present exactly when `metadata.git_operation` is.
-    pub operation_payloads: Option<GitOperationPayloads>,
+    pub operation_payloads: Option<GitOperationPayloads<T>>,
 }
 
 /// The files of an unfinished Git operation that are not index entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitOperationPayloads {
+pub struct GitOperationPayloads<T = Vec<u8>> {
     /// The working-tree files of the unmerged paths.
-    pub conflicted_worktree_tar: Vec<u8>,
+    pub conflicted_worktree_tar: T,
     /// The operation's state files, named as `git rev-parse --git-path`
     /// names them.
-    pub state_tar: Vec<u8>,
+    pub state_tar: T,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveInput {
+pub struct ArchiveInput<T = Vec<u8>> {
     pub session: SessionManifest,
     pub target: TargetManifest,
     pub bundle: BundleManifest,
     pub canonical_session: CanonicalSessionSnapshot,
     pub native_artifacts: Vec<NativeArtifact>,
-    pub repositories: Vec<RepositorySnapshot>,
+    pub repositories: Vec<RepositorySnapshot<T>>,
 }
 
 #[derive(Clone, Copy)]
-struct ArchiveInputView<'a> {
+struct ArchiveInputView<'a, T = Vec<u8>> {
     session: &'a SessionManifest,
     target: &'a TargetManifest,
     bundle: &'a BundleManifest,
     canonical_session: &'a CanonicalSessionSnapshot,
     native_artifacts: &'a [NativeArtifact],
-    repositories: &'a [RepositorySnapshot],
+    repositories: &'a [RepositorySnapshot<T>],
 }
 
-impl<'a> From<&'a ArchiveInput> for ArchiveInputView<'a> {
-    fn from(input: &'a ArchiveInput) -> Self {
+impl<'a, T> From<&'a ArchiveInput<T>> for ArchiveInputView<'a, T> {
+    fn from(input: &'a ArchiveInput<T>) -> Self {
         Self {
             session: &input.session,
             target: &input.target,
@@ -288,7 +288,14 @@ struct PendingPayload<'a> {
 /// the target. Failure leaves an existing destination untouched whenever the
 /// failure occurs before the final same-directory rename.
 pub fn write_archive_atomic(path: &Path, input: &ArchiveInput) -> Result<VerifiedArchiveMetadata> {
-    write_archive_installed(path, input)?;
+    write_archive_atomic_with_payloads(path, input)
+}
+
+pub(crate) fn write_archive_atomic_with_payloads<T: RepositoryPayload>(
+    path: &Path,
+    input: &ArchiveInput<T>,
+) -> Result<VerifiedArchiveMetadata> {
+    write_archive_installed_view(path, input.into(), PAYLOAD_PART_BYTES)?;
     verify_archive_streaming(path)
         .with_context(|| format!("verify newly written archive {}", path.display()))
 }
@@ -341,6 +348,26 @@ pub fn write_archive_hashed_borrowed_with_manifest(
     native_artifacts: &[NativeArtifact],
     repositories: &[RepositorySnapshot],
 ) -> Result<(String, ArchiveManifest)> {
+    write_archive_hashed_repository_payloads(
+        path,
+        session,
+        target,
+        bundle,
+        canonical_session,
+        native_artifacts,
+        repositories,
+    )
+}
+
+pub(crate) fn write_archive_hashed_repository_payloads<T: RepositoryPayload>(
+    path: &Path,
+    session: &SessionManifest,
+    target: &TargetManifest,
+    bundle: &BundleManifest,
+    canonical_session: &CanonicalSessionSnapshot,
+    native_artifacts: &[NativeArtifact],
+    repositories: &[RepositorySnapshot<T>],
+) -> Result<(String, ArchiveManifest)> {
     write_archive_hashed_view_with_manifest(
         path,
         ArchiveInputView {
@@ -358,9 +385,9 @@ fn write_archive_hashed_view(path: &Path, input: ArchiveInputView<'_>) -> Result
     Ok(write_archive_hashed_view_with_manifest(path, input)?.0)
 }
 
-fn write_archive_hashed_view_with_manifest(
+fn write_archive_hashed_view_with_manifest<T: RepositoryPayload>(
     path: &Path,
-    input: ArchiveInputView<'_>,
+    input: ArchiveInputView<'_, T>,
 ) -> Result<(String, ArchiveManifest)> {
     let manifest = write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -369,10 +396,7 @@ fn write_archive_hashed_view_with_manifest(
     Ok((sha256, manifest))
 }
 
-fn write_archive_installed(path: &Path, input: &ArchiveInput) -> Result<()> {
-    write_archive_installed_with_part_size(path, input, PAYLOAD_PART_BYTES)
-}
-
+#[cfg(test)]
 fn write_archive_installed_with_part_size(
     path: &Path,
     input: &ArchiveInput,
@@ -382,9 +406,9 @@ fn write_archive_installed_with_part_size(
     Ok(())
 }
 
-fn write_archive_installed_view(
+fn write_archive_installed_view<T: RepositoryPayload>(
     path: &Path,
-    input: ArchiveInputView<'_>,
+    input: ArchiveInputView<'_, T>,
     part_bytes: usize,
 ) -> Result<ArchiveManifest> {
     let (manifest, payloads) = prepare_archive_view_with_part_size(input, part_bytes)?;
@@ -862,10 +886,10 @@ fn prepare_archive_with_part_size(
     prepare_archive_view_with_part_size(input.into(), part_bytes)
 }
 
-fn prepare_archive_view_with_part_size(
-    input: ArchiveInputView<'_>,
+fn prepare_archive_view_with_part_size<'a, T: RepositoryPayload>(
+    input: ArchiveInputView<'a, T>,
     part_bytes: usize,
-) -> Result<(ArchiveManifest, Vec<PendingPayload<'_>>)> {
+) -> Result<(ArchiveManifest, Vec<PendingPayload<'a>>)> {
     ensure!(part_bytes > 0, "archive payload part size is zero");
     ensure!(!input.session.id.trim().is_empty(), "session id is empty");
     ensure!(!input.bundle.id.trim().is_empty(), "bundle id is empty");
@@ -954,10 +978,10 @@ fn prepare_archive_view_with_part_size(
                     && repository.metadata.saved_refs.is_empty()
                     && repository.metadata.stash_stack.is_empty()
                     && repository.metadata.git_operation.is_none()
-                    && repository.committed_bundle.is_empty()
-                    && repository.staged_patch.is_empty()
-                    && repository.unstaged_patch.is_empty()
-                    && repository.untracked_tar.is_empty()
+                    && repository.committed_bundle.size()? == 0
+                    && repository.staged_patch.size()? == 0
+                    && repository.unstaged_patch.size()? == 0
+                    && repository.untracked_tar.size()? == 0
                     && repository.operation_payloads.is_none(),
                 "repository '{}' is a plain directory but carries Git state",
                 repository.metadata.id
@@ -966,10 +990,10 @@ fn prepare_archive_view_with_part_size(
         let root = format!("repositories/{}", repository.metadata.id);
         if repository.metadata.origin_delta.is_some() {
             ensure!(
-                repository.committed_bundle.is_empty()
-                    && repository.staged_patch.is_empty()
-                    && repository.unstaged_patch.is_empty()
-                    && repository.untracked_tar.is_empty()
+                repository.committed_bundle.size()? == 0
+                    && repository.staged_patch.size()? == 0
+                    && repository.unstaged_patch.size()? == 0
+                    && repository.untracked_tar.size()? == 0
                     && repository.operation_payloads.is_none()
                     && repository.linked_worktrees.is_empty(),
                 "origin delta repository has legacy Git payloads"
@@ -1011,7 +1035,6 @@ fn prepare_archive_view_with_part_size(
             repository.origin_delta_pack.is_none(),
             "legacy repository has an origin delta pack"
         );
-        validate_untracked_tar(&repository.untracked_tar)?;
         let operation = match (
             &repository.metadata.git_operation,
             &repository.operation_payloads,
@@ -1019,8 +1042,6 @@ fn prepare_archive_view_with_part_size(
             (None, None) => None,
             (Some(operation), Some(operation_payloads)) => {
                 validate_saved_git_operation(operation)?;
-                validate_conflicted_worktree_tar(&operation_payloads.conflicted_worktree_tar)?;
-                validate_operation_state_tar(&operation_payloads.state_tar)?;
                 Some(operation_payloads)
             }
             _ => bail!(
@@ -1063,33 +1084,25 @@ fn prepare_archive_view_with_part_size(
                 },
             ),
         ] {
-            push_payload(
-                &mut payloads,
-                path.clone(),
-                Cow::Borrowed(data.as_slice()),
-                0o600,
-                role,
-            )?;
+            push_repository_payload(&mut payloads, path.clone(), data, role)?;
         }
         let (conflicted_worktree_tar_path, operation_state_tar_path) = match operation {
             None => (None, None),
             Some(operation) => {
                 let worktree_path = format!("{root}/conflicted-worktree.tar");
                 let state_path = format!("{root}/operation-state.tar");
-                push_payload(
+                push_repository_payload(
                     &mut payloads,
                     worktree_path.clone(),
-                    Cow::Borrowed(operation.conflicted_worktree_tar.as_slice()),
-                    0o600,
+                    &operation.conflicted_worktree_tar,
                     PayloadRole::GitConflictedWorktreeTar {
                         repository_id: repository.metadata.id.clone(),
                     },
                 )?;
-                push_payload(
+                push_repository_payload(
                     &mut payloads,
                     state_path.clone(),
-                    Cow::Borrowed(operation.state_tar.as_slice()),
-                    0o600,
+                    &operation.state_tar,
                     PayloadRole::GitOperationStateTar {
                         repository_id: repository.metadata.id.clone(),
                     },
@@ -1108,7 +1121,6 @@ fn prepare_archive_view_with_part_size(
                 repository.metadata.id,
                 worktree.metadata.path.display()
             );
-            validate_untracked_tar(&worktree.untracked_tar)?;
             let worktree_root = format!("{root}/worktrees/{index:08}");
             let id = repository.metadata.id.clone();
             let worktree_index = index as u32;
@@ -1141,13 +1153,7 @@ fn prepare_archive_view_with_part_size(
                     },
                 ),
             ] {
-                push_payload(
-                    &mut payloads,
-                    path.clone(),
-                    Cow::Borrowed(data.as_slice()),
-                    0o600,
-                    role,
-                )?;
+                push_repository_payload(&mut payloads, path.clone(), data, role)?;
             }
             let (conflicted_worktree_tar_path, operation_state_tar_path) = match (
                 &worktree.metadata.git_operation,
@@ -1155,25 +1161,21 @@ fn prepare_archive_view_with_part_size(
             ) {
                 (None, None) => (None, None),
                 (Some(_), Some(operation)) => {
-                    validate_conflicted_worktree_tar(&operation.conflicted_worktree_tar)?;
-                    validate_operation_state_tar(&operation.state_tar)?;
                     let worktree_path = format!("{worktree_root}/conflicted-worktree.tar");
                     let state_path = format!("{worktree_root}/operation-state.tar");
-                    push_payload(
+                    push_repository_payload(
                         &mut payloads,
                         worktree_path.clone(),
-                        Cow::Borrowed(operation.conflicted_worktree_tar.as_slice()),
-                        0o600,
+                        &operation.conflicted_worktree_tar,
                         PayloadRole::GitLinkedWorktreeConflictedWorktreeTar {
                             repository_id: id.clone(),
                             worktree: worktree_index,
                         },
                     )?;
-                    push_payload(
+                    push_repository_payload(
                         &mut payloads,
                         state_path.clone(),
-                        Cow::Borrowed(operation.state_tar.as_slice()),
-                        0o600,
+                        &operation.state_tar,
                         PayloadRole::GitLinkedWorktreeOperationStateTar {
                             repository_id: id.clone(),
                             worktree: worktree_index,
@@ -1212,37 +1214,8 @@ fn prepare_archive_view_with_part_size(
     payloads
         .par_iter_mut()
         .try_for_each(|payload| -> Result<()> {
-            if let Some(path) = payload.source {
-                let mut source = File::open(path)?;
-                let mut whole = Sha256::new();
-                let mut buffer = vec![0; part_bytes];
-                let mut index = 0;
-                let split = payload_compression(&payload.descriptor.role)
-                    != CompressionMethod::Stored
-                    && payload.descriptor.size > part_bytes as u64;
-                loop {
-                    let mut count = 0;
-                    while count < buffer.len() {
-                        let read = source.read(&mut buffer[count..])?;
-                        if read == 0 {
-                            break;
-                        }
-                        count += read;
-                    }
-                    if count == 0 {
-                        break;
-                    }
-                    whole.update(&buffer[..count]);
-                    if split {
-                        payload.descriptor.parts.push(PayloadPartDescriptor {
-                            path: payload_part_path(&payload.descriptor.path, index),
-                            sha256: digest_bytes(&buffer[..count]),
-                            size: count as u64,
-                        });
-                    }
-                    index += 1;
-                }
-                payload.descriptor.sha256 = lower_hex(whole.finalize());
+            if payload.source.is_some() {
+                hash_file_payload(payload, part_bytes)?;
             } else {
                 payload.descriptor.sha256 = digest_bytes(&payload.data);
                 payload.descriptor.parts = plan_payload_parts(
@@ -1332,6 +1305,120 @@ fn push_payload<'a>(
         data,
         source: None,
     });
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) enum StagedPayload {
+    Inline(Vec<u8>),
+    File(PathBuf),
+}
+
+impl Default for StagedPayload {
+    fn default() -> Self {
+        Self::Inline(Vec::new())
+    }
+}
+
+pub(crate) trait RepositoryPayload {
+    fn source(&self) -> (&[u8], Option<&Path>);
+
+    fn reader(&self) -> Result<Box<dyn Read + '_>> {
+        let (bytes, path) = self.source();
+        match path {
+            Some(path) => Ok(Box::new(NativeArtifactData::open_file(path)?)),
+            None => Ok(Box::new(Cursor::new(bytes))),
+        }
+    }
+
+    fn size(&self) -> Result<u64> {
+        let (bytes, path) = self.source();
+        match path {
+            Some(path) => Ok(NativeArtifactData::open_file(path)?.metadata()?.len()),
+            None => Ok(bytes.len() as u64),
+        }
+    }
+}
+
+impl RepositoryPayload for Vec<u8> {
+    fn source(&self) -> (&[u8], Option<&Path>) {
+        (self, None)
+    }
+}
+
+impl RepositoryPayload for StagedPayload {
+    fn source(&self) -> (&[u8], Option<&Path>) {
+        match self {
+            Self::Inline(bytes) => (bytes, None),
+            Self::File(path) => (&[], Some(path)),
+        }
+    }
+}
+
+fn hash_file_payload(payload: &mut PendingPayload<'_>, part_bytes: usize) -> Result<()> {
+    let split = payload_compression(&payload.descriptor.role) != CompressionMethod::Stored
+        && payload.descriptor.size > part_bytes as u64;
+    let mut whole = Sha256::new();
+    let mut remaining = payload.descriptor.size;
+    let mut parts = Vec::new();
+    {
+        let mut source = payload.reader_at(0)?;
+        let mut buffer = [0; 64 * 1024];
+        while remaining > 0 {
+            let size = if split {
+                remaining.min(part_bytes as u64)
+            } else {
+                remaining
+            };
+            let mut part = Sha256::new();
+            let mut unread = size;
+            while unread > 0 {
+                let count = unread.min(buffer.len() as u64) as usize;
+                source
+                    .read_exact(&mut buffer[..count])
+                    .with_context(|| format!("hash payload '{}'", payload.descriptor.path))?;
+                whole.update(&buffer[..count]);
+                if split {
+                    part.update(&buffer[..count]);
+                }
+                unread -= count as u64;
+            }
+            if split {
+                parts.push(PayloadPartDescriptor {
+                    path: payload_part_path(&payload.descriptor.path, parts.len()),
+                    sha256: lower_hex(part.finalize()),
+                    size,
+                });
+            }
+            remaining -= size;
+        }
+        ensure!(
+            source.read(&mut [0])? == 0,
+            "payload source '{}' grew during export",
+            payload.descriptor.path
+        );
+    }
+    payload.descriptor.parts = parts;
+    payload.descriptor.sha256 = lower_hex(whole.finalize());
+    Ok(())
+}
+
+fn push_repository_payload<'a>(
+    payloads: &mut Vec<PendingPayload<'a>>,
+    path: String,
+    data: &'a impl RepositoryPayload,
+    role: PayloadRole,
+) -> Result<()> {
+    let (bytes, source) = data.source();
+    push_payload(payloads, path, Cow::Borrowed(bytes), 0o600, role)?;
+    let payload = payloads
+        .last_mut()
+        .expect("just inserted repository payload");
+    payload.source = source;
+    payload.descriptor.size = data.size()?;
+    if let Some(validate) = tar_payload_validator(&payload.descriptor.role) {
+        validate(&mut payload.reader_at(0)?)?;
+    }
     Ok(())
 }
 
@@ -2955,9 +3042,8 @@ pub(crate) use git::{
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
 use git::{
-    validate_conflicted_worktree_tar, validate_conflicted_worktree_tar_reader,
-    validate_operation_state_tar, validate_operation_state_tar_reader, validate_untracked_tar,
-    validate_untracked_tar_reader,
+    validate_conflicted_worktree_tar_reader, validate_operation_state_tar_reader,
+    validate_untracked_tar, validate_untracked_tar_reader,
 };
 
 mod purge;
