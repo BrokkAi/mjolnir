@@ -466,12 +466,593 @@ const ACCOUNTING_MIGRATION_SQL: &str = "
             ) STRICT;
 ";
 
+/// Temporary SQLite tuning active only while `migrate_schema` runs.
+///
+/// The daemon holds `ControllerStoreGuard` exclusively during startup
+/// migrations, so we can raise SQLite's page cache, temp store, mmap ceiling,
+/// index-sorter threads, and relax WAL per-step fsyncs for the migration
+/// ladder, then restore every setting (and fsync WAL once) before returning.
+struct MigrationTuningGuard<'a> {
+    connection: &'a Connection,
+    previous_cache_size: i64,
+    previous_temp_store: i64,
+    previous_mmap_size: Option<i64>,
+    previous_threads: Option<i64>,
+    previous_synchronous: i64,
+    relaxed_synchronous: bool,
+    restored: bool,
+}
+
+impl<'a> MigrationTuningGuard<'a> {
+    /// 256 MiB page cache (allocated lazily by SQLite as pages are touched, so
+    /// small stores keep minimal heap while multi-GB migrations avoid thrashing
+    /// SQLite's 2 MiB default).
+    const CACHE_SIZE_KIB: i64 = -262_144;
+    /// 1 GiB mmap ceiling (SQLite clamps to file size; avoids read() syscalls
+    /// during table scans and index builds).
+    const MMAP_SIZE_BYTES: i64 = 1_073_741_824;
+    /// Up to 4 SQLite sorter worker threads for `CREATE INDEX` (clamped by
+    /// SQLite to `SQLITE_MAX_WORKER_THREADS`).
+    const SORTER_THREADS: i64 = 4;
+
+    fn enter(connection: &'a Connection) -> Result<Self> {
+        let journal_mode: String =
+            connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        let previous_cache_size: i64 =
+            connection.pragma_query_value(None, "cache_size", |row| row.get(0))?;
+        let previous_temp_store: i64 =
+            connection.pragma_query_value(None, "temp_store", |row| row.get(0))?;
+        // `:memory:` databases return no row for `PRAGMA mmap_size`, and builds
+        // without worker-thread support may return no row for `PRAGMA threads`.
+        let previous_mmap_size: Option<i64> = connection
+            .pragma_query_value(None, "mmap_size", |row| row.get(0))
+            .optional()?;
+        let previous_threads: Option<i64> = connection
+            .pragma_query_value(None, "threads", |row| row.get(0))
+            .optional()?;
+        let previous_synchronous: i64 =
+            connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+
+        let relax_synchronous = journal_mode.eq_ignore_ascii_case("wal")
+            && previous_synchronous >= 2
+            && connection.is_autocommit();
+        let mut guard = Self {
+            connection,
+            previous_cache_size,
+            previous_temp_store,
+            previous_mmap_size,
+            previous_threads,
+            previous_synchronous,
+            relaxed_synchronous: false,
+            restored: false,
+        };
+        let mut sql = format!("PRAGMA cache_size = {};", Self::CACHE_SIZE_KIB);
+        if previous_mmap_size.is_some() {
+            sql.push_str(&format!(" PRAGMA mmap_size = {};", Self::MMAP_SIZE_BYTES));
+        }
+        if previous_threads.is_some() {
+            sql.push_str(&format!(" PRAGMA threads = {};", Self::SORTER_THREADS));
+        }
+        if connection.is_autocommit() {
+            sql.push_str(" PRAGMA temp_store = MEMORY;");
+        }
+        if relax_synchronous {
+            sql.push_str(" PRAGMA synchronous = NORMAL;");
+        }
+        connection.execute_batch(&sql)?;
+        guard.relaxed_synchronous = relax_synchronous;
+        Ok(guard)
+    }
+
+    fn restore_pragmas(&self) -> Result<()> {
+        let mut sql = format!("PRAGMA cache_size = {};", self.previous_cache_size);
+        if let Some(mmap_size) = self.previous_mmap_size {
+            sql.push_str(&format!(" PRAGMA mmap_size = {mmap_size};"));
+        }
+        if let Some(threads) = self.previous_threads {
+            sql.push_str(&format!(" PRAGMA threads = {threads};"));
+        }
+        if self.connection.is_autocommit() {
+            sql.push_str(&format!(
+                " PRAGMA temp_store = {};",
+                self.previous_temp_store
+            ));
+            if self.relaxed_synchronous {
+                sql.push_str(&format!(
+                    " PRAGMA synchronous = {};",
+                    self.previous_synchronous
+                ));
+            }
+        }
+        self.connection.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.restored = true;
+        self.restore_pragmas()?;
+        if self.relaxed_synchronous && self.connection.is_autocommit() {
+            // One tiny WAL commit under the restored synchronous=FULL flushes
+            // every migration frame in `-wal` to disk without blocking startup
+            // on a full WAL-to-main checkpoint copy.
+            self.connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE schema_compatibility
+                     SET minimum_compatible_version = minimum_compatible_version
+                     WHERE singleton = 1;
+                 COMMIT;",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MigrationTuningGuard<'_> {
+    fn drop(&mut self) {
+        if !self.restored
+            && let Err(error) = self.restore_pragmas()
+        {
+            tracing::warn!(%error, "could not restore SQLite PRAGMAs after failed migration");
+        }
+    }
+}
+
+/// Check foreign key integrity only for `rebuilt_tables` and tables that declare
+/// a foreign key referencing one of them.
+///
+/// Unscoped `PRAGMA foreign_key_check` scans every table in the database,
+/// including multi-GB tables such as `materialized_transcript_items` and
+/// `api_events`, even when rebuilding a small unrelated table.
+pub(super) fn has_foreign_key_violation_for_tables(
+    connection: &Connection,
+    rebuilt_tables: &[&str],
+) -> Result<bool> {
+    let tables: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut fk_targets = connection.prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")?;
+    for table in tables {
+        let is_rebuilt = rebuilt_tables
+            .iter()
+            .any(|target| target.eq_ignore_ascii_case(&table));
+        let references_rebuilt = if is_rebuilt {
+            true
+        } else {
+            let mut found = false;
+            let mut rows = fk_targets.query([table.as_str()])?;
+            while let Some(row) = rows.next()? {
+                let target: String = row.get(0)?;
+                if rebuilt_tables
+                    .iter()
+                    .any(|rebuilt| rebuilt.eq_ignore_ascii_case(&target))
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !references_rebuilt {
+            continue;
+        }
+        let quoted = table.replace('"', "\"\"");
+        if connection
+            .prepare(&format!("PRAGMA foreign_key_check(\"{quoted}\")"))?
+            .exists([])?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Single-pass streaming extractor for revision 153's transcript metadata.
+///
+/// Matches the original SQL (`json_valid` + `json_extract` for `$.kind`,
+/// `$.streaming`, and `$.call.status`) while validating and parsing each row
+/// once without allocating large payloads (`rawOutput`, `chunks`,
+/// `terminal_outputs`).
+fn extract_v153_transcript_metadata(body_json: &str) -> (String, bool) {
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+
+    enum RootKey {
+        Kind,
+        Streaming,
+        Call,
+        Other,
+    }
+    struct RootKeySeed;
+    impl<'de> DeserializeSeed<'de> for RootKeySeed {
+        type Value = RootKey;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<RootKey, D::Error> {
+            struct KeyVisitor;
+            impl Visitor<'_> for KeyVisitor {
+                type Value = RootKey;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON object key")
+                }
+                fn visit_str<E>(self, v: &str) -> Result<RootKey, E> {
+                    Ok(match v {
+                        "kind" => RootKey::Kind,
+                        "streaming" => RootKey::Streaming,
+                        "call" => RootKey::Call,
+                        _ => RootKey::Other,
+                    })
+                }
+            }
+            deserializer.deserialize_str(KeyVisitor)
+        }
+    }
+
+    enum CallKey {
+        Status,
+        Other,
+    }
+    struct CallKeySeed;
+    impl<'de> DeserializeSeed<'de> for CallKeySeed {
+        type Value = CallKey;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<CallKey, D::Error> {
+            struct KeyVisitor;
+            impl Visitor<'_> for KeyVisitor {
+                type Value = CallKey;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON object key")
+                }
+                fn visit_str<E>(self, v: &str) -> Result<CallKey, E> {
+                    Ok(if v == "status" {
+                        CallKey::Status
+                    } else {
+                        CallKey::Other
+                    })
+                }
+            }
+            deserializer.deserialize_str(KeyVisitor)
+        }
+    }
+
+    struct SqliteNonZero;
+    impl<'de> DeserializeSeed<'de> for SqliteNonZero {
+        type Value = bool;
+        fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+            struct NonZeroVisitor;
+            impl<'de> Visitor<'de> for NonZeroVisitor {
+                type Value = bool;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON value")
+                }
+                fn visit_bool<E>(self, v: bool) -> Result<bool, E> {
+                    Ok(v)
+                }
+                fn visit_i64<E>(self, v: i64) -> Result<bool, E> {
+                    Ok(v != 0)
+                }
+                fn visit_u64<E>(self, v: u64) -> Result<bool, E> {
+                    Ok(v != 0)
+                }
+                fn visit_f64<E>(self, v: f64) -> Result<bool, E> {
+                    Ok(v != 0.0)
+                }
+                fn visit_unit<E>(self) -> Result<bool, E> {
+                    Ok(false)
+                }
+                fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+                    Ok(true)
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(true)
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    Ok(true)
+                }
+            }
+            deserializer.deserialize_any(NonZeroVisitor)
+        }
+    }
+
+    enum OptionalStringField {
+        Null,
+        Text(String),
+        Other,
+    }
+    struct OptionalStringSeed;
+    impl<'de> DeserializeSeed<'de> for OptionalStringSeed {
+        type Value = OptionalStringField;
+        fn deserialize<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<OptionalStringField, D::Error> {
+            struct FieldVisitor;
+            impl<'de> Visitor<'de> for FieldVisitor {
+                type Value = OptionalStringField;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON value")
+                }
+                fn visit_unit<E>(self) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_str<E>(self, v: &str) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Text(v.to_owned()))
+                }
+                fn visit_string<E>(self, v: String) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Text(v))
+                }
+                fn visit_bool<E>(self, _: bool) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Other)
+                }
+                fn visit_i64<E>(self, _: i64) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Other)
+                }
+                fn visit_u64<E>(self, _: u64) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Other)
+                }
+                fn visit_f64<E>(self, _: f64) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Other)
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<OptionalStringField, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(OptionalStringField::Other)
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<OptionalStringField, A::Error> {
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    Ok(OptionalStringField::Other)
+                }
+            }
+            deserializer.deserialize_any(FieldVisitor)
+        }
+    }
+
+    struct CallStatusSeed;
+    impl<'de> DeserializeSeed<'de> for CallStatusSeed {
+        type Value = OptionalStringField;
+        fn deserialize<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<OptionalStringField, D::Error> {
+            struct CallVisitor;
+            impl<'de> Visitor<'de> for CallVisitor {
+                type Value = OptionalStringField;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a JSON value")
+                }
+                fn visit_unit<E>(self) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_bool<E>(self, _: bool) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_i64<E>(self, _: i64) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_u64<E>(self, _: u64) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_f64<E>(self, _: f64) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_str<E>(self, _: &str) -> Result<OptionalStringField, E> {
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<OptionalStringField, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(OptionalStringField::Null)
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<OptionalStringField, A::Error> {
+                    let mut status: Option<OptionalStringField> = None;
+                    while let Some(key) = map.next_key_seed(CallKeySeed)? {
+                        if matches!(key, CallKey::Status) && status.is_none() {
+                            status = Some(map.next_value_seed(OptionalStringSeed)?);
+                        } else {
+                            let _ = map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(status.unwrap_or(OptionalStringField::Null))
+                }
+            }
+            deserializer.deserialize_any(CallVisitor)
+        }
+    }
+
+    struct RootMeta {
+        kind: String,
+        streaming: bool,
+        call_status: OptionalStringField,
+    }
+    impl Default for RootMeta {
+        fn default() -> Self {
+            Self {
+                kind: String::new(),
+                streaming: false,
+                call_status: OptionalStringField::Null,
+            }
+        }
+    }
+
+    struct RootVisitor;
+    impl<'de> Visitor<'de> for RootVisitor {
+        type Value = RootMeta;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON value")
+        }
+        fn visit_unit<E>(self) -> Result<RootMeta, E> {
+            Ok(RootMeta::default())
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<RootMeta, E> {
+            Ok(RootMeta::default())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<RootMeta, E> {
+            Ok(RootMeta::default())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<RootMeta, E> {
+            Ok(RootMeta::default())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<RootMeta, E> {
+            Ok(RootMeta::default())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<RootMeta, E> {
+            Ok(RootMeta::default())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<RootMeta, A::Error> {
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(RootMeta::default())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RootMeta, A::Error> {
+            let mut kind: Option<String> = None;
+            let mut streaming: Option<bool> = None;
+            let mut call_status: Option<OptionalStringField> = None;
+            while let Some(key) = map.next_key_seed(RootKeySeed)? {
+                match key {
+                    RootKey::Kind if kind.is_none() => {
+                        kind = Some(match map.next_value_seed(OptionalStringSeed)? {
+                            OptionalStringField::Text(text) => text,
+                            OptionalStringField::Null | OptionalStringField::Other => String::new(),
+                        });
+                    }
+                    RootKey::Streaming if streaming.is_none() => {
+                        streaming = Some(map.next_value_seed(SqliteNonZero)?);
+                    }
+                    RootKey::Call if call_status.is_none() => {
+                        call_status = Some(map.next_value_seed(CallStatusSeed)?);
+                    }
+                    _ => {
+                        let _ = map.next_value::<IgnoredAny>()?;
+                    }
+                }
+            }
+            Ok(RootMeta {
+                kind: kind.unwrap_or_default(),
+                streaming: streaming.unwrap_or(false),
+                call_status: call_status.unwrap_or(OptionalStringField::Null),
+            })
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(body_json);
+    let Ok(meta) = deserializer.deserialize_any(RootVisitor) else {
+        return (String::new(), true);
+    };
+    if deserializer.end().is_err() {
+        return (String::new(), true);
+    }
+    let settled = match meta.kind.as_str() {
+        "agent" | "thought" => !meta.streaming,
+        "tool" => match &meta.call_status {
+            OptionalStringField::Null => false,
+            OptionalStringField::Text(status) => {
+                !matches!(status.as_str(), "pending" | "in_progress")
+            }
+            OptionalStringField::Other => true,
+        },
+        _ => true,
+    };
+    (meta.kind, settled)
+}
+
+/// Revision 153: add spilled-detail pointers and indexed transcript metadata.
+///
+/// Extracts `item_kind` and `settled` in a single zero-copy Rust pass per row
+/// instead of running SQLite's `json_valid`/`json_extract` 5–6 times per row
+/// over multi-MB tool payloads.
+fn migrate_transcript_metadata_v153(connection: &Connection) -> Result<()> {
+    const BATCH_ROWS: i64 = 512;
+    let started = std::time::Instant::now();
+    let transaction =
+        Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "ALTER TABLE materialized_transcript_items ADD COLUMN detail_offset INTEGER;
+         ALTER TABLE materialized_transcript_items ADD COLUMN detail_len INTEGER;
+         ALTER TABLE materialized_transcript_items ADD COLUMN item_kind TEXT NOT NULL DEFAULT '';
+         ALTER TABLE materialized_transcript_items ADD COLUMN settled INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE materialized_transcript_items ADD COLUMN update_ordinal INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    let mut updated_rows: u64 = 0;
+    {
+        let mut select = transaction.prepare(
+            "SELECT rowid, COALESCE(latest_content_event_ordinal, position), body_json
+             FROM materialized_transcript_items
+             WHERE rowid > ?1
+             ORDER BY rowid
+             LIMIT ?2",
+        )?;
+        let mut update = transaction.prepare(
+            "UPDATE materialized_transcript_items
+             SET item_kind = ?1, settled = ?2, update_ordinal = ?3
+             WHERE rowid = ?4",
+        )?;
+        let mut last_rowid: i64 = 0;
+        let mut batch: Vec<(i64, i64, String, bool)> = Vec::with_capacity(BATCH_ROWS as usize);
+        loop {
+            batch.clear();
+            let mut rows = select.query(params![last_rowid, BATCH_ROWS])?;
+            while let Some(row) = rows.next()? {
+                let rowid: i64 = row.get(0)?;
+                let update_ordinal: i64 = row.get(1)?;
+                let body_json = row.get_ref(2)?.as_str()?;
+                let (item_kind, settled) = extract_v153_transcript_metadata(body_json);
+                batch.push((rowid, update_ordinal, item_kind, settled));
+                last_rowid = rowid;
+            }
+            drop(rows);
+            if batch.is_empty() {
+                break;
+            }
+            for &(rowid, update_ordinal, ref item_kind, settled) in &batch {
+                update.execute(params![item_kind, settled, update_ordinal, rowid])?;
+            }
+            updated_rows += batch.len() as u64;
+        }
+    }
+    transaction.execute_batch(
+        "CREATE INDEX materialized_transcript_update_ordinal
+             ON materialized_transcript_items (session_id, update_ordinal, position, stable_id);
+         CREATE INDEX materialized_transcript_unsettled
+             ON materialized_transcript_items (session_id, position, stable_id) WHERE settled = 0;
+         UPDATE schema_compatibility
+             SET minimum_compatible_version = 153 WHERE singleton = 1;
+         INSERT INTO schema_migrations(version, applied_at)
+             VALUES (153, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+         PRAGMA user_version=153;",
+    )?;
+    transaction.commit()?;
+    if updated_rows > 0 {
+        tracing::info!(
+            rows = updated_rows,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "backfilled transcript metadata for schema 153"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     let state = read_schema_state(connection)?;
     let version = state.revision;
     if version > SCHEMA_VERSION {
         return state.ensure_supported();
     }
+    let started = std::time::Instant::now();
+    let tuning = if version < SCHEMA_VERSION {
+        Some(MigrationTuningGuard::enter(connection)?)
+    } else {
+        None
+    };
     if version == 0 {
         create_baseline_schema(connection)?;
     } else if version < BASELINE_SCHEMA_VERSION {
@@ -3012,38 +3593,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     // Revision 153 is breaking: older readers cannot resolve spilled bodies,
     // and older writers can replace the body without clearing its detail pointer.
     if version < 153 {
-        let transaction =
-            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
-        transaction.execute_batch(
-            "ALTER TABLE materialized_transcript_items ADD COLUMN detail_offset INTEGER;
-             ALTER TABLE materialized_transcript_items ADD COLUMN detail_len INTEGER;
-             ALTER TABLE materialized_transcript_items ADD COLUMN item_kind TEXT NOT NULL DEFAULT '';
-             ALTER TABLE materialized_transcript_items ADD COLUMN settled INTEGER NOT NULL DEFAULT 1;
-             ALTER TABLE materialized_transcript_items ADD COLUMN update_ordinal INTEGER NOT NULL DEFAULT 0;
-             UPDATE materialized_transcript_items
-             SET update_ordinal = COALESCE(latest_content_event_ordinal, position),
-                 item_kind = CASE WHEN json_valid(body_json)
-                     THEN COALESCE(json_extract(body_json, '$.kind'), '') ELSE '' END,
-                 settled = CASE
-                     WHEN NOT json_valid(body_json) THEN 1
-                     WHEN json_extract(body_json, '$.kind') IN ('agent', 'thought')
-                          AND COALESCE(json_extract(body_json, '$.streaming'), 0) != 0 THEN 0
-                     WHEN json_extract(body_json, '$.kind') = 'tool'
-                          AND COALESCE(json_extract(body_json, '$.call.status'), 'pending')
-                              IN ('pending', 'in_progress') THEN 0
-                     ELSE 1
-                 END;
-             CREATE INDEX materialized_transcript_update_ordinal
-                 ON materialized_transcript_items (session_id, update_ordinal, position, stable_id);
-             CREATE INDEX materialized_transcript_unsettled
-                 ON materialized_transcript_items (session_id, position, stable_id) WHERE settled = 0;
-             UPDATE schema_compatibility
-                 SET minimum_compatible_version = 153 WHERE singleton = 1;
-             INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (153, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-             PRAGMA user_version=153;",
-        )?;
-        transaction.commit()?;
+        migrate_transcript_metadata_v153(connection)?;
     }
     // Compatible: deduplicates identical legacy drafts while preserving user
     // text, the schema and the revisioned terminal draft contract.
@@ -3106,18 +3656,22 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
         })?;
-    if recorded == Some(SCHEMA_VERSION) && version < SCHEMA_VERSION {
-        tracing::info!(
-            from_revision = version,
-            to_revision = SCHEMA_VERSION,
-            "database migrations applied"
-        );
-    }
     if recorded != Some(SCHEMA_VERSION) {
         bail!(
             "Mjolnir database migration ledger {:?} does not match schema {}",
             recorded,
             SCHEMA_VERSION
+        );
+    }
+    if let Some(tuning) = tuning {
+        tuning.finish()?;
+    }
+    if version < SCHEMA_VERSION {
+        tracing::info!(
+            from_revision = version,
+            to_revision = SCHEMA_VERSION,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "database migrations applied"
         );
     }
     Ok(())
@@ -3314,9 +3868,10 @@ fn migrate_nitro_target_kind(connection: &Connection) -> Result<()> {
              CREATE INDEX environment_worker_identity ON environment_workers(worker_session_id);"
         ))?;
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !has_foreign_key_violation_for_tables(
+                &transaction,
+                &["session_targets", "environment_workers"],
+            )?,
             "foreign key violation in the Nitro target-kind migration"
         );
         transaction.execute_batch(
@@ -3378,9 +3933,7 @@ fn migrate_parked_session_state(connection: &Connection) -> Result<()> {
                 transaction.execute_batch(&object)?;
             }
             ensure!(
-                !transaction
-                    .prepare("PRAGMA foreign_key_check")?
-                    .exists([])?,
+                !has_foreign_key_violation_for_tables(&transaction, &["sessions"])?,
                 "foreign key violation in the parked-state migration"
             );
         }
@@ -3449,9 +4002,10 @@ fn migrate_opencode_harness_kind(connection: &Connection) -> Result<()> {
             }
         }
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !has_foreign_key_violation_for_tables(
+                &transaction,
+                &["sessions", "hidden_native_sessions"],
+            )?,
             "foreign key violation in OpenCode migration"
         );
         transaction.execute_batch(
@@ -3517,9 +4071,10 @@ fn migrate_mimo_harness_kind(connection: &Connection) -> Result<()> {
             }
         }
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !has_foreign_key_violation_for_tables(
+                &transaction,
+                &["sessions", "hidden_native_sessions"],
+            )?,
             "foreign key violation in MiMo Code migration"
         );
         transaction.execute_batch(
@@ -3590,9 +4145,10 @@ fn admit_harness_kind(
             }
         }
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !has_foreign_key_violation_for_tables(
+                &transaction,
+                &["sessions", "hidden_native_sessions"],
+            )?,
             "foreign key violation while admitting harness {added}"
         );
         transaction.execute_batch(&format!(
@@ -3653,9 +4209,10 @@ fn remove_harness_constraints(connection: &Connection) -> Result<()> {
             }
         }
         ensure!(
-            !transaction
-                .prepare("PRAGMA foreign_key_check")?
-                .exists([])?,
+            !has_foreign_key_violation_for_tables(
+                &transaction,
+                &["sessions", "hidden_native_sessions"],
+            )?,
             "foreign key violation while removing harness constraints"
         );
         transaction.execute_batch(
@@ -3714,9 +4271,7 @@ fn migrate_startup_cleanup_state(connection: &Connection) -> Result<()> {
                 transaction.execute_batch(&object)?;
             }
             ensure!(
-                !transaction
-                    .prepare("PRAGMA foreign_key_check")?
-                    .exists([])?,
+                !has_foreign_key_violation_for_tables(&transaction, &["sessions"])?,
                 "foreign key violation in the startup-cleanup migration"
             );
         }
@@ -5572,7 +6127,11 @@ mod reader_tests {
         assert_eq!(before.revision, 152);
         assert_eq!(before.minimum_compatible, Some(152));
         before.ensure_supported_by(152).unwrap();
-        let cases = [
+        let oversized_tool = format!(
+            r#"{{"kind":"tool","call":{{"status":"completed","rawOutput":"{}"}}}}"#,
+            "x".repeat(96 * 1024)
+        );
+        let cases: [(&str, Option<i64>, &str, bool); 12] = [
             (
                 r#"{"kind":"agent","chunks":[],"streaming":true}"#,
                 Some(10),
@@ -5598,18 +6157,28 @@ mod reader_tests {
                 false,
             ),
             (r#"{"kind":"tool","call":{}}"#, None, "tool", false),
+            (r#"{"kind":"tool"}"#, None, "tool", false),
+            (
+                r#"{"kind":"tool","call":{"status":null}}"#,
+                None,
+                "tool",
+                false,
+            ),
             (
                 r#"{"kind":"tool","call":{"status":"completed"}}"#,
                 None,
                 "tool",
                 true,
             ),
+            (oversized_tool.as_str(), Some(20), "tool", true),
             (
                 r#"{"kind":"terminal_output","record":{}}"#,
                 None,
                 "terminal_output",
                 true,
             ),
+            ("not-json", None, "", true),
+            (r#"["not","an","object"]"#, None, "", true),
         ];
         for (position, (json, ordinal, _, _)) in (1_i64..).zip(cases) {
             previous
@@ -8048,5 +8617,128 @@ mod reader_tests {
                 minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
         );
+    }
+
+    #[test]
+    fn migration_tuning_guard_restores_pragmas_on_success_and_aborted_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        let expected_cache: i64 = connection
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        let expected_temp: i64 = connection
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .unwrap();
+        let expected_mmap: i64 = connection
+            .pragma_query_value(None, "mmap_size", |row| row.get(0))
+            .unwrap();
+        let expected_threads: i64 = connection
+            .pragma_query_value(None, "threads", |row| row.get(0))
+            .unwrap();
+        let expected_sync: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(expected_sync, 2, "open_writer starts with synchronous=FULL");
+
+        // Rewind by one revision and abort inside its transaction; Drop must
+        // restore cache/mmap/threads without panicking while in-transaction.
+        connection
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN staged_aws_profile;
+                 ALTER TABLE worker_restart_intents DROP COLUMN staged_aws_profile;
+                 DELETE FROM schema_migrations WHERE version >= 155;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 153 WHERE singleton = 1;
+                 PRAGMA user_version = 154;
+                 CREATE TRIGGER abort_v155 BEFORE INSERT ON schema_migrations WHEN NEW.version = 155
+                     BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "cache_size", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_cache
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "mmap_size", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_mmap
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "threads", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_threads
+        );
+
+        // Removing the trigger and rerunning restores every PRAGMA including
+        // synchronous=FULL and temp_store.
+        connection
+            .execute_batch("DROP TRIGGER abort_v155; PRAGMA synchronous = FULL;")
+            .unwrap();
+        migrate_schema(&connection).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "cache_size", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_cache
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_temp
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "mmap_size", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_mmap
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "threads", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_threads
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected_sync
+        );
+    }
+
+    #[test]
+    fn scoped_foreign_key_check_detects_related_violations_and_skips_unrelated_tables() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TABLE parent_a (id TEXT PRIMARY KEY) STRICT;
+                 CREATE TABLE child_a (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES parent_a(id)) STRICT;
+                 CREATE TABLE parent_b (id TEXT PRIMARY KEY) STRICT;
+                 CREATE TABLE child_b (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES parent_b(id)) STRICT;
+                 INSERT INTO parent_a VALUES ('a1');
+                 INSERT INTO child_a VALUES ('ca1', 'a1');
+                 INSERT INTO child_b VALUES ('cb1', 'missing-b');",
+            )
+            .unwrap();
+        // Unrelated table `child_b` has a violation, so checking `parent_a` must not flag it.
+        assert!(!has_foreign_key_violation_for_tables(&connection, &["parent_a"]).unwrap());
+        // Checking `parent_b` (referenced by `child_b`) or `child_b` itself catches it.
+        assert!(has_foreign_key_violation_for_tables(&connection, &["parent_b"]).unwrap());
+        assert!(has_foreign_key_violation_for_tables(&connection, &["child_b"]).unwrap());
+        // Introducing an orphan in `child_a` is caught when checking `parent_a`.
+        connection
+            .execute("INSERT INTO child_a VALUES ('ca2', 'missing-a')", [])
+            .unwrap();
+        assert!(has_foreign_key_violation_for_tables(&connection, &["parent_a"]).unwrap());
     }
 }

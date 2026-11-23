@@ -411,6 +411,41 @@ class ValidationTests(unittest.TestCase):
                 coverage = {"complete": False, "open": [{"reason": reason, "site": span()}]}
                 self.assertIn("only semantic boundaries", " ".join(validate(payload([], coverage), SOURCE.get)[2]))
 
+    # Hard-won: 82a0658a0: Terra and Sonnet excused incomplete enumeration via coverage.open
+    def test_coverage_rejects_partial_enumeration_bailouts_and_allows_semantic_frontiers(self):
+        bailouts = (
+            "The matching oneshot calls occur in many enclosing procedures; their complete contract cases have not been enumerated.",
+            "Contract cases and guard alternatives in this seed were not fully evaluated.",
+            "The bounded callee effects and remaining alternatives have not been fully resolved.",
+            "The upstream transfers to DashboardState were not fully traced.",
+            "The bounded transfer relation was not enumerated; callers require further analysis.",
+            "The listed rows are partial proofs.",
+            "Only a subset of matching callers is listed.",
+            "The full bounded upstream relation, including all return components and propagation exits, has not been resolved.",
+        )
+        for reason in bailouts:
+            with self.subTest(bailout=reason):
+                coverage = {"complete": False, "open": [{"reason": reason, "site": span()}]}
+                errors = validate(payload([], coverage), SOURCE.get)[2]
+                self.assertEqual([err.key[0] for err in errors], ["frontier-partial-enumeration"])
+                self.assertIn("incomplete or partial enumeration", str(errors[0]))
+
+        semantic = (
+            "Unresolved trait-object dispatch of IAnalyzer::signatures may affect return cases.",
+            "The standard dedup operation is not among the modeled collection operations.",
+            "This call sits inside an assert! macro token tree, which is not expanded.",
+            "External declaration body is outside the workspace.",
+        )
+        for reason in semantic:
+            with self.subTest(semantic=reason):
+                coverage = {"complete": False, "open": [{"reason": reason, "site": span()}]}
+                self.assertEqual(validate(payload([], coverage), SOURCE.get)[2], [])
+
+        for tools in (live_engine.CLAUDE_TOOLS, live_engine.prompt.TERRA_TOOLS):
+            rendered = turn_prompt(QUERY, "output", "catalogue", "menu", [], tools=tools)
+            self.assertIn("have not been enumerated", rendered)
+            self.assertIn("incomplete enumeration is rejected as a validation error", rendered)
+
     def test_source_text_is_not_a_coverage_diagnostic(self):
         rows = deepcopy(MODEL_ROWS)
         operand = rows[0]["fields"]["operand"]
@@ -567,6 +602,22 @@ class EngineTests(unittest.TestCase):
                     self.assertFalse(record.exists())
                     self.assertFalse(runner.launches)
         self.assertEqual(len(runner.launches), 1)
+        # Real Claude reports omit the 5-hour window while idle before first use.
+        driver.mj = lambda op, flag, prof: {"profiles": [{"report": {
+            "harness": "claude",
+            "windows": [{"remaining_percent": 97, "duration_seconds": 604800}],
+            "error": None,
+        }}]}
+        self.assertEqual(driver.pilot_claude_quota("claude4"), ((97, 100), None))
+        driver.mj = lambda op, flag, prof: {"profiles": [{"report": {
+            "harness": "claude",
+            "windows": [
+                {"remaining_percent": 97, "duration_seconds": 604800},
+                {"remaining_percent": None, "duration_seconds": 18_000},
+            ],
+            "error": None,
+        }}]}
+        self.assertIn("no usable 5-hour quota report", driver.pilot_claude_hold("claude4"))
 
     # Hard-won: 3dbf317: a held launch left an empty active directory for teardown.
     def test_teardown_after_a_held_launch_has_nothing_to_retire(self):
@@ -1373,7 +1424,7 @@ class RetirementTests(unittest.TestCase):
                 raise RuntimeError("fidelity session failed the pilot audit")
             if scenario == "transcript":
                 capture.fail = "transcript"
-            return payload().encode(), result
+            return payload().encode(), result, []
 
         def checked(output, read):
             if scenario == "output":

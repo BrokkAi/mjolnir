@@ -1024,6 +1024,7 @@ mod tests {
 
     // Store integration: Claude records the alias a turn selected; the
     // profile's discovered model list says which model that alias runs.
+    // Hard-won: 22d16e7e7: live Usage by session could not price Fable 5.2 turns.
     #[test]
     fn usage_report_prices_claude_aliases_through_the_profile_catalog() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -1052,6 +1053,7 @@ mod tests {
         for (seq, (session, model)) in [
             ("aliases", "opus"),
             ("aliases", "fable"),
+            ("aliases", "claude-fable-5-2"),
             ("unresolved", "default"),
         ]
         .into_iter()
@@ -1088,10 +1090,15 @@ mod tests {
             models,
             [
                 ("claude-fable-5-1", Ok(152_500_000_000)), // $10 + $5 + $0.25
+                ("claude-fable-5-2", Ok(122_000_000_000)), // $8 + $4 + $0.20
                 ("claude-opus-5-5", Ok(62_000_000_000)),   // $4 + $2 + $0.20
             ]
         );
-        assert_eq!(aliases.cost_usd_ticks, Ok(214_500_000_000));
+        assert_eq!(aliases.cost_usd_ticks, Ok(336_500_000_000));
+        assert_eq!(
+            report.hours.last().unwrap().known_cost_usd_ticks,
+            336_500_000_000
+        );
         // `default` names no versioned model, so its cost is unknown.
         assert_eq!(unresolved.models[0].model.as_deref(), Some("default"));
         assert_eq!(unresolved.cost_usd_ticks, Err(UnknownCost));

@@ -203,9 +203,40 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             require_api_auth,
         ))
         .merge(settings)
+        .route("/prove", get(prove_http_identity))
         // Outside the auth layers so a 401 carries the version header too: a
         // client must be able to tell "wrong token" from "wrong server".
         .layer(axum::middleware::from_fn(api_response_headers))
+}
+
+#[derive(Deserialize)]
+struct ProofQuery {
+    nonce: Option<String>,
+}
+
+async fn prove_http_identity(
+    State(state): State<ServerState>,
+    query: Result<Query<ProofQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    if state.loopback_token.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(Query(query)) = query else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(nonce) = query
+        .nonce
+        .as_deref()
+        .filter(|nonce| mj_client::http::is_valid_proof_nonce(nonce))
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let mac = mj_client::http::http_api_proof_hex(&state.loopback_token, nonce);
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "mac": mac })),
+    )
+        .into_response()
 }
 
 /// Accept either the bearer token or the viewer's own session cookie.

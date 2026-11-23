@@ -1489,8 +1489,6 @@ pub(super) fn turn_stall_timeout() -> Option<Duration> {
 /// when anything last arrived, and which tool calls are open.
 pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::ActivityFacts {
     mj_core::activity::ActivityFacts {
-        background_commands: spec.turn_context.counts().0,
-        queued_commands: spec.turn_context.counts().1,
         last_acp_activity_at_ms: spec.acp_activity.last_at_ms(),
         tools_in_flight: spec.tools_in_flight.snapshot(),
         ..mj_core::activity::ActivityFacts::default()
