@@ -4829,8 +4829,8 @@ impl SubagentBackend for ApiBackend {
         admission: Option<mj_core::upgrade::Work>,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'_, Result<Result<PreflightNew, PreflightFailure>, ApiFailure>> {
+        let slots = self.preflight_slots.clone();
         Box::pin(async move {
-            let slot = self.preflight_slot().await;
             let config = self.viewer_projection()?.metadata.installed_config();
             let project_validation = request.project_directory.is_some();
             let work = move |cancelled| {
@@ -4850,6 +4850,11 @@ impl SubagentBackend for ApiBackend {
             };
             let admitted = admission.is_some();
             let operation = async move {
+                let slot = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return Err(viewer_unavailable()),
+                    permit = slots.acquire_owned() => permit.expect("preflight semaphore stays open"),
+                };
                 let blocking = super::preflight::cancellable_blocking(slot, move |cancelled| {
                     let _admission = admission;
                     work(cancelled)
@@ -5132,6 +5137,7 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             let reference =
                 new_command_id("container-settings").map_err(|_| viewer_unavailable())?;
+            let admission = viewer_activity("container settings")?;
             let settings = ContainerSettingsChange {
                 resource_allocation,
                 mounts,
@@ -5140,6 +5146,7 @@ impl SubagentBackend for ApiBackend {
             // Complete reload/publication even when the requester leaves.
             join_viewer_task(
                 mj_core::runtime::spawn(async move {
+                    let _admission = admission;
                     exports
                         .set_container_settings(session_id, settings)
                         .await
