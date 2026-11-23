@@ -447,6 +447,19 @@ fn restore_native_artifacts(
             &spec.workspace_root,
         )
     });
+    // A full restore of a legacy OpenCode archive replays its archived WAL.
+    // Rewriting the main file before that replay would mix two snapshots.
+    // Missing-only recovery already collapses the family before relocation.
+    let target_cwd = target_cwd.filter(|_| {
+        missing_only
+            || archive.manifest.session.harness_kind != HarnessKind::OpenCode
+            || !archive.manifest.payloads.iter().any(|payload| {
+                matches!(&payload.role, PayloadRole::NativeArtifact { relative_path }
+                    if *relative_path == super::native_scan::sqlite_sidecars(
+                        Path::new(super::native_scan::OPENCODE_DATABASE),
+                    )[0])
+            })
+    });
     let (mut changed, sqlite_families) = if missing_only {
         restore_missing_sqlite_families(archive, payload_reader, spec, target_cwd.as_deref())?
     } else {
