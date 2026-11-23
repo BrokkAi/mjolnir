@@ -173,7 +173,6 @@ impl AcpSupervisorSpec {
             .with_context(|| format!("parse ACP supervisor spec {}", path.display()))
     }
 
-    #[cfg(unix)]
     pub(crate) fn write_spec(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_vec_pretty(self)?;
         mj_core::config::atomic_write(path, &body)

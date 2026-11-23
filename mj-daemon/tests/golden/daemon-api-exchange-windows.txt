@@ -116,7 +116,7 @@
         "value": {
           "scope": "Profiles",
           "config": {
-            "version": 23,
+            "version": 24,
             "review": {
               "reviewers": []
             }
@@ -142,7 +142,7 @@
         "value": {
           "scope": "Runtimes",
           "config": {
-            "version": 23,
+            "version": 24,
             "review": {
               "reviewers": []
             }

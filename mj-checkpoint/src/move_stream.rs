@@ -721,6 +721,7 @@ impl<W: Write> Write for CountingWriter<W> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    #[cfg(unix)]
     use std::thread;
 
     #[cfg(unix)]

@@ -9099,10 +9099,6 @@ esac
     }
     // Historical Moves must not turn a workerless cleanup into interrupted
     // checkpoint recovery merely because their rows are still retained.
-    let historical =
-        mj_controller::database::load_move_operation("15420000000000000000000000000008")
-            .unwrap()
-            .unwrap();
     for (index, lifecycle) in [
         SessionState::Provisioning,
         SessionState::Parked,
@@ -9164,13 +9160,20 @@ esac
                 record.state = lifecycle;
                 mj_controller::database::save_lifecycle_session(&record).unwrap();
             }
-            let mut completed = historical.clone();
-            completed.selection.session_id = id.clone();
+            let historical_archive =
+                mj_controller::controller::test_support::write_checkpoint_gate_archive(
+                    root.path(),
+                    &id,
+                    7,
+                );
+            let mut completed = retained_startup_test_move(&record);
             completed.operation_id = format!("historical-{id}");
             completed.phase = phase;
             completed.queue_admission_started = false;
             completed.queue_admission_finished = true;
+            completed.cancellation_requested = phase == mj_core::state::MovePhase::Cancelled;
             completed.prepared_destination = None;
+            completed.checkpoint = Some(historical_archive);
             mj_controller::database::save_move_operation(&completed).unwrap();
             // A crash during a later ordinary close must leave close recovery
             // in charge even while its historical Move row remains.
