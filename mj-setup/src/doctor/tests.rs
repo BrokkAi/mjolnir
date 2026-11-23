@@ -2137,7 +2137,7 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         Ok(output(b"Darwin arm64\n")),
         Ok(output(b"26.1\n")),
         Ok(output(b"container 1.2.3\n")),
-        Ok(output(b"running\n")),
+        Ok(output(br#"{"status":"running"}"#)),
         Ok(output(b"")),
     ]);
     let check = ssh_apple_container_check(
@@ -2164,7 +2164,11 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         Ok(output(b"Darwin arm64\n")),
         Ok(output(b"26.1\n")),
         Ok(output(b"container 1.2.3\n")),
-        Ok(failed(b"Error: container system service is not running\n")),
+        Ok(CommandOutput {
+            status: 1,
+            stdout: br#"{"status":"unregistered"}"#.to_vec(),
+            stderr: Vec::new(),
+        }),
     ]);
     let check = ssh_apple_container_check(
         "mac-apple",
@@ -2173,16 +2177,97 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         &stopped,
         false,
     );
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(check.detail.contains("not running"), "{}", check.detail);
+    assert_eq!(check.status, CheckStatus::Warning);
     assert!(
-        check
-            .remediation
-            .as_deref()
-            .is_some_and(|fix| fix.contains("container system start") || fix.contains("container")),
-        "{:?}",
-        check.remediation
+        check.detail.contains("service is stopped"),
+        "{}",
+        check.detail
     );
+    assert!(check.remediation.is_none());
+    assert_eq!(stopped.commands.borrow().len(), 5);
+    assert!(
+        stopped.commands.borrow()[4]
+            .args
+            .last()
+            .unwrap()
+            .ends_with("'status' '--format' 'json'")
+    );
+}
+
+#[test]
+fn apple_container_doctor_smoke_starts_stopped_services_before_creating_a_container() {
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_TEST_APPLE_CONTAINER_DOCTOR_SMOKE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "apple_container_doctor_smoke_starts_stopped_services_before_creating_a_container",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "apple-container-doctor-smoke")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    let ssh = RuntimeSshTarget {
+        destination: "dev@mac.example.test".into(),
+        ssh_args: vec![],
+    };
+    let platform = ApplePlatform::Macos {
+        architecture: "arm64".into(),
+        major_version: 27,
+    };
+    let image = "example.invalid/apple-smoke:1";
+    for remote in [false, true] {
+        let stopped = CommandOutput {
+            status: 1,
+            stdout: br#"{"status":"unregistered"}"#.to_vec(),
+            stderr: vec![],
+        };
+        let remote_probes = remote
+            .then(|| {
+                [
+                    Ok(output(b"")),
+                    Ok(output(b"Darwin arm64")),
+                    Ok(output(b"27.0.1")),
+                ]
+            })
+            .into_iter()
+            .flatten();
+        let executor = FakeExecutor::new(remote_probes.chain([
+            Ok(output(b"container 1.7.0")),
+            Ok(stopped.clone()),
+            Ok(stopped),
+            Ok(output(b"")),
+            Ok(output(br#"{"status":"running"}"#)),
+            Ok(output(b"")),
+            Ok(output(b"")),
+            Ok(output(b"")),
+        ]));
+        let check = if remote {
+            ssh_apple_container_check("mac", &ssh, image, &executor, true)
+        } else {
+            apple_container_check(&platform, &executor, true, image.into())
+        };
+        assert_eq!(check.status, CheckStatus::Ready, "{check:?}");
+        let commands = executor.commands.borrow();
+        let purposes = commands
+            .iter()
+            .map(|command| command.purpose.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &purposes[usize::from(remote) * 3 + 2..usize::from(remote) * 3 + 5],
+            [
+                "check Apple container runtime",
+                "start Apple container runtime",
+                "check Apple container runtime",
+            ],
+        );
+        assert!(executor.responses.borrow().is_empty());
+    }
 }
 
 /// A host that does not answer has one problem, not two: its GitHub check
