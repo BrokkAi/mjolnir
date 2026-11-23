@@ -2999,6 +2999,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
         .unwrap()
         .unwrap();
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });

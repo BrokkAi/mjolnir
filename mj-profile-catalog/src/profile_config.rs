@@ -1040,6 +1040,7 @@ mod tests {
             ("chosen", Some("adaptive"), false),
         ] {
             let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: Some(Box::new(mj_core::config::SubagentChoice {
                     model: model.into(),
@@ -1069,6 +1070,7 @@ mod tests {
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: Some(Box::new(mj_core::config::SubagentChoice {
                     model: "chosen".into(),
@@ -1085,6 +1087,7 @@ mod tests {
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -1098,6 +1101,7 @@ mod tests {
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: Some(Box::new(mj_core::config::SubagentChoice {
                     model: "chosen".into(),
@@ -1726,6 +1730,7 @@ mod tests {
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },

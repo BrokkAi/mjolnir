@@ -44,16 +44,16 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
         effort: Some("high".into()),
     };
     session.oracle = true;
-    assert!(!oracle_launch_enabled(&session, false, &choices));
-    choices.oracle = vec![choice.clone()];
-    assert!(oracle_launch_enabled(&session, false, &choices));
     assert!(!oracle_launch_enabled(&session, true, &choices));
-    session.oracle = false;
+    choices.oracle = vec![choice.clone()];
+    assert!(oracle_launch_enabled(&session, true, &choices));
     assert!(!oracle_launch_enabled(&session, false, &choices));
+    session.oracle = false;
+    assert!(!oracle_launch_enabled(&session, true, &choices));
     session.oracle = true;
     session.oracle_choice = Some(Box::new(choice));
     choices.oracle.clear();
-    assert!(oracle_launch_enabled(&session, false, &choices));
+    assert!(oracle_launch_enabled(&session, true, &choices));
 }
 
 #[test]
@@ -1130,6 +1130,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session.subagents = choice.map(|enabled| {
             if enabled {
                 mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }
@@ -1153,6 +1154,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
     codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3068,6 +3070,8 @@ fn a_session_without_project_memory_launches_without_memory() {
                     session_id: &session_id,
                     container: None,
                     parent_worktree: None,
+                    owner: None,
+                    working_directories: &[],
                 },
                 &mj_core::state::TargetRuntimeSettings::from(
                     &mj_core::config::TargetTemplate::LocalBare,
@@ -3160,6 +3164,8 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
                 session_id: &session_id,
                 container: None,
                 parent_worktree: None,
+                owner: None,
+                working_directories: &[],
             },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
@@ -4088,6 +4094,8 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
             session_id,
             container: Some(&workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
         &mj_core::config::Config::default(),
@@ -4376,6 +4384,8 @@ fn launches_on_every_target(
             session_id: parent_id,
             container: None,
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
         &mj_core::config::Config::default(),
@@ -4399,6 +4409,8 @@ fn launches_on_every_target(
             session_id: parent_id,
             container: Some(&parent_workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &with_target_keys(&container),
         &mj_core::config::Config::default(),
@@ -4422,6 +4434,8 @@ fn launches_on_every_target(
             session_id: parent_id,
             container: Some(&parent_workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &with_target_keys(&container),
         &mj_core::config::Config::default(),
@@ -4538,6 +4552,8 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
             session_id: parent_id,
             container: Some(&workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&docker),
         &mj_core::config::Config::default(),
@@ -4824,6 +4840,8 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
             session_id: parent_id,
             container: Some(&parent_workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
         &mj_core::config::Config::default(),
@@ -4877,6 +4895,8 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
             session_id: &session.id,
             container: None,
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
         &mj_core::config::Config::default(),
@@ -4978,6 +4998,8 @@ fn raw_local_muse_launches_with_guardian_approvals() {
             session_id: &session.id,
             container: None,
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
         &mj_core::config::Config::default(),
@@ -5363,8 +5385,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
-        supervisor: false,
-        supervisors_enabled: false,
+        orchestrator: false,
+        orchestrators_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5537,8 +5559,8 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
-        supervisor: false,
-        supervisors_enabled: false,
+        orchestrator: false,
+        orchestrators_enabled: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
@@ -5985,6 +6007,8 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
                 session_id: &session_id,
                 container: None,
                 parent_worktree: None,
+                owner: None,
+                working_directories: &[],
             },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
@@ -6444,11 +6468,13 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         for policy in [
             SubagentPolicy::Native,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
             SubagentPolicy::None,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -6631,6 +6657,16 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
         .unwrap();
         launch.harness = harness;
         launch.harness_home = "/session".into();
+        if harness == HarnessKind::OpenCode {
+            launch.reviewer_launch = None;
+            launch.subagent_kind = Some(mj_core::subagent::SubagentKind::Worker);
+            launch.handback_tool = true;
+            launch.orchestrator = true;
+            launch.environment.insert(
+                mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+                "1".into(),
+            );
+        }
         launch.environment.insert(
             mj_core::subagent::CHILD_REPORT_DIR_ENV.into(),
             "/session/reports".into(),
@@ -6660,6 +6696,7 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
                 harness,
                 stage.path(),
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },

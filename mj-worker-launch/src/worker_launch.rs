@@ -662,26 +662,37 @@ pub fn session_launch_config(
         .profiles
         .get(&session.last_profile)
         .context("session profile is missing")?;
-    let checkout = state.checkout(session_id)?;
+    let owner = state.workspace_owner(session_id)?;
+    let checkout = owner.checkout();
     let bundle = checkout
         .project_directory()
         .is_none()
-        .then(|| session.project_bundle(config))
+        .then(|| owner.project_bundle(config))
         .flatten();
     let target = session.target_runtime_settings(config)?;
     let subagent = state.subagents.get(session_id);
-    // A sub-agent child shares its parent's container, so it works in the
-    // parent's workspace. The parent record is authoritative for that path.
-    let (workspace_session_id, workspace_container) = match subagent.as_ref() {
-        Some(child) => {
-            let parent = state
-                .sessions
-                .get(&child.parent_session_id)
-                .context("sub-agent parent session is missing")?;
-            (parent.id.clone(), parent.container_workspace.clone())
+    let mut working_directories = Vec::new();
+    let mut cursor = session_id;
+    let mut visited = std::collections::BTreeSet::new();
+    while cursor != owner.id {
+        ensure!(
+            visited.insert(cursor),
+            "cycle in borrowed workspace ancestry"
+        );
+        let child = state
+            .subagents
+            .get(cursor)
+            .context("borrowed workspace is missing its parent relation")?;
+        if !child.working_directory.as_os_str().is_empty() {
+            working_directories.push(child.working_directory.as_path());
         }
-        None => (session_id.to_owned(), session.container_workspace.clone()),
-    };
+        cursor = &child.parent_session_id;
+        ensure!(
+            state.environment_owner_id(cursor) == Some(owner.id.as_str()),
+            "borrowed workspace parent is outside its environment"
+        );
+    }
+    working_directories.reverse();
     let (mut launch, project_memory, target_profile_home) = worker_launch_config_with_checkout(
         session,
         &checkout,
@@ -689,9 +700,11 @@ pub fn session_launch_config(
         bundle,
         backend,
         LaunchWorkspace {
-            session_id: &workspace_session_id,
-            container: workspace_container.as_deref(),
-            parent_worktree: subagent_parent_worktree(config, state, session_id),
+            session_id: &owner.id,
+            container: owner.container_workspace.as_deref(),
+            parent_worktree: owner.managed_worktree.as_deref(),
+            owner: Some(owner),
+            working_directories: &working_directories,
         },
         &target,
         config,
@@ -779,13 +792,13 @@ pub fn session_launch_config(
     // the default, so their launch files do not change.
     launch.subtle_subagents =
         !launch.subagents.uses_mjolnir() || config.subagents.offers_subtle(&launch.subagents);
-    launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &config.subagents);
+    let owns_environment = state.owns_environment(session_id) == Some(true);
+    launch.oracle = oracle_launch_enabled(session, owns_environment, &config.subagents);
     // Registration decided whether this child can be given the tool.
     launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
     launch.subagent_kind = subagent.as_ref().map(|child| child.kind);
-    launch.supervisor = subagent.as_ref().is_some_and(|child| child.supervisor);
-    launch.supervisors_enabled =
-        subagent.is_none() && session.supervisors && launch.subagents.uses_mjolnir();
+    launch.orchestrator = subagent.as_ref().is_some_and(|child| child.orchestrator);
+    launch.orchestrators_enabled = subagent.is_none() && launch.subagents.orchestrators_enabled();
 
     // The child's harness opens on its spawn model instead of switching
     // to it from the profile default before the first turn (issue 1217).
@@ -839,10 +852,9 @@ pub fn session_launch_config(
                 .collect::<Result<Vec<_>>>()?;
         }
     }
-    // Only top-level sessions request review, before they push. A sub-agent
-    // never does: its parent reviews the integrated work. The worker derives
+    // The workspace owner requests review before pushing. The worker derives
     // the review tools and the push gate from this one value.
-    launch.review_trigger = if subagent.is_none() {
+    launch.review_trigger = if owns_environment {
         if let Err(missing) = state.effective_review(session_id) {
             tracing::warn!(session_id, missing = %missing,
                 "review choice cannot be resolved; launching without review tools");
@@ -853,50 +865,6 @@ pub fn session_launch_config(
     } else {
         Default::default()
     };
-    // Older workers still read this launch field. Push capture does not
-    // need working-tree baselines at startup.
-    if let Some(subagent) = &subagent {
-        let parent = state
-            .sessions
-            .get(&subagent.parent_session_id)
-            .context("sub-agent parent session is missing")?;
-        let parent_profile = config
-            .profiles
-            .get(&parent.last_profile)
-            .context("sub-agent parent profile is missing")?;
-        let parent_target = parent.target_runtime_settings(config)?;
-        let parent_locator = parent
-            .target
-            .as_ref()
-            .context("sub-agent parent has no live target")?;
-        let parent_backend = backend_locator(parent_locator, parent, config)?;
-        let parent_checkout = state.checkout(&parent.id)?;
-        let parent_bundle = parent_checkout
-            .project_directory()
-            .is_none()
-            .then(|| parent.project_bundle(config))
-            .flatten();
-        let (parent_launch, _, _) = worker_launch_config_with_checkout(
-            parent,
-            &parent_checkout,
-            parent_profile,
-            parent_bundle,
-            &parent_backend,
-            LaunchWorkspace {
-                session_id: &parent.id,
-                container: parent.container_workspace.as_deref(),
-                parent_worktree: None,
-            },
-            &parent_target,
-            config,
-        )?;
-        launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
-            parent_launch.cwd
-        } else {
-            mj_core::target_path::join(&parent_launch.cwd, &subagent.working_directory)
-        };
-        launch.additional_directories = parent_launch.additional_directories;
-    }
     Ok((launch, project_memory, target_profile_home))
 }
 
@@ -973,47 +941,38 @@ pub fn project_memory_sync_target(
         .profiles
         .get(&session.last_profile)
         .context("session profile is missing")?;
-    let checkout = state.checkout(session_id)?;
+    let owner = state.workspace_owner(session_id)?;
+    let checkout = owner.checkout();
     let bundle = checkout
         .project_directory()
         .is_none()
-        .then(|| session.project_bundle(config))
+        .then(|| owner.project_bundle(config))
         .flatten();
-    let workspace = if let Some(project_directory) = checkout.project_directory() {
-        (project_directory.to_string_lossy().into_owned(), Vec::new())
-    } else {
-        workspace_paths(
-            &backend,
-            bundle.context("session bundle is missing")?,
-            session_id,
-            session.container_workspace.as_deref(),
-        )?
-    };
+    let workspace = launch_workspace_paths(
+        &checkout,
+        bundle,
+        &backend,
+        &LaunchWorkspace {
+            session_id: &owner.id,
+            container: owner.container_workspace.as_deref(),
+            parent_worktree: owner.managed_worktree.as_deref(),
+            owner: Some(owner),
+            working_directories: &[],
+        },
+    )?;
     let target_home = target_profile_home(&backend, session_id, profile);
     let launch = project_memory_launch(
         session,
         bundle,
         &workspace,
         &target_home,
-        subagent_parent_worktree(config, state, session_id),
+        owner.managed_worktree.as_deref(),
     )?;
     Ok(Some(ProjectMemorySyncTarget {
         canonical_root: canonical_memory_root(&launch.project_key),
     }))
 }
 
-pub fn subagent_parent_worktree<'a>(
-    _config: &Config,
-    state: &'a State,
-    id: &str,
-) -> Option<&'a mj_core::state::ManagedWorktree> {
-    match state.checkout(id).ok()?.effective() {
-        mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
-        mj_core::state::Checkout::Attached { .. }
-        | mj_core::state::Checkout::ManagedWorkspace
-        | mj_core::state::Checkout::Borrowed { .. } => None,
-    }
-}
 /// Writes `servers` into the staged profile of a harness that reads its MCP
 /// configuration from disk.
 ///
@@ -1101,4 +1060,119 @@ pub fn reconnect_command(
         .into_iter()
         .next()
         .context("reconnect plan is empty")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use mj_core::config::{HarnessKind, HarnessProfile, TargetTemplate};
+    use mj_core::state::{SessionState, TargetLocator};
+    use mj_core::subagent::{CHILD_REPORT_DIR_ENV, SubagentKind, SubagentRecord};
+    use mj_targets::test_isolation::{IsolatedTest, test_name};
+
+    #[test]
+    fn owned_child_launch_uses_its_checkout_and_report_without_parent_placement() {
+        const TEST: &str =
+            "owned_child_launch_uses_its_checkout_and_report_without_parent_placement";
+        const MARKER: &str = "MJ_TEST_OWNED_CHILD_LAUNCH";
+        if std::env::var_os(MARKER).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), TEST))
+                .env(MARKER, "1")
+                .isolated_store(dir.path())
+                .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("podman".into(), TargetTemplate::LocalBare);
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(
+                HarnessKind::Codex,
+                mj_core::config::data_dir().join("profile"),
+            ),
+        );
+        let choice = mj_core::config::SubagentChoice {
+            model: "test-model".into(),
+            effort: None,
+        };
+        config.review.reviewers = vec![choice.clone()];
+        let parent_id = "11111111111111111111111111111111";
+        let child_id = "22222222222222222222222222222222";
+        let mut parent = crate::database::test_fixtures::checkpoint_test_session(parent_id);
+        parent.last_profile = "missing-profile".into();
+        crate::database::save_session(&parent).unwrap();
+        let mut child = crate::database::test_fixtures::checkpoint_test_session(child_id);
+        child.oracle = true;
+        child.oracle_choice = Some(Box::new(choice));
+        child.review = Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: None,
+        }));
+        child.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
+            straightforward: None,
+            subtle: None,
+        });
+        let workspace = mj_core::config::data_dir().join("child-workspace");
+        child.project_directory = Some(workspace.clone());
+        child.target = Some(Box::new(TargetLocator::LocalBare {
+            worker_root: mj_core::config::data_dir().join(child_id),
+        }));
+        let relation = SubagentRecord {
+            child_session_id: child_id.into(),
+            parent_session_id: parent_id.into(),
+            task_name: "isolated assignment".into(),
+            profile_id: "codex".into(),
+            working_directory: PathBuf::from("relative-to-parent"),
+            request_key: "owned-child-launch".into(),
+            created_at: child.created_at.clone(),
+            kind: SubagentKind::Worker,
+            reviewer_launch: None,
+            model: None,
+            effort: None,
+            initial_prompt: "inspect".into(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: true,
+            orchestrator: true,
+            resume_with_parent: false,
+        };
+        crate::database::register_subagent_with_startup(
+            &child,
+            &relation,
+            vec![],
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        parent.state = SessionState::Stopped;
+        crate::database::save_lifecycle_session(&parent).unwrap();
+        let report = workspace.join(".mj/agents").join(child_id);
+        crate::database::record_subagent_report_dir(child_id, report.to_str().unwrap()).unwrap();
+        let state = crate::database::load_state().unwrap();
+        let (backend, _) = worker_placement(&config, &state, child_id).unwrap();
+        let (launch, _, _) =
+            session_launch_config(&config, &state, child_id, &backend, LaunchHistory::Stored)
+                .unwrap();
+        assert_eq!(launch.cwd, workspace);
+        assert_eq!(
+            launch.environment[CHILD_REPORT_DIR_ENV],
+            report.to_str().unwrap()
+        );
+        assert!(launch.oracle);
+        assert!(launch.review_tools() && launch.review_gate() && launch.prepares_review());
+        assert_eq!(
+            launch.subagent_mcp_role(),
+            Some(mj_core::subagent::SubagentMcpRole::Orchestrator)
+        );
+        let saved = serde_json::to_value(&launch).unwrap();
+        assert!(saved.get("owns_environment").is_none());
+        let launch: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
+        assert!(launch.oracle && launch.review_gate());
+        assert_eq!(launch.subagent_kind, Some(SubagentKind::Worker));
+    }
 }

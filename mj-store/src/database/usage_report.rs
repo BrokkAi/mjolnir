@@ -336,7 +336,7 @@ mod tests {
         let connection = open(&path)?;
         // Reconstruct the previous revision, with a turn written before the index.
         super::super::legacy_schema::ensure_session_container_override_columns(&connection)?;
-        super::super::schema::restore_pre152_transcript_layout(&connection);
+        super::super::schema::restore_pre153_transcript_layout(&connection);
         connection.execute_batch(
             "DROP INDEX session_turn_usage_completed_time;
              DROP INDEX materialized_sessions_active_usage;
@@ -439,7 +439,7 @@ mod tests {
             save_session_to(&path, &super::super::tests::session(id, "project"))?;
         }
         let connection = open(&path)?;
-        super::super::schema::restore_pre152_transcript_layout(&connection);
+        super::super::schema::restore_pre153_transcript_layout(&connection);
         connection.execute_batch(
             "DROP TRIGGER subagent_accounting_kind_insert;
              DROP TRIGGER subagent_accounting_kind_update;
@@ -550,6 +550,7 @@ mod tests {
             ),
         ] {
             let record = mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind,
                 reviewer_launch: None,
                 child_session_id: child.into(),
@@ -565,7 +566,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             };
             connection.execute(
                 "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)

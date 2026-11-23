@@ -81,6 +81,9 @@ fn managed_worktree_export_capture(
     }));
     let mut state = State::default();
     state.sessions.insert(session_id.into(), session);
+    state
+        .environment_owners
+        .insert(session_id.into(), session_id.into());
     let controller = Controller {
         config: crate::controller::test_support::resume_compatibility_config(),
         state,
@@ -137,6 +140,9 @@ fn a_plain_project_directory_is_captured_without_git() {
     plain.project = Some(recorded.into());
     let mut state = State::default();
     state.sessions.insert(session_id.clone(), plain);
+    state
+        .environment_owners
+        .insert(session_id.clone(), session_id.clone());
     let controller = Controller {
         config: crate::controller::test_support::resume_compatibility_config(),
         state,
@@ -1230,6 +1236,9 @@ async fn live_resume_discards_queue_before_native_readiness() {
     let controller = Controller {
         config: Default::default(),
         state: mj_core::state::State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
             sessions: [(LATCH_RELAY_SESSION.into(), session)]
                 .into_iter()
                 .collect(),
@@ -2297,6 +2306,9 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
             sessions: [(LATCH_RELAY_SESSION.into(), session)]
                 .into_iter()
                 .collect(),
@@ -2700,6 +2712,9 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
             sessions: [(LATCH_RELAY_SESSION.into(), session)]
                 .into_iter()
                 .collect(),
@@ -3171,6 +3186,9 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
             sessions: [(LATCH_RELAY_SESSION.into(), session.clone())]
                 .into_iter()
                 .collect(),
@@ -3180,7 +3198,6 @@ async fn a_cross_target_move_capture_keeps_the_source_target_and_preserves_sessi
 
     let selection = mj_core::state::MoveSelection {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),

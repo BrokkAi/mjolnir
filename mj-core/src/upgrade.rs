@@ -289,7 +289,7 @@ impl Gate {
         loop {
             anyhow::ensure!(
                 !state.closed,
-                mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
                     .with_code(HANDOFF_REFUSAL_CODE)
             );
             if !state.draining() {
@@ -298,7 +298,7 @@ impl Gate {
             // This is the owner's existing lapse deadline, not a polling
             // interval or a bound on the resumable operation.
             let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
-            let track_waiters = cfg!(test) || mj_core::test_hooks::test_fixtures_enabled();
+            let track_waiters = cfg!(test) || crate::test_hooks::test_fixtures_enabled();
             if track_waiters {
                 state.resumable_waiters += 1;
                 self.1.notify_waiters();
@@ -413,7 +413,7 @@ impl Gate {
         let mut state = self.lock();
         anyhow::ensure!(
             !state.closed,
-            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+            crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
                 .with_code(HANDOFF_REFUSAL_CODE)
         );
         Ok(self.register_as(&mut state, label, None, describer))
@@ -434,12 +434,12 @@ impl Gate {
         let mut state = self.lock();
         anyhow::ensure!(
             !state.closed,
-            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+            crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
                 .with_code(HANDOFF_REFUSAL_CODE)
         );
         anyhow::ensure!(
             !state.draining(),
-            mj_core::refusal::Refusal::precondition("a daemon upgrade handoff is waiting")
+            crate::refusal::Refusal::precondition("a daemon upgrade handoff is waiting")
                 .with_code(HANDOFF_REFUSAL_CODE)
         );
         Ok(self.register_as(&mut state, label, None, describer))
@@ -466,7 +466,7 @@ impl Gate {
         let mut state = self.lock();
         anyhow::ensure!(
             !state.closed && (!deferrable || !state.draining()),
-            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+            crate::refusal::Refusal::precondition("daemon upgrade handoff is underway")
                 .with_code(HANDOFF_REFUSAL_CODE)
         );
         state.destroying.push(session_id.to_owned());

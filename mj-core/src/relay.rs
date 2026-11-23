@@ -278,10 +278,18 @@ pub const WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT: &str = "login-environment";
 /// File a dying worker daemon writes with the reason it stopped.
 pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
 
-/// An ACP failure before this worker first recorded a configured session.
+/// A startup failure before this worker first recorded a configured session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerHarnessStartupFailure {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<WorkerHarnessStartupFailureKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHarnessStartupFailureKind {
+    WorkingDirectoryUnavailable,
 }
 
 impl std::fmt::Display for WorkerHarnessStartupFailure {

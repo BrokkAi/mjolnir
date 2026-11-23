@@ -671,6 +671,9 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
     let mut session = stopped_session();
     session.bundle_id = "missingpath".into();
     let mut state = State::default();
+    state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
@@ -759,6 +762,9 @@ fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() 
 fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selection() {
     let mut state = State::default();
     let session = stopped_session();
+    state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = dashboard_at_saved_projects(state);
 
@@ -1578,7 +1584,6 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
             subagents: None,
@@ -2010,7 +2015,6 @@ fn raw_localhost_uses_local_project_history() {
         dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
             subagents: None,
@@ -2448,7 +2452,6 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         conversion: None,
         selection: mj_core::state::MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -5671,10 +5674,12 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
             [
                 SubagentPolicy::Native,
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: Some(Box::new(mj_core::config::SubagentChoice {
                         model: "gpt-6-luna".into(),
                         effort: Some("max".into()),
@@ -5776,6 +5781,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         session.project_directory = Some("/work/project".into());
         session.target_template_id = "local".into();
         session.subagents = Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         });
@@ -5819,6 +5825,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             }
@@ -5853,6 +5860,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         assert_eq!(
             dashboard.state.sessions["session-1"].subagents,
             Some(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             }),
@@ -6262,7 +6270,7 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     }];
     let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
     let profile = config.profiles.keys().next().unwrap().clone();
-    draft.update_choices(&profile, "localhost", &config, &Default::default());
+    draft.update_choices(&profile, &config);
     assert!(draft.oracle_available());
     assert_eq!(
         draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
@@ -6273,7 +6281,7 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     let override_choice = config.subagents.oracle.pop();
     let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
         .with_oracle(true, override_choice);
-    override_draft.update_choices(&profile, "localhost", &config, &Default::default());
+    override_draft.update_choices(&profile, &config);
     assert!(override_draft.oracle_available());
     config.subagents.oracle = override_draft.oracle_choice.clone().into_iter().collect();
     let mut state = State::default();
@@ -6298,6 +6306,7 @@ fn golden_create_delegation_availability_and_submission() {
                 model: "model".into(),
                 effort: None,
             };
+            dashboard.config.subagents.primary = vec![choice.clone()];
             dashboard.config.subagents.straightforward = vec![choice.clone()];
             dashboard.config.subagents.subtle = vec![choice];
             dashboard.config.subagents.oracle = vec![SubagentChoice {
@@ -6318,6 +6327,7 @@ fn golden_create_delegation_availability_and_submission() {
             wizard.subagents.policy,
             if configured {
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }
@@ -6340,6 +6350,27 @@ fn golden_create_delegation_availability_and_submission() {
             panic!("create");
         };
         assert_eq!(subagents, None);
+        if configured {
+            let Mode::New(wizard) = &mut dashboard.mode else {
+                unreachable!()
+            };
+            wizard.form.borrow_mut().focus(WizardControl::Orchestrators);
+            drawn(&mut dashboard, 140, 40);
+            dashboard.handle_key(key(KeyCode::Char(' ')));
+            dashboard.take_subagent_discovery();
+            let wizard = new_wizard(&dashboard);
+            let DashboardAction::CreateSession {
+                subagents: Some(policy),
+                ..
+            } = dashboard.create_session_action_without_closing(wizard)
+            else {
+                panic!("orchestrator opt-in must submit the delegation policy");
+            };
+            assert!(policy.orchestrators_enabled());
+            let screen = drawn(&mut dashboard, 140, 40).join("\n");
+            assert!(screen.contains("Orchestrators"));
+            output.push_str(&format!("=== orchestrators enabled ===\n{screen}\n"));
+        }
         // None is available even without configured Mjolnir models.
         let Mode::New(wizard) = &mut dashboard.mode else {
             unreachable!()
@@ -6385,6 +6416,7 @@ fn golden_create_delegation_availability_and_submission() {
     // starts on a remembered Mjolnir only when it is configured, and on None
     // otherwise, and submits what it shows.
     let mjolnir = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -6485,11 +6517,11 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     use mj_core::subagent::SubagentPolicy;
     let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
     let mut config = config();
-    draft.update_choices("claude-1", "localhost", &config, &Default::default());
+    draft.update_choices("claude-1", &config);
     assert!(!draft.select_policy(1));
     assert!(draft.unavailable_reason().unwrap().contains("Settings"));
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
-    draft.update_choices("claude-1", "localhost", &config, &Default::default());
+    draft.update_choices("claude-1", &config);
     assert!(!draft.select_policy(1));
     assert!(
         draft
@@ -6499,7 +6531,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
-    draft.update_choices("claude-1", "localhost", &config, &Default::default());
+    draft.update_choices("claude-1", &config);
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);
     assert_eq!(draft.selected(), SubagentPolicy::None);
@@ -6527,6 +6559,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.state.last_subagent_policies.insert(
         "codex-1".into(),
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(SubagentChoice {
                 model: "codex-model".into(),
                 effort: None,
@@ -6537,6 +6570,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.state.last_subagent_policies.insert(
         "claude-1".into(),
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(SubagentChoice {
                 model: "grok-model".into(),
                 effort: None,
@@ -6559,6 +6593,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         (
             supported,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(SubagentChoice {
                     model: "codex-model".into(),
                     effort: None,
@@ -6570,6 +6605,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         (
             supported,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(SubagentChoice {
                     model: "codex-model".into(),
                     effort: None,
@@ -6607,6 +6643,7 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(SubagentChoice {
                 model: "codex-model".into(),
                 effort: None,
@@ -6643,6 +6680,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6653,6 +6691,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6675,6 +6714,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         wizard.subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6698,6 +6738,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         }
@@ -6705,6 +6746,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     assert_eq!(
         new_wizard(&dashboard).subagents.create_selection(),
         Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         })
@@ -6724,6 +6766,7 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
     // Mjolnir delegation with no sub-agent model configured, and an oracle
     // with no oracle model: the copy cannot keep either.
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -6756,7 +6799,7 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     let mut dashboard = dashboard_with_session(parent.clone());
     dashboard
@@ -6764,6 +6807,9 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     let mut state = dashboard.state.clone();
+    state
+        .environment_owners
+        .insert(child.id.clone(), relation.parent_session_id.clone());
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);
@@ -6847,9 +6893,12 @@ fn new_session_like_carries_the_container_owners_size() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     let mut state = dashboard.state.clone();
+    state
+        .environment_owners
+        .insert(child.id.clone(), relation.parent_session_id.clone());
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);

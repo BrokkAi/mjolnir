@@ -684,8 +684,9 @@ mod tests {
                 originating_command_id: None,
                 request_id: "request".into(),
                 created_at_ms: 1,
-                action: mj_core::subagent::SubagentToolAction::LegacyInterruptAgent {
+                action: mj_core::subagent::SubagentToolAction::SendInput {
                     child_session_id: "child".into(),
+                    message: "continue".into(),
                 },
             },
             turn_target: Some("original-turn".into()),

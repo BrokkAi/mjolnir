@@ -1763,7 +1763,6 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
     let DashboardAction::MoveSession {
         subagents,
         oracle,
-        supervisors,
         oracle_choice,
         consent,
         skip_keep_paths,
@@ -1786,7 +1785,6 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
             daemon
                 .prepare_move_session(MoveSelection {
                     oracle,
-                    supervisors,
                     oracle_choice,
                     subagents,
                     consent,

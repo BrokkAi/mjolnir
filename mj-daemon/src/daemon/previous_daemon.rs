@@ -1,4 +1,7 @@
 use super::*;
+use mj_core::daemon_exit::{
+    DaemonExitRecord, daemon_exits_dir, format_exit_reason, read_daemon_exit_record,
+};
 
 /// Why the previous daemon of this instance is gone, judged from what it left
 /// behind. A daemon removes `daemon.json` on every exit path it controls (the
@@ -90,50 +93,326 @@ fn rfc3339(time: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Log one WARN line when the previous daemon left its `daemon.json` behind.
-///
-/// Call it only while holding the controller store guard: that proves the
-/// recorded daemon is not running, so the record is a leftover and not a
-/// daemon that is still shutting down.
+/// Report abnormal exits and preserve their diagnostic logs. Call this only
+/// while holding the controller store guard, which excludes a live predecessor.
 pub(super) fn report_unclean_previous_daemon() {
-    let previous = match read_metadata_any() {
-        Ok(previous) => previous,
-        // No record is a clean stop.
-        Err(error) if daemon_not_running(&error).is_some() => return,
-        // A record that is there but unreadable is not a clean stop either;
-        // say so, though it names no previous daemon.
-        Err(error) => {
+    report_unclean_previous_daemon_at(
+        &mj_core::config::data_dir(),
+        read_metadata_any(),
+        host_boot_time,
+    );
+}
+
+fn report_unclean_previous_daemon_at(
+    data_dir: &Path,
+    previous: Result<DaemonMetadata>,
+    host_boot_time: impl FnOnce() -> Option<SystemTime>,
+) {
+    let mut exits = read_exit_records(data_dir);
+    match previous {
+        Ok(previous) if previous.pid > 0 => {
+            let boot = host_boot_time();
+            if let Some(index) = exits
+                .iter()
+                .position(|(_, record)| record.pid == previous.pid)
+            {
+                let (path, record) = exits.remove(index);
+                report_exit_record(data_dir, &record, Some((&previous, boot)));
+                remove_exit_record(&path);
+            } else {
+                let last_seen = last_logged_at(data_dir, previous.pid);
+                let kept_logs = keep_crashed_logs(data_dir, previous.pid);
+                tracing::warn!(
+                    previous_pid = previous.pid,
+                    previous_started_at = %previous.started_at,
+                    last_seen = %timestamp(last_seen),
+                    host_boot = %boot_timestamp(boot),
+                    kept_logs = ?kept_logs,
+                    "{}",
+                    conclusion(last_seen, boot)
+                );
+            }
+        }
+        Err(error) if daemon_not_running(&error).is_none() => {
             tracing::warn!(
                 error = %format!("{error:#}"),
                 "the previous daemon left a daemon.json that could not be read; it did not shut down cleanly"
             );
-            return;
+        }
+        // A host-side container record has PID 0. It does not identify
+        // a process in this namespace.
+        _ => {}
+    }
+
+    for (path, record) in exits {
+        report_exit_record(data_dir, &record, None);
+        remove_exit_record(&path);
+    }
+}
+
+fn timestamp(time: Option<SystemTime>) -> String {
+    time.map_or_else(|| "unknown".to_owned(), rfc3339)
+}
+
+fn boot_timestamp(time: Option<SystemTime>) -> String {
+    time.map_or_else(|| "not available".to_owned(), rfc3339)
+}
+
+fn read_exit_records(data_dir: &Path) -> Vec<(PathBuf, DaemonExitRecord)> {
+    let directory = daemon_exits_dir(data_dir);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(directory = %directory.display(), %error, "could not list daemon exit records");
+            return Vec::new();
         }
     };
-    // A container daemon's record carries PID 0 and its guard is in the
-    // container, so holding the host guard says nothing about it.
-    if previous.pid == 0 {
-        return;
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                tracing::warn!(directory = %directory.display(), %error, "could not read a daemon exit directory entry");
+                continue;
+            }
+        };
+        if path.extension().is_none_or(|extension| extension != "json")
+            || path
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
+        {
+            continue;
+        }
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() => paths.push(path),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "could not inspect daemon exit record");
+            }
+        }
     }
-    let data_dir = mj_core::config::data_dir();
-    let last_seen = last_logged_at(&data_dir, previous.pid);
-    let kept_logs = keep_crashed_logs(&data_dir, previous.pid);
-    let boot = host_boot_time();
-    let timestamp = |time: Option<SystemTime>| time.map_or_else(|| "unknown".to_owned(), rfc3339);
+    paths.sort();
+
+    paths
+        .into_iter()
+        .filter_map(|path| match read_daemon_exit_record(&path) {
+            Ok(record) => Some((path, record)),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "could not read daemon exit record");
+                remove_exit_record(&path);
+                None
+            }
+        })
+        .collect()
+}
+
+fn report_exit_record(
+    data_dir: &Path,
+    record: &DaemonExitRecord,
+    previous: Option<(&DaemonMetadata, Option<SystemTime>)>,
+) {
+    let last_seen = last_logged_at(data_dir, record.pid);
+    let kept_logs = keep_crashed_logs(data_dir, record.pid);
     tracing::warn!(
-        previous_pid = previous.pid,
-        previous_started_at = %previous.started_at,
+        previous_pid = record.pid,
+        previous_started_at = previous.map(|(metadata, _)| metadata.started_at.as_str()),
+        exited_at = %record.exited_at,
+        exit_code = record.exit_code,
+        signal = record.signal,
+        signal_name = record.signal_name.as_deref(),
+        core_dumped = record.core_dumped,
         last_seen = %timestamp(last_seen),
-        host_boot = %boot.map_or_else(|| "not available".to_owned(), rfc3339),
+        host_boot = previous.map(|(_, boot)| boot_timestamp(boot)).as_deref(),
         kept_logs = ?kept_logs,
         "{}",
-        conclusion(last_seen, boot)
+        format_exit_reason(record)
     );
+}
+
+fn remove_exit_record(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), %error, "could not remove daemon exit record");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn previous(pid: u32) -> DaemonMetadata {
+        DaemonMetadata {
+            pid,
+            protocol_version: PROTOCOL_VERSION,
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "fixture".to_owned(),
+            started_at: "2026-11-06T16:35:01Z".to_owned(),
+            build_version: "fixture".to_owned(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        }
+    }
+
+    fn absent(data_dir: &Path) -> Result<DaemonMetadata> {
+        Err(DaemonNotRunning {
+            metadata_path: data_dir.join("daemon.json"),
+        }
+        .into())
+    }
+
+    fn report(
+        data_dir: &Path,
+        metadata: Result<DaemonMetadata>,
+        boot: Option<SystemTime>,
+    ) -> String {
+        let trace = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(trace.reopen().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            report_unclean_previous_daemon_at(data_dir, metadata, || boot);
+        });
+        fs::read_to_string(trace.path()).unwrap()
+    }
+
+    fn daemon_log(data_dir: &Path, pid: u32) -> PathBuf {
+        let logs = data_dir.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let path = logs.join(format!("mj-daemon-20261106T163501.626Z-{pid}.log"));
+        fs::write(&path, "log").unwrap();
+        path
+    }
+
+    fn exit_record(data_dir: &Path, pid: u32) -> PathBuf {
+        use mj_core::daemon_exit::{DAEMON_EXIT_SCHEMA, write_daemon_exit_record};
+
+        write_daemon_exit_record(
+            &daemon_exits_dir(data_dir),
+            &DaemonExitRecord {
+                schema: DAEMON_EXIT_SCHEMA,
+                pid,
+                waiter_pid: Some(pid - 1),
+                exited_at: "2026-11-06T16:35:02Z".to_owned(),
+                exit_code: None,
+                signal: Some(9),
+                signal_name: Some("SIGKILL".to_owned()),
+                core_dumped: Some(false),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn previous_daemon_exit_record_and_metadata_are_reported_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        let pid = 42;
+        let log = daemon_log(data_dir, pid);
+        let exit = exit_record(data_dir, pid);
+        let boot = Some(UNIX_EPOCH + Duration::from_secs(1_300));
+
+        let warnings = report(data_dir, Ok(previous(pid)), boot);
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        for field in [
+            "WARN",
+            "terminated by signal SIGKILL (9)",
+            "previous_pid=42",
+            "previous_started_at=\"2026-11-06T16:35:01Z\"",
+            "exited_at=2026-11-06T16:35:02Z",
+            "signal=9",
+            "signal_name=\"SIGKILL\"",
+            "core_dumped=false",
+            "last_seen=",
+            "host_boot=\"1970-01-01T00:21:40Z\"",
+            "kept_logs=",
+        ] {
+            assert!(warnings.contains(field), "missing {field}: {warnings}");
+        }
+        assert!(!log.exists());
+        assert!(log.with_extension("crashed.log").exists());
+        assert!(!exit.exists());
+        // This daemon publishes and later removes its own metadata.
+        assert!(report(data_dir, absent(data_dir), boot).is_empty());
+    }
+
+    #[test]
+    fn previous_daemon_exit_records_survive_absent_container_or_unreadable_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        for (pid, metadata) in [
+            (42, absent(data_dir)),
+            (43, Ok(previous(0))),
+            (44, Err(anyhow!("invalid metadata fixture"))),
+        ] {
+            let log = daemon_log(data_dir, pid);
+            let exit = exit_record(data_dir, pid);
+            let warnings = report(data_dir, metadata, None);
+            assert!(warnings.contains("WARN"), "{warnings}");
+            assert!(
+                warnings.contains(&format!("previous_pid={pid}")),
+                "{warnings}"
+            );
+            assert!(
+                warnings.contains("terminated by signal SIGKILL (9)"),
+                "{warnings}"
+            );
+            assert!(warnings.contains("signal=9"), "{warnings}");
+            assert!(!warnings.contains("previous_started_at"), "{warnings}");
+            assert!(!log.exists());
+            assert!(log.with_extension("crashed.log").exists());
+            assert!(!exit.exists());
+        }
+        assert!(report(data_dir, absent(data_dir), None).is_empty());
+    }
+
+    #[test]
+    fn previous_daemon_without_exit_record_still_infers_a_host_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        let pid = 42;
+        let log = daemon_log(data_dir, pid);
+        let modified = log.metadata().unwrap().modified().unwrap();
+
+        let warnings = report(
+            data_dir,
+            Ok(previous(pid)),
+            Some(modified + Duration::from_secs(60)),
+        );
+        assert!(warnings.contains(HOST_RESTARTED), "{warnings}");
+        assert!(log.with_extension("crashed.log").exists());
+    }
+
+    #[test]
+    fn previous_daemon_discards_corrupt_exit_records_but_ignores_temporary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path();
+        let exit_dir = daemon_exits_dir(data_dir);
+        fs::create_dir(&exit_dir).unwrap();
+        let corrupt = exit_dir.join("42.json");
+        let temporary = exit_dir.join(".tmp.json");
+        let subdirectory = exit_dir.join("43.json");
+        fs::write(&corrupt, "incomplete").unwrap();
+        fs::write(&temporary, "incomplete").unwrap();
+        fs::create_dir(&subdirectory).unwrap();
+
+        let warnings = report(data_dir, absent(data_dir), None);
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        assert!(
+            warnings.contains("could not read daemon exit record"),
+            "{warnings}"
+        );
+        assert!(warnings.contains("42.json"), "{warnings}");
+        assert!(!corrupt.exists());
+        assert!(temporary.is_file());
+        assert!(subdirectory.is_dir());
+        assert!(report(data_dir, absent(data_dir), None).is_empty());
+    }
 
     #[test]
     fn the_previous_daemon_keeps_its_log_under_a_crashed_name() {

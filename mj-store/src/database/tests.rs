@@ -561,6 +561,9 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
     }));
+    state
+        .environment_owners
+        .insert(record.id.clone(), record.id.clone());
     state.sessions.insert(record.id.clone(), record);
     state.mount_history.insert(
         "local".into(),
@@ -616,7 +619,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 65);
-    schema::restore_pre152_transcript_layout(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -689,7 +692,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 53);
-    schema::restore_pre152_transcript_layout(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -789,7 +792,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 46);
-    schema::restore_pre152_transcript_layout(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -5335,7 +5338,7 @@ fn review_state_migration_moves_the_open_review_and_findings_into_lists() {
 
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_pre145_review_columns(&connection);
-    schema::restore_pre152_transcript_layout(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "DELETE FROM schema_migrations WHERE version >= 145;
@@ -6637,30 +6640,35 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     child.title = "child session".into();
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
-    let relation = mj_core::subagent::SubagentRecord {
-        kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
-        child_session_id: child.id.clone(),
-        parent_session_id: parent.id.clone(),
-        task_name: "probe".into(),
-        profile_id: "codex".into(),
-        model: None,
-        effort: None,
-        working_directory: PathBuf::new(),
-        initial_prompt: "say ready".into(),
-        request_key: "probe-1".into(),
-        created_at: "2026-09-18T00:00:00Z".into(),
-        noticed_turn: None,
-        reported_finish: None,
-        handback_tool: false,
-        supervisor: false,
-    };
+    let relation = test_subagent(&parent.id, &child.id);
     save_state_to(path, &state).unwrap();
     register_test_subagent(path, &child, &relation).unwrap();
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation.into());
     save_state_to(path, &state).unwrap();
     (parent, child)
+}
+
+pub(super) fn test_subagent(parent_id: &str, child_id: &str) -> SubagentRecord {
+    SubagentRecord {
+        resume_with_parent: false,
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
+        child_session_id: child_id.into(),
+        parent_session_id: parent_id.into(),
+        task_name: "probe".into(),
+        profile_id: "codex".into(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: "say ready".into(),
+        request_key: child_id.into(),
+        created_at: "2026-09-18T00:00:00Z".into(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+        orchestrator: false,
+    }
 }
 
 #[test]
@@ -6759,6 +6767,7 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         let mut without_child = with_child.clone();
         without_child.sessions.remove(&child.id);
         without_child.subagents.remove(&child.id);
+        without_child.environment_owners.remove(&child.id);
         without_child
             .mount_history
             .insert("host".into(), vec![directory.path().join("without-child")]);
@@ -7133,7 +7142,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
     schema::restore_review_state_schema(&raw, 43);
-    schema::restore_pre152_transcript_layout(&raw);
+    schema::restore_pre153_transcript_layout(&raw);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -8152,7 +8161,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
     schema::restore_review_state_schema(&raw, 52);
-    schema::restore_pre152_transcript_layout(&raw);
+    schema::restore_pre153_transcript_layout(&raw);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema
@@ -8265,37 +8274,52 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
 }
 
 #[test]
-fn supervisors_preference_survives_reopen_and_profile_rename() {
+fn schema_orchestrator_policy_survives_reopen_and_profile_rename() {
+    use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("supervisors.sqlite3");
-    let mut record = session("sup-parent", "project");
-    record.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+    let path = directory.path().join("orchestrators.sqlite3");
+    let mut record = session("parent", "project");
+    record.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: true,
         straightforward: None,
         subtle: None,
     });
-    record.supervisors = true;
     save_new_session_to(&path, &record, None, true, false).unwrap();
-    let conn = open(&path).unwrap();
-    let schema = schema::read_schema_state(&conn).unwrap();
-    assert_eq!(schema.revision, SCHEMA_VERSION);
-    assert_eq!(
-        schema.minimum_compatible,
-        Some(schema::MINIMUM_COMPATIBLE_VERSION)
-    );
     let state = load_state_from(&path).unwrap();
-    assert!(state.sessions[&record.id].supervisors);
-    assert_eq!(
-        state.last_supervisor_choices.get(&record.last_profile),
-        Some(&true)
+    assert!(
+        state.sessions[&record.id]
+            .subagents
+            .as_ref()
+            .unwrap()
+            .orchestrators_enabled()
     );
+    assert!(state.last_subagent_policies[&record.last_profile].orchestrators_enabled());
+
     rename_profile_references_at(&path, &record.last_profile, "renamed").unwrap();
     let renamed = load_state_from(&path).unwrap();
-    assert_eq!(renamed.last_supervisor_choices.get("renamed"), Some(&true));
+    assert!(renamed.last_subagent_policies["renamed"].orchestrators_enabled());
     assert!(
         !renamed
-            .last_supervisor_choices
+            .last_subagent_policies
             .contains_key(&record.last_profile)
     );
+
+    let mut record = renamed.sessions[&record.id].clone();
+    record.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: false,
+        straightforward: None,
+        subtle: None,
+    });
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let disabled = load_state_from(&path).unwrap();
+    assert!(
+        !disabled.sessions[&record.id]
+            .subagents
+            .as_ref()
+            .unwrap()
+            .orchestrators_enabled()
+    );
+    assert!(!disabled.last_subagent_policies["renamed"].orchestrators_enabled());
 }
 
 #[test]
@@ -8312,6 +8336,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         .unwrap();
     let mut parent = session("fixed-parent", "project");
     let fixed = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "gpt-6-luna".into(),
             effort: Some("max".into()),
@@ -8457,6 +8482,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         Some(&fixed)
     );
     let plain = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -8491,6 +8517,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             r#"{"mode":"all_models"}"#,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8498,6 +8525,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             r#"{"mode":"single_model","model":"old","effort":"high"}"#,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8505,6 +8533,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             r#"{"mode":"single_model","model":"old","effort":"adaptive"}"#,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8512,6 +8541,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             "true",
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8545,6 +8575,7 @@ fn profile_rename_moves_remembered_choice_atomically_and_idempotently() {
     let mut old = session("old-profile-session", "project");
     old.last_profile = "old-profile".into();
     old.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -8770,7 +8801,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
         ).unwrap();
     }
     schema::drop_environment_schema(&connection);
-    schema::restore_pre152_transcript_layout(&connection);
+    schema::restore_pre153_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN no_github_credentials;

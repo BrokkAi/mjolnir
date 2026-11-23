@@ -30,7 +30,7 @@ include = [
     "assets/instructions/brief_writer.md",
     # Delegation guidance embedded with `include_str!` by `subagent`.
     "assets/subagent-delegation.md",
-    "assets/supervisor-delegation.md",
+    "assets/orchestrator-delegation.md",
     # Suspend and Move rules appended to every harness's staged instructions.
     "assets/session-state.md",
     # OpenCode provider environment embedded with `include_str!` by the
@@ -96,4 +96,5 @@ windows-sys = { workspace = true, features = [
 
 
 [dev-dependencies]
+futures = "0.3"
 tempfile.workspace = true

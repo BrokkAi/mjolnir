@@ -356,3 +356,5 @@ Dependencies: Mjolnir already depends on `zstd` (via `mj-checkpoint`/`mj-core`) 
 Revision note (2026-11-22): Initial ExecPlan authored after completing the eight-harness native tool-call fidelity audit, UI expansion audit, `t3code` code dive, and `brokk-sessionwiki 0.34.27` audit. Recorded the decision to use daemon-local `.mjtd` cold Zstd files for click-to-expand instead of native harness lookup, and unified the `{mj, sw}` reader consolidation with turn-end tool trimming.
 
 Revision note (2026-11-23): Recorded user confirmation that `.mjtd` cold tool-detail storage is daemon-local only (not copied into `.hel.zip` archives) and handed off the plan to session `52f10ee41f9c61aff134b426ad72a9d1` for joint `sessionwiki` + `mjolnir` implementation.
+
+Revision note (2026-11-23, merge with `origin/master` `0fdc93622`): Upstream claimed schema revision 152, so the breaking `#1637` transcript-metadata and `.mjtd` pointer migration was renumbered to schema revision 153 (`SCHEMA_VERSION = 153`, `MINIMUM_COMPATIBLE_VERSION = 153`).

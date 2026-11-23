@@ -206,7 +206,6 @@ impl DashboardState {
             create_managed_worktree: recipe.create_managed_worktree,
             subagents,
             oracle: Some(oracle),
-            supervisors: None,
             oracle_choice: None,
             review: self
                 .simple_mode
@@ -323,6 +322,7 @@ mod tests {
                 project_directory: None,
                 create_managed_worktree: Some(false),
                 subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),

@@ -1040,6 +1040,9 @@ mod tests {
         // A base the other repository does not hold: applying it there would fail.
         session.launch_base = Some(fixture.later.clone());
         let mut state = mj_core::state::State::default();
+        state
+            .environment_owners
+            .insert(EXACT_SESSION.into(), EXACT_SESSION.into());
         state.sessions.insert(EXACT_SESSION.into(), session);
         let controller = Controller { config, state };
         controller
@@ -1918,6 +1921,12 @@ mod tests {
             let mut state = mj_core::state::State::default();
             state.sessions.insert(EXACT_SESSION.into(), session);
             state.sessions.insert(child.id.clone(), child);
+            state
+                .environment_owners
+                .insert(EXACT_SESSION.into(), EXACT_SESSION.into());
+            state
+                .environment_owners
+                .insert("child-session".into(), EXACT_SESSION.into());
             state.subagents.insert(
                 "child-session".into(),
                 mj_core::subagent::SubagentMetadata {
@@ -1934,7 +1943,7 @@ mod tests {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: false,
-                    supervisor: false,
+                    orchestrator: false,
                 },
             );
             let controller = Controller {

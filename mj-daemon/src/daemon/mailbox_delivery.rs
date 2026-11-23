@@ -363,17 +363,38 @@ pub(crate) async fn deliver_mailbox_event(
     let Some(record) = state.session_record(session_id) else {
         return Ok(pending("the daemon has no record of the session"));
     };
-    if record.state == mj_core::state::SessionState::Parked {
+    let (record, wake) = if record.state == mj_core::state::SessionState::Parked {
         if !unpark_parked {
             return Ok(pending("the session is parked"));
         }
-        std::sync::Arc::clone(&state)
+        let wake = std::sync::Arc::clone(&state)
             .unpark_subagent(session_id.to_owned())
-            .await?;
-    }
-    let Some(record) = state.session_record(session_id) else {
-        return Ok(pending("the daemon has no record of the session"));
+            .await;
+        let Some(record) = state.session_record(session_id) else {
+            return Ok(pending("the daemon has no record of the session"));
+        };
+        (record, wake)
+    } else {
+        (record, Ok(()))
     };
+    if unpark_parked && record.state == mj_core::state::SessionState::Error {
+        let cause = record
+            .last_error
+            .unwrap_or_else(|| "Child startup failed".to_owned());
+        let detail = if matches!(
+            event.body,
+            mj_core::mailbox::MailboxEventBody::ParentMessage { .. }
+        ) {
+            format!(
+                "{cause}. {}",
+                mj_core::subagent::FAILED_CHILD_CLOSE_GUIDANCE
+            )
+        } else {
+            cause
+        };
+        return Ok(MailboxEventDelivery::Failed(detail));
+    }
+    wake?;
     if !record.state.has_live_worker() {
         return Ok(MailboxEventDelivery::Pending(format!(
             "the session has no live worker (state {:?})",

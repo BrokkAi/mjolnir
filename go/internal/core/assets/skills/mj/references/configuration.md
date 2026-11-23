@@ -532,7 +532,7 @@ pairs (at most one model per provider):
 
 ```toml
 [subagents]
-max_concurrent = 6
+max_concurrent = 8
 
 [[subagents.primary]]
 model = "your-claude-model"
@@ -580,7 +580,7 @@ The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
 a notice and uses `native` where supported or `none` on DSH and Antigravity.
-An explicit `--subagents mjolnir` or `--supervisors enabled` requires Mjolnir
+An explicit `--subagents mjolnir` or `--orchestrators` requires Mjolnir
 delegation to be available. `mj move --subagents native|mjolnir|none` retains
 the recorded policy when omitted, including any session override.
 `--subagent-straightforward M` and `--subagent-subtle M` independently override
@@ -604,7 +604,7 @@ or moves the session with the oracle off and a notice.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `max_concurrent` | integer | no | `6` | Most live sub-agents one session may have at once; between `1` and `64`. A sub-agent counts while it holds processes on the target, including while it is idle. A parked sub-agent, one whose turn ended and whose worker Mjolnir stopped, does not count (see [Parked sub-agents](/sessions/#parked-sub-agents)). |
+| `max_concurrent` | integer | no | `8` | Between `1` and `64` slots. Live workers sharing an environment count against its owner. Each live orchestrator with its own environment uses one slot under its parent, and its workers count against its own limit. Idle live workers hold a slot. [Parked sub-agents](/sessions/#parked-sub-agents), reviewers, and oracles do not count. |
 
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.

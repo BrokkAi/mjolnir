@@ -213,7 +213,7 @@ pub(super) async fn prepare(
 ) -> Result<Plan> {
     let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
     let turn = ended_turn(snapshot).context("missing quota completion")?;
-    let (profile_id, profile, child, handed_back) = {
+    let (profile_id, profile, child, owned_child, handed_back) = {
         let controller_owner = state.owner();
         let controller = controller_owner.controller();
         let session = controller
@@ -230,6 +230,8 @@ pub(super) async fn prepare(
                 .context("profile was removed")?
                 .clone(),
             controller.state.subagents.contains_key(id),
+            controller.state.owns_environment(id) == Some(true)
+                && controller.state.subagents.contains_key(id),
             controller_owner
                 .committed()
                 .and_then(|committed| committed.subagent_reports.get(id))
@@ -435,12 +437,16 @@ pub(super) async fn prepare(
             } else {
                 mj_core::config::ExecutionPolicy::ConfiguredApprovals
             };
-            let placement = if child {
+            let placement = if owned_child {
+                mj_controller::profile_scheduler::Placement::Orchestrator
+            } else if child {
                 mj_controller::profile_scheduler::Placement::Child
             } else {
                 mj_controller::profile_scheduler::Placement::TopLevel
             };
-            let category: &'static str = if child {
+            let category: &'static str = if owned_child {
+                "orchestrator"
+            } else if child {
                 match state
                     .owner()
                     .controller()
@@ -981,4 +987,94 @@ pub(super) async fn resume(
         Ok(Box::new(handle.view()))
     }
     .await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use mj_controller::controller::test_support::{IsolatedTest, test_name};
+    use mj_core::config::{HarnessKind, HarnessProfile};
+
+    #[tokio::test]
+    async fn quota_for_an_owned_child_selects_the_in_place_child_switch() {
+        const NAME: &str = "quota_for_an_owned_child_selects_the_in_place_child_switch";
+        const MARKER: &str = "MJ_QUOTA_OWNED_CHILD_TEST";
+        if std::env::var_os(MARKER).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), NAME))
+                .env(MARKER, "1")
+                .isolated_store(root.path())
+                .run();
+            return;
+        }
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        use crate::daemon::tests::{
+            runtime_test_session, runtime_test_subagent, test_runtime_state_with,
+        };
+        use mj_core::state::SessionState;
+        let mut config = Config::default();
+        for id in ["source", "destination"] {
+            let home = mj_core::config::data_dir().join(id);
+            std::fs::create_dir_all(&home).unwrap();
+            config
+                .profiles
+                .insert(id.into(), HarnessProfile::new(HarnessKind::Claude, home));
+        }
+        let workspace = mj_core::workspace::DEFAULT_WORKSPACE_ID;
+        let parent = runtime_test_session("parent", workspace, SessionState::Running);
+        let mut owner = runtime_test_session("owner", workspace, SessionState::Running);
+        owner.harness_kind = HarnessKind::Claude;
+        owner.last_profile = "source".into();
+        mj_controller::database::save_session(&parent).unwrap();
+        mj_controller::database::register_subagent_with_startup(
+            &owner,
+            &runtime_test_subagent("owner", "parent"),
+            vec![],
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let state = test_runtime_state_with(Controller {
+            config: config.clone(),
+            state: mj_controller::database::load_state().unwrap(),
+        });
+        let catalog = mj_controller::profile_catalog::ProfileCatalog::with_probe(
+            mj_controller::profile_catalog::counting_probe(Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            )),
+        );
+        catalog.sync_now(&config).await;
+        let backend = Arc::new(
+            crate::server_runtime::api::ApiBackend::new(
+                state.session_manager.client(),
+                Arc::new(|_| None),
+                state.clone(),
+            )
+            .with_profile_catalog(catalog),
+        );
+        state.install_report_backend(&backend);
+
+        let mut view = super::super::tests::view("owner", true);
+        let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot
+            .operational
+            .config
+            .insert("model".into(), "destination-model".into());
+        let now = mj_core::clock::epoch_millis();
+        let turn = snapshot.materialized.last_turn_outcome.as_mut().unwrap();
+        turn.completed_at_ms = now;
+        turn.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+            message: "usage limit reached".into(),
+            code: Some("usageLimitExceeded".into()),
+            http_status: None,
+            reset_at: Some((now / 1000 + 10 * 3600).to_string()),
+            login_fingerprint: None,
+        });
+        let plan = prepare(&state, "owner", &view).await.unwrap();
+        assert!(
+            matches!(&plan, Plan::ChildSwitch { destination, .. } if destination == "destination"),
+            "{plan:?}"
+        );
+    }
 }

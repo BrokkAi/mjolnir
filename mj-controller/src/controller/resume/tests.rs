@@ -47,6 +47,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let parent_id = "0123456789abcdef0123456789abcdef";
     let mut parent = checkpoint_test_session(parent_id);
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -59,6 +60,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         worker_root: child_directory.path().join(&child.id),
     }));
     let relation = mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: child.id.clone(),
@@ -74,7 +76,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();
 
@@ -162,6 +164,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -220,6 +223,7 @@ async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() 
         let controller = Controller {
             config,
             state: State {
+                environment_owners: [(session_id.clone(), session_id.clone())].into(),
                 sessions: [(session_id.clone(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -316,6 +320,9 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -380,6 +387,9 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -479,6 +489,9 @@ async fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
             ..Config::default()
         },
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -666,6 +679,9 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             ..Config::default()
         },
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -968,6 +984,9 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1412,7 +1431,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
@@ -1690,6 +1708,9 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1872,6 +1893,9 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2124,6 +2148,9 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2402,6 +2429,7 @@ exit 0
     // when the archive holds that session's conversation.
     let mut session = checkpoint_test_session(session_id);
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2430,6 +2458,9 @@ exit 0
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())]
+                .into_iter()
+                .collect(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2524,6 +2555,7 @@ exit 0
             assert_eq!(
                 durable.sessions[session_id].subagents,
                 Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None
                 }),
@@ -2842,6 +2874,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
             let controller = Controller {
                 config,
                 state: State {
+                    environment_owners: [(id.into(), id.into())].into(),
                     sessions: [(id.into(), session)].into_iter().collect(),
                     ..State::default()
                 },
@@ -2991,6 +3024,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         let mut controller = Controller {
             config,
             state: State {
+                environment_owners: [(id.into(), id.into())].into(),
                 sessions: [(id.into(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -3252,6 +3286,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
         let mut controller = Controller {
             config,
             state: State {
+                environment_owners: [(session_id.clone(), session_id.clone())].into(),
                 sessions: [(session_id.clone(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -3591,6 +3626,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -3757,6 +3793,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -3793,6 +3830,10 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn resolve_move_keep_dir_matches_worker_startup_for_subdirs_nested_repos_and_plain_dirs() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");

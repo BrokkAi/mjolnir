@@ -54,6 +54,7 @@ pub struct RuntimeStateUpdate {
     pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,
     pub records: SnapshotMap<String, SessionRecord>,
+    pub environment_owners: SnapshotMap<String, String>,
     /// Live worker views, including the controller-owned session config policy.
     pub sessions: SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
     pub lifecycles: Vec<daemon::RuntimeLifecycleView>,

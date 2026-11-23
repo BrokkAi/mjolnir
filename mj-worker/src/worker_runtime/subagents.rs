@@ -86,7 +86,7 @@ pub(super) fn configure_claude_subagent_mcp(
     session_id: &str,
     home: &Path,
     role: Option<mj_core::subagent::SubagentMcpRole>,
-    agent_mailboxes_enabled: bool,
+    capabilities: (bool, bool),
     subtle_subagents: bool,
     review_tools: bool,
 ) -> Result<bool> {
@@ -106,7 +106,7 @@ pub(super) fn configure_claude_subagent_mcp(
         return match role {
             Some(
                 role @ (SubagentMcpRole::Parent
-                | SubagentMcpRole::Supervisor
+                | SubagentMcpRole::Orchestrator
                 | SubagentMcpRole::Child
                 | SubagentMcpRole::FetchOnly),
             ) => Err(anyhow::anyhow!(
@@ -151,8 +151,6 @@ pub(super) fn configure_claude_subagent_mcp(
             mj_core::config::HarnessKind::Claude.id().to_owned(),
             "--role".to_owned(),
             role.id().to_owned(),
-            "--agent-mailboxes-enabled".to_owned(),
-            agent_mailboxes_enabled.to_string(),
         ];
         if !subtle_subagents {
             // Only the non-default value is written, as for Codex.
@@ -214,9 +212,10 @@ pub(super) fn configure_claude_subagent_mcp(
                     settings_path.display()
                 )
             })?;
+        let (oracle, orchestrators_enabled) = capabilities;
         let agents = role
-            .tool_names()
-            .iter()
+            .tool_names(oracle, orchestrators_enabled)
+            .into_iter()
             .map(|tool| format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
         let review = review_tools
             .then(|| {
@@ -633,17 +632,16 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_with_mailboxes(root, "", home, role, policy, true, true, false, false)
+    configure_codex_mcp_profile(root, "", home, role, policy, true, false, false)
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the worker startup policy and owned MCP options.
-fn configure_codex_mcp_with_mailboxes(
+fn configure_codex_mcp_profile(
     root: &Path,
     session_id: &str,
     home: &Path,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
-    mailboxes_enabled: bool,
     subtle_subagents: bool,
     review_tools: bool,
     managed_subagent: bool,
@@ -666,7 +664,6 @@ fn configure_codex_mcp_with_mailboxes(
         root,
         role,
         policy,
-        mailboxes_enabled,
         subtle_subagents,
         review_tools,
     )?;
@@ -719,14 +716,12 @@ fn disable_codex_subagent_features(config: &mut toml::Table, path: &Path) -> Res
 }
 
 /// Returns whether the configuration changed.
-#[allow(clippy::too_many_arguments)] // The owned MCP options of the caller.
 fn configure_codex_mcp_servers(
     config: &mut toml::Table,
     path: &Path,
     root: &Path,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
-    mailboxes_enabled: bool,
     subtle_subagents: bool,
     review_tools: bool,
 ) -> Result<bool> {
@@ -750,8 +745,6 @@ fn configure_codex_mcp_servers(
             "codex".to_owned(),
             "--role".to_owned(),
             role.id().to_owned(),
-            "--agent-mailboxes-enabled".to_owned(),
-            mailboxes_enabled.to_string(),
         ];
         if !subtle_subagents {
             // Written only when off, so a launch offering both types keeps
@@ -832,19 +825,18 @@ pub(super) fn configure_codex_profile(
     environment: &mut BTreeMap<String, String>,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
-    options: mj_worker_mcp::subagent_mcp::ParentTools,
+    subtle_subagents: bool,
     review_tools: bool,
     managed_subagent: bool,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
-    configure_codex_mcp_with_mailboxes(
+    configure_codex_mcp_profile(
         root,
         session_id,
         home,
         role,
         policy,
-        options.agent_mailboxes_enabled,
-        options.subtle_subagents,
+        subtle_subagents,
         review_tools,
         managed_subagent,
     )
@@ -1715,7 +1707,7 @@ console.log("OpenCode durable mailbox bridge passed");
                 "session",
                 &home,
                 Some(SubagentMcpRole::MessageOnly),
-                true,
+                (true, true),
                 true,
                 false,
             )
@@ -1972,7 +1964,7 @@ console.log("OpenCode durable mailbox bridge passed");
                 "session",
                 &home,
                 Some(mj_core::subagent::SubagentMcpRole::MessageOnly),
-                true,
+                (true, true),
                 true,
                 false,
             )
@@ -2152,7 +2144,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                     "session",
                     &home,
                     Some(role),
-                    true,
+                    (true, true),
                     true,
                     false,
                 )
@@ -2218,7 +2210,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             "session",
             &home,
             Some(SubagentMcpRole::MessageOnly),
-            true,
+            (true, true),
             true,
             false,
         )
@@ -2243,8 +2235,16 @@ print(sys.argv[sys.argv.index('--role') + 1])
         );
 
         // Losing the role removes the server; the person's servers stay.
-        configure_claude_subagent_mcp(root.path(), "session", &home, None, true, true, false)
-            .unwrap();
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            None,
+            (true, true),
+            true,
+            false,
+        )
+        .unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(config["mcpServers"].get("mj-agents").is_none());
@@ -2254,8 +2254,16 @@ print(sys.argv[sys.argv.index('--role') + 1])
         let bare = tempfile::tempdir().unwrap();
         let bare_home = bare.path().join("profile");
         std::fs::create_dir(&bare_home).unwrap();
-        configure_claude_subagent_mcp(bare.path(), "session", &bare_home, None, true, true, false)
-            .unwrap();
+        configure_claude_subagent_mcp(
+            bare.path(),
+            "session",
+            &bare_home,
+            None,
+            (true, true),
+            true,
+            false,
+        )
+        .unwrap();
         assert!(!bare_home.join(".claude.json").exists());
         assert!(!bare_home.join("settings.json").exists());
     }
@@ -2281,7 +2289,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                 "session",
                 &home,
                 Some(role),
-                true,
+                (true, true),
                 subtle,
                 false,
             )
@@ -2349,7 +2357,8 @@ print(sys.argv[sys.argv.index('--role') + 1])
             "{allow:?}"
         );
         for tool in [
-            "spawn",
+            "spawn_worker",
+            "spawn_orchestrator",
             "list_agents",
             "list_targets",
             "send_message",
@@ -2400,7 +2409,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                     "session",
                     &home,
                     Some(role),
-                    true,
+                    (true, true),
                     true,
                     false
                 )
@@ -2414,7 +2423,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                 "session",
                 &home,
                 Some(SubagentMcpRole::MessageOnly),
-                true,
+                (true, true),
                 true,
                 false,
             )
@@ -2438,7 +2447,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                     "session",
                     &home,
                     Some(SubagentMcpRole::MessageOnly),
-                    true,
+                    (true, true),
                     true,
                     false
                 )
@@ -2549,9 +2558,7 @@ enabled = false
                         "--harness",
                         "codex",
                         "--role",
-                        role.id(),
-                        "--agent-mailboxes-enabled",
-                        "true"
+                        role.id()
                     ]
                 );
                 assert_eq!(
@@ -2562,13 +2569,12 @@ enabled = false
                 );
                 if role == SubagentMcpRole::Child {
                     let child = || {
-                        configure_codex_mcp_with_mailboxes(
+                        configure_codex_mcp_profile(
                             root.path(),
                             "",
                             &home,
                             Some(role),
                             policy,
-                            true,
                             true,
                             false,
                             true,
@@ -2666,13 +2672,12 @@ enabled = false
                 Some(SubagentMcpRole::Child),
             ] {
                 assert!(
-                    configure_codex_mcp_with_mailboxes(
+                    configure_codex_mcp_profile(
                         root.path(),
                         "session",
                         &remote,
                         role,
                         policy,
-                        true,
                         true,
                         false,
                         false,
@@ -2682,13 +2687,12 @@ enabled = false
             }
         }
         assert!(
-            !configure_codex_mcp_with_mailboxes(
+            !configure_codex_mcp_profile(
                 root.path(),
                 "different-session",
                 &remote,
                 None,
                 ExecutionPolicy::ConfiguredApprovals,
-                true,
                 true,
                 false,
                 false,
@@ -2752,13 +2756,12 @@ enabled = false
         ] {
             assert!(!private_staged_home(root.path(), "session", &remote_home));
             assert!(
-                !configure_codex_mcp_with_mailboxes(
+                !configure_codex_mcp_profile(
                     root.path(),
                     "session",
                     &remote_home,
                     role,
                     ExecutionPolicy::ConfiguredApprovals,
-                    true,
                     true,
                     false,
                     false,
@@ -2818,8 +2821,12 @@ enabled = false
                 child_session_id: "child".into(),
                 message: "note".into(),
             },
-            SubagentToolAction::LegacyInterruptAgent {
-                child_session_id: "child".into(),
+            SubagentToolAction::SpawnOrchestrator {
+                no_github_credentials: false,
+                task_name: "coordinate".into(),
+                instructions: "delegate the work".into(),
+                target: None,
+                repos: None,
             },
             SubagentToolAction::CloseAgent {
                 child_session_id: "child".into(),
@@ -3357,6 +3364,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     let lane = if matches!(
         request.action,
         mj_core::subagent::SubagentToolAction::Spawn { .. }
+            | mj_core::subagent::SubagentToolAction::SpawnOrchestrator { .. }
     ) {
         &endpoint.admission.long
     } else {
@@ -3535,7 +3543,7 @@ mod review_gate_tests {
                     "session",
                     &home,
                     Some(role),
-                    true,
+                    (true, true),
                     true,
                     tools,
                 )
@@ -3587,13 +3595,12 @@ mod review_gate_tests {
                     mj_core::config::ExecutionPolicy::ConfiguredApprovals,
                     mj_core::config::ExecutionPolicy::Unconstrained,
                 ] {
-                    configure_codex_mcp_with_mailboxes(
+                    configure_codex_mcp_profile(
                         root.path(),
                         "",
                         &home,
                         Some(role),
                         policy,
-                        true,
                         true,
                         tools,
                         false,
@@ -3683,7 +3690,7 @@ mod review_gate_tests {
             "session",
             &home,
             Some(SubagentMcpRole::Parent),
-            true,
+            (true, true),
             true,
             true,
         )
@@ -3696,13 +3703,12 @@ mod review_gate_tests {
             assert!(allow.iter().any(|allowed| allowed == rule));
         }
 
-        configure_codex_mcp_with_mailboxes(
+        configure_codex_mcp_profile(
             root.path(),
             "",
             &home,
             Some(SubagentMcpRole::Parent),
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            true,
             true,
             true,
             false,
@@ -3724,7 +3730,7 @@ mod review_gate_tests {
             "session",
             &home,
             Some(SubagentMcpRole::Parent),
-            true,
+            (true, true),
             true,
             false,
         )
@@ -3732,13 +3738,12 @@ mod review_gate_tests {
         let (config, _) = claude_files(&home);
         assert!(config["mcpServers"].get("mj-review").is_none());
         assert!(config["mcpServers"]["mj-agents"].is_object());
-        configure_codex_mcp_with_mailboxes(
+        configure_codex_mcp_profile(
             root.path(),
             "",
             &home,
             Some(SubagentMcpRole::Parent),
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            true,
             true,
             false,
             false,
@@ -3753,18 +3758,26 @@ mod review_gate_tests {
             "session",
             &home,
             Some(SubagentMcpRole::Parent),
-            true,
+            (true, true),
             true,
             true,
         )
         .unwrap();
-        configure_claude_subagent_mcp(root.path(), "session", &home, None, true, true, true)
-            .unwrap();
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            None,
+            (true, true),
+            true,
+            true,
+        )
+        .unwrap();
         let (config, _) = claude_files(&home);
         assert!(config["mcpServers"].get("mj-review").is_none());
         assert!(config["mcpServers"].get("mj-agents").is_none());
         assert_eq!(config["mcpServers"]["other"]["command"], "x");
-        configure_codex_mcp_with_mailboxes(
+        configure_codex_mcp_profile(
             root.path(),
             "",
             &home,
@@ -3772,17 +3785,15 @@ mod review_gate_tests {
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             true,
             true,
-            true,
             false,
         )
         .unwrap();
-        configure_codex_mcp_with_mailboxes(
+        configure_codex_mcp_profile(
             root.path(),
             "",
             &home,
             None,
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            true,
             true,
             true,
             false,

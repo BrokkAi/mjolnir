@@ -172,7 +172,7 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(page.locator('#settings-heading')).toHaveText('Sub-agents');
   await expect(page.getByRole('checkbox', { name: 'Use the same subagents on all targets' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'YOLO Target Subagents' })).toHaveCount(0);
-  for (const category of ['Primary and supervisor', 'Straightforward', 'Subtle', 'Oracle']) {
+  for (const category of ['Primary and orchestrator', 'Straightforward', 'Subtle', 'Oracle']) {
     await expect(page.locator('.settings-link', { hasText: category })).toBeVisible();
   }
   await capture('subagent categories are lists of pairs');

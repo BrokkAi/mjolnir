@@ -81,8 +81,6 @@ pub enum ControllerAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         oracle: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        supervisors: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         oracle_choice: Option<mj_core::config::SubagentChoice>,
         /// Review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -88,14 +88,14 @@ reachable from here, and continue with the task by yourself.
 Some sessions are given an MCP server named `mj-agents`. It delegates work to
 child sessions in the same target and filesystem:
 
-- `spawn` — start a child. When the user configured both task types, `task_type`
+- `spawn_worker` — start a child. When the user configured both task types, `task_type`
   is required (`straightforward` for a clear method, `subtle` for judgment or
-  risk of subtle bugs). When only straightforward is configured, `spawn` has no
+  risk of subtle bugs). When only straightforward is configured, `spawn_worker` has no
   `task_type` and the parent delegates straightforward work. The user configures model/effort choices globally in Settings →
   Sub-agents; returns `child_session_id` at once, before the child has started
   running.
 - `list_targets` lists enabled targets, their default container sizes, and host
-  capacity when the parent has supervisors enabled.
+  capacity when the parent has orchestrators enabled.
 - `list_agents` — this parent's children and their status. An entry's `facts` hold
   what Mjolnir observed when the child finished (processes its agent left running,
   its working tree). Read them against the child's own report.

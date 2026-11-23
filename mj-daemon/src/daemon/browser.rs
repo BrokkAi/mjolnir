@@ -166,20 +166,14 @@ impl BrowserState {
             (!resolved.key.matches(id, controller)).then(|| id.clone())
         };
         let invalid: BTreeSet<_> = if before.metadata.config == owner.config_snapshot {
-            let relationships = before
-                .subagents
-                .changes(&controller.state.subagents)
-                .map(|(id, _)| id);
-            let records = before.records.changes(records).flat_map(|(id, record)| {
-                // When a previously absent parent appears, its children stop
-                // owning their project identity even if their rows stayed put.
-                let children = (record.is_some() && !before.records.contains_key(id))
-                    .then(|| owner.indexes.children.get(id))
-                    .flatten();
-                std::iter::once(id).chain(children.into_iter().flat_map(SnapshotMap::keys))
-            });
-            records
-                .chain(relationships)
+            let bindings = before
+                .environment_owners
+                .changes(&controller.state.environment_owners);
+            before
+                .records
+                .changes(records)
+                .map(|(id, _)| id)
+                .chain(bindings.map(|(id, _)| id))
                 .filter_map(|id| invalid(id, self.inputs.project_sources.get(id)?))
                 .collect()
         } else {

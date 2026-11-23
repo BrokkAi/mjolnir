@@ -136,6 +136,11 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         )?,
         ..Default::default()
     };
+    let mut owners = connection.prepare(super::environments::ENVIRONMENT_OWNER_QUERY)?;
+    for row in owners.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (session_id, owner_id) = row?;
+        state.environment_owners.insert(session_id, owner_id);
+    }
     let mut statement = connection
         .prepare("SELECT profile_id, policy FROM subagent_preference ORDER BY profile_id")?;
     let rows = statement.query_map([], |row| {
@@ -158,15 +163,6 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
     for row in rows {
         let (profile_id, enabled) = row?;
         state.last_oracle_choices.insert(profile_id, enabled);
-    }
-    let mut statement = connection
-        .prepare("SELECT profile_id, enabled FROM supervisor_preference ORDER BY profile_id")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
-    })?;
-    for row in rows {
-        let (profile_id, enabled) = row?;
-        state.last_supervisor_choices.insert(profile_id, enabled);
     }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
     let mut interns = SessionInterns::default();
@@ -746,8 +742,8 @@ pub(super) fn insert_session_with_parent(
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
              review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials,
-             notifications_ignored, supervisors
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
+             notifications_ignored
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -784,8 +780,7 @@ pub(super) fn insert_session_with_parent(
              oracle = excluded.oracle,
              oracle_choice = excluded.oracle_choice,
              no_github_credentials = excluded.no_github_credentials,
-             notifications_ignored = excluded.notifications_ignored,
-             supervisors = excluded.supervisors",
+             notifications_ignored = excluded.notifications_ignored",
         params![
             session.id,
             session.title,
@@ -840,7 +835,6 @@ pub(super) fn insert_session_with_parent(
             session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
             session.no_github_credentials,
             session.notifications_ignored,
-            session.supervisors,
         ],
     )?;
     tx.execute(
@@ -873,7 +867,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     // Fields bound to `_` have explicit writers, such as container settings.
     let SessionRecord {
         oracle_choice,
-        supervisors,
         target_runtime,
         id,
         title,
@@ -906,7 +899,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         no_github_credentials: _,
         notifications_ignored: _,
         // A Move can change it along with the profile the session runs on.
-        subagents,
+        subagents: _,
         oracle,
         additional_mounts: _,
         container_workspace: _,
@@ -942,7 +935,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              project_json = coalesce(?16,project_json),
              oracle = ?17,
              oracle_choice = ?18,
-             supervisors = ?19,
              closing_consent = CASE WHEN ?6 = 'closing' THEN closing_consent ELSE NULL END
          WHERE session_id = ?1",
         params![
@@ -971,14 +963,17 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            subagents.as_ref().map(serde_json::to_string).transpose()?,
+            session
+                .subagents
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
             project.as_ref().map(serde_json::to_string).transpose()?,
             oracle,
             oracle_choice
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            supervisors,
         ],
     )?;
     if changed != 1 {
@@ -1512,7 +1507,7 @@ const SESSION_QUERY: &str =
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
                 s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
-                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation, s.supervisors
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(
@@ -1542,7 +1537,6 @@ fn decode_session(
             })
             .transpose()?,
         oracle: row.get(34)?,
-        supervisors: row.get(40)?,
         project: decode_shared(row, 30, &mut interns.projects)?,
         target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
         harness_kind,

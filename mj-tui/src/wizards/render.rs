@@ -1064,8 +1064,8 @@ pub(crate) fn render_review_wizard(
             lines.push(Line::raw(""));
             row
         });
-    let supervisors_row = subagents
-        .filter(|wizard| wizard.supervisors_available())
+    let orchestrators_row = subagents
+        .filter(|wizard| wizard.orchestrators_available())
         .map(|_| {
             let row = lines.len() as u16;
             lines.push(Line::raw(""));
@@ -1076,7 +1076,7 @@ pub(crate) fn render_review_wizard(
         sandbox_row,
         subagent_row,
         oracle_row,
-        supervisors_row,
+        orchestrators_row,
     ]
     .into_iter()
     .flatten()
@@ -1102,7 +1102,7 @@ pub(crate) fn render_review_wizard(
     let sandbox_row = sandbox_row.map(map_row);
     let subagent_row = subagent_row.map(map_row);
     let oracle_row = oracle_row.map(map_row);
-    let supervisors_row = supervisors_row.map(map_row);
+    let orchestrators_row = orchestrators_row.map(map_row);
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
         u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
@@ -1129,7 +1129,7 @@ pub(crate) fn render_review_wizard(
         Some(WizardControl::UseSandboxedTarget) => sandbox_row,
         Some(WizardControl::Subagents) => subagent_row,
         Some(WizardControl::Oracle) => oracle_row,
-        Some(WizardControl::Supervisors) => supervisors_row,
+        Some(WizardControl::Orchestrators) => orchestrators_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -1170,15 +1170,15 @@ pub(crate) fn render_review_wizard(
             form,
         );
     }
-    if let Some((wizard, row)) = subagents.zip(supervisors_row) {
+    if let Some((wizard, row)) = subagents.zip(orchestrators_row) {
         Checkbox::render(
             frame,
             viewport.row(row, 1),
-            "Supervisors",
-            wizard.supervisors,
+            "Orchestrators",
+            wizard.policy.orchestrators_enabled(),
             true,
             form,
-            WizardControl::Supervisors,
+            WizardControl::Orchestrators,
         );
     }
     let mut expanded_subagent_combo = None;

@@ -214,8 +214,140 @@ struct GithubSearch {
     incomplete_results: bool,
 }
 
+struct GithubSearchResult {
+    repositories: Vec<GithubRepository>,
+    truncated: bool,
+}
+
 fn discover_github(query: &str, executor: &impl CommandExecutor) -> Result<ProjectDiscovery> {
-    let endpoint = if query.is_empty() {
+    if query.is_empty() {
+        let result = execute_github_query(None, false, executor)?;
+        return Ok(project_discovery(result.repositories, result.truncated));
+    }
+    if let Some((owner, name)) = owner_scoped_query(query) {
+        let q = match name.as_deref() {
+            Some(name) => format!("user:{owner} {name} in:name fork:true"),
+            None => format!("user:{owner} fork:true"),
+        };
+        let mut result = execute_github_query(Some(&q), true, executor)?;
+        if let Some(name) = name {
+            let exact = format!("{owner}/{name}");
+            if let Some(index) = result
+                .repositories
+                .iter()
+                .position(|repo| repo.full_name.eq_ignore_ascii_case(&exact))
+            {
+                let repo = result.repositories.remove(index);
+                result.repositories.insert(0, repo);
+            }
+        }
+        return Ok(project_discovery(result.repositories, result.truncated));
+    }
+    if mj_core::config::valid_github_owner_login(query)
+        && !query.contains([' ', '\t', '\n', '/', ':'])
+    {
+        let q = format!("user:{query} fork:true");
+        let owner = execute_github_query(Some(&q), true, executor)?;
+        if owner.repositories.len() >= MAX_ENTRIES {
+            return Ok(project_discovery(
+                owner.repositories.into_iter().take(MAX_ENTRIES).collect(),
+                true,
+            ));
+        }
+        check_cancelled(executor)?;
+        let general = execute_github_query(Some(&format!("{query} fork:true")), false, executor)?;
+        let mut repositories = owner.repositories;
+        let mut seen = repositories
+            .iter()
+            .map(|repo| repo.full_name.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        for repo in general.repositories {
+            if seen.insert(repo.full_name.to_ascii_lowercase()) {
+                repositories.push(repo);
+            }
+        }
+        let truncated = owner.truncated || general.truncated || repositories.len() > MAX_ENTRIES;
+        return Ok(project_discovery(
+            repositories.into_iter().take(MAX_ENTRIES).collect(),
+            truncated,
+        ));
+    }
+    let has_fork = query.split_whitespace().any(|token| {
+        token
+            .strip_prefix('-')
+            .unwrap_or(token)
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("fork:"))
+    });
+    let q = if has_fork {
+        query.to_owned()
+    } else {
+        format!("{query} fork:true")
+    };
+    let result = execute_github_query(Some(&q), false, executor)?;
+    Ok(project_discovery(result.repositories, result.truncated))
+}
+
+fn owner_scoped_query(query: &str) -> Option<(String, Option<String>)> {
+    if let Some(remote) =
+        mj_core::remote_git::parse_github_remote(query, mj_core::remote_git::Shorthand::Rejected)
+    {
+        return Some((remote.owner, Some(remote.repository)));
+    }
+    if query.chars().any(char::is_whitespace)
+        || query.contains(':')
+        || query.matches('/').count() != 1
+    {
+        return None;
+    }
+    let (owner, rest) = query.split_once('/')?;
+    if !mj_core::config::valid_github_owner_login(owner) {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some((owner.to_owned(), None));
+    }
+    let part = rest.strip_suffix(".git").unwrap_or(rest);
+    if !part.is_empty()
+        && part.len() <= 100
+        && part != "."
+        && part != ".."
+        && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        Some((owner.to_owned(), Some(part.to_owned())))
+    } else {
+        None
+    }
+}
+
+fn project_discovery(repositories: Vec<GithubRepository>, truncated: bool) -> ProjectDiscovery {
+    let truncated = truncated || repositories.len() > MAX_ENTRIES;
+    let entries = repositories
+        .into_iter()
+        .take(MAX_ENTRIES)
+        .map(|repo| ProjectEntry {
+            name: repo.full_name.clone(),
+            source: repo.full_name,
+            description: repo.description.unwrap_or_default(),
+            kind: ProjectEntryKind::Repository,
+        })
+        .collect();
+    ProjectDiscovery {
+        entries,
+        directory: None,
+        parent: None,
+        truncated,
+    }
+}
+
+fn execute_github_query(
+    query: Option<&str>,
+    swallow_422: bool,
+    executor: &impl CommandExecutor,
+) -> Result<GithubSearchResult> {
+    let endpoint = if query.is_none() {
         "user/repos"
     } else {
         "search/repositories"
@@ -237,7 +369,7 @@ fn discover_github(query: &str, executor: &impl CommandExecutor) -> Result<Proje
         ],
     )
     .purpose("discover GitHub repositories");
-    if query.is_empty() {
+    if query.is_none() {
         command.args.extend([
             "--raw-field".into(),
             "direction=desc".into(),
@@ -246,7 +378,7 @@ fn discover_github(query: &str, executor: &impl CommandExecutor) -> Result<Proje
             "--raw-field".into(),
             "affiliation=owner,collaborator,organization_member".into(),
         ]);
-    } else {
+    } else if let Some(query) = query {
         // --raw-field treats @, braces, spaces, and qualifiers as literal query
         // data; --field would expand filenames and repository placeholders.
         command.args.extend([
@@ -270,6 +402,16 @@ fn discover_github(query: &str, executor: &impl CommandExecutor) -> Result<Proje
     })?;
     check_cancelled(executor)?;
     if output.status != 0 {
+        if swallow_422
+            && String::from_utf8_lossy(&output.stderr)
+                .to_ascii_lowercase()
+                .contains("http 422")
+        {
+            return Ok(GithubSearchResult {
+                repositories: vec![],
+                truncated: false,
+            });
+        }
         return Err(github_error(output.status, &output.stderr).into());
     }
     let invalid = || {
@@ -288,7 +430,7 @@ fn discover_github(query: &str, executor: &impl CommandExecutor) -> Result<Proje
                 && value.split(',').any(|link| link.contains("rel=\"next\""))
         })
     });
-    let repositories: Vec<GithubRepository> = if query.is_empty() {
+    let repositories: Vec<GithubRepository> = if query.is_none() {
         serde_json::from_str(body).map_err(|_| invalid())?
     } else {
         let result: GithubSearch = serde_json::from_str(body).map_err(|_| invalid())?;
@@ -296,20 +438,8 @@ fn discover_github(query: &str, executor: &impl CommandExecutor) -> Result<Proje
         result.items
     };
     truncated |= repositories.len() > MAX_ENTRIES;
-    let entries = repositories
-        .into_iter()
-        .take(MAX_ENTRIES)
-        .map(|repo| ProjectEntry {
-            name: repo.full_name.clone(),
-            source: repo.full_name,
-            description: repo.description.unwrap_or_default(),
-            kind: ProjectEntryKind::Repository,
-        })
-        .collect();
-    Ok(ProjectDiscovery {
-        entries,
-        directory: None,
-        parent: None,
+    Ok(GithubSearchResult {
+        repositories,
         truncated,
     })
 }
@@ -345,15 +475,15 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     struct FakeGh {
-        output: RefCell<Option<Result<CommandOutput>>>,
-        command: RefCell<Option<CommandSpec>>,
+        output: RefCell<Vec<Result<CommandOutput>>>,
+        command: RefCell<Vec<CommandSpec>>,
     }
 
     impl FakeGh {
         fn new(output: Result<CommandOutput>) -> Self {
             Self {
-                output: RefCell::new(Some(output)),
-                command: RefCell::new(None),
+                output: RefCell::new(vec![output]),
+                command: RefCell::new(Vec::new()),
             }
         }
 
@@ -396,8 +526,9 @@ mod tests {
         }
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.command.replace(Some(command.clone()));
-            self.output.borrow_mut().take().expect("one GitHub request")
+            self.command.borrow_mut().push(command.clone());
+            let mut output = self.output.borrow_mut();
+            output.remove(0)
         }
     }
 
@@ -601,14 +732,188 @@ mod tests {
             .unwrap();
             assert_eq!(answer.entries[0].source, "team/private");
             assert_eq!(answer.truncated, truncated);
-            let command = executor.command.borrow();
-            let command = command.as_ref().unwrap();
+            let commands = executor.command.borrow();
+            let command = &commands[0];
             assert!(command.args.iter().any(|arg| arg == "search/repositories"));
             assert!(
                 command
                     .args
                     .windows(2)
-                    .any(|args| args == ["--raw-field", &format!("q={query}")])
+                    .any(|args| args == ["--raw-field", &format!("q={query} fork:true")])
+            );
+        }
+    }
+
+    fn search_output(names: &[&str]) -> Result<CommandOutput> {
+        Ok(CommandOutput { status: 0, stdout: format!("HTTP/2.0 200 OK\r\n\r\n{}", serde_json::json!({"total_count":names.len(),"incomplete_results":false,"items":names.iter().map(|name|serde_json::json!({"full_name":name,"description":null})).collect::<Vec<_>>()})).into_bytes(), stderr: vec![] })
+    }
+
+    #[test]
+    fn owner_scoped_github_queries_search_forks_and_promote_exact_match() {
+        for (query, expected, first) in [
+            (
+                "jbellis/sessionwiki",
+                "user:jbellis sessionwiki in:name fork:true",
+                "JBELLIS/SESSIONWIKI",
+            ),
+            (
+                "jbellis/session",
+                "user:jbellis session in:name fork:true",
+                "jbellis/sessionwiki-copy",
+            ),
+            (
+                "jbellis/",
+                "user:jbellis fork:true",
+                "jbellis/sessionwiki-copy",
+            ),
+            (
+                "https://github.com/jbellis/sessionwiki.git",
+                "user:jbellis sessionwiki in:name fork:true",
+                "JBELLIS/SESSIONWIKI",
+            ),
+        ] {
+            let executor = FakeGh::json(
+                serde_json::json!({"total_count":2,"incomplete_results":false,"items":[{"full_name":"jbellis/sessionwiki-copy","description":null},{"full_name":"JBELLIS/SESSIONWIKI","description":null}]}),
+                false,
+            );
+            let answer = discover(
+                &ProjectDiscoveryRequest::Github {
+                    query: query.into(),
+                },
+                &executor,
+            )
+            .unwrap();
+            assert_eq!(answer.entries[0].source, first, "{query}");
+            assert!(
+                executor.command.borrow()[0]
+                    .args
+                    .windows(2)
+                    .any(|args| args == ["--raw-field", &format!("q={expected}")]),
+                "{query}"
+            );
+        }
+
+        let missing_owner = FakeGh::new(Ok(CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: b"gh: Validation Failed (HTTP 422)".to_vec(),
+        }));
+        let answer = discover(
+            &ProjectDiscoveryRequest::Github {
+                query: "missing-owner/sessionwiki".into(),
+            },
+            &missing_owner,
+        )
+        .unwrap();
+        assert!(answer.entries.is_empty());
+        assert!(!answer.truncated);
+    }
+
+    #[test]
+    fn bare_owner_merges_searches_and_handles_owner_lookup_outcomes() {
+        let executor = FakeGh {
+            output: RefCell::new(vec![
+                search_output(&["jbellis/a"]),
+                search_output(&["JBELLIS/A", "other/b"]),
+            ]),
+            command: RefCell::new(vec![]),
+        };
+        let answer = discover(
+            &ProjectDiscoveryRequest::Github {
+                query: "jbellis".into(),
+            },
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(
+            answer
+                .entries
+                .iter()
+                .map(|e| e.source.as_str())
+                .collect::<Vec<_>>(),
+            ["jbellis/a", "other/b"]
+        );
+        assert_eq!(executor.command.borrow().len(), 2);
+
+        // Non-user single word: synthesized owner 422 falls through to general search.
+        let not_a_user = FakeGh {
+            output: RefCell::new(vec![
+                Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"gh: Validation Failed (HTTP 422)".to_vec(),
+                }),
+                search_output(&["jbellis/sessionwiki"]),
+            ]),
+            command: RefCell::new(vec![]),
+        };
+        let answer = discover(
+            &ProjectDiscoveryRequest::Github {
+                query: "sessionwiki".into(),
+            },
+            &not_a_user,
+        )
+        .unwrap();
+        assert_eq!(answer.entries.len(), 1);
+        assert_eq!(answer.entries[0].source, "jbellis/sessionwiki");
+        assert_eq!(not_a_user.command.borrow().len(), 2);
+
+        // Non-422 errors (e.g. rate limit / auth) propagate without running general search.
+        let auth_error = FakeGh::new(Ok(CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: b"Bad credentials (HTTP 401)".to_vec(),
+        }));
+        let error = discover(
+            &ProjectDiscoveryRequest::Github {
+                query: "jbellis".into(),
+            },
+            &auth_error,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("gh auth login"));
+        assert_eq!(auth_error.command.borrow().len(), 1);
+
+        // Full page of owner matches skips the general search and marks truncated.
+        let full_page: Vec<String> = (0..MAX_ENTRIES)
+            .map(|index| format!("jbellis/repo-{index}"))
+            .collect();
+        let full_page_refs: Vec<&str> = full_page.iter().map(String::as_str).collect();
+        let full_owner = FakeGh {
+            output: RefCell::new(vec![search_output(&full_page_refs)]),
+            command: RefCell::new(vec![]),
+        };
+        let answer = discover(
+            &ProjectDiscoveryRequest::Github {
+                query: "jbellis".into(),
+            },
+            &full_owner,
+        )
+        .unwrap();
+        assert_eq!(answer.entries.len(), MAX_ENTRIES);
+        assert!(answer.truncated);
+        assert_eq!(full_owner.command.borrow().len(), 1);
+    }
+
+    #[test]
+    fn explicit_fork_qualifiers_are_not_duplicated() {
+        for query in ["foo fork:false", "foo -fork:only"] {
+            let executor = FakeGh::json(
+                serde_json::json!({"total_count":0,"incomplete_results":false,"items":[]}),
+                false,
+            );
+            discover(
+                &ProjectDiscoveryRequest::Github {
+                    query: query.into(),
+                },
+                &executor,
+            )
+            .unwrap();
+            assert!(
+                executor.command.borrow()[0]
+                    .args
+                    .iter()
+                    .any(|arg| arg == &format!("q={query}"))
             );
         }
     }

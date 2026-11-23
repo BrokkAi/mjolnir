@@ -9,8 +9,8 @@
 //! file does not already end in one, and no write when the checkout is not a
 //! Git repository.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -53,6 +53,67 @@ pub fn snapshot_keep_dir(checkout: &Path, session_id: Option<&str>) -> Result<Pa
         path.push(session_id);
     }
     Ok(path)
+}
+
+/// The source directory and path exclusions for a cross-target Move.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MoveKeep {
+    directory: PathBuf,
+    skipped: BTreeSet<PathBuf>,
+}
+
+impl MoveKeep {
+    pub fn new(directory: PathBuf, skip: &[PathBuf]) -> Result<Self> {
+        Ok(Self {
+            directory,
+            skipped: skip
+                .iter()
+                .map(|path| normalize_keep_path(path))
+                .collect::<Result<_>>()?,
+        })
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    pub fn skipped_paths(&self) -> &BTreeSet<PathBuf> {
+        &self.skipped
+    }
+
+    /// Match a path under the checkout-wide keep directory against the one
+    /// session directory the transport sends.
+    pub fn relative_path<'a>(&self, keep_root: &Path, path: &'a Path) -> Option<&'a Path> {
+        let prefix = self.directory.strip_prefix(keep_root).ok()?;
+        path.strip_prefix(prefix).ok()
+    }
+
+    pub fn carries(&self, keep_root: &Path, path: &Path) -> bool {
+        self.relative_path(keep_root, path)
+            .is_some_and(|relative| !self.skips(relative))
+    }
+
+    pub fn skips(&self, relative: &Path) -> bool {
+        self.skipped.iter().any(|skip| relative.starts_with(skip))
+    }
+}
+
+pub fn normalize_keep_path(path: &Path) -> Result<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("invalid relative path in keep stream: {}", path.display());
+            }
+        }
+    }
+    ensure!(
+        !out.as_os_str().is_empty(),
+        "empty relative path in keep stream"
+    );
+    Ok(out)
 }
 
 /// Create the session keep directory and export [`SESSION_KEEP_DIR_ENV`].

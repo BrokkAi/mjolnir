@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 152;
+const SCHEMA_VERSION: i64 = 153;
 
 pub mod web_push;
 pub use web_push::*;
@@ -122,7 +122,6 @@ pub fn test_session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,

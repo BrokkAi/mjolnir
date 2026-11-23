@@ -310,8 +310,6 @@ pub struct StartSessionRequest {
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
-    #[serde(default)]
-    pub supervisors: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
     /// Review for this session: `off`, `push` or `inherit`. Omitted follows

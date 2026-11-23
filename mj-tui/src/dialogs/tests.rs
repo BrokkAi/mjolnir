@@ -28,7 +28,6 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
     };
     let retry = DashboardAction::CreateSession {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_container_size: false,
         subagents: None,
@@ -2051,7 +2050,6 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let retry = DashboardAction::CreateSession {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_container_size: false,
         subagents: None,

@@ -1705,6 +1705,7 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move {
             Ok(mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: SPAWNED_CHILD.to_owned(),
@@ -1720,7 +1721,7 @@ impl SubagentBackend for FakeBackend {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             })
         })
     }
@@ -3212,7 +3213,6 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         request.action,
         ControllerAction::New {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
@@ -3389,6 +3389,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
         &backend,
         "codex-1",
         &mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         },
@@ -6476,7 +6477,6 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
         failure_notice: None,
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
@@ -6529,6 +6529,12 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                 if prior_use == "sub-agent" {
                     let mut parent = record.clone();
                     parent.id = "parent".into();
+                    state
+                        .environment_owners
+                        .insert(parent.id.clone(), parent.id.clone());
+                    state
+                        .environment_owners
+                        .insert("session-1".into(), parent.id.clone());
                     state.sessions.insert(parent.id.clone(), parent);
                     state.subagents.insert(
                         "session-1".into(),
@@ -6546,7 +6552,7 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                             noticed_turn: None,
                             reported_finish: None,
                             handback_tool: false,
-                            supervisor: false,
+                            orchestrator: false,
                         },
                     );
                 }
@@ -6648,6 +6654,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
             snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             };
@@ -8120,6 +8127,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
     let child = mj_store::database::test_fixtures::checkpoint_test_session("review-child");
     mj_store::database::save_session(&parent).unwrap();
     let relation = mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: None,
         child_session_id: child.id.clone(),
@@ -8135,7 +8143,7 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-        supervisor: false,
+        orchestrator: false,
     };
     mj_store::database::save_subagent_session(&child, &relation).unwrap();
     let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});

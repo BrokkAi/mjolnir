@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, HarnessKind, ProjectRepository, TargetTemplate, validate_id};
@@ -1682,9 +1682,6 @@ pub struct SessionRecord {
     /// Records written before the choice existed allow it.
     #[serde(default = "default_oracle_enabled")]
     pub oracle: bool,
-    /// Whether this top-level session may spawn depth-1 supervisors.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub supervisors: bool,
     /// This session's own oracle model (`--subagent-oracle`), overriding
     /// `[subagents.oracle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2647,12 +2644,12 @@ pub struct State {
     /// The most recent Oracle choice for each profile.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_oracle_choices: BTreeMap<String, bool>,
-    /// The most recent Supervisors choice for each profile.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub last_supervisor_choices: BTreeMap<String, bool>,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub sessions: SnapshotMap<String, SessionRecord>,
+    /// Physical workspace owners, projected from the environment ledger.
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub environment_owners: SnapshotMap<String, String>,
     /// Child sessions keyed by their session id. The relationship lives in
     /// controller state so every control surface sees the same session family.
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
@@ -2672,8 +2669,8 @@ impl Default for State {
             operator_presence: OperatorPresence::default(),
             last_subagent_policies: Default::default(),
             last_oracle_choices: Default::default(),
-            last_supervisor_choices: Default::default(),
             sessions: SnapshotMap::new(),
+            environment_owners: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
             mount_history: SnapshotMap::new(),
             container_sizes: SnapshotMap::new(),
@@ -2706,40 +2703,29 @@ impl State {
             .copied()
             .unwrap_or(true)
     }
-    /// The remembered Supervisors choice for a profile; disabled when it has none.
-    pub fn last_supervisor_choice_for(&self, profile_id: &str) -> bool {
-        self.last_supervisor_choices
-            .get(profile_id)
-            .copied()
-            .unwrap_or(false)
-    }
-
-    /// The session whose record holds the review choice that governs
-    /// `session_id`. An ordinary sub-agent reviews under the choice of the
-    /// session that spawned it, followed up the chain to a top-level session,
-    /// so the parent's record stays the only copy and a later change to it
-    /// applies to its children. Every other session uses its own record.
-    ///
-    /// Fails with the id of a missing ancestor record, or with the session
-    /// itself when the parent chain loops.
+    /// Ordinary workers share the review choice of their environment owner.
+    /// Oracles and reviewers retain the choice on their own record.
     fn review_owner(
         &self,
         session_id: &str,
     ) -> std::result::Result<Option<&SessionRecord>, String> {
-        let mut current = session_id;
-        // A chain longer than the relation table repeats a session.
-        for _ in 0..=self.subagents.len() {
-            match self.subagents.get(current) {
-                Some(child) if child.kind == crate::subagent::SubagentKind::Worker => {
-                    if !self.sessions.contains_key(&child.parent_session_id) {
-                        return Err(child.parent_session_id.clone());
-                    }
-                    current = &child.parent_session_id;
-                }
-                _ => return Ok(self.sessions.get(current)),
-            }
+        let Some(session) = self.sessions.get(session_id) else {
+            return Ok(None);
+        };
+        if self
+            .subagents
+            .get(session_id)
+            .is_some_and(|relation| relation.kind != crate::subagent::SubagentKind::Worker)
+        {
+            return Ok(Some(session));
         }
-        Err(session_id.to_owned())
+        let owner_id = self
+            .environment_owner_id(session_id)
+            .ok_or_else(|| session_id.to_owned())?;
+        self.sessions
+            .get(owner_id)
+            .map(Some)
+            .ok_or_else(|| owner_id.to_owned())
     }
 
     /// The stored review choice that governs `session_id`, through
@@ -2759,8 +2745,7 @@ impl State {
     /// The review configuration that governs `session_id`: the given global
     /// `[review]` under the stored choice, then Mjolnir's automatic rules
     /// (see `review::settings::automatic_review_off`), which are evaluated
-    /// here on every call and never stored. A parent chain that cannot be
-    /// followed reviews as Off. Launch (which offers the review tools), the
+    /// here on every call and never stored. Missing environment ownership reviews as Off. Launch (which offers the review tools), the
     /// review host, child review requests, delegation completion and the
     /// viewer all read the effective review through this one rule.
     pub fn effective_review_config(
@@ -2785,7 +2770,7 @@ impl State {
 /// The effective code checkout for one session, including who owns it.
 ///
 /// These variants are derived from the durable session record and the
-/// `State::subagents` relationship. They are not serialized. In particular,
+/// environment ledger. They are not serialized. In particular,
 /// the creation-time `create_managed_worktree` choice is not evidence of
 /// current checkout ownership.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2848,13 +2833,12 @@ impl<'a> Checkout<'a> {
         }
     }
 
-    /// The record that owns a borrowed checkout, following nested borrowing
-    /// to the session that holds the workspace. `None` for a checkout the
+    /// The record that owns a borrowed checkout. `None` for a checkout the
     /// session owns itself.
     #[must_use]
     pub fn owner(&self) -> Option<&'a SessionRecord> {
         match self {
-            Self::Borrowed { owner, checkout } => checkout.owner().or(Some(*owner)),
+            Self::Borrowed { owner, .. } => Some(*owner),
             Self::Attached { .. } | Self::ManagedWorktree { .. } | Self::ManagedWorkspace => None,
         }
     }
@@ -2916,6 +2900,70 @@ pub fn live_session_ids(
 }
 
 impl State {
+    /// The ledger owner ID may outlive the owner's session record.
+    pub fn environment_owner_id(&self, session_id: &str) -> Option<&str> {
+        if crate::native_agent::is_view_id(session_id) || !self.sessions.contains_key(session_id) {
+            return None;
+        }
+        self.environment_owners.get(session_id).map(String::as_str)
+    }
+
+    /// Missing ownership is unknown, including on older client projections.
+    pub fn owns_environment(&self, session_id: &str) -> Option<bool> {
+        self.environment_owner_id(session_id)
+            .map(|owner| owner == session_id)
+    }
+
+    pub fn borrowed_members(&self, owner_id: &str) -> Vec<String> {
+        self.environment_owners
+            .iter()
+            .filter(|(id, owner)| {
+                owner.as_str() == owner_id
+                    && id.as_str() != owner_id
+                    && self.environment_owner_id(id).is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn active_borrowers(&self, owner_id: &str) -> Vec<String> {
+        self.borrowed_members(owner_id)
+            .into_iter()
+            .filter(|id| self.sessions[id].state.is_active())
+            .collect()
+    }
+
+    fn direct_subagents<'a>(&'a self, parent_id: &'a str) -> impl Iterator<Item = &'a String> {
+        self.subagents.iter().filter_map(move |(id, relation)| {
+            (relation.parent_session_id == parent_id).then_some(id)
+        })
+    }
+
+    pub fn direct_owned_child_ids(&self, parent_id: &str) -> Vec<String> {
+        let mut owned: Vec<_> = self
+            .direct_subagents(parent_id)
+            .filter(|id| self.owns_environment(id) == Some(true))
+            .cloned()
+            .collect();
+        owned.sort_unstable();
+        owned
+    }
+
+    pub fn can_suspend_owned_child(&self, id: &str) -> bool {
+        self.owns_environment(id) == Some(true)
+            && self.subagents.contains_key(id)
+            && self.sessions.get(id).is_some_and(|record| {
+                record.state == SessionState::Parked || record.state.has_live_worker()
+            })
+    }
+
+    pub fn suspendable_owned_child_ids(&self, parent_id: &str) -> Vec<String> {
+        self.direct_owned_child_ids(parent_id)
+            .into_iter()
+            .filter(|id| self.can_suspend_owned_child(id))
+            .collect()
+    }
+
     /// All sub-agent descendants of `root_id` in BFS order, guarded against cycles.
     #[must_use]
     pub fn descendant_subagent_ids(&self, root_id: &str) -> Vec<String> {
@@ -2926,10 +2974,8 @@ impl State {
         let mut descendants = Vec::new();
         while let Some(parent_id) = queue.pop_front() {
             let mut direct: Vec<&str> = self
-                .subagents
-                .values()
-                .filter(|child| child.parent_session_id == parent_id)
-                .map(|child| child.child_session_id.as_str())
+                .direct_subagents(&parent_id)
+                .map(String::as_str)
                 .collect();
             direct.sort_unstable();
             for child_id in direct {
@@ -2956,35 +3002,15 @@ impl State {
             .collect()
     }
 
-    /// Whether any sub-agent descendant of `parent_session_id` still has a
-    /// target. A child's worker, parked or live, runs in its root's container,
-    /// so recreating that container would end it.
+    /// Whether any borrower still has a target, including a parked worker.
     #[must_use]
-    pub fn subagents_occupy_container(&self, parent_session_id: &str) -> bool {
-        self.descendant_subagent_ids(parent_session_id)
+    pub fn subagents_occupy_container(&self, owner_id: &str) -> bool {
+        self.borrowed_members(owner_id)
             .into_iter()
-            .any(|child_id| {
-                self.sessions
-                    .get(&child_id)
-                    .is_some_and(|session| session.target.is_some())
-            })
+            .any(|id| self.sessions[&id].target.is_some())
     }
 
-    /// Derive the checkout location and its owner for a session.
-    ///
-    /// Raw directory sessions with no managed-worktree descriptor are
-    /// attached even when they have no Git project snapshot (the supported
-    /// non-Git bare-target case). A descriptor takes precedence if both raw
-    /// fields are present, because it is the cleanup authority; the stored
-    /// project path is retained as the checkout directory, even if an invalid
-    /// legacy record disagrees with the descriptor's root. Record validation
-    /// rejects that mismatch. With neither field present, old bundle-backed
-    /// records map to a managed workspace whether their bundle came from config
-    /// or a saved project snapshot. A managed sub-agent is resolved through its
-    /// durable parent relation first, so its copied `project_directory` never
-    /// changes ownership. Nested children keep the chain of borrowed owners.
-    /// An orphan child whose parent record has already been removed falls
-    /// back to its stored checkout fields, preserving the older cleanup path.
+    /// Derive checkout location and ownership from the session and its ledger binding.
     pub fn checkout(&self, session_id: &str) -> Result<Checkout<'_>> {
         let session = self
             .sessions
@@ -2993,48 +3019,32 @@ impl State {
         self.checkout_for_record(session_id, session)
     }
 
-    /// Derive checkout ownership for a projected record while retaining the
-    /// durable sub-agent relationship from this state snapshot.
+    /// For an owner, use the projected record (which may describe a proposed
+    /// placement). A borrower always takes its checkout from the bound owner.
     pub fn checkout_for_record<'a>(
         &'a self,
         session_id: &str,
         session: &'a SessionRecord,
     ) -> Result<Checkout<'a>> {
-        self.checkout_for_record_inner(session_id, session, &mut BTreeSet::new())
-    }
-
-    fn checkout_for_record_inner<'a>(
-        &'a self,
-        session_id: &str,
-        session: &'a SessionRecord,
-        visited: &mut BTreeSet<String>,
-    ) -> Result<Checkout<'a>> {
-        if !visited.insert(session_id.to_owned()) {
-            bail!("sub-agent checkout ownership contains a cycle at {session_id}");
-        }
-        if let Some(relation) = self.subagents.get(session_id) {
-            let Some(owner) = self.sessions.get(&relation.parent_session_id) else {
-                return Ok(session.checkout());
-            };
-            return Ok(Checkout::Borrowed {
+        let owner = self.workspace_owner(session_id)?;
+        if owner.id == session_id {
+            Ok(session.checkout())
+        } else {
+            Ok(Checkout::Borrowed {
                 owner,
-                checkout: Box::new(self.checkout_for_record_inner(&owner.id, owner, visited)?),
-            });
+                checkout: Box::new(owner.checkout()),
+            })
         }
-        Ok(session.checkout())
     }
 
-    /// The record whose workspace `session_id` works in: the session itself,
-    /// or, for a sub-agent, the parent it borrows from. Facts about how the
-    /// workspace was created (its exact checkout, its history cutoff) belong
-    /// to that record, so a reader asks here instead of the child's own
-    /// fields, which a child leaves empty.
+    /// The record holding the physical checkout and workspace history.
     pub fn workspace_owner(&self, session_id: &str) -> Result<&SessionRecord> {
-        let session = self
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        Ok(self.checkout(session_id)?.owner().unwrap_or(session))
+        let owner_id = self
+            .environment_owner_id(session_id)
+            .with_context(|| format!("session {session_id} has no environment owner binding"))?;
+        self.sessions.get(owner_id).with_context(|| {
+            format!("environment owner {owner_id} for session {session_id} is unavailable")
+        })
     }
 
     /// How a notice names a session: the title the session list shows
@@ -3049,19 +3059,13 @@ impl State {
         }
     }
 
-    /// The session whose project identity names a row.
-    ///
-    /// A sub-agent child runs inside its parent's workspace and owns no
-    /// managed worktree, so its own `project_directory` is the parent's
-    /// worktree checkout, whose directory is named after the parent session
-    /// id. Reading the project identity from the parent instead keeps a child
-    /// under the same project heading and target label as the session it
-    /// belongs to.
+    /// Use the physical owner's project for display, falling back to the row
+    /// when the owner is outside this projection.
     #[must_use]
     pub fn project_identity_session<'a>(&'a self, session: &'a SessionRecord) -> &'a SessionRecord {
-        self.subagents
-            .get(&session.id)
-            .and_then(|record| self.sessions.get(&record.parent_session_id))
+        self.environment_owner_id(&session.id)
+            .filter(|owner_id| *owner_id != session.id)
+            .and_then(|owner_id| self.sessions.get(owner_id))
             .unwrap_or(session)
     }
 
@@ -3153,6 +3157,7 @@ impl State {
             .subagents
             .get(&subagent.parent_session_id)
             .map(|parent| crate::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: parent.kind,
                 reviewer_launch: None,
                 child_session_id: parent.child_session_id.clone(),
@@ -3168,16 +3173,25 @@ impl State {
                 noticed_turn: parent.noticed_turn,
                 reported_finish: parent.reported_finish.clone(),
                 handback_tool: parent.handback_tool,
-                supervisor: parent.supervisor,
+                orchestrator: parent.orchestrator,
             });
         crate::subagent::validate_subagent_parent(
             parent_subagent.as_ref(),
+            self.owns_environment(&subagent.parent_session_id) == Some(true),
             subagent.kind,
-            subagent.supervisor,
+            subagent.orchestrator,
         )?;
-        // The shared checkout derivation validates the complete ownership
-        // chain and rejects cycles for nested reviewer relationships.
-        self.checkout(child_id)?;
+        // Reviewer relations may nest. Validate the logical graph separately
+        // from the environment ledger, whose owners can outlive their rows.
+        let mut ancestor = subagent.parent_session_id.as_str();
+        let mut visited = BTreeSet::from([child_id]);
+        while let Some(parent) = self.subagents.get(ancestor) {
+            ensure!(
+                visited.insert(ancestor),
+                "sub-agent relationship contains a cycle at {ancestor}"
+            );
+            ancestor = &parent.parent_session_id;
+        }
         if subagent.task_name.trim().is_empty()
             || subagent.profile_id.trim().is_empty()
             || subagent.request_key.trim().is_empty()

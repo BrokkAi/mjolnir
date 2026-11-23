@@ -202,12 +202,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_detail_skips_spilling_pre_152_tool_and_restores_full_legacy_archive() {
+    fn tool_call_detail_skips_spilling_legacy_tool_and_restores_full_legacy_archive() {
         let root = tempfile::tempdir().unwrap();
         let db_path = root.path().join("hel.sqlite3");
         let sessions_dir = root.path().join("sessions");
         std::fs::create_dir(&sessions_dir).unwrap();
-        let session_id = "session-pre-152";
+        let session_id = "legacy-session";
         let stable_id = "tool:legacy";
         database::save_session_to(&db_path, &database::test_session(session_id, "project"))
             .unwrap();

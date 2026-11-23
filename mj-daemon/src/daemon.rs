@@ -524,7 +524,7 @@ fn lifecycle_starts_committed(kind: LifecycleKind, state: Option<SessionState>) 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseRoute {
     /// Stop only the borrowed worker, keeping its conversation in the store.
-    Subagent,
+    Borrower,
     /// Run the graceful close from the start.
     Graceful,
     /// A previous close stopped partway; finish it from its checkpoint.
@@ -540,14 +540,9 @@ enum CloseRoute {
 /// An owning session mid-close with a live target cannot be closed again from the start:
 /// its worker socket is gone, so a fresh checkpoint attempt only fails on
 /// connect. Recovery finishes it from the checkpoint the first close verified.
-/// `subagent` says the session is a Mjolnir sub-agent; see
-/// [`mj_controller::controller::has_nothing_to_checkpoint`].
-fn close_route(session: Option<&SessionRecord>, subagent: bool) -> CloseRoute {
-    let Some(session) = session else {
-        return CloseRoute::Graceful;
-    };
-    if subagent {
-        CloseRoute::Subagent
+fn close_route(session: &SessionRecord, owns_environment: bool) -> CloseRoute {
+    if !owns_environment {
+        CloseRoute::Borrower
     } else if crate::pollers::is_interrupted_close(session) {
         CloseRoute::RecoverInterrupted
     } else if session.state == SessionState::Stopped {
@@ -556,7 +551,7 @@ fn close_route(session: Option<&SessionRecord>, subagent: bool) -> CloseRoute {
         } else {
             CloseRoute::Done
         }
-    } else if mj_controller::controller::has_nothing_to_checkpoint(session, subagent) {
+    } else if mj_controller::controller::has_nothing_to_checkpoint(session) {
         CloseRoute::SettleWithoutCheckpoint
     } else {
         CloseRoute::Graceful

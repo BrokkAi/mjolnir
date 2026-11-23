@@ -153,7 +153,7 @@ impl std::error::Error for LifecycleFailureReason {}
 pub struct RegisterSubagentRequest {
     pub no_github_credentials: bool,
     pub kind: mj_core::subagent::SubagentKind,
-    pub supervisor: bool,
+    pub orchestrator: bool,
     pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
     pub parent_session_id: String,
     pub task_name: String,

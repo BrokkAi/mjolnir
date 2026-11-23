@@ -1,6 +1,6 @@
 # Delegation policy
 
-The user selected Mjolnir delegation. Use Mjolnir's `spawn`, `list_agents`, `send_message`, and `close` tools; $TASK_TYPES
+The user selected Mjolnir delegation. Use Mjolnir's `spawn_worker`, `list_agents`, `send_message`, and `close` tools; $TASK_TYPES
 Up to $N children can hold live processes at once.
 You own the user conversation, priorities, design, integrated review, commit,
 and acceptance. Children investigate, implement slices of the agreed design,

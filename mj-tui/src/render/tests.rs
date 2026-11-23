@@ -1155,10 +1155,10 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
         config(),
         State {
             last_oracle_choices: Default::default(),
-            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),
@@ -2766,7 +2766,11 @@ fn dashboard_with_nested_workspaces() -> (DashboardState, String) {
         session.title = title.into();
         session.acp_session_title = None;
     }
-    state.subagents.get_mut("orchestrator").unwrap().supervisor = true;
+    state
+        .subagents
+        .get_mut("orchestrator")
+        .unwrap()
+        .orchestrator = true;
     for id in ["worker", "reviewer"] {
         let relation = state.subagents.get_mut(id).unwrap();
         relation.parent_session_id = "orchestrator".into();

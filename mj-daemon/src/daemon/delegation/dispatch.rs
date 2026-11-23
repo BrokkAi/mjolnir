@@ -213,7 +213,7 @@ impl SubagentDispatch {
 fn execution_lane(request: &SubagentToolRequest) -> usize {
     usize::from(matches!(
         request.action,
-        SubagentToolAction::LegacyInterruptAgent { .. } | SubagentToolAction::CloseAgent { .. }
+        SubagentToolAction::CloseAgent { .. }
     ))
 }
 

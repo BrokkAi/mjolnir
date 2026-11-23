@@ -17,6 +17,8 @@ pub enum SubagentPolicy {
         straightforward: Option<Box<crate::config::SubagentChoice>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         subtle: Option<Box<crate::config::SubagentChoice>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        orchestrators: bool,
     },
     None,
 }
@@ -32,6 +34,8 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
                 straightforward: Option<Box<crate::config::SubagentChoice>>,
                 #[serde(default)]
                 subtle: Option<Box<crate::config::SubagentChoice>>,
+                #[serde(default)]
+                orchestrators: bool,
                 // b4374cb29 briefly stored one flattened choice for both types.
                 #[serde(default)]
                 model: Option<String>,
@@ -47,6 +51,7 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
             Wire::Mjolnir {
                 straightforward,
                 subtle,
+                orchestrators,
                 model,
                 effort,
             } => {
@@ -72,14 +77,32 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
                 Self::Mjolnir {
                     straightforward: straightforward.or_else(|| legacy.clone()),
                     subtle: subtle.or(legacy),
+                    orchestrators,
                 }
             }
             Wire::LegacyMjolnir => Self::Mjolnir {
                 straightforward: None,
                 subtle: None,
+                orchestrators: false,
             },
             Wire::None => Self::None,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerTaskType {
+    Straightforward,
+    Subtle,
+}
+
+impl From<WorkerTaskType> for SubagentTaskType {
+    fn from(task: WorkerTaskType) -> Self {
+        match task {
+            WorkerTaskType::Straightforward => Self::Straightforward,
+            WorkerTaskType::Subtle => Self::Subtle,
+        }
     }
 }
 
@@ -90,7 +113,8 @@ pub enum SubagentTaskType {
     Straightforward,
     Subtle,
     Oracle,
-    Supervisor,
+    #[serde(rename = "supervisor", alias = "orchestrator")]
+    Orchestrator,
 }
 
 impl SubagentTaskType {
@@ -99,7 +123,7 @@ impl SubagentTaskType {
             Self::Straightforward => "straightforward",
             Self::Subtle => "subtle",
             Self::Oracle => "oracle",
-            Self::Supervisor => "supervisor",
+            Self::Orchestrator => "orchestrator",
         }
     }
 }
@@ -111,6 +135,15 @@ impl SubagentPolicy {
     pub fn uses_mjolnir(&self) -> bool {
         matches!(self, Self::Mjolnir { .. })
     }
+    pub fn orchestrators_enabled(&self) -> bool {
+        matches!(
+            self,
+            Self::Mjolnir {
+                orchestrators: true,
+                ..
+            }
+        )
+    }
     pub fn override_choice(
         &self,
         task_type: SubagentTaskType,
@@ -119,10 +152,11 @@ impl SubagentPolicy {
             Self::Mjolnir {
                 straightforward,
                 subtle,
+                ..
             } => match task_type {
                 SubagentTaskType::Straightforward => straightforward.as_deref(),
                 SubagentTaskType::Subtle => subtle.as_deref(),
-                SubagentTaskType::Oracle | SubagentTaskType::Supervisor => None,
+                SubagentTaskType::Oracle | SubagentTaskType::Orchestrator => None,
             },
             _ => None,
         }
@@ -160,8 +194,12 @@ impl SubagentPolicy {
         if !harness.supports_delegation_tools() {
             Self::Native
         } else if let Some(record) = subagent {
-            if record.supervisor {
-                self.clone()
+            if record.orchestrator {
+                let mut policy = self.clone();
+                if let Self::Mjolnir { orchestrators, .. } = &mut policy {
+                    *orchestrators = false;
+                }
+                policy
             } else {
                 Self::None
             }
@@ -185,6 +223,7 @@ pub fn deserialize_optional_policy<'de, D: serde::Deserializer<'de>>(
     Ok(
         Option::<Stored>::deserialize(deserializer)?.map(|stored| match stored {
             Stored::Legacy(true) => SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -328,9 +367,9 @@ pub fn delegation_policy(limit: usize, offers_subtle: bool) -> String {
         .replace("$N", &limit.to_string())
 }
 
-/// The supervisor's delegation policy document.
-pub fn supervisor_delegation_policy() -> &'static str {
-    include_str!("../assets/supervisor-delegation.md")
+/// The orchestrator's delegation policy document.
+pub fn orchestrator_delegation_policy() -> &'static str {
+    include_str!("../assets/orchestrator-delegation.md")
 }
 
 /// Identity of one finish already sent to the parent in a notification.
@@ -502,6 +541,16 @@ pub enum SubagentToolAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<FileSourceRanges>,
     },
+    SpawnOrchestrator {
+        task_name: String,
+        instructions: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        repos: Option<Vec<String>>,
+        #[serde(default)]
+        no_github_credentials: bool,
+    },
     ListAgents,
     ListTargets,
     SendInput {
@@ -600,6 +649,16 @@ enum SubagentToolActionWire {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<FileSourceRanges>,
     },
+    SpawnOrchestrator {
+        task_name: String,
+        instructions: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        repos: Option<Vec<String>>,
+        #[serde(default)]
+        no_github_credentials: bool,
+    },
     ListAgents,
     ListTargets,
     SendInput {
@@ -634,13 +693,13 @@ impl SubagentToolAction {
         matches!(
             self,
             Self::Spawn { .. }
+                | Self::SpawnOrchestrator { .. }
                 | Self::RequestReview { .. }
                 | Self::AskOracle { .. }
                 | Self::OverrideReview { .. }
                 | Self::SetReviewBaseline { .. }
                 | Self::SendInput { .. }
                 | Self::SendMessage { .. }
-                | Self::LegacyInterruptAgent { .. }
                 | Self::CloseAgent { .. }
         )
     }
@@ -728,6 +787,19 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 working_directory,
                 context,
                 files,
+            },
+            SubagentToolActionWire::SpawnOrchestrator {
+                task_name,
+                instructions,
+                target,
+                repos,
+                no_github_credentials,
+            } => Self::SpawnOrchestrator {
+                task_name,
+                instructions,
+                target,
+                repos,
+                no_github_credentials,
             },
             SubagentToolActionWire::ListAgents => Self::ListAgents,
             SubagentToolActionWire::ListTargets => Self::ListTargets,
@@ -926,10 +998,17 @@ pub struct SubagentRecord {
     /// reads as false and keeps reporting through its last message.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handback_tool: bool,
-    /// Whether this depth-1 worker is a supervisor that may delegate to
-    /// depth-2 non-supervisor workers.
+    /// Whether this depth-1 worker is an orchestrator that may delegate
+    /// to depth-2 workers.
+    #[serde(
+        rename = "supervisor",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub orchestrator: bool,
+    /// The parent suspended this child and should resume it with its own worker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisor: bool,
+    pub resume_with_parent: bool,
 }
 
 /// Relationship and lifecycle metadata published to control surfaces.
@@ -961,8 +1040,13 @@ pub struct SubagentMetadata {
     pub reported_finish: Option<SubagentFinishIdentity>,
     #[serde(default)]
     pub handback_tool: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisor: bool,
+    #[serde(
+        rename = "supervisor",
+        alias = "orchestrator",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub orchestrator: bool,
 }
 
 impl From<&SubagentRecord> for SubagentMetadata {
@@ -981,7 +1065,7 @@ impl From<&SubagentRecord> for SubagentMetadata {
             noticed_turn: record.noticed_turn,
             reported_finish: record.reported_finish.clone(),
             handback_tool: record.handback_tool,
-            supervisor: record.supervisor,
+            orchestrator: record.orchestrator,
         }
     }
 }
@@ -1008,12 +1092,13 @@ impl SubagentMetadata {
         record.noticed_turn = self.noticed_turn;
         record.reported_finish = self.reported_finish.clone();
         record.handback_tool = self.handback_tool;
-        record.supervisor = self.supervisor;
+        record.orchestrator = self.orchestrator;
     }
 
     /// Build a `SubagentRecord` view for shared validation and launch helpers.
     pub fn to_record_view(&self) -> SubagentRecord {
         SubagentRecord {
+            resume_with_parent: false,
             kind: self.kind,
             reviewer_launch: None,
             child_session_id: self.child_session_id.clone(),
@@ -1029,7 +1114,7 @@ impl SubagentMetadata {
             noticed_turn: self.noticed_turn,
             reported_finish: self.reported_finish.clone(),
             handback_tool: self.handback_tool,
-            supervisor: self.supervisor,
+            orchestrator: self.orchestrator,
         }
     }
 }
@@ -1038,23 +1123,26 @@ impl SubagentMetadata {
 /// and `Controller::register_subagent_inner`.
 pub fn validate_subagent_parent(
     parent_subagent: Option<&SubagentRecord>,
+    parent_owns_environment: bool,
     requested_kind: SubagentKind,
-    requested_supervisor: bool,
+    requested_orchestrator: bool,
 ) -> anyhow::Result<()> {
-    if requested_supervisor && requested_kind != SubagentKind::Worker {
-        anyhow::bail!("only worker sub-agents can be supervisors");
+    if requested_orchestrator && requested_kind != SubagentKind::Worker {
+        anyhow::bail!("only worker sub-agents can be orchestrators");
     }
     if requested_kind == SubagentKind::Reviewer {
         return Ok(());
     }
     match parent_subagent {
         None => Ok(()),
-        Some(parent) if parent.kind == SubagentKind::Worker && parent.supervisor => {
-            if requested_supervisor {
-                anyhow::bail!("supervisors cannot spawn nested supervisors (maximum depth is 2)");
+        Some(parent) if parent.kind == SubagentKind::Worker && parent.orchestrator => {
+            if requested_orchestrator {
+                anyhow::bail!(
+                    "orchestrators cannot spawn nested orchestrators (maximum depth is 2)"
+                );
             }
-            if requested_kind == SubagentKind::Oracle {
-                anyhow::bail!("supervisors cannot spawn oracles");
+            if requested_kind == SubagentKind::Oracle && !parent_owns_environment {
+                anyhow::bail!("borrowed orchestrators cannot spawn oracles");
             }
             Ok(())
         }
@@ -1106,7 +1194,8 @@ pub enum SubagentMcpRole {
     #[default]
     #[serde(alias = "fixed_parent")]
     Parent,
-    Supervisor,
+    #[serde(rename = "supervisor", alias = "orchestrator")]
+    Orchestrator,
     MessageOnly,
     FetchOnly,
     Child,
@@ -1129,7 +1218,7 @@ impl SubagentMcpRole {
         ]
         .map(str::to_owned)
         .into();
-        if matches!(self, Self::Child | Self::FetchOnly | Self::Supervisor) {
+        if matches!(self, Self::Child | Self::FetchOnly | Self::Orchestrator) {
             args.extend(["--role".to_owned(), self.id().to_owned()]);
         }
         args
@@ -1139,39 +1228,36 @@ impl SubagentMcpRole {
     pub fn id(self) -> &'static str {
         match self {
             Self::Parent => "parent",
-            Self::Supervisor => "supervisor",
+            Self::Orchestrator => "orchestrator",
             Self::MessageOnly => "message_only",
             Self::FetchOnly => "fetch_only",
             Self::Child => "child",
         }
     }
 
-    /// Tools this role can offer, for harness approval rules. Some tools
-    /// also require a capability in the session's launch settings.
+    /// Tools advertised, accepted and allowed by the harness for this launch.
     #[must_use]
-    pub fn tool_names(self) -> &'static [&'static str] {
-        match self {
-            Self::Parent => &[
-                "spawn",
-                "list_agents",
-                "list_targets",
-                "send_message",
-                "close",
-                "fetch",
-                "ask_oracle",
-            ],
-            Self::Supervisor => &[
-                "spawn",
-                "list_agents",
-                "send_message",
-                "close",
-                "fetch",
-                "handback",
-            ],
-            Self::MessageOnly => &["send_message", "fetch", "ask_oracle"],
-            Self::FetchOnly => &["fetch", "send_message", "ask_oracle"],
-            Self::Child => &["handback", "fetch", "send_message"],
+    pub fn tool_names(self, oracle: bool, orchestrators_enabled: bool) -> Vec<&'static str> {
+        let mut tools = match self {
+            Self::Parent | Self::Orchestrator => {
+                let mut tools = vec!["spawn_worker"];
+                if self == Self::Parent && orchestrators_enabled {
+                    tools.extend(["spawn_orchestrator", "list_targets"]);
+                }
+                tools.extend(["list_agents", "send_message", "close", "fetch"]);
+                tools
+            }
+            Self::MessageOnly => vec!["send_message", "fetch"],
+            Self::FetchOnly => vec!["fetch", "send_message"],
+            Self::Child => vec!["handback", "fetch", "send_message"],
+        };
+        if oracle && self != Self::Child {
+            tools.push("ask_oracle");
         }
+        if self == Self::Orchestrator {
+            tools.push("handback");
+        }
+        tools
     }
 }
 
@@ -1188,7 +1274,7 @@ impl std::str::FromStr for SubagentMcpRole {
         match value {
             "parent" => Ok(Self::Parent),
             "fixed_parent" => Ok(Self::Parent),
-            "supervisor" => Ok(Self::Supervisor),
+            "orchestrator" | "supervisor" => Ok(Self::Orchestrator),
             "message_only" => Ok(Self::MessageOnly),
             "fetch_only" => Ok(Self::FetchOnly),
             "child" => Ok(Self::Child),
@@ -1547,6 +1633,10 @@ impl WakeFailure {
             .map_or((error, None), |(detail, evidence)| (detail, Some(evidence)))
     }
 }
+
+/// Guidance for a parent whose child's lifecycle is in Error.
+pub const FAILED_CHILD_CLOSE_GUIDANCE: &str =
+    "Use close_agent to close this child, then spawn a replacement if needed.";
 
 /// What a parent is told about a profile whose login the provider refused.
 #[must_use]
@@ -2188,8 +2278,12 @@ mod tests {
                 child_session_id: "child".into(),
                 message: "legacy note".into(),
             },
-            SubagentToolAction::LegacyInterruptAgent {
-                child_session_id: "child".into(),
+            SubagentToolAction::SpawnOrchestrator {
+                task_name: "task".into(),
+                instructions: "work".into(),
+                target: None,
+                repos: None,
+                no_github_credentials: false,
             },
             SubagentToolAction::CloseAgent {
                 child_session_id: "child".into(),
@@ -2212,6 +2306,9 @@ mod tests {
                 .all(SubagentToolAction::mutates_child_state)
         );
         for observation in [
+            SubagentToolAction::LegacyInterruptAgent {
+                child_session_id: "child".into(),
+            },
             SubagentToolAction::ListProfiles,
             SubagentToolAction::ListAgents,
             SubagentToolAction::LegacyWaitAgents,
@@ -2239,6 +2336,7 @@ mod tests {
             (
                 r#"{"mjolnir_subagents":true}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2250,6 +2348,7 @@ mod tests {
             (
                 r#"{"subagents":{"mode":"all_models"}}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2257,6 +2356,7 @@ mod tests {
             (
                 r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"adaptive"}}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2264,6 +2364,7 @@ mod tests {
             (
                 r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"high"}}"#,
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2277,6 +2378,7 @@ mod tests {
         }
         assert!(serde_json::from_str::<SubagentPolicy>("true").is_err());
         let fixed = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(crate::config::SubagentChoice {
                 model: "gpt-6-luna".into(),
                 effort: Some("max".into()),
@@ -2288,6 +2390,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None
             })
@@ -2299,6 +2402,7 @@ mod tests {
             serde_json::json!({"mode":"mjolnir", "straightforward":{"model":"gpt-6-luna", "effort":"max"}, "subtle":{"model":"gpt-6-sol"}})
         );
         let default_effort = SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: Some(Box::new(crate::config::SubagentChoice {
                 model: "gpt-6-luna".into(),
                 effort: None,
@@ -2327,6 +2431,7 @@ mod tests {
         assert_eq!(
             old_flat,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: Some(Box::new(duplicated.clone())),
                 subtle: Some(Box::new(duplicated))
             }
@@ -2338,6 +2443,7 @@ mod tests {
             crate::config::HarnessKind::OpenCode,
         ] {
             let worker = SubagentRecord {
+                resume_with_parent: false,
                 kind: SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: "child".into(),
@@ -2353,13 +2459,27 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: true,
-                supervisor: false,
+                orchestrator: false,
             };
-            let mut supervisor = worker.clone();
-            supervisor.supervisor = true;
+            let mut orchestrator = worker.clone();
+            orchestrator.orchestrator = true;
+            let enabled = SubagentPolicy::Mjolnir {
+                orchestrators: true,
+                straightforward: None,
+                subtle: None,
+            };
+            assert_eq!(enabled.for_launch(harness, None), enabled);
+            assert!(matches!(
+                enabled.for_launch(harness, Some(&orchestrator)),
+                SubagentPolicy::Mjolnir {
+                    orchestrators: false,
+                    ..
+                }
+            ));
             for policy in [
                 SubagentPolicy::Native,
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -2371,23 +2491,32 @@ mod tests {
                     policy.for_launch(harness, Some(&worker)),
                     SubagentPolicy::None
                 );
-                assert_eq!(policy.for_launch(harness, Some(&supervisor)), policy);
+                assert_eq!(policy.for_launch(harness, Some(&orchestrator)), policy);
                 assert_eq!(policy.for_launch(harness, None), policy);
             }
-            // Depth-2 invariant: top-level -> supervisor ok; supervisor -> worker ok;
-            // supervisor -> supervisor/oracle refused; worker -> worker refused.
-            assert!(validate_subagent_parent(None, SubagentKind::Worker, true).is_ok());
+            // Depth-2 invariant: top-level -> orchestrator ok; orchestrator -> worker ok;
+            // orchestrator -> orchestrator/oracle refused; worker -> worker refused.
+            assert!(validate_subagent_parent(None, true, SubagentKind::Worker, true).is_ok());
             assert!(
-                validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, false).is_ok()
+                validate_subagent_parent(Some(&orchestrator), false, SubagentKind::Worker, false)
+                    .is_ok()
             );
             assert!(
-                validate_subagent_parent(Some(&supervisor), SubagentKind::Worker, true).is_err()
+                validate_subagent_parent(Some(&orchestrator), false, SubagentKind::Worker, true)
+                    .is_err()
             );
             assert!(
-                validate_subagent_parent(Some(&supervisor), SubagentKind::Oracle, false).is_err()
+                validate_subagent_parent(Some(&orchestrator), false, SubagentKind::Oracle, false)
+                    .is_err()
             );
-            assert!(validate_subagent_parent(Some(&worker), SubagentKind::Worker, false).is_err());
-            assert!(validate_subagent_parent(Some(&worker), SubagentKind::Reviewer, false).is_ok());
+            assert!(
+                validate_subagent_parent(Some(&worker), false, SubagentKind::Worker, false)
+                    .is_err()
+            );
+            assert!(
+                validate_subagent_parent(Some(&worker), false, SubagentKind::Reviewer, false)
+                    .is_ok()
+            );
             // Keep existing serde round-trip check below for completeness.
             for policy in [SubagentPolicy::Native, SubagentPolicy::None] {
                 assert_eq!(
@@ -2895,7 +3024,10 @@ mod tests {
             SubagentMcpRole::Child,
         ] {
             for tool in REVIEW_MCP_TOOLS {
-                assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
+                assert!(
+                    !role.tool_names(true, true).contains(tool),
+                    "{role} lists {tool}"
+                );
             }
         }
     }
@@ -2912,7 +3044,11 @@ mod tests {
                 child_session_id: "child".into()
             }
         );
-        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+        assert!(
+            !SubagentMcpRole::Parent
+                .tool_names(true, true)
+                .contains(&"interrupt")
+        );
     }
 
     #[test]
@@ -2948,11 +3084,19 @@ mod tests {
         );
         assert!(
             SubagentMcpRole::Parent
-                .tool_names()
+                .tool_names(true, true)
                 .contains(&"send_message")
         );
-        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"send_input"));
-        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+        assert!(
+            !SubagentMcpRole::Parent
+                .tool_names(true, true)
+                .contains(&"send_input")
+        );
+        assert!(
+            !SubagentMcpRole::Parent
+                .tool_names(true, true)
+                .contains(&"interrupt")
+        );
     }
 
     #[test]
@@ -2982,8 +3126,8 @@ mod tests {
             SubagentToolAction::LegacyAwaitChildren
         );
         for role in [SubagentMcpRole::Parent, SubagentMcpRole::Child] {
-            assert!(!role.tool_names().contains(&"wait"));
-            assert!(!role.tool_names().contains(&"await_children"));
+            assert!(!role.tool_names(true, true).contains(&"wait"));
+            assert!(!role.tool_names(true, true).contains(&"await_children"));
         }
 
         for old_shape in [
@@ -3517,6 +3661,27 @@ mod tests {
         let encoded = serde_json::to_value(&action).unwrap();
         for key in ["profile_id", "model", "effort"] {
             assert!(encoded["params"].get(key).is_none());
+        }
+
+        for spelling in ["supervisor", "orchestrator"] {
+            let mut request = encoded.clone();
+            request["params"]["task_type"] = spelling.into();
+            let action: SubagentToolAction = serde_json::from_value(request).unwrap();
+            assert!(matches!(
+                action,
+                SubagentToolAction::Spawn {
+                    task_type: SubagentTaskType::Orchestrator,
+                    ..
+                }
+            ));
+            assert_eq!(
+                serde_json::to_value(action).unwrap()["params"]["task_type"],
+                "supervisor"
+            );
+            assert_eq!(
+                spelling.parse::<SubagentMcpRole>().unwrap(),
+                SubagentMcpRole::Orchestrator
+            );
         }
         assert_eq!(
             serde_json::from_str::<SubagentMcpRole>("\"fixed_parent\"").unwrap(),

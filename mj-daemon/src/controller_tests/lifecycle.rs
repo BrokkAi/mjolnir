@@ -121,7 +121,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
             .spawn(|| recover_worker_controlled(plan.clone(), false, Some(session_id), &recovery));
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let closing = scope.spawn(|| {
-            persist_controller_fixture(&controller);
+            persist_controller_fixture(&mut controller);
             mj_controller::controller::test_support::worker_test_scope(session_id, || {
                 controller.destroy_after_verified_checkpoint_with(
                     session_id,
@@ -178,7 +178,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
             WorkerRecoveryOutcome::Suppressed
         );
     }
-    persist_controller_fixture(&controller);
+    persist_controller_fixture(&mut controller);
     assert!(
         mj_controller::controller::test_support::worker_test_scope(session_id, || controller
             .destroy_after_verified_checkpoint_with(

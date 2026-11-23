@@ -187,7 +187,6 @@ pub fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> Mov
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -385,7 +384,7 @@ impl CommandExecutor for RecordingProcessExecutor {
         }
     }
 
-    fn before_move_source_stop(
+    fn stop_borrowed_workers_before_quiesce(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         self.move_stop_calls
@@ -593,6 +592,9 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(LATCH_RELAY_SESSION.into(), LATCH_RELAY_SESSION.into())]
+                .into_iter()
+                .collect(),
             sessions: [(LATCH_RELAY_SESSION.into(), session)]
                 .into_iter()
                 .collect(),
@@ -614,7 +616,6 @@ pub fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind)
 pub fn in_place_operation(controller: &Controller, destination_profile: &str) -> MoveOperation {
     let selection = MoveSelection {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),

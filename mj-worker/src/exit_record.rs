@@ -163,6 +163,7 @@ mod tests {
             std::fs::metadata(&path).unwrap().ino()
         };
         let failure = mj_core::relay::WorkerHarnessStartupFailure {
+            kind: None,
             message: "could not open the native ACP session".into(),
         };
         write_with_recent_log(
