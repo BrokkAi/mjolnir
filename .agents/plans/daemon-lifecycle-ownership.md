@@ -21,9 +21,10 @@ Observational RPCs return control to their caller during upgrades. The engine’
 - [x] (2026-11-23 02:40Z) Reviewed ExecPlan with MJ Advisor (`91233b0efdd193066e7b4eeb46c8db10`) and reshaped Milestones 1, 2, and 3 to fix three M2 flaws and cut unnecessary machinery.
 - [x] (2026-11-23 03:01Z) Milestone 1 (#1568 Phase 1): Single-exchange `request_single` for attachment, concurrent readiness/notice driving, abort-on-drop `UpgradeBlockers`, straight-line two-phase handoff, `pid == 0` placement fix, and store-guard-backed corrupt `daemon.json` recovery.
 - [x] (2026-11-23 03:44Z) Milestone 2 (#1458 + #1568 Phase 2): Engine `ps`+`top` container liveness owner, container launch record (`daemon-container.json`), pre-launch adoption gate, legacy `pid: 0` `mj daemon stop --force` recovery, and deletion of `wait_until_answering`, `wait_for_endpoint_down`, and the 3-second absence `Ping`.
+- [x] (2026-11-23 04:18Z) Milestones 1 & 2 reviewed, pushed to `origin/master` (`3187539ca`, `d348d8bfd`), and `#1568` & `#1458` closed.
 - [x] (2026-11-23 04:29Z) Milestone 3 (#1644): Minimal detached one-child exit waiter (`mj daemon-wait-exit`) wrapping outside `systemd-run --scope`, PID-keyed non-zero/signaled exit records, and `previous_daemon.rs` reporting.
-- [x] (2026-11-23 04:35Z) Final dev-profile validation for Milestone 3.
-- [ ] Coordinator review (`request_review`), commit, push, and issue closure.
+- [x] (2026-11-23 04:41Z) Final dev-profile validation for Milestone 3 (including Windows console-isolation flags in `wait_exit.rs`).
+- [ ] Milestone 3 review (`request_review`), push to `origin/master`, and closure of `#1644` and `#1658`.
 
 ## Surprises & Discoveries
 

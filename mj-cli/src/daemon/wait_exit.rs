@@ -72,6 +72,16 @@ pub(crate) fn run(args: DaemonWaitExitArgs) -> Result<()> {
         }
     }
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+        // Creation flags from `spawn_detached` are not inherited by this child.
+        // Keep the daemon in its own hidden console and process group.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
+
     // Inherit stdio without creating any pipes. The waiter owns no daemon state.
     let mut child = command
         .spawn()
