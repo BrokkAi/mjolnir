@@ -403,6 +403,9 @@ func DecisionLogOpen(directory string) (DecisionLog, error) {
 	return DecisionLog{writer: writer}, nil
 }
 
+// append queues decision for the writer. Rust warns "Jev diagnostic writer
+// stopped" when its writer thread has died; a serving goroutine cannot die
+// without ending the process, so that case does not exist here.
 func (l DecisionLog) append(decision *JevDecision) {
 	copied := *decision
 	copied.Technical = slices.Clone(decision.Technical)

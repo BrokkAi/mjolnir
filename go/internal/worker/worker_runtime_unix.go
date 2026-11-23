@@ -624,10 +624,20 @@ func startBridge(ctx context.Context, cancel context.CancelFunc, setup *prepared
 	return started, nil
 }
 
-// abortTaskOnDrop aborts a task when closed (Rust's Drop).
-type abortTaskOnDrop context.CancelFunc
+// abortTaskOnDrop aborts a task when closed (Rust's Drop) and waits for it to
+// return. An aborted tokio task drops its future, and with it the guards the
+// task owns; a Go task releases them only by returning, so Close waits for
+// that and the caller never returns while the task still holds them (the
+// accept loop's control socket).
+type abortTaskOnDrop struct {
+	abort context.CancelFunc
+	done  <-chan struct{}
+}
 
-func (a abortTaskOnDrop) Close() { a() }
+func (a abortTaskOnDrop) Close() {
+	a.abort()
+	<-a.done
+}
 
 // cancelPreparationOnDrop cancels a preparation when closed (Rust's Drop).
 type cancelPreparationOnDrop context.CancelFunc
@@ -693,7 +703,10 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 		if generations != nil {
 			generationsChanged = generations.Changed()
 		}
-		jevChanged := jev.Changed()
+		// The rate limit is process-wide, so this wait subscribes with a
+		// channel of its own; stopJev withdraws it on every way out of this
+		// pass.
+		jevChanged, stopJev := jev.Subscribe()
 		var harnessPreparation core.HarnessPreparation
 		if preparation != nil {
 			// A finished preparation keeps its last value, which an attach
@@ -708,6 +721,7 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 		latestOrdinal := state.LatestOrdinal
 		digest, err := core.RelayStateDigest(&state)
 		if err != nil {
+			stopJev()
 			return nil, err
 		}
 		subagentQueueChanged := subagents != nil && feed.HasUnpolled(subagents)
@@ -720,6 +734,7 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 			SubagentQueueChanged: subagentQueueChanged,
 		}}
 		if changed {
+			stopJev()
 			return observed, nil
 		}
 		waitCtx, stopWait := context.WithCancel(ctx)
@@ -729,6 +744,7 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 		select {
 		case <-released:
 			stopWait()
+			stopJev()
 			continue
 		case <-generationsChanged:
 		case <-preparationChanged:
@@ -737,12 +753,14 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 			timedOut = true
 		case <-ctx.Done():
 			stopWait()
+			stopJev()
 			<-released
 			return nil, ctx.Err()
 		}
 		// The release watcher reads the receiver's mark; it ends before the
 		// next look marks it again.
 		stopWait()
+		stopJev()
 		<-released
 		if timedOut {
 			return observed, nil
@@ -1240,10 +1258,12 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	runtime.preparationCancel = preparationCancel
 	runtime.hasSubagentTools = hasSubagentRole
 	clientContext, abortClients := context.WithCancel(context.Background())
-	defer abortTaskOnDrop(abortClients).Close()
 	clientTask := core.Spawn(func() error {
 		return acceptWorkerClients(clientContext, listener, guard, relay, dispatchWake, credentials, runtime, fatal)
 	})
+	// Every return below removes control.sock before the daemon's caller
+	// sees the result: the accept loop's socket guard ends with it.
+	defer abortTaskOnDrop{abort: abortClients, done: clientTask.Done()}.Close()
 	clientStopped := func() error {
 		result, joinErr := clientTask.Join(context.Background())
 		return acceptStopped(result, joinErr)
