@@ -3,7 +3,7 @@ use mj_core::config::ConfigLoadError;
 use mj_core::guardian::{
     DaemonGuardianFailure, GUARDIAN_DISABLED_REASON, GUARDIAN_REVIEW_TIMEOUT,
     GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
-    MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD,
+    MAX_PENDING_GUARDIAN_REVIEWS, Outcome, WOLF_STAGE1_ALLOW_THRESHOLD, WolfStage1SkipReason,
 };
 use mj_core::state::MaterializedExecutionState;
 use mj_core::transcript::TranscriptItem;
@@ -19,7 +19,7 @@ pub enum GuardianStage1Verdict {
         tokens: usize,
         elapsed_ms: u64,
     },
-    EscalatedActionTooLong,
+    Escalated(WolfStage1SkipReason),
     Overflow {
         tokens: usize,
     },
@@ -1457,8 +1457,8 @@ async fn run_guardian_review(
                     });
                 }
             }
-            GuardianStage1Verdict::EscalatedActionTooLong => {
-                tracing::debug!(target: "mj_guardian", "Wolf action length exceeded");
+            GuardianStage1Verdict::Escalated(reason) => {
+                tracing::debug!(target: "mj_guardian", ?reason, "Wolf skipped Stage 1 inference");
             }
             GuardianStage1Verdict::Overflow { tokens } => {
                 tracing::debug!(target: "mj_guardian", tokens, "Wolf case token limit exceeded");

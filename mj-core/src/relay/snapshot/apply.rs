@@ -2452,6 +2452,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             action,
             reply,
             answers,
+            permission_decision,
         } => {
             let pending = snapshot.assessment_questions.remove(elicitation_id);
             if pending
@@ -2476,6 +2477,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 elicitation_id,
                 pending_request.as_ref(),
                 action,
+                *permission_decision,
                 reply.as_deref(),
                 answers.as_deref(),
             ) {
@@ -2705,6 +2707,7 @@ mod open_request_tests {
                     action: "accept".into(),
                     reply: None,
                     answers: Some(answers),
+                    permission_decision: None,
                 },
             };
             event.digest = relay_event_digest(&event).unwrap();
@@ -2729,7 +2732,9 @@ mod open_request_tests {
         use crate::elicitation::{
             ElicitationRequest, ElicitationResponse, TOOL_PERMISSION_ID_PREFIX, ToolPermissionForm,
         };
-        use crate::guardian::TrustedUserInputKind;
+        use crate::guardian::{
+            ManualPermissionDecision, TrustedUserDecision, TrustedUserInputKind,
+        };
 
         let mut snapshot = RelaySnapshot::new("forms".into());
         let mut replay = snapshot.clone();
@@ -2784,9 +2789,22 @@ mod open_request_tests {
                     action: action.into(),
                     reply,
                     answers: None,
+                    permission_decision: None,
                 },
             );
         }
+        let rejected = format!("{TOOL_PERMISSION_ID_PREFIX}typed-rejection");
+        apply(
+            &mut snapshot,
+            &mut replay,
+            RelayObservation::ElicitationResolved {
+                elicitation_id: rejected,
+                action: "accept".into(),
+                reply: None,
+                answers: Some(Vec::new()),
+                permission_decision: Some(ManualPermissionDecision::Rejected),
+            },
+        );
         for id in [
             "ask".to_owned(),
             format!("{TOOL_PERMISSION_ID_PREFIX}missing-request"),
@@ -2799,6 +2817,7 @@ mod open_request_tests {
                     action: "accept".into(),
                     reply: Some("Yes".into()),
                     answers: None,
+                    permission_decision: None,
                 },
             );
         }
@@ -2808,18 +2827,30 @@ mod open_request_tests {
         let restored: RelaySnapshot =
             serde_json::from_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
         assert_eq!(inputs, restored.trusted_user_inputs());
-        assert_eq!(inputs.len(), 4);
-        assert_ne!(inputs[0].id, inputs[2].id, "a legacy form ID can be reused");
+        assert_eq!(inputs.len(), 5);
+        assert_ne!(inputs[0].id, inputs[3].id, "a legacy form ID can be reused");
         assert_eq!(inputs[0].kind, TrustedUserInputKind::UserAnswer);
         assert_eq!(inputs[0].prompt, "Proceed?");
         assert_eq!(inputs[0].legacy_reply.as_deref(), Some("Keep it local."));
         assert_eq!(inputs[1].kind, TrustedUserInputKind::ManualPermission);
         assert_eq!(inputs[1].prompt, "Proceed?");
         assert_eq!(inputs[1].legacy_reply.as_deref(), Some("Skipped"));
-        assert_eq!(inputs[2].kind, TrustedUserInputKind::UserAnswer);
-        assert_eq!(inputs[2].legacy_reply.as_deref(), Some("Yes"));
-        assert_eq!(inputs[3].kind, TrustedUserInputKind::ManualPermission);
-        assert!(inputs[3].prompt.is_empty());
+        assert_eq!(
+            inputs[1].decision(),
+            TrustedUserDecision::PermissionRejected
+        );
+        assert_eq!(
+            inputs[2].decision(),
+            TrustedUserDecision::PermissionRejected
+        );
+        assert_eq!(inputs[2].action, "permission_reject");
+        assert_eq!(inputs[3].kind, TrustedUserInputKind::UserAnswer);
+        assert_eq!(inputs[3].legacy_reply.as_deref(), Some("Yes"));
+        assert_eq!(
+            inputs[4].decision(),
+            TrustedUserDecision::LegacyPermissionUnknown
+        );
+        assert!(inputs[4].prompt.is_empty());
 
         let form = ElicitationRequest::from_acp_params("label-injection", serde_json::json!({
             "mode": "form",
@@ -2861,6 +2892,7 @@ mod open_request_tests {
             action: "accept".into(),
             reply: Some(form.reply_text(&response)),
             answers: Some(form.trusted_answers(&response)),
+            permission_decision: None,
         };
         apply(
             &mut snapshot,
@@ -2963,6 +2995,7 @@ mod open_request_tests {
                     action: "accept".into(),
                     reply,
                     answers: None,
+                    permission_decision: None,
                 },
             };
             event.digest = relay_event_digest(&event).unwrap();

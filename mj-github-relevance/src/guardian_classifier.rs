@@ -3,7 +3,7 @@ use crate::github_student::{Notice, PreparationFailure, assets, runtime};
 use anyhow::{Context, Result, anyhow, ensure};
 use mj_core::guardian::{
     GuardianReviewRequest, WOLF_STAGE1_MAX_CASE_TOKENS, WOLF_STAGE1_OPTIONS, WOLF_STAGE1_QUESTION,
-    wolf_action_exceeds_stage1_limit, wolf_scene_packet,
+    WolfStage1SkipReason, wolf_scene_packet, wolf_stage1_skip_reason,
 };
 use ort::{environment::Environment, session::Session, value::Tensor};
 use serde::Deserialize;
@@ -31,7 +31,7 @@ pub enum GuardianStage1Result {
         tokens: usize,
         elapsed_ms: u64,
     },
-    EscalatedActionTooLong,
+    Escalated(WolfStage1SkipReason),
     Overflow {
         tokens: usize,
     },
@@ -132,8 +132,8 @@ impl GuardianClassifier {
     pub async fn classify(&self, request: &GuardianReviewRequest) -> GuardianStage1Result {
         use GuardianStage1Result as Verdict;
 
-        if wolf_action_exceeds_stage1_limit(request) {
-            return Verdict::EscalatedActionTooLong;
+        if let Some(reason) = wolf_stage1_skip_reason(request) {
+            return Verdict::Escalated(reason);
         }
         let (permit, engine) = match admit_inference(
             &self.inner.machine,
@@ -639,10 +639,14 @@ mod tests {
         let verdict = classifier
             .classify(&request(&"α".repeat(WOLF_STAGE1_MAX_ACTION_CHARS + 1)))
             .await;
-        assert_eq!(verdict, GuardianStage1Result::EscalatedActionTooLong);
-        assert!(!wolf_action_exceeds_stage1_limit(&request(
-            &"α".repeat(WOLF_STAGE1_MAX_ACTION_CHARS)
-        )));
+        assert_eq!(
+            verdict,
+            GuardianStage1Result::Escalated(WolfStage1SkipReason::ActionTooLong)
+        );
+        assert_eq!(
+            wolf_stage1_skip_reason(&request(&"α".repeat(WOLF_STAGE1_MAX_ACTION_CHARS))),
+            None
+        );
         let mut truncated = request("git status");
         truncated.action = serde_json::json!({
             "tool": "Edit",
@@ -650,7 +654,57 @@ mod tests {
         });
         assert_eq!(
             classifier.classify(&truncated).await,
-            GuardianStage1Result::EscalatedActionTooLong
+            GuardianStage1Result::Escalated(WolfStage1SkipReason::TruncatedPatch)
+        );
+        assert!(matches!(
+            classifier.inner.machine.lock().unwrap().state,
+            State::Dormant
+        ));
+        classifier.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guardian_alignment_gates_leave_classifier_dormant() {
+        use WolfStage1SkipReason::*;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let classifier = GuardianClassifier::new(dir.path().into(), false);
+        let mut request = request("git status");
+        for (field, value, reason) in [
+            (
+                "retry_reason",
+                json!("User update arrived"),
+                RetryAfterUserUpdate,
+            ),
+            (
+                "trusted_user_inputs",
+                json!([{
+                    "id": "form", "kind": "manual_permission", "prompt": "Proceed?",
+                    "action": "permission_reject",
+                }]),
+                ManualPermissionRejected,
+            ),
+            (
+                "prior_reviews",
+                json!([{
+                    "tool": "shell", "action_summary": "make deploy", "outcome": "deny",
+                }]),
+                RecentPriorDeny,
+            ),
+        ] {
+            let mut wire = serde_json::to_value(&request).unwrap();
+            wire[field] = value;
+            let gated = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                classifier.classify(&gated).await,
+                GuardianStage1Result::Escalated(reason)
+            );
+        }
+        request.action["tool_description"] = json!("Untrusted description");
+        assert_eq!(
+            classifier.classify(&request).await,
+            GuardianStage1Result::Escalated(UntrustedActionDescription)
         );
         assert!(matches!(
             classifier.inner.machine.lock().unwrap().state,

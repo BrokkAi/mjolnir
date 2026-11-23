@@ -1637,6 +1637,26 @@ async fn pinned_plan_permissions_wait_for_consent_and_select_exact_bridge_option
             let answer = probe.message().await;
             assert_eq!(answer["id"], action);
             assert_eq!(answer["result"]["outcome"]["optionId"], expected);
+            let permission_decision = loop {
+                if let RuntimeEvent::ElicitationResolved {
+                    elicitation_id,
+                    permission_decision,
+                    ..
+                } = probe.event().await
+                    && elicitation_id == request.id
+                {
+                    break permission_decision;
+                }
+            };
+            use mj_core::guardian::ManualPermissionDecision::{Allowed, Rejected};
+            assert_eq!(
+                permission_decision,
+                Some(if action == "implement" {
+                    Allowed
+                } else {
+                    Rejected
+                })
+            );
         }
         probe.close().await;
     }
@@ -1846,6 +1866,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
             action: "cancel".into(),
             reply: None,
             answers: None,
+            permission_decision: None,
         })
         .unwrap();
     assert_eq!(relay.operational_state().cancelling_prompt_id, None);
@@ -1862,6 +1883,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
             action: "cancel".into(),
             reply: None,
             answers: None,
+            permission_decision: None,
         })
         .unwrap();
     assert_eq!(

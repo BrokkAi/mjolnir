@@ -1260,12 +1260,14 @@ pub(crate) fn record_runtime_event_with_facts(
             action,
             reply,
             answers,
+            permission_decision,
         } => {
             relay.record_observation(RelayObservation::ElicitationResolved {
                 elicitation_id,
                 action,
                 reply,
                 answers,
+                permission_decision,
             })?;
         }
         RuntimeEvent::PromptFinished {

@@ -2584,6 +2584,7 @@ fn permission_cancellation_prevents_restart_continuation_before_prompt_settles()
                 action: action.into(),
                 reply: None,
                 answers: None,
+                permission_decision: None,
             })
             .unwrap();
         assert_eq!(

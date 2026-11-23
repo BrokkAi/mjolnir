@@ -598,6 +598,7 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
             action: "accept".into(),
             reply: Some("Only to staging.".into()),
             answers: None,
+            permission_decision: None,
         })
         .unwrap();
     endpoint.complete(GuardianReviewResult {
@@ -642,6 +643,25 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
 
 #[tokio::test]
 async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
+    use mj_core::guardian::TrustedUserDecision;
+
+    for (choice, label, decision) in [
+        ("reject", "Reject", TrustedUserDecision::PermissionRejected),
+        (
+            "approve",
+            "Approve once",
+            TrustedUserDecision::PermissionAllowed,
+        ),
+    ] {
+        guardian_alignment_form_answer_before_echo(choice, label, decision).await;
+    }
+}
+
+async fn guardian_alignment_form_answer_before_echo(
+    choice: &str,
+    label: &str,
+    decision: mj_core::guardian::TrustedUserDecision,
+) {
     use crate::relay::DurableRelay;
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{
@@ -690,7 +710,7 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
             response: ElicitationResponse::Accept {
                 content: BTreeMap::from([(
                     "choice".into(),
-                    ElicitationValue::String("approve".into()),
+                    ElicitationValue::String(choice.into()),
                 )]),
             },
             resolved,
@@ -704,17 +724,16 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
     let [answer] = second.trusted_user_inputs.as_slice() else {
         panic!("the next review must already have the human answer");
     };
-    assert_eq!(answer.action, "accept");
-    assert_eq!(
-        answer.answers[0].option_label.as_deref(),
-        Some("Approve once")
-    );
+    assert_eq!(answer.decision(), decision);
+    assert_eq!(context.trusted_user_inputs(), second.trusted_user_inputs);
+    assert_eq!(answer.answers[0].option_label.as_deref(), Some(label));
     let resolution = loop {
         if let RuntimeEvent::ElicitationResolved {
             elicitation_id,
             action,
             reply,
             answers,
+            permission_decision,
         } = next_event(&mut events).await
         {
             break RelayObservation::ElicitationResolved {
@@ -722,6 +741,7 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
                 action,
                 reply,
                 answers,
+                permission_decision,
             };
         }
     };
@@ -734,7 +754,11 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
             stage1_score: None,
         },
     });
-    await_recorded(temp.path(), "session_outcomes", 2).await;
+    let outcomes = await_recorded(temp.path(), "session_outcomes", 2).await;
+    assert_eq!(
+        outcomes[0]["outcome"],
+        json!({"outcome": "selected", "optionId": choice})
+    );
     assert!(endpoint.requests().is_empty());
     runtime.abort();
 }

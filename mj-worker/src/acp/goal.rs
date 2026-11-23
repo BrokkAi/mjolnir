@@ -302,6 +302,7 @@ pub(super) async fn prepare_control(
                     action: "cancel".into(),
                     reply: None,
                     answers: None,
+                    permission_decision: None,
                 },
             )
             .await?;
@@ -375,6 +376,7 @@ pub(super) async fn recover(
             action: "cancel".into(),
             reply: None,
             answers: None,
+            permission_decision: None,
         },
     )
     .await?;
@@ -530,6 +532,7 @@ pub(super) async fn resolve(
         &question.request,
         response.action_name(),
         Some(response),
+        None,
     )
     .await?;
     *pending = None;
