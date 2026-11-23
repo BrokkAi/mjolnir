@@ -49,6 +49,7 @@ pub mod profile_capabilities;
 pub mod project_catalog;
 pub mod project_memory;
 pub mod project_picker;
+pub mod recovery_gate;
 pub mod redact;
 pub mod refusal;
 pub mod relay;
