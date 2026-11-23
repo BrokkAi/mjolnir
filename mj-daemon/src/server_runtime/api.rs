@@ -268,6 +268,20 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    fn session_working_context(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_client::http::SessionWorkingContext>>> {
+        Box::pin(async { bail!("session_working_context probe is unavailable") })
+    }
+
+    fn session_git_status(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::local_git::SessionGitStatus>>> {
+        Box::pin(async { bail!("session_git_status probe is unavailable") })
+    }
+
     fn wiki_sync_request(&self) -> anyhow::Result<mj_client::daemon::WikiSyncStatus> {
         anyhow::bail!("SessionWiki sync is unavailable")
     }
@@ -309,7 +323,7 @@ pub trait ExportRuntime: Send + Sync {
     fn wiki_restore(
         self: Arc<Self>,
         _request: WikiRestoreRequest,
-    ) -> BoxFuture<'static, Result<Option<String>>> {
+    ) -> BoxFuture<'static, Result<Option<mj_client::daemon::RegisteredSession>>> {
         Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
     }
 
@@ -580,6 +594,47 @@ impl ExportRuntime for RuntimeState {
         Box::pin(RuntimeState::refresh_workspaces(self))
     }
 
+    fn session_working_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_client::http::SessionWorkingContext>>> {
+        let controller = self.with_controller(|controller| Controller {
+            config: controller.config.clone(),
+            state: controller.state.clone(),
+        });
+        Box::pin(blocking("session_working_context probe", move || {
+            if !controller.state.sessions.contains_key(&session_id) {
+                return Ok(None);
+            }
+            let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
+                Duration::from_secs(3),
+            );
+            let (cwd, branch) = controller.session_working_context(&session_id, &executor)?;
+            Ok(Some(mj_client::http::SessionWorkingContext { cwd, branch }))
+        }))
+    }
+
+    fn session_git_status(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::local_git::SessionGitStatus>>> {
+        let controller = self.with_controller(|controller| Controller {
+            config: controller.config.clone(),
+            state: controller.state.clone(),
+        });
+        Box::pin(blocking("session_git_status probe", move || {
+            if !controller.state.sessions.contains_key(&session_id) {
+                return Ok(None);
+            }
+            let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
+                Duration::from_secs(8),
+            );
+            controller
+                .session_git_status(&session_id, &executor)
+                .map(Some)
+        }))
+    }
+
     fn wiki_sync_request(&self) -> Result<mj_client::daemon::WikiSyncStatus> {
         let target = self.wiki().request_sync(false);
         let mut status = self.wiki().state();
@@ -626,14 +681,12 @@ impl ExportRuntime for RuntimeState {
     fn wiki_restore(
         self: Arc<Self>,
         request: WikiRestoreRequest,
-    ) -> BoxFuture<'static, Result<Option<String>>> {
+    ) -> BoxFuture<'static, Result<Option<mj_client::daemon::RegisteredSession>>> {
         Box::pin(async move {
             // The HTTP API has no request-scoped cancellation; the daemon's
             // shutdown drain cancels the queue's own token directly.
-            Ok(self
-                .restore_wiki_session(request, &tokio_util::sync::CancellationToken::new())
-                .await?
-                .map(|registered| registered.session.id))
+            self.restore_wiki_session(request, &tokio_util::sync::CancellationToken::new())
+                .await
         })
     }
 
@@ -4825,6 +4878,20 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn session_working_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_client::http::SessionWorkingContext>>> {
+        self.exports.session_working_context(session_id)
+    }
+
+    fn session_git_status(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::local_git::SessionGitStatus>>> {
+        self.exports.session_git_status(session_id)
+    }
+
     fn wiki_sync_request(&self) -> Result<mj_client::daemon::WikiSyncStatus> {
         self.exports.wiki_sync_request()
     }
@@ -4881,7 +4948,10 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move { runtime.wiki_session(wiki_id).await })
     }
 
-    fn wiki_restore(&self, request: WikiRestoreRequest) -> BoxFuture<'_, Result<Option<String>>> {
+    fn wiki_restore(
+        &self,
+        request: WikiRestoreRequest,
+    ) -> BoxFuture<'_, Result<Option<mj_client::daemon::RegisteredSession>>> {
         let runtime = Arc::clone(&self.exports);
         Box::pin(async move { runtime.wiki_restore(request).await })
     }

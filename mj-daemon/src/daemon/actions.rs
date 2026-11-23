@@ -34,7 +34,7 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
-        DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
+        DaemonAction::TranscribeAudio { .. } => {
             bail!("blob action outside connection transport")
         }
         DaemonAction::TranscriptionAvailable { preferred_profile } => {
@@ -579,49 +579,9 @@ pub(super) async fn handle_action(
             state.remove_project(bundle_id).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::WikiSyncRequest => {
-            let target = state.wiki().request_sync(false);
-            let mut status = state.wiki().state();
-            status.target = Some(target);
-            Ok(DaemonReply::WikiSyncStatus(status))
-        }
-        DaemonAction::WikiSyncWatch { epoch, after } => Ok(DaemonReply::WikiSyncStatus(
-            state.wiki().watch_after(epoch, after).await?,
-        )),
-        DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
-            state.wiki_search(query, limit).await?,
-        )),
         DaemonAction::SessionTextSearch { query } => Ok(DaemonReply::SessionTextMatches(
             state.session_text_search(query).await?,
         )),
-        DaemonAction::WikiBrief { wiki_id, max_chars } => {
-            let markdown = state
-                .wiki_brief(wiki_id.clone(), max_chars)
-                .await?
-                .with_context(|| format!("no indexed session {wiki_id}"))?;
-            Ok(DaemonReply::Text(markdown))
-        }
-        DaemonAction::WikiHits {
-            wiki_id,
-            query,
-            context_messages,
-            per_message_chars,
-        } => Ok(DaemonReply::WikiHits(
-            state
-                .wiki_hits(wiki_id, query, context_messages, per_message_chars)
-                .await?,
-        )),
-        DaemonAction::WikiSession { wiki_id } => Ok(DaemonReply::WikiSession(
-            state.wiki_session(wiki_id).await?.map(Box::new),
-        )),
-        DaemonAction::WikiRestore(request) => {
-            let wiki_id = request.wiki_id.clone();
-            let registered = state
-                .restore_wiki_session(request, cancellation)
-                .await?
-                .with_context(|| format!("no indexed session {wiki_id}"))?;
-            Ok(DaemonReply::RegisteredSession(Box::new(registered)))
-        }
         DaemonAction::ScanRecovery { all_instances } => {
             let scan = blocking(move || {
                 Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor, all_instances))
@@ -1058,27 +1018,6 @@ pub(super) async fn handle_action(
                 .await?,
             ))
         }
-        DaemonAction::StartTurnReview { session_id } => {
-            state
-                .review_host()
-                .start(&session_id)
-                .await
-                .map_err(|refusal| anyhow!("{refusal}"))?;
-            state.publish_revision();
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::ResolveTurnReview {
-            session_id,
-            resolution,
-        } => {
-            state
-                .review_host()
-                .resolve(&session_id, resolution)
-                .await
-                .map_err(|error| anyhow!("{error}"))?;
-            state.publish_revision();
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::SyncSession { session_id } => {
             state
                 .session_manager
@@ -1125,18 +1064,6 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::NativeAgentHistory(page))
         }
-        DaemonAction::StopBackgroundTask {
-            session_id,
-            background_task_id,
-        } => {
-            state
-                .session_manager
-                .session(session_id)
-                .await?
-                .stop_background_task(background_task_id)
-                .await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::StartSessionLifecycle(request) => {
             match state.start_session_lifecycle(request).await {
                 Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
@@ -1167,15 +1094,6 @@ pub(super) async fn handle_action(
                     },
                 )
                 .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::PreviewContainerUpgrade { session_id } => {
-            Ok(DaemonReply::ContainerUpgradePreview(
-                state.preview_container_upgrade(session_id).await?,
-            ))
-        }
-        DaemonAction::UpgradeContainer(request) => {
-            state.upgrade_container(request).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::RestartSession {
@@ -1274,10 +1192,6 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::CancelContainerUpgrade { session_id } => {
-            state.cancel_container_upgrade(&session_id).await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::CancelLifecycle { session_id } => {
             blocking({
                 let session_id = session_id.clone();
@@ -1336,9 +1250,6 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::InterruptAll { .. }) {
         return mj_controller::upgrade::activity("interrupt session work").map(Some);
     }
-    if matches!(action, DaemonAction::WikiSyncRequest) {
-        return mj_controller::upgrade::activity_unless_draining("wiki sync request").map(Some);
-    }
     if let DaemonAction::PreflightNewSession { request } = action
         && !request.remote_repairs.is_empty()
     {
@@ -1378,7 +1289,6 @@ pub(super) fn upgrade_request_activity(
             // handoff does not wait for it; the client asks again.
             | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::AdoptRecovery(_)
-            | DaemonAction::WikiSyncWatch { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::SetSessionContainerSettings { .. }
             | DaemonAction::Status

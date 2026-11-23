@@ -155,6 +155,11 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             "/sessions/{session_id}/suspend-preflight",
             get(suspend_preflight),
         )
+        .route(
+            "/sessions/{session_id}/working-context",
+            get(session_working_context),
+        )
+        .route("/sessions/{session_id}/git-status", get(session_git_status))
         .route("/sessions/{session_id}/restart", post(restart_agent))
         .route(
             "/sessions/{session_id}/container-upgrade",
@@ -258,18 +263,10 @@ pub(super) async fn require_api_auth(
                 .with_code(Some(DAEMON_HANDOFF_CODE)),
         );
     }
-    let bearer = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim);
-    if bearer.is_some_and(|token| {
-        !token.is_empty()
-            && (constant_time_eq(state.api_token.as_bytes(), token.as_bytes())
-                || (!state.loopback_token.is_empty()
-                    && constant_time_eq(state.loopback_token.as_bytes(), token.as_bytes())))
-    }) {
+    if loopback_authenticated(&state, request.headers())
+        || bearer_token(request.headers())
+            .is_some_and(|token| constant_time_eq(state.api_token.as_bytes(), token.as_bytes()))
+    {
         return Ok(next.run(request).await);
     }
     let cookie =
@@ -286,6 +283,25 @@ pub(super) async fn require_api_auth(
     let mut response = next.run(request).await;
     super::super::renew_viewer_response(&state, &cookie, &mut response)?;
     Ok(response)
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+pub(in crate::server) fn loopback_authenticated(
+    state: &ServerState,
+    headers: &axum::http::HeaderMap,
+) -> bool {
+    !state.loopback_token.is_empty()
+        && bearer_token(headers).is_some_and(|token| {
+            constant_time_eq(state.loopback_token.as_bytes(), token.as_bytes())
+        })
 }
 
 /// Stamp the contract version and forbid caching on every API response,

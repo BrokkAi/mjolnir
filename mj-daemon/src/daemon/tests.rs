@@ -15949,53 +15949,8 @@ async fn daemon_upload_exchange() {
             .await
             .is_err()
     );
-    assert!(
-        !mj_core::attachment::AttachmentStore::controller("upload-session")
-            .unwrap()
-            .root()
-            .exists()
-    );
-    // Exercise several transport fragments and the pipe-buffer boundary.
-    let mut bytes = vec![37; 192 * 1024];
-    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-    let reference =
-        mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 256, 256).unwrap();
     let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
     let mut output = String::from("interrupted upload: no blob remains\n");
-    for label in ["install 196608 bytes", "repeat content-addressed install"] {
-        let blob = client.upload(&mut bytes.as_slice()).await.unwrap();
-        let reply = client
-            .request(DaemonAction::InstallAttachment {
-                session_id: "upload-session".into(),
-                reference: reference.clone(),
-                blob,
-            })
-            .await
-            .unwrap();
-        output.push_str(&format!(
-            "{label}: {}\n",
-            serde_json::to_string(&reply).unwrap()
-        ));
-    }
-    assert_eq!(
-        mj_core::attachment::AttachmentStore::controller("upload-session")
-            .unwrap()
-            .read(&reference)
-            .unwrap(),
-        bytes
-    );
-    let mut corrupt = bytes;
-    corrupt[100] ^= 1;
-    let blob = client.upload(&mut corrupt.as_slice()).await.unwrap();
-    let error = client
-        .request(DaemonAction::InstallAttachment {
-            session_id: "upload-session".into(),
-            reference,
-            blob,
-        })
-        .await
-        .unwrap_err();
-    output.push_str(&format!("corrupt payload: {error}\n"));
     let error = client
         .request(DaemonAction::ImportSession {
             blob: "another-connections-blob".into(),
