@@ -326,7 +326,7 @@ func accountCurrent() (Account, error) {
 		account.shell = "/bin/sh"
 	}
 	// Let a subprocess fixture substitute a deliberately slow shell.
-	if core.TestHooksEnabled {
+	if core.TestHooksEnabled() {
 		if shell, ok := os.LookupEnv("MJ_TEST_ACCOUNT_SHELL"); ok {
 			account.shell = shell
 		}

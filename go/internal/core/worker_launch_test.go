@@ -91,6 +91,44 @@ func TestLegacyCPUWireAndLaunchDefaultToProcessTree(t *testing.T) {
 	}
 }
 
+func TestWorkerLaunchRenamedOrchestratorFieldsKeepTheStrictLegacyWireShape(t *testing.T) {
+	launch := workerLaunchMustDecode(t, workerLaunchJSON())
+	baseline := workerLaunchToValue(t, launch)
+	for _, flags := range [][2]bool{{true, false}, {false, true}} {
+		orchestrator, enabled := flags[0], flags[1]
+		launch.Orchestrator = orchestrator
+		launch.OrchestratorsEnabled = enabled
+		payload := workerLaunchToValue(t, launch)
+		fields := map[string]any{}
+		for key, value := range payload {
+			if previous, ok := baseline[key]; !ok || !reflect.DeepEqual(previous, value) {
+				fields[key] = value
+			}
+		}
+		// The only changed fields are the retained legacy names, with the
+		// strictness of #[serde(deny_unknown_fields)].
+		retained := map[string]bool{"supervisor": false, "supervisors_enabled": false}
+		for key, value := range fields {
+			if _, ok := retained[key]; !ok {
+				t.Fatalf("unexpected field %s", key)
+			}
+			flag, ok := value.(bool)
+			if !ok {
+				t.Fatalf("%s = %v", key, value)
+			}
+			retained[key] = flag
+		}
+		if retained["supervisor"] != orchestrator || retained["supervisors_enabled"] != enabled {
+			t.Fatalf("retained %v for (%v, %v)", retained, orchestrator, enabled)
+		}
+
+		decoded := workerLaunchMustDecode(t, payload)
+		if decoded.Orchestrator != orchestrator || decoded.OrchestratorsEnabled != enabled {
+			t.Fatalf("decoded (%v, %v), want (%v, %v)", decoded.Orchestrator, decoded.OrchestratorsEnabled, orchestrator, enabled)
+		}
+	}
+}
+
 // A launch file written before per-turn review was removed still names
 // `"turn"`. It must keep parsing, and reads as the push gate.
 func TestALaunchFileWrittenForTurnReviewStillParsesAsPush(t *testing.T) {
@@ -162,12 +200,9 @@ func TestPersistedReviewTriggerControlsPrimaryMCPWithoutLeakingToChildren(t *tes
 			}
 			launch.Subagents = SubagentPolicy{Mode: SubagentPolicyNone}
 			launch.Environment[SessionManagedSubagentEnv] = "1"
-			// A sub-agent is offered the review tools but never gated.
-			if launch.ReviewGate() {
-				t.Fatal("sub-agent gated")
-			}
-			if launch.ReviewTools() != expected {
-				t.Fatalf("%s %s: review tools %v", harness, trigger, launch.ReviewTools())
+			// Managed identity does not suppress an owning launch's gate.
+			if launch.ReviewGate() != expected {
+				t.Fatalf("%s %s: managed review gate %v", harness, trigger, launch.ReviewGate())
 			}
 			if role, ok := launch.SubagentMCPRole(); !ok || role != SubagentMcpRoleFetchOnly {
 				t.Fatalf("sub-agent role %q %v", role, ok)

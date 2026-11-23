@@ -5,8 +5,10 @@
 package core
 
 import (
+	"errors"
 	"log/slog"
 	"os"
+	"time"
 )
 
 // FileLock owns an already locked file. Explicit unlock releases the open
@@ -19,6 +21,24 @@ type FileLock struct {
 // NewFileLock transfers ownership immediately after successfully locking file.
 func NewFileLock(file *os.File) *FileLock {
 	return &FileLock{file: file}
+}
+
+// AcquireFileLockCancellable waits for an exclusive lock on file, checking
+// cancellation between attempts (Rust FileLock::acquire_cancellable).
+func AcquireFileLockCancellable(file *os.File, cancelled func() bool) (*FileLock, error) {
+	for {
+		if cancelled() {
+			return nil, errors.New("file lock wait cancelled")
+		}
+		locked, err := tryLockFile(file)
+		if err != nil {
+			return nil, err
+		}
+		if locked {
+			return NewFileLock(file), nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 // File inspects the locked file without duplicating ownership of its lock.

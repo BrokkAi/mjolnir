@@ -92,7 +92,7 @@ func spawnDetachedPlatform(command *exec.Cmd) (uint32, error) {
 	// closing it do not reach the child, and the console programs it runs
 	// open no window.
 	command.SysProcAttr.CreationFlags |= windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP
-	if err := command.Start(); err != nil {
+	if err := SpawnChild(command); err != nil {
 		return 0, fmt.Errorf("spawn detached child process: %w", err)
 	}
 	pid := uint32(command.Process.Pid)

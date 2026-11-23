@@ -10,12 +10,14 @@
 package core
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"unicode/utf8"
 )
@@ -87,7 +89,8 @@ const (
 )
 
 // PublishError is a sealed interface over PublishErrorNotARegularFile,
-// PublishErrorAlreadyExists and PublishErrorFailed.
+// PublishErrorAlreadyExists, PublishErrorLengthMismatch and
+// PublishErrorFailed.
 type PublishError interface {
 	error
 	isPublishError()
@@ -100,14 +103,25 @@ type PublishErrorNotARegularFile struct{}
 // PublishErrorAlreadyExists: PublishCreateNew found the name already taken.
 type PublishErrorAlreadyExists struct{}
 
+// PublishErrorLengthMismatch: streamed input did not match the declared
+// length.
+type PublishErrorLengthMismatch struct {
+	Expected uint64
+	Received uint64
+}
+
 type PublishErrorFailed struct{ Err error }
 
 func (PublishErrorNotARegularFile) isPublishError() {}
 func (PublishErrorAlreadyExists) isPublishError()   {}
+func (PublishErrorLengthMismatch) isPublishError()  {}
 func (PublishErrorFailed) isPublishError()          {}
 
 func (PublishErrorNotARegularFile) Error() string { return "destination is not a regular file" }
 func (PublishErrorAlreadyExists) Error() string   { return "file already exists" }
+func (e PublishErrorLengthMismatch) Error() string {
+	return fmt.Sprintf("incomplete file upload: expected %d bytes, received %d", e.Expected, e.Received)
+}
 
 // Error renders like anyhow's `{:#}`: the whole cause chain joined by ": ",
 // which wrapped Go errors already print.
@@ -307,82 +321,117 @@ func (d *ConfinedDir) ReadToString(name string) (*string, error) {
 // replaced file keeps its permissions. Refuses a `name` that is not a
 // regular file, such as a link, rather than replacing it.
 func (d *ConfinedDir) WriteAtomically(name string, body []byte, publish Publish) PublishError {
+	length := uint64(len(body))
+	_, err := d.WriteAtomicallyFromReader(name, bytes.NewReader(body), &length, publish)
+	return err
+}
+
+// WriteAtomicallyFromReader streams `reader` into a temporary file in this
+// directory in 64 KiB chunks and atomically publishes it as `name`. When
+// `expectedLen` is set, rejects both short reads and trailing extra bytes
+// before syncing or publishing, removing the temporary file on any error.
+func (d *ConfinedDir) WriteAtomicallyFromReader(name string, reader io.Reader, expectedLen *uint64, publish Publish) (uint64, PublishError) {
 	path := rustPathPush(d.path, name)
 	var existing *fs.FileMode
 	mode, err := lstatAt(d.dir, name)
 	switch {
 	case err == nil && !mode.IsRegular():
-		return PublishErrorNotARegularFile{}
+		return 0, PublishErrorNotARegularFile{}
 	case err == nil && publish == PublishCreateNew:
-		return PublishErrorAlreadyExists{}
+		return 0, PublishErrorAlreadyExists{}
 	case err == nil:
 		permissions := mode.Perm()
 		existing = &permissions
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return PublishErrorFailed{fmt.Errorf("inspect %s: %w", path, err)}
+		return 0, PublishErrorFailed{fmt.Errorf("inspect %s: %w", path, err)}
 	}
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err != nil {
-		return PublishErrorFailed{fmt.Errorf("generate temporary filename: %w", err)}
+		return 0, PublishErrorFailed{fmt.Errorf("generate temporary filename: %w", err)}
 	}
 	temporary := fmt.Sprintf(".%s.%d.%016x.tmp", name, os.Getpid(), binary.LittleEndian.Uint64(random[:]))
-	result := d.publish(name, temporary, path, body, publish, existing)
+	written, result := d.publish(name, temporary, path, reader, expectedLen, publish, existing)
 	if result != nil {
 		_ = removeAt(d.dir, temporary, false)
+		return 0, result
 	}
-	return result
+	return written, nil
 }
 
-func (d *ConfinedDir) publish(name, temporary, path string, body []byte, publish Publish, existing *fs.FileMode) PublishError {
+func (d *ConfinedDir) publish(name, temporary, path string, reader io.Reader, expectedLen *uint64, publish Publish, existing *fs.FileMode) (uint64, PublishError) {
 	file, err := createFileNoFollow(d.dir, temporary)
 	if err != nil {
-		return PublishErrorFailed{fmt.Errorf("create a temporary file for %s: %w", path, err)}
+		return 0, PublishErrorFailed{fmt.Errorf("create a temporary file for %s: %w", path, err)}
 	}
-	written := func() error {
+	var written uint64
+	failure := func() PublishError {
 		defer file.Close()
 		if existing != nil {
 			if err := file.Chmod(*existing); err != nil {
-				return fmt.Errorf("keep the permissions of %s: %w", path, err)
+				return PublishErrorFailed{fmt.Errorf("keep the permissions of %s: %w", path, err)}
 			}
 		} else if err := restrictNewFile(file); err != nil {
-			return fmt.Errorf("restrict %s: %w", path, err)
+			return PublishErrorFailed{fmt.Errorf("restrict %s: %w", path, err)}
 		}
-		if _, err := file.Write(body); err != nil {
-			return fmt.Errorf("write %s: %w", path, err)
+		buffer := make([]byte, 64*1024)
+		for {
+			count, err := reader.Read(buffer)
+			if count > 0 {
+				next := written + uint64(count)
+				if next < written {
+					next = math.MaxUint64
+				}
+				if expectedLen != nil && next > *expectedLen {
+					return PublishErrorLengthMismatch{Expected: *expectedLen, Received: next}
+				}
+				if _, err := file.Write(buffer[:count]); err != nil {
+					return PublishErrorFailed{fmt.Errorf("write %s: %w", path, err)}
+				}
+				written = next
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return PublishErrorFailed{fmt.Errorf("read input for %s: %w", path, err)}
+			}
+		}
+		if expectedLen != nil && written != *expectedLen {
+			return PublishErrorLengthMismatch{Expected: *expectedLen, Received: written}
 		}
 		if err := file.Sync(); err != nil {
-			return fmt.Errorf("sync %s: %w", path, err)
+			return PublishErrorFailed{fmt.Errorf("sync %s: %w", path, err)}
 		}
 		return nil
 	}()
-	if written != nil {
-		return PublishErrorFailed{written}
+	if failure != nil {
+		return 0, failure
 	}
 	switch publish {
 	case PublishReplace:
 		// A rename replaces whatever entry holds `name` at that moment, a
 		// link included, and never follows it.
 		if err := renameAt(d.dir, temporary, name); err != nil {
-			return PublishErrorFailed{fmt.Errorf("replace %s: %w", path, err)}
+			return 0, PublishErrorFailed{fmt.Errorf("replace %s: %w", path, err)}
 		}
 	case PublishCreateNew:
 		// A link fails when `name` exists, so a file that appeared since
 		// the check above is never replaced.
 		if err := linkAt(d.dir, temporary, name); err != nil {
 			if errors.Is(err, fs.ErrExist) {
-				return PublishErrorAlreadyExists{}
+				return 0, PublishErrorAlreadyExists{}
 			}
-			return PublishErrorFailed{fmt.Errorf("publish %s: %w", path, err)}
+			return 0, PublishErrorFailed{fmt.Errorf("publish %s: %w", path, err)}
 		}
 		if err := removeAt(d.dir, temporary, false); err != nil {
-			return PublishErrorFailed{fmt.Errorf("remove the temporary file for %s: %w", path, err)}
+			return 0, PublishErrorFailed{fmt.Errorf("remove the temporary file for %s: %w", path, err)}
 		}
 	}
 	if err := d.sync(); err != nil {
-		return PublishErrorFailed{err}
+		return 0, PublishErrorFailed{err}
 	}
-	return nil
+	return written, nil
 }
 
 // RemoveFile removes the file or link `name` in this directory; a link is

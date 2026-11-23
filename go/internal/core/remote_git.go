@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"unicode"
@@ -129,7 +130,7 @@ func ResolveRepository(repository *ProjectRepository, executor CommandExecutor) 
 	}
 	switch {
 	case repository.Github != nil && repository.Local == nil:
-		fetchURL, err := expandGithubSource(*repository.Github)
+		fetchURL, err := ExpandGithubSource(*repository.Github)
 		if err != nil {
 			return NetworkGitSource{}, err
 		}
@@ -212,19 +213,118 @@ func DefaultBranch(source *NetworkGitSource, executor CommandExecutor) (string, 
 // controller's filesystem or execute an unbounded helper, so they are
 // rejected here.
 func ValidateNetworkURL(url string) error {
+	_, _, err := networkURL(url, false)
+	return err
+}
+
+// ProjectSource parses a project source and removes HTTP userinfo before it
+// can be saved. It returns the accepted spelling verbatim except for its
+// HTTP credentials; stripped reports that credentials were removed (Rust's
+// Cow::Owned).
+func ProjectSource(source string, shorthand Shorthand) (accepted string, stripped bool, err error) {
+	source = strings.TrimSpace(source)
+	if remote := ParseGithubRemote(source, shorthand); remote != nil && remote.Spelling == GithubSpellingShorthand {
+		return source, false, nil
+	}
+	return networkURL(source, true)
+}
+
+// validateConfiguredProjectSource keeps loading all sources accepted by the
+// previous config validator.
+func validateConfiguredProjectSource(source string) error {
+	_, _, err := ProjectSource(source, ShorthandAllowed)
+	if err != nil && wasConfiguredGithubSource(source) {
+		return nil
+	}
+	return err
+}
+
+// wasConfiguredGithubSource: validation at checkout still rejects unusable
+// sources.
+func wasConfiguredGithubSource(source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" || strings.HasPrefix(source, "-") || strings.IndexFunc(source, unicode.IsSpace) >= 0 {
+		return false
+	}
+	if ParseGithubRemote(source, ShorthandAllowed) != nil {
+		return true
+	}
+	repositoryPath := source
+	for _, prefix := range []string{"https://github.com/", "git@github.com:", "ssh://git@github.com/"} {
+		if rest, ok := strings.CutPrefix(source, prefix); ok {
+			repositoryPath = rest
+			break
+		}
+	}
+	for strings.HasSuffix(repositoryPath, ".git") {
+		repositoryPath = strings.TrimSuffix(repositoryPath, ".git")
+	}
+	parts := strings.Split(repositoryPath, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
+
+// SSHLogin is the SSH login in an accepted Git URL. An empty login uses SSH
+// configuration. false when the source names no SSH login at all.
+func SSHLogin(source string) (string, bool) {
+	if strings.Contains(source, "://") {
+		parsed, ok := parseRustURL(source)
+		if !ok || parsed.scheme != "ssh" {
+			return "", false
+		}
+		return parsed.username, true
+	}
+	authority, _, found := strings.Cut(source, ":")
+	if !found {
+		return "", false
+	}
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		return authority[:at], true
+	}
+	return "", true
+}
+
+// ProjectSourceName is a label derived from the repository path,
+// independent of HTTP query data.
+func ProjectSourceName(source string) (string, bool) {
+	if remote := ParseGithubRemote(source, ShorthandAllowed); remote != nil {
+		return remote.Repository, true
+	}
+	path := source
+	if strings.Contains(source, "://") {
+		if parsed, ok := parseRustURL(source); ok {
+			path = parsed.path
+		}
+	}
+	path = strings.TrimRight(path, "/")
+	for strings.HasSuffix(path, ".git") {
+		path = strings.TrimSuffix(path, ".git")
+	}
+	name := path[strings.LastIndexAny(path, "/:")+1:]
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+const HTTPUserinfoRemoved = "Removed credentials from the HTTP Git URL. Configure Git credentials on the target."
+
+// networkURL validates a network Git URL. With stripHTTPUserinfo it removes
+// the userinfo of an HTTP(S) URL, keeping the rest exactly as entered;
+// stripped reports that it did (Rust's Cow::Owned).
+func networkURL(url string, stripHTTPUserinfo bool) (accepted string, stripped bool, err error) {
 	value := strings.TrimSpace(url)
 	if value == "" {
-		return errors.New("Git URL is empty")
+		return "", false, errors.New("Git URL is empty")
 	}
 	if value != url || strings.HasPrefix(value, "-") || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
-		return fmt.Errorf("Git URL %s contains invalid whitespace or option syntax", DisplayURL(value))
+		return "", false, fmt.Errorf("Git URL %s contains invalid whitespace or option syntax", DisplayURL(value))
 	}
 	if LooksLikePath(value) {
-		return fmt.Errorf("Git URL %s is a local repository path", DisplayURL(value))
+		return "", false, fmt.Errorf("Git URL %s is a local repository path", DisplayURL(value))
 	}
 	for _, prefix := range []string{"ext::", "helper::", "local::", "fd::"} {
 		if strings.HasPrefix(value, prefix) {
-			return fmt.Errorf("Git URL %s uses a local or helper transport", DisplayURL(value))
+			return "", false, fmt.Errorf("Git URL %s uses a local or helper transport", DisplayURL(value))
 		}
 	}
 
@@ -232,7 +332,7 @@ func ValidateNetworkURL(url string) error {
 		if scheme, _, found := strings.Cut(value, ":"); found {
 			switch asciiLowercase(scheme) {
 			case "file", "ext", "helper", "local", "fd", "http", "https", "ssh", "git":
-				return fmt.Errorf("Git URL %s uses an unsupported non-network or malformed URL transport", DisplayURL(value))
+				return "", false, fmt.Errorf("Git URL %s uses an unsupported non-network or malformed URL transport", DisplayURL(value))
 			}
 		}
 	}
@@ -240,15 +340,31 @@ func ValidateNetworkURL(url string) error {
 	if strings.Contains(value, "://") {
 		parsed, err := parseRustURLWithError(value)
 		if err != nil {
-			return fmt.Errorf("parse Git URL %s: %w", DisplayURL(value), err)
+			return "", false, fmt.Errorf("parse Git URL %s: %w", DisplayURL(value), err)
 		}
-		switch parsed.scheme {
+		scheme := parsed.scheme
+		switch scheme {
 		case "http", "https", "ssh", "git":
-			if parsed.hasHost {
-				return nil
+		default:
+			return "", false, fmt.Errorf("Git URL %s does not use a supported network transport", DisplayURL(value))
+		}
+		if !parsed.hasHost {
+			return "", false, fmt.Errorf("Git URL %s does not use a supported network transport", DisplayURL(value))
+		}
+		if stripHTTPUserinfo && (scheme == "http" || scheme == "https") {
+			// Keep the path, query, fragment and escape spelling exactly as
+			// entered. The parsed URL establishes its transport and host.
+			_, endpoint, _ := strings.Cut(value, "://")
+			authority := strings.TrimLeft(endpoint, `/\`)
+			start := len(value) - len(authority)
+			if end := strings.IndexAny(authority, `/?#\`); end >= 0 {
+				authority = authority[:end]
+			}
+			if at := strings.LastIndex(authority, "@"); at >= 0 {
+				return value[:start] + value[start+at+1:], true, nil
 			}
 		}
-		return fmt.Errorf("Git URL %s does not use a supported network transport", DisplayURL(value))
+		return value, false, nil
 	}
 
 	// The remaining network spelling Git accepts is scp-like SSH, for
@@ -256,19 +372,69 @@ func ValidateNetworkURL(url string) error {
 	// is a local path and is rejected.
 	host, remotePath, found := strings.Cut(value, ":")
 	if !found {
-		return fmt.Errorf("Git URL %s is a local repository path", DisplayURL(value))
+		return "", false, fmt.Errorf("Git URL %s is a local repository path", DisplayURL(value))
 	}
 	if host == "" || remotePath == "" || strings.HasPrefix(host, ".") || strings.Contains(host, "/") ||
 		strings.Contains(host, `\`) || (strings.Contains(host, "@") && strings.HasSuffix(host, "@")) {
-		return fmt.Errorf("Git URL %s is not a valid scp-style SSH endpoint", DisplayURL(value))
+		return "", false, fmt.Errorf("Git URL %s is not a valid scp-style SSH endpoint", DisplayURL(value))
 	}
 	if at := strings.LastIndex(host, "@"); at >= 0 && (host[:at] == "" || host[at+1:] == "") {
-		return fmt.Errorf("Git URL %s is not a valid scp-style SSH endpoint", DisplayURL(value))
+		return "", false, fmt.Errorf("Git URL %s is not a valid scp-style SSH endpoint", DisplayURL(value))
 	}
 	if strings.HasPrefix(remotePath, ":") {
-		return fmt.Errorf("Git URL %s uses an unsupported helper transport", DisplayURL(value))
+		return "", false, fmt.Errorf("Git URL %s uses an unsupported helper transport", DisplayURL(value))
 	}
-	return nil
+	return value, false, nil
+}
+
+// IsHostOnlyGitSource reports whether a Git source names the host's
+// filesystem or loopback network. Bundle validation rejects local paths and
+// file URLs before checkout.
+func IsHostOnlyGitSource(source string) bool {
+	source = strings.TrimSpace(source)
+	if LooksLikePath(source) {
+		return true
+	}
+	if strings.Contains(source, "://") || (len(source) >= 5 && asciiEqualFold(source[:5], "file:")) {
+		parsed, ok := parseRustURL(source)
+		return ok && (parsed.scheme == "file" || (parsed.hasHost && isLoopbackGitHost(parsed.host)))
+	}
+	authority, _, found := strings.Cut(source, ":")
+	if !found {
+		return true // Git interprets a bare name as a relative filesystem path.
+	}
+	if strings.ContainsAny(authority, `/\`) {
+		return true
+	}
+	host := authority[strings.LastIndex(authority, "@")+1:]
+	if strings.HasPrefix(host, "[") {
+		// Git recognizes the colon after a bracketed IPv6 host as the path separator.
+		endpoint := source[len(authority)-len(host):]
+		bracketed, _, found := strings.Cut(endpoint, "]:")
+		return found && isLoopbackGitHost(bracketed)
+	}
+	return isLoopbackGitHost(host)
+}
+
+func isLoopbackGitHost(host string) bool {
+	host = strings.TrimRight(strings.TrimLeft(host, "["), "]")
+	if asciiEqualFold(strings.TrimRight(host, "."), "localhost") {
+		return true
+	}
+	// Rust's IpAddr parser: no zones; an IPv6 address is loopback only as ::1.
+	address, err := netip.ParseAddr(host)
+	if err != nil || address.Zone() != "" {
+		return false
+	}
+	if address.Is6() {
+		return address == netip.IPv6Loopback()
+	}
+	return address.IsLoopback()
+}
+
+// asciiEqualFold is Rust's `str::eq_ignore_ascii_case`.
+func asciiEqualFold(left, right string) bool {
+	return len(left) == len(right) && asciiLowercase(left) == asciiLowercase(right)
 }
 
 // DisplayURL returns a URL suitable for diagnostics or persistence in
@@ -300,7 +466,7 @@ func DisplayURL(url string) string {
 	return url
 }
 
-func expandGithubSource(source string) (string, error) {
+func ExpandGithubSource(source string) (string, error) {
 	source = strings.TrimSpace(source)
 	shorthand := !strings.Contains(source, "://") && !strings.Contains(source, "@") &&
 		!strings.Contains(source, ":") && strings.Contains(source, "/")
@@ -316,6 +482,46 @@ func expandGithubSource(source string) (string, error) {
 		return "", fmt.Errorf("invalid configured GitHub source %s: %w", DisplayURL(expanded), err)
 	}
 	return expanded, nil
+}
+
+// CanonicalGithubHTTPSURL is `https://github.com/{owner}/{repository}.git`
+// for a remote on GitHub's default endpoint.
+func CanonicalGithubHTTPSURL(source string, shorthand Shorthand) (string, bool) {
+	remote := ParseGithubRemote(source, shorthand)
+	if remote == nil || !remote.IsDefaultEndpoint() {
+		return "", false
+	}
+	return fmt.Sprintf("https://github.com/%s/%s.git", remote.Owner, remote.Repository), true
+}
+
+// DisplayNetworkURL returns a sanitized, normalized URL for user-facing
+// clone/push previews.
+//
+// Default-endpoint GitHub remotes are shown as
+// `https://github.com/{owner}/{repository}.git` (stripping any userinfo and
+// unifying SSH/HTTPS/suffix spellings) without altering operational URLs
+// passed to Git. Other remotes use DisplayURL.
+func DisplayNetworkURL(url string) string {
+	sanitized := DisplayURL(strings.TrimSpace(url))
+	if canonical, ok := CanonicalGithubHTTPSURL(sanitized, ShorthandRejected); ok {
+		return canonical
+	}
+	return sanitized
+}
+
+// DisplayNetworkURLs sanitizes, normalizes, and deduplicates a list of
+// user-facing remote URLs while preserving first-seen order.
+func DisplayNetworkURLs(urls []string) []string {
+	seen := map[string]bool{}
+	displayed := []string{}
+	for _, url := range urls {
+		url = DisplayNetworkURL(url)
+		if !seen[url] {
+			seen[url] = true
+			displayed = append(displayed, url)
+		}
+	}
+	return displayed
 }
 
 // Shorthand is whether ParseGithubRemote accepts a bare `owner/repository`.

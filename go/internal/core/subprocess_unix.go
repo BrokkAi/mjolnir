@@ -186,7 +186,7 @@ func spawnDetachedPlatform(command *exec.Cmd) (uint32, error) {
 	// The intermediate leads a group of its own, so it never signals the
 	// caller's group.
 	intermediate.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	spawned := intermediate.Start()
+	spawned := SpawnChild(intermediate)
 	// Close this process's ends, so the read below sees EOF instead of
 	// blocking if the intermediate died without reporting.
 	_ = reportWrite.Close()

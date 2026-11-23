@@ -1251,10 +1251,11 @@ var ReviewMCPTools = []string{"request_review", "override_review", "set_baseline
 type SubagentMcpRole string
 
 const (
-	SubagentMcpRoleParent      SubagentMcpRole = "parent"
-	SubagentMcpRoleMessageOnly SubagentMcpRole = "message_only"
-	SubagentMcpRoleFetchOnly   SubagentMcpRole = "fetch_only"
-	SubagentMcpRoleChild       SubagentMcpRole = "child"
+	SubagentMcpRoleParent       SubagentMcpRole = "parent"
+	SubagentMcpRoleOrchestrator SubagentMcpRole = "orchestrator"
+	SubagentMcpRoleMessageOnly  SubagentMcpRole = "message_only"
+	SubagentMcpRoleFetchOnly    SubagentMcpRole = "fetch_only"
+	SubagentMcpRoleChild        SubagentMcpRole = "child"
 )
 
 // UnmarshalJSON also accepts the alias fixed_parent.

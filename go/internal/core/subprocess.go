@@ -45,6 +45,11 @@ import (
 // cancellation token (Rust's task-local CANCELLATION).
 type preparationCancellationKey struct{}
 
+// SpawnChild starts command. On Linux, in a worker that reaps adopted
+// children, it registers the child so the reaper leaves its wait to its
+// owner (Rust's spawn_child and spawn_async_child).
+func SpawnChild(command *exec.Cmd) error { return spawnChild(command) }
+
 // WithPreparationCancellation gives all preparation commands run under the
 // returned context the same owner: token. Blocking work receives
 // PreparationCancellation(ctx) explicitly before being spawned. The caller
@@ -151,7 +156,7 @@ func SupervisedChildSpawn(command *exec.Cmd) (*SupervisedChild, error) {
 	}
 	command.Stderr = writer
 	prepareOwnedGroup(command)
-	err = command.Start()
+	err = SpawnChild(command)
 	_ = writer.Close()
 	if err != nil {
 		_ = reader.Close()
@@ -432,7 +437,7 @@ func Capture(ctx context.Context, command *exec.Cmd) (ProcessOutput, error) {
 	command.Stdin = nil
 	command.Stdout, command.Stderr = &stdout, &stderr
 	prepareOwnedGroup(command)
-	if err := command.Start(); err != nil {
+	if err := SpawnChild(command); err != nil {
 		return ProcessOutput{}, fmt.Errorf("start captured subprocess: %w", err)
 	}
 	job, err := childJobAttach(command.Process)
@@ -466,7 +471,7 @@ func RunToFileAsync(ctx context.Context, command *exec.Cmd, output *os.File) (*o
 	command.Stdin = nil
 	command.Stdout, command.Stderr = output, output
 	prepareOwnedGroup(command)
-	if err := command.Start(); err != nil {
+	if err := SpawnChild(command); err != nil {
 		return nil, fmt.Errorf("start logged subprocess: %w", err)
 	}
 	job, err := childJobAttach(command.Process)
@@ -518,7 +523,7 @@ func RunBoundedObserved(ctx context.Context, command *exec.Cmd, maxBytes int, ti
 		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
 	}
 	prepareOwnedGroup(command)
-	err = command.Start()
+	err = SpawnChild(command)
 	pipes.closeWriteEnds()
 	defer pipes.closeReadEnds()
 	if err != nil {
@@ -625,7 +630,7 @@ func RunBoundedWithInput(ctx context.Context, command *exec.Cmd, input []byte, m
 		return ProcessOutput{}, fmt.Errorf("start bounded subprocess: %w", err)
 	}
 	prepareOwnedGroup(command)
-	err = command.Start()
+	err = SpawnChild(command)
 	_ = stdinRead.Close()
 	pipes.closeWriteEnds()
 	defer pipes.closeReadEnds()
@@ -734,6 +739,19 @@ func RaiseOpenFileLimit() {
 // real exit status and stderr are more useful to the caller than a generic
 // I/O error, so the output is still returned.
 func RunWithInput(command *exec.Cmd, input []byte) (ProcessOutput, error) {
+	return runWithInputStdio(command, input, nil)
+}
+
+// RunWithInputToFile runs a child with stdin fed concurrently with stderr
+// draining, writing stdout directly to output without buffering it in
+// memory. A broken pipe on stdin is handled the same way as RunWithInput.
+func RunWithInputToFile(command *exec.Cmd, input []byte, output *os.File) (ProcessOutput, error) {
+	return runWithInputStdio(command, input, output)
+}
+
+// runWithInputStdio captures stdout when output is nil and sends it to
+// output otherwise.
+func runWithInputStdio(command *exec.Cmd, input []byte, output *os.File) (ProcessOutput, error) {
 	stdinRead, stdinWrite, err := os.Pipe()
 	if err != nil {
 		return ProcessOutput{}, fmt.Errorf("spawn child process: %w", err)
@@ -741,7 +759,10 @@ func RunWithInput(command *exec.Cmd, input []byte) (ProcessOutput, error) {
 	var stdout, stderr bytes.Buffer
 	command.Stdin = stdinRead
 	command.Stdout, command.Stderr = &stdout, &stderr
-	err = command.Start()
+	if output != nil {
+		command.Stdout = output
+	}
+	err = SpawnChild(command)
 	_ = stdinRead.Close()
 	if err != nil {
 		_ = stdinWrite.Close()
@@ -787,7 +808,7 @@ func RunCapturingStdoutCancellable(ctx context.Context, command *exec.Cmd) (Proc
 	if foreground != nil {
 		defer foreground.Close()
 	}
-	if err := command.Start(); err != nil {
+	if err := SpawnChild(command); err != nil {
 		return ProcessOutput{}, fmt.Errorf("spawn interactive command: %w", err)
 	}
 	job, err := childJobAttach(command.Process)
@@ -834,7 +855,7 @@ func RunCapturingStdoutCancellable(ctx context.Context, command *exec.Cmd) (Proc
 func RunCapturingStdout(command *exec.Cmd) (ProcessOutput, error) {
 	var stdout bytes.Buffer
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, &stdout, os.Stderr
-	if err := command.Start(); err != nil {
+	if err := SpawnChild(command); err != nil {
 		return ProcessOutput{}, fmt.Errorf("spawn child process: %w", err)
 	}
 	outcome := waitForExit(command)
@@ -866,10 +887,11 @@ func RunInteractive(command *exec.Cmd) (*os.ProcessState, error) {
 	return runForStatus(command, "run interactive child process")
 }
 
-// runForStatus is Rust's Command::status with context.
+// runForStatus is Rust's `spawn_child(command)?.wait().context(...)`: a
+// spawn failure is returned as it is.
 func runForStatus(command *exec.Cmd, context string) (*os.ProcessState, error) {
-	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("%s: %w", context, err)
+	if err := SpawnChild(command); err != nil {
+		return nil, err
 	}
 	outcome := waitForExit(command)
 	if outcome.err != nil {

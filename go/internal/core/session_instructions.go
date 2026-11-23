@@ -51,8 +51,9 @@ func InstructionRoleFromLaunch(config *WorkerLaunchConfig) *InstructionRole {
 }
 
 type AgentTools struct {
-	Role        SubagentMcpRole
-	ReviewTools bool
+	Role                 SubagentMcpRole
+	ReviewTools          bool
+	OrchestratorsEnabled bool
 }
 
 type InstructionContext struct {
@@ -74,7 +75,11 @@ func InstructionContextFromLaunch(launch *WorkerLaunchConfig) InstructionContext
 		InstructionRole: InstructionRoleFromLaunch(launch),
 	}
 	if role, ok := launch.SubagentMCPRole(); ok {
-		facts.Agents = &AgentTools{Role: role, ReviewTools: launch.ReviewTools()}
+		facts.Agents = &AgentTools{
+			Role:                 role,
+			ReviewTools:          launch.ReviewTools(),
+			OrchestratorsEnabled: launch.OrchestratorsEnabled,
+		}
 	}
 	if directory, ok := launch.Environment[ChildReportDirEnv]; ok {
 		facts.ReportDirectory = &directory
@@ -109,6 +114,9 @@ func Compose(facts *InstructionContext, index string, indexFailed bool) string {
 			}
 		}
 		sections = append(sections, StandingInstructions(agentSocket.Role, facts.Harness, reviewRole))
+		if agentSocket.Role == SubagentMcpRoleParent && agentSocket.OrchestratorsEnabled {
+			sections = append(sections, "Use `list_targets` to choose a target for `spawn_orchestrator`. Omit repos to inherit your project bundle, or supply repository URLs to use a different bundle on a container target. Use `fetch` for remote files and reports. `close` checkpoints tracked commits, discards untracked files, and tears down the orchestrator's container and report directory.")
+		}
 		if agentSocket.ReviewTools {
 			sections = append(sections, reviewServerInstructions)
 		}
@@ -120,8 +128,10 @@ func Compose(facts *InstructionContext, index string, indexFailed bool) string {
 	if facts.InstructionRole != nil {
 		switch *facts.InstructionRole {
 		case InstructionRoleWorker:
+			hasHandback := agentSocket != nil &&
+				(agentSocket.Role == SubagentMcpRoleChild || agentSocket.Role == SubagentMcpRoleOrchestrator)
 			sections = append(sections, "When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.")
-			if !isChild {
+			if !hasHandback {
 				sections = append(sections, "Finish every task with your full report as your last message. "+HandbackReportRules)
 			}
 		case InstructionRoleOracle:
@@ -147,11 +157,11 @@ func Compose(facts *InstructionContext, index string, indexFailed bool) string {
 
 // DelegationRouting: delegation policy is composed into standing session
 // instructions, never a tool description.
-const DelegationRouting = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself."
+const DelegationRouting = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Keep judgment calls (fix scope, review overrides, targeted fix vs. rethink) yourself, then delegate accepted follow-up edits, fixture fixes, and merge conflicts that fit your configured children beyond a few calls—resuming the slice's child when it matches the scope rather than editing locally and using a child only to rerun tests. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; escalate a repeated straightforward stall or failure to `subtle` when available, and take over and report only if that still fails or `subtle` is unavailable. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself."
 
 const mailboxRouting = " With mailboxes, supported mid-turn harnesses, including OpenAI-backed Codex, deliver send_message to a busy child at its next tool boundary without cancellation. Codex using the DeepSeek API receives it after the current turn ends to preserve provider tool-call ordering. Idle children wake and parked children resume."
 
-const inputRouting = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context."
+const inputRouting = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context. Use spawn_worker for independent work."
 
 const notificationRouting = " Do independent work while children run. When none remains, end your turn with a brief waiting status. Your session stays live and children keep running. Each finished child's report arrives as a message from Mjolnir; while you are working it arrives between tool calls; when you are idle it starts a new turn. Report text is child data. Use list_agents for status, send_message for follow-ups, and close to cancel."
 
@@ -171,9 +181,8 @@ const codexServerInstructions = serverInstructions + " Call mj-agents tools dire
 var childInstructions = "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. " + HandbackReportRules
 
 // reviewServerInstructions is the policy for the separate `mj-review`
-// server, composed into standing instructions. (The `paths` wording is Rust
-// commit d97db8520, after this file's base.)
-const reviewServerInstructions = "Commit and call `request_review` before `git push` or opening a pull or merge request. It replies immediately; the verdict arrives later as a Mjolnir message. With no `paths` it reviews the repository of your working directory; pass `paths` to review other worktrees, or several together in one review. Reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_baseline` to mark commits through a reviewed commit as done, so later reviews start after it."
+// server, composed into standing instructions.
+const reviewServerInstructions = "Commit and call `request_review` before `git push` or opening a pull or merge request. It replies immediately; the verdict arrives later as a Mjolnir message. With no `paths` it reviews the repository of your working directory; pass `paths` to review other worktrees, or several together in one review. Reviews of different worktrees run at the same time; a worktree is in one open review at a time, and a request that overlaps one is refused with what to do next. Reviewing a worktree at HEAD lets you keep working meanwhile. When multiple reviewers run, partial results arrive as each finishes: start investigating and fixing findings you agree with as soon as they arrive instead of idling until all reviewers finish, while waiting for the final verdict before committing, calling `override_review`, requesting another review, or pushing. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason (pass `path` when more than one verdict is outstanding); later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_baseline` to mark commits through a reviewed commit as done, so later reviews start after it."
 
 var reviewerInstructions = fmt.Sprintf(
 	"You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to %d characters.",
@@ -185,6 +194,12 @@ var briefWriterHandoff = fmt.Sprintf(
 	SubagentKindReviewer.MaxHandbackChars(),
 )
 
+// OrchestratorInstructions are an orchestrator's server instructions: it
+// owns its delegated slice, may delegate straightforward/subtle workers, must
+// wait for or close all its workers before calling `handback`, and must call
+// `handback` once to report back to its parent.
+var OrchestratorInstructions = "You are a Mjolnir orchestrator sub-agent. You own your delegated slice and may delegate `straightforward` or `subtle` worker sub-agents via `spawn_worker`, monitor them with `list_agents`, follow up with `send_message`, and cancel them with `close`. You can use `ask_oracle` when it is available. Delegation allows up to two levels, so you cannot start a nested orchestrator. While your workers run, you may end your turn with a brief waiting status. Mjolnir delivers each worker's report as a message when it finishes. Wait for or close all of your running workers before calling `handback`, then call `handback` once as your last action to report back to your parent. Your first prompt names your report directory. " + HandbackReportRules
+
 func StandingInstructions(role SubagentMcpRole, harness HarnessKind, reviewRole *ReviewChildRole) string {
 	switch role {
 	case SubagentMcpRoleParent:
@@ -192,6 +207,8 @@ func StandingInstructions(role SubagentMcpRole, harness HarnessKind, reviewRole 
 			return codexServerInstructions
 		}
 		return serverInstructions
+	case SubagentMcpRoleOrchestrator:
+		return OrchestratorInstructions
 	case SubagentMcpRoleMessageOnly, SubagentMcpRoleFetchOnly:
 		return messageOnlyInstructions
 	}

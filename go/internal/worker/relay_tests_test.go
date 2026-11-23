@@ -5869,11 +5869,11 @@ func TestACodexSessionIsReplaceableAgainOnceTheRestartedAdapterReports(t *testin
 	}
 	facts := state.Facts()
 	reported := false
-	for _, reason := range core.ReplacementBlockers(&facts, core.HarnessKindCodex) {
+	for _, reason := range core.ReplacementBlockers(&facts, core.HarnessKindCodex, core.WorkerReplacementAutomaticUpgrade) {
 		reported = reported || strings.Contains(reason, "has not reported goal and execution state")
 	}
 	if !reported {
-		t.Fatalf("%v", core.ReplacementBlockers(&facts, core.HarnessKindCodex))
+		t.Fatalf("%v", core.ReplacementBlockers(&facts, core.HarnessKindCodex, core.WorkerReplacementAutomaticUpgrade))
 	}
 
 	configure()

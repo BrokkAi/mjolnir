@@ -120,19 +120,30 @@ func (d *TurnDiagnostic) enrich(data any) {
 	}
 }
 
+// IsTypedUsageLimitCode recognizes an explicit provider code for an
+// exhausted usage limit.
+func (d *TurnDiagnostic) IsTypedUsageLimitCode() bool {
+	if d.Code == nil {
+		return false
+	}
+	switch *d.Code {
+	case "usage_limit", "quota_exceeded", "provider.quota_exceeded",
+		// Codex's `codexErrorInfo` for an exhausted plan (J-25).
+		"usageLimitExceeded", "usage_limit_exceeded":
+		return true
+	}
+	return false
+}
+
 // IsUsageLimit reports an exhausted account quota. Only apply to trusted
 // provider failures, never arbitrary chat or tool text.
 func (d *TurnDiagnostic) IsUsageLimit() bool {
-	if d.Code != nil {
-		switch *d.Code {
-		case "usage_limit", "quota_exceeded", "provider.quota_exceeded",
-			// Codex's `codexErrorInfo` for an exhausted plan (J-25).
-			"usageLimitExceeded", "usage_limit_exceeded":
-			return true
-		case "limit":
-			// Typed non-account limits must never be reclassified from their prose.
-			return false
-		}
+	if d.IsTypedUsageLimitCode() {
+		return true
+	}
+	// Typed non-account limits must never be reclassified from their prose.
+	if d.Code != nil && *d.Code == "limit" {
+		return false
 	}
 	message := strings.ToLower(d.Message)
 	if !strings.Contains(message, "usage limit") && !strings.Contains(message, "usage-limit") &&

@@ -4,12 +4,35 @@ package core
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"strconv"
 	"testing"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 )
+
+func TestLatestJevHTTPResponseControlsRateLimitObservation(t *testing.T) {
+	check := func(want RateLimitKind, limited bool) {
+		t.Helper()
+		got, ok := CurrentRateLimit()
+		if ok != limited || got != want {
+			t.Fatalf("current rate limit = %q, %v; want %q, %v", got, ok, want, limited)
+		}
+	}
+	ObserveResponse(http.StatusTooManyRequests, nil, []byte(`{"error":"rate_limited"}`))
+	check(RateLimitKindSharedProxy, true)
+	ObserveResponse(http.StatusTooManyRequests, nil, nil)
+	check(RateLimitKindFastino, true)
+	ObserveResponse(http.StatusServiceUnavailable, nil, nil)
+	check(RateLimitKindFastino, true)
+	epoch := "Thu, 01 Jan 1970 00:00:00 GMT"
+	ObserveResponse(http.StatusTooManyRequests, &epoch, nil)
+	check("", false)
+	ObserveResponse(http.StatusTooManyRequests, nil, nil)
+	ObserveResponse(http.StatusNoContent, nil, nil)
+	check("", false)
+}
 
 func TestExactInputAndFinalActionAreCorrelatedWithoutExposingInputsInLists(t *testing.T) {
 	dir := t.TempDir()
