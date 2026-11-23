@@ -94,7 +94,7 @@ pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<Hi
             stable_id: item.stable_id.clone(),
             position: item.position,
             role: mj_core::transcript::transcript_item_role(&item.body),
-            tool_detail_trimmed: item.body.detail_trimmed(),
+            tool_detail_trimmed: item.body.has_trimmed_detail(),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
                     event.message_text().expect("message entry metadata"),
@@ -287,7 +287,7 @@ pub fn materialized_chat_entries_reusing(
             if entry_matches_transcript_item(&entry, item) {
                 entry.seq = item_update_ordinal(item, session.applied_event_ordinal);
                 entry.stable_id = Some(item.stable_id.clone());
-                entry.tool_detail_trimmed = item.body.detail_trimmed();
+                entry.tool_detail_trimmed = item.body.has_trimmed_detail();
                 entry.source = TranscriptSource(Some(item.clone()));
                 return entry;
             }
@@ -599,7 +599,11 @@ pub fn materialized_chat_entry_with_outputs(
                 Some(error) => format!("{error}\n{detail}"),
                 None => detail,
             };
-            let mut entry = ChatEntry::plain(item.position, ChatRole::System, text);
+            let mut entry = ChatEntry::plain(
+                item.position,
+                ChatRole::System,
+                sanitize_terminal_text(&text),
+            );
             // Output no tool call refers to is a whole block per command. A
             // command that ended cleanly says nothing the decluttered feed
             // needs, so only the raw transcript carries it; anything abnormal
@@ -650,7 +654,7 @@ pub fn materialized_chat_entry_with_outputs(
         entry.message_id = Some(item.stable_id.clone());
     }
     entry.stable_id = Some(item.stable_id.clone());
-    entry.tool_detail_trimmed = item.body.detail_trimmed();
+    entry.tool_detail_trimmed = item.body.has_trimmed_detail();
     entry.source = TranscriptSource(Some(item.clone()));
     entry
 }
@@ -1572,6 +1576,32 @@ mod tests {
             last_changed_at_ms: 1,
             body,
         })
+    }
+
+    #[test]
+    fn standalone_terminal_output_sanitizes_ansi_and_osc_in_error_and_output() {
+        let mut session = MaterializedSession::empty("terminal-controls");
+        session.applied_event_ordinal = 1;
+        session.transcript.push(item(
+            1,
+            TranscriptBody::TerminalOutput {
+                record: TerminalOutputRecord {
+                    terminal_id: "terminal-controls".into(),
+                    output: "\x1b[33mcompiler output\x1b[0m\x1b]0;output title\x1b\\".into(),
+                    truncated: false,
+                    exit_code: Some(101),
+                    signal: None,
+                },
+                output_line_count: Some(1),
+                first_error_line: Some("\x1b]0;error title\x07\x1b[31mcompile error\x1b[0m".into()),
+                detail_trimmed: false,
+            },
+        ));
+        let entries = materialized_chat_entries(&session);
+        assert_eq!(
+            entries[0].text,
+            "compile error\ncompiler output\nexited 101"
+        );
     }
 
     #[test]

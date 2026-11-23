@@ -211,6 +211,16 @@ enum HydratedToolDetail {
     Unavailable(String),
 }
 
+pub(super) type ToolDetailRevision = (i64, Option<u64>);
+
+pub(super) fn entry_tool_detail_revision(entry: &ChatEntry) -> Option<ToolDetailRevision> {
+    entry
+        .source
+        .0
+        .as_ref()
+        .map(|item| (item.last_changed_at_ms, item.latest_content_event_ordinal))
+}
+
 #[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
     theme: theme::UiTheme,
@@ -225,7 +235,7 @@ pub(super) struct TranscriptRenderCache {
     collapse_input_fingerprint: u64,
     expanded_mailbox_events: BTreeSet<MailboxDisclosureId>,
     // The active conversation owns these bodies and drops them on a session switch.
-    hydrated_tool_details: BTreeMap<String, HydratedToolDetail>,
+    hydrated_tool_details: BTreeMap<String, (ToolDetailRevision, HydratedToolDetail)>,
 }
 
 /// A frame-local target for toggling a tool or mailbox event. The
@@ -713,7 +723,11 @@ impl TranscriptRenderCache {
         if !entry.tool_detail_trimmed {
             return None;
         }
-        self.hydrated_tool_details.get(entry.stable_id.as_deref()?)
+        let revision = entry_tool_detail_revision(entry)?;
+        let (cached_revision, state) = self
+            .hydrated_tool_details
+            .get(entry.stable_id.as_deref()?)?;
+        (*cached_revision == revision).then_some(state)
     }
 
     fn detail_entry<'a>(&'a self, entry: &'a ChatEntry, collapse: EntryCollapse) -> &'a ChatEntry {
@@ -748,10 +762,12 @@ impl ChatState {
 
     fn queue_tool_detail(&mut self, index: usize, retry: bool) {
         let entry = &self.entries[index];
-        if !entry.tool_detail_trimmed || entry.source.0.is_none() {
+        if !entry.tool_detail_trimmed {
             return;
         }
-        let Some(stable_id) = &entry.stable_id else {
+        let (Some(stable_id), Some(revision)) =
+            (&entry.stable_id, entry_tool_detail_revision(entry))
+        else {
             return;
         };
         if self
@@ -763,39 +779,55 @@ impl ChatState {
         }
         self.render_cache
             .hydrated_tool_details
-            .insert(stable_id.clone(), HydratedToolDetail::Loading);
+            .insert(stable_id.clone(), (revision, HydratedToolDetail::Loading));
         self.pending_tool_detail_requests.push(entry.clone());
         self.invalidate_tool_detail_rows(index);
+    }
+
+    pub(super) fn refresh_expanded_tool_details(&mut self) {
+        if self.expanded_tool_calls.is_empty() {
+            return;
+        }
+        for index in 0..self.entries.len() {
+            if self
+                .expanded_tool_calls
+                .contains(&self.entries[index].start_seq)
+            {
+                self.queue_tool_detail(index, false);
+            }
+        }
     }
 
     pub(super) fn apply_tool_detail(
         &mut self,
         generation: u64,
         stable_id: String,
+        revision: ToolDetailRevision,
         result: Result<Box<ChatEntry>, String>,
     ) {
-        if generation != self.tool_detail_generation
-            || !matches!(
-                self.render_cache.hydrated_tool_details.get(&stable_id),
-                Some(HydratedToolDetail::Loading)
-            )
-        {
+        if generation != self.tool_detail_generation {
+            return;
+        }
+        let Some(index) = self.entries.iter().position(|entry| {
+            entry.stable_id.as_deref() == Some(&stable_id)
+                && entry_tool_detail_revision(entry) == Some(revision)
+        }) else {
+            return;
+        };
+        if !matches!(
+            self.render_cache.tool_detail(&self.entries[index]),
+            Some(HydratedToolDetail::Loading)
+        ) {
             return;
         }
         let state = match result {
             Ok(full) => HydratedToolDetail::Full(full),
             Err(reason) => HydratedToolDetail::Unavailable(reason),
         };
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.stable_id.as_deref() == Some(&stable_id))
-        {
-            self.invalidate_tool_detail_rows(index);
-        }
+        self.invalidate_tool_detail_rows(index);
         self.render_cache
             .hydrated_tool_details
-            .insert(stable_id, state);
+            .insert(stable_id, (revision, state));
     }
 
     fn invalidate_tool_detail_rows(&mut self, index: usize) {

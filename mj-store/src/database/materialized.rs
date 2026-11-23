@@ -1259,7 +1259,9 @@ fn spill_tool_detail_batch(
                 continue;
             }
         };
-        if !mj_transcript::transcript::compact_transcript_body_for_retention(&mut body) {
+        if body.is_legacy_compacted_tool()
+            || !mj_transcript::transcript::compact_transcript_body_for_retention(&mut body)
+        {
             continue;
         }
         let compacted = serde_json::to_string(&body)
@@ -1342,7 +1344,7 @@ pub fn load_tool_call_detail_from(
                 reason: format!("{error:#}"),
             },
         },
-        (None, _) if !body.detail_trimmed() => ToolCallDetailResult::Full { body },
+        (None, _) if !body.has_trimmed_detail() => ToolCallDetailResult::Full { body },
         _ => ToolCallDetailResult::Unavailable {
             summary: Some(body),
             reason: "full tool detail is not stored locally".into(),

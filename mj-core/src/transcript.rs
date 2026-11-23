@@ -14,7 +14,8 @@ use crate::packed_text::PackedText;
 use std::sync::Arc;
 
 use agent_client_protocol::v1::schema::{
-    ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, ToolCallStatus, ToolKind,
+    ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, ToolCallContent,
+    ToolCallStatus, ToolKind,
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -233,6 +234,9 @@ struct ToolCallMetadata {
     terminal_ids: Vec<String>,
     fallback: bool,
     raw_result: Option<(u32, usize, [u8; 32])>,
+    has_raw_input: bool,
+    has_raw_output: bool,
+    has_dropped_patch: bool,
 }
 
 impl Serialize for OpaqueToolCall {
@@ -292,6 +296,15 @@ impl From<serde_json::Value> for OpaqueToolCall {
                 .as_ref()
                 .is_some_and(crate::acp::is_fallback_terminal_tool_call),
             raw_result,
+            has_raw_input: value.get("rawInput").is_some(),
+            has_raw_output: value.get("rawOutput").is_some(),
+            has_dropped_patch: decoded.as_ref().is_some_and(|call| {
+                call.content.iter().any(|content| {
+                    matches!(content, ToolCallContent::Diff(diff)
+                        if crate::diff::stored_patch(diff)
+                            .is_some_and(|patch| patch.text.is_empty() && patch.truncated))
+                })
+            }),
         };
         Self {
             json: serde_json::to_string(&value)
@@ -475,6 +488,26 @@ impl TranscriptBody {
             Self::TerminalOutput { detail_trimmed, .. } => *detail_trimmed,
             _ => false,
         }
+    }
+
+    /// Recognize rows compacted before retention recorded an explicit marker.
+    pub fn is_legacy_compacted_tool(&self) -> bool {
+        let Self::Tool {
+            call, presentation, ..
+        } = self
+        else {
+            return false;
+        };
+        !presentation.as_ref().is_some_and(|p| p.detail_trimmed)
+            && (presentation.as_ref().is_some_and(|p| match p.source_kind {
+                ToolSummarySourceKind::RawInput => !call.metadata.has_raw_input,
+                ToolSummarySourceKind::RawOutput => !call.metadata.has_raw_output,
+                ToolSummarySourceKind::Title => false,
+            }) || call.metadata.has_dropped_patch)
+    }
+
+    pub fn has_trimmed_detail(&self) -> bool {
+        self.detail_trimmed() || self.is_legacy_compacted_tool()
     }
 
     pub fn terminal_output(record: TerminalOutputRecord) -> Self {

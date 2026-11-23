@@ -4620,21 +4620,17 @@ fn tool_call_detail_click_loads_retries_and_renders_the_same_as_inline_detail() 
             .iter()
             .any(|line| line.contains("Loading tool details…"))
     );
-    assert_eq!(
-        chat.pending_tool_detail_requests
-            .pop()
-            .unwrap()
-            .stable_id
-            .as_deref(),
-        Some("tool:1")
-    );
+    let requested = chat.pending_tool_detail_requests.pop().unwrap();
+    assert_eq!(requested.stable_id.as_deref(), Some("tool:1"));
 
     let generation = chat.tool_detail_generation;
+    let revision = entry_tool_detail_revision(&requested).unwrap();
     apply_chat_io_update(
         &mut chat,
         ChatIoUpdate::ToolCallDetail {
             generation,
             stable_id: "tool:1".into(),
+            revision,
             result: Err("spill was removed".into()),
         },
     );
@@ -4659,6 +4655,7 @@ fn tool_call_detail_click_loads_retries_and_renders_the_same_as_inline_detail() 
         ChatIoUpdate::ToolCallDetail {
             generation,
             stable_id: "tool:1".into(),
+            revision,
             result: Ok(Box::new(hydrated)),
         },
     );
@@ -4681,6 +4678,110 @@ fn tool_call_detail_click_loads_retries_and_renders_the_same_as_inline_detail() 
 }
 
 #[test]
+fn tool_call_detail_refetches_expanded_tools_and_rejects_superseded_replies() {
+    let mut full = tool_detail_projection("tool-detail-revisions", 1);
+    let compact = |full: &MaterializedSession| {
+        let mut projection = full.clone();
+        trim_detail_projection(&mut projection);
+        projection
+    };
+    let detail = |request: &ChatEntry, body| {
+        Box::new(mj_client::transcript::tool_detail_chat_entry(
+            request.source.0.as_ref().unwrap(),
+            request.seq,
+            body,
+        ))
+    };
+    let mut chat = ChatState::from_materialized(&compact(&full), &[], &[]);
+    click_tool_detail(&mut chat, 1);
+    let original = chat.pending_tool_detail_requests.pop().unwrap();
+    let generation = chat.tool_detail_generation;
+    let reply = |request: &ChatEntry, result| ChatIoUpdate::ToolCallDetail {
+        generation,
+        stable_id: request.stable_id.clone().unwrap(),
+        revision: entry_tool_detail_revision(request).unwrap(),
+        result,
+    };
+    apply_chat_io_update(
+        &mut chat,
+        reply(
+            &original,
+            Ok(detail(&original, full.transcript[0].body.clone())),
+        ),
+    );
+    assert!(
+        drawn_transcript(&mut chat, 90, 24)
+            .iter()
+            .any(|line| line.contains("complete tool output"))
+    );
+
+    let revise = |full: &mut MaterializedSession, ordinal, output| {
+        full.applied_event_ordinal = ordinal;
+        let item = Arc::make_mut(&mut full.transcript[0]);
+        item.last_changed_at_ms = 121;
+        item.latest_content_event_ordinal = Some(ordinal);
+        let mj_core::transcript::TranscriptBody::Tool { call, .. } = &mut item.body else {
+            unreachable!()
+        };
+        call.edit(|value| value["content"][0]["content"]["text"] = serde_json::json!(output));
+    };
+    revise(&mut full, 2, "intermediate tool output");
+    assert!(apply_session_view(
+        &mut chat,
+        Ok(managed_view(compact(&full)))
+    ));
+    let intermediate = chat.pending_tool_detail_requests.pop().unwrap();
+    let intermediate_body = full.transcript[0].body.clone();
+    let loading = drawn_transcript(&mut chat, 90, 24);
+    assert!(
+        loading
+            .iter()
+            .any(|line| line.contains("Loading tool details…"))
+    );
+    assert!(
+        !loading
+            .iter()
+            .any(|line| line.contains("complete tool output"))
+    );
+
+    // The next update arrives in the same millisecond as the in-flight one.
+    revise(&mut full, 3, "latest tool output");
+    assert!(apply_session_view(
+        &mut chat,
+        Ok(managed_view(compact(&full)))
+    ));
+    let latest = chat.pending_tool_detail_requests.pop().unwrap();
+    apply_chat_io_update(
+        &mut chat,
+        reply(&intermediate, Ok(detail(&intermediate, intermediate_body))),
+    );
+    let loading = drawn_transcript(&mut chat, 90, 24);
+    assert!(
+        loading
+            .iter()
+            .any(|line| line.contains("Loading tool details…"))
+    );
+    assert!(
+        !loading
+            .iter()
+            .any(|line| line.contains("intermediate tool output"))
+    );
+
+    apply_chat_io_update(
+        &mut chat,
+        reply(
+            &latest,
+            Ok(detail(&latest, full.transcript[0].body.clone())),
+        ),
+    );
+    assert!(
+        drawn_transcript(&mut chat, 90, 24)
+            .iter()
+            .any(|line| line.contains("latest tool output"))
+    );
+}
+
+#[test]
 fn tool_call_detail_ignores_a_session_switch_reply_for_the_same_stable_id() {
     let mut projection = tool_detail_projection("first", 1);
     trim_detail_projection(&mut projection);
@@ -4692,11 +4793,13 @@ fn tool_call_detail_ignores_a_session_switch_reply_for_the_same_stable_id() {
     assert!(chat.pending_tool_detail_requests.is_empty());
     assert!(chat.expanded_tool_calls.is_empty());
     click_tool_detail(&mut chat, 1);
+    let revision = entry_tool_detail_revision(&chat.pending_tool_detail_requests[0]).unwrap();
     apply_chat_io_update(
         &mut chat,
         ChatIoUpdate::ToolCallDetail {
             generation: previous_generation,
             stable_id: "tool:1".into(),
+            revision,
             result: Err("stale lookup".into()),
         },
     );

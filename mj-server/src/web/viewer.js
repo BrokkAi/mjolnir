@@ -9425,21 +9425,27 @@ function syncToolDetailSession(sessionId) {
   toolDetailCache = new Map();
 }
 
-function toolDetailFold(sessionId, stableId) {
+function toolDetailFold(sessionId, stableId, version) {
   syncToolDetailSession(sessionId);
   const cache = toolDetailCache;
+  const cached = cache.get(stableId);
+  if (cached && cached.version !== version) cache.delete(stableId);
   const fold = el('details', 'block-fold tool-detail-fold');
   fold.dataset.foldKey = `tool-detail-${stableId}`;
   const content = el('div');
   fold.append(el('summary', '', 'Tool details'), content);
   fold.addEventListener('toggle', async () => {
     let load = cache.get(stableId);
+    if (load && load.version !== version) {
+      cache.delete(stableId);
+      load = undefined;
+    }
     if (!fold.open) {
       if (load?.result?.status === 'unavailable') cache.delete(stableId);
       return;
     }
     if (!load) {
-      load = {};
+      load = { version };
       load.pending = request(`/api/sessions/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(stableId)}/detail`)
         .catch(error => ({ status: 'unavailable', unavailable_reason: error.message }))
         .then(result => {
@@ -9501,7 +9507,8 @@ function paintEntry(node, entry, unansweredPrompt) {
   } else {
     node.replaceChildren(heading, entryBody(entry));
     if (entry.tool_detail_trimmed && entry.stable_id && currentSession) {
-      node.append(toolDetailFold(currentSession, entry.stable_id));
+      const version = `${entry.updated_seq ?? ''}:${entry.tool_ended_at_ms ?? ''}`;
+      node.append(toolDetailFold(currentSession, entry.stable_id, version));
     }
   }
   if (unansweredPrompt) {

@@ -1104,6 +1104,7 @@ impl ChatState {
             if self.has_inline_submissions() {
                 self.sync_inline_submissions();
             }
+            self.refresh_expanded_tool_details();
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.

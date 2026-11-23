@@ -80,7 +80,9 @@ impl ActiveChat {
 
         let generation = self.state.tool_detail_generation;
         for entry in self.state.pending_tool_detail_requests.drain(..) {
-            let Some(stable_id) = entry.stable_id.clone() else {
+            let (Some(stable_id), Some(revision)) =
+                (entry.stable_id.clone(), entry_tool_detail_revision(&entry))
+            else {
                 continue;
             };
             let session = self.session.clone();
@@ -115,6 +117,7 @@ impl ActiveChat {
                 if let Err(error) = updates.send(ChatIoUpdate::ToolCallDetail {
                     generation,
                     stable_id,
+                    revision,
                     result,
                 }) {
                     tracing::debug!(%error, "chat closed while loading tool details");
