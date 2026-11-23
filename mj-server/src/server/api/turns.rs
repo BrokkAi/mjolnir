@@ -1,5 +1,4 @@
 use super::*;
-use crate::server::ClientStateRequest;
 
 #[derive(Default, Deserialize)]
 pub(super) struct NativeHistoryQuery {
@@ -855,15 +854,9 @@ pub(super) async fn container_upgrade_preview(
 ) -> Result<Json<mj_core::state::ContainerUpgradePreview>, ApiFailure> {
     crate::server::validate_public_id(&session_id)?;
     require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    state
-        .client_state_tx
-        .send(ClientStateRequest::ContainerUpgradePreview { session_id, reply })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    answer
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    crate::server::handlers::viewer_backend(&state)?
+        .container_upgrade_preview(session_id)
+        .await?
         .map(Json)
         .map_err(ApiFailure::conflict)
 }

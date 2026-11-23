@@ -55,6 +55,12 @@ impl ApiError {
     }
 }
 
+impl From<super::api::ApiFailure> for ApiError {
+    fn from(error: super::api::ApiFailure) -> Self {
+        Self::new(error.status, error.message).with_code(error.code)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response<Body> {
         if self.code == Some(super::api::DAEMON_HANDOFF_CODE) {

@@ -54,7 +54,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
     }
 }
 
-/// Flatten a joined blocking result into the answer a phone channel carries.
+/// Flatten a joined blocking result into the answer a viewer receives.
 pub(super) fn flatten_stored<T>(
     joined: std::result::Result<Result<T>, tokio::task::JoinError>,
 ) -> std::result::Result<T, String> {

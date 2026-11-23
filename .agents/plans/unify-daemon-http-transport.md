@@ -19,7 +19,9 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 - [ ] Milestone 3: Migrate TCP `DaemonAction` families and the two remaining `#1043` dashboard git/working-context probes onto `/api/v1/*` in clean domain slices, deleting migrated TCP variants and handlers after each slice.
   - [x] (2026-11-23 18:49Z) Slice 3a-1: Migrated & deleted 14 TCP `DaemonAction` variants (`InstallAttachment`, `StartTurnReview`, dead `ResolveTurnReview`, `StopBackgroundTask`, `PreviewContainerUpgrade`, `UpgradeContainer`, `CancelContainerUpgrade`, and all 7 `Wiki*` actions) onto `/api/v1/*` via `mj_client::http::HttpDaemonClient`, unified TUI and Web image attachment upload on `POST /api/v1/sessions/{id}/attachments`, and moved the remaining 2 `#1043` local dashboard probes (`session_working_context`, `session_git_status`) behind `/api/v1/sessions/{id}/working-context` and `/api/v1/sessions/{id}/git-status` (deleting `live_controller_snapshot`).
   - [x] (2026-11-23 19:17Z) Slice 3a-2: Migrated & deleted 21 TCP `DaemonAction` variants (all 12 Workspace/Draft/ReadReceipt actions including dead `DeleteWorkspace`, plus `PreflightNewSession`, `CompletePath`, `DiscoverProjects`, `ProjectCatalog`, `CreateProject`, `RemoveProject`, `GitIdentity`, `SetGitIdentity`, and `PrepareMoveSession`) and 11 unused `DaemonReply` variants onto `/api/v1/*`, gating the 5 private terminal draft/receipt routes on `loopback_authenticated` and guarding mutations with upgrade-gate admission (allowing `DELETE /workspaces/{id}/close` during drain).
-  - [ ] Slice 3b: Consolidate `ServerState` channels + `SubagentBackend` and migrate remaining request/response `DaemonAction` families (including audio & session import so `UploadChunk` can be deleted).
+  - [x] (2026-11-23 20:08Z) Slice 3b-0: Deleted 6 redundant `ServerState` `mpsc` channels (`bundle_tx`, `receipt_tx`, `preflight_tx`, `move_preparation_tx`, `client_state_tx`, `background_task_stop_tx`), their 3 `*_done` reply relays, and dead request structs in favor of direct async methods on `SubagentBackend` / `ApiBackend`, cutting 529 net lines across `mj-server` and `mj-daemon/src/server_runtime/run.rs`.
+  - [ ] Slice 3b-1: Migrate & delete 27 TCP `DaemonAction` variants (Session State/Read Views + Session Flags/Layouts/Sidebar/Away/Notifications).
+  - [ ] Slice 3b-2+: Migrate remaining request/response `DaemonAction` families (prompts/turns/elicitations, lifecycle/moves, audio/import deleting `UploadChunk`, config/setup/quotas/profiles/targets/mounts/recovery).
 - [ ] Milestone 4: Move streaming/interactive/SSH daemon paths (`RuntimeChanges`, `LoginTerminal`, SSH `ssh -L` forwarding) onto HTTP `/api/v1/*`, reduce TCP `DaemonAction` to the five frozen upgrade-management variants, and clean up remaining `mj-controller` type imports in `mj-cli`.
 
 ## Surprises & Discoveries
@@ -72,7 +74,9 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 
 - **Milestone 3 Slice 3a-2 (complete):** Deleted 21 TCP `DaemonAction` variants (Workspaces, Drafts, ReadReceipts, Preflight, Paths, Projects/Bundles, GitIdentity, MovePrepare) and 11 unused `DaemonReply` variants, shrinking the repo net LOC while adding loopback-auth gating on terminal draft/receipt routes and upgrade-gate admission on workspace/project writes.
 
-Milestones 3 (Slice 3b) and 4 remain.
+- **Milestone 3 Slice 3b-0 (complete):** Removed 6 redundant `ServerState` `mpsc` channels (`bundle_tx`, `receipt_tx`, `preflight_tx`, `move_preparation_tx`, `client_state_tx`, `background_task_stop_tx`), their `*_done` reply relays, and dead request types, routing HTTP handlers directly to async `SubagentBackend` methods while preserving concurrency semaphores, upgrade-gate admission, and cancel-on-disconnect semantics (-529 net LOC across `mj-server` and `mj-daemon/src/server_runtime/run.rs`).
+
+Milestones 3 (Slices 3b-1..3) and 4 remain.
 
 ## Context and Orientation
 

@@ -1,6 +1,6 @@
 use super::routes::loopback_authenticated;
 use super::*;
-use crate::server::{BackgroundTaskStopFailure, BackgroundTaskStopRequest};
+use crate::server::BackgroundTaskStopFailure;
 
 pub(super) async fn session_working_context(
     State(state): State<ServerState>,
@@ -62,19 +62,9 @@ pub(super) async fn stop_background_task(
         }
     }
 
-    let (reply, result) = tokio::sync::oneshot::channel();
-    state
-        .background_task_stop_tx
-        .send(BackgroundTaskStopRequest {
-            session_id,
-            background_task_id: request.background_task_id,
-            reply,
-        })
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?;
-    match result
-        .await
-        .map_err(|_| ApiError::controller_unavailable())?
+    match crate::server::handlers::viewer_backend(&state)?
+        .stop_background_task(session_id, request.background_task_id)
+        .await?
     {
         Ok(()) => Ok(StatusCode::ACCEPTED),
         Err(BackgroundTaskStopFailure::SessionUnavailable) => Err(ApiFailure::new(

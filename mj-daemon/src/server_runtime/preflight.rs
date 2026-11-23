@@ -9,6 +9,20 @@ impl Drop for ProcessCancellationGuard {
     }
 }
 
+/// The blocking work keeps its slot until a cancelled subprocess exits.
+pub(super) async fn cancellable_blocking<T: Send + 'static>(
+    slot: tokio::sync::OwnedSemaphorePermit,
+    work: impl FnOnce(Arc<AtomicBool>) -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel = ProcessCancellationGuard(cancelled.clone());
+    mj_core::runtime::spawn_blocking(move || {
+        let _slot = slot;
+        work(cancelled)
+    })
+    .await
+}
+
 /// Perform the preflight for a new session.
 ///
 /// This runs on the blocking task owned by the phone server. Bare targets
@@ -30,106 +44,6 @@ pub(super) fn run_new_preflight(
         project_directory,
         &CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
     )
-}
-
-/// Run one resume preflight on its own task, like a new-session preflight:
-/// the disk work stays off the feed loop, a disconnected browser cancels it,
-/// and the task is supervised by the same `JoinSet`.
-pub(super) fn spawn_resume_preflight(
-    jobs: &mut tokio::task::JoinSet<()>,
-    controller: &Controller,
-    request: crate::server::ResumePreflightRequest,
-    termination: &tokio_util::sync::CancellationToken,
-) {
-    let crate::server::ResumePreflightRequest {
-        session_id,
-        target_id,
-        mut reply,
-    } = request;
-    let config = controller.config.clone();
-    let state = controller.state.clone();
-    let termination = termination.clone();
-    jobs.spawn(async move {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
-        let mut blocking = mj_core::runtime::spawn_blocking(move || {
-            run_resume_preflight(config, state, &session_id, &target_id, cancelled)
-        });
-        let answer = tokio::select! {
-            biased;
-            _ = termination.cancelled() => None,
-            _ = reply.closed() => None,
-            answer = &mut blocking => Some(answer),
-        };
-        let Some(answer) = answer else {
-            drop(cancellation_guard);
-            if let Err(error) = blocking.await {
-                tracing::warn!(%error, "cancelled phone resume preflight task failed");
-            }
-            return;
-        };
-        let answer = answer.map_err(|error| {
-            tracing::warn!(%error, "phone resume preflight task failed");
-            PreflightFailure::Controller(format!("resume preflight task failed: {error}"))
-        });
-        if reply.send(answer).is_err() {
-            tracing::debug!("phone resume preflight reply dropped after client disconnect");
-        }
-    });
-}
-
-/// Answer one path-completion request on its own task.
-///
-/// Listing a directory can mean an SSH round trip, so it stays off the feed
-/// loop and runs under the same supervision, cap and cancellation as a
-/// preflight. A browser that abandons the request, or a controller that is
-/// shutting down, stops the child process rather than waiting for it.
-pub(super) fn spawn_path_completion(
-    jobs: &mut tokio::task::JoinSet<()>,
-    config: &Config,
-    request: crate::server::PathCompletionRequest,
-    termination: &tokio_util::sync::CancellationToken,
-) {
-    let crate::server::PathCompletionRequest {
-        host,
-        prefix,
-        kind,
-        mut reply,
-    } = request;
-    let config = config.clone();
-    let termination = termination.clone();
-    jobs.spawn(async move {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
-        let mut blocking = mj_core::runtime::spawn_blocking(move || {
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(5));
-            config_only_controller(config).complete_path(&host, &prefix, kind, &executor)
-        });
-        let answer = tokio::select! {
-            biased;
-            _ = termination.cancelled() => None,
-            _ = reply.closed() => None,
-            answer = &mut blocking => Some(answer),
-        };
-        let Some(answer) = answer else {
-            drop(cancellation_guard);
-            if let Err(error) = blocking.await {
-                tracing::warn!(%error, "cancelled phone path completion task failed");
-            }
-            return;
-        };
-        let answer = match answer {
-            Ok(answer) => answer.map_err(|error| format!("{error:#}")),
-            Err(error) => {
-                tracing::warn!(%error, "phone path completion task failed");
-                Err(format!("path completion task failed: {error}"))
-            }
-        };
-        if reply.send(answer).is_err() {
-            tracing::debug!("phone path completion reply dropped after client disconnect");
-        }
-    });
 }
 
 /// What resuming this session on this target does to its repository content.

@@ -538,11 +538,6 @@ mod tests {
             watch::channel(mj_core::snapshot_map::SnapshotMap::new()).1,
             ServerRequests {
                 action_tx: mpsc::channel(1).0,
-                bundle_tx: mpsc::channel(1).0,
-                receipt_tx: mpsc::channel(1).0,
-                preflight_tx: mpsc::channel(1).0,
-                move_preparation_tx: mpsc::channel(1).0,
-                client_state_tx: mpsc::channel(1).0,
             },
             crate::server::BrowserSource {
                 revisions: watch::channel(0).1,

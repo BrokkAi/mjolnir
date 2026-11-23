@@ -1,3 +1,4 @@
+use super::super::tests::{BundleCall, PurgeCall, capture_viewer_call};
 use super::*;
 use mj_core::state::{SessionResourceAllocation, TurnOutcomeKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1345,6 +1346,8 @@ type FakeToolDetails =
 
 #[derive(Default)]
 struct FakeBackend {
+    bundle_calls: Mutex<Option<mpsc::Sender<BundleCall>>>,
+    purge_calls: Mutex<Option<mpsc::Sender<PurgeCall>>>,
     wiki_restore_requests: Mutex<Vec<mj_client::daemon::WikiRestoreRequest>>,
     login_errors: std::collections::BTreeMap<String, String>,
     /// When set, a history write announces itself on the first and waits
@@ -1427,6 +1430,52 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn create_bundle(
+        &self,
+        source: String,
+        _exact_sources: Option<Vec<String>>,
+        discovered: bool,
+        _include_project: bool,
+        admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Result<crate::server::CreateBundleResponse, crate::server::BundleFailure>,
+            ApiFailure,
+        >,
+    > {
+        let calls = self.bundle_calls.lock().unwrap().clone();
+        Box::pin(async move {
+            let _admission = admission;
+            capture_viewer_call(
+                &calls.ok_or_else(ApiError::controller_unavailable)?,
+                |reply| BundleCall {
+                    source,
+                    discovered,
+                    reply,
+                },
+            )
+            .await
+        })
+    }
+
+    fn purge_untracked(
+        &self,
+        request: PurgeUntrackedRequest,
+    ) -> BoxFuture<'_, Result<Result<PurgeUntrackedResponse, PurgeUntrackedFailure>, ApiFailure>>
+    {
+        let calls = self.purge_calls.lock().unwrap().clone();
+        Box::pin(async move {
+            let unavailable = || ApiFailure::unavailable("the controller is unavailable");
+            capture_viewer_call(&calls.ok_or_else(unavailable)?, |reply| PurgeCall {
+                request,
+                reply,
+            })
+            .await
+            .map_err(|_| unavailable())
+        })
+    }
+
     fn wiki_restore(
         &self,
         request: mj_client::daemon::WikiRestoreRequest,
@@ -2241,7 +2290,7 @@ fn api_app(
     axum::Router,
     mpsc::Receiver<ControllerRequest>,
     watch::Sender<ViewerSnapshot>,
-    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<BundleCall>,
 ) {
     api_app_with_preferences(backend, adjust, absent_preferences_path())
 }
@@ -2269,7 +2318,7 @@ fn api_app_with_preferences(
     axum::Router,
     mpsc::Receiver<ControllerRequest>,
     watch::Sender<ViewerSnapshot>,
-    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<BundleCall>,
 ) {
     api_app_with_worker_check(backend, adjust, preferences_path, None)
 }
@@ -2283,7 +2332,7 @@ fn api_app_with_worker_check(
     axum::Router,
     mpsc::Receiver<ControllerRequest>,
     watch::Sender<ViewerSnapshot>,
-    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<BundleCall>,
 ) {
     let (app, actions, snapshot, bundles, _client_state) =
         api_app_with_client_state(backend, adjust, preferences_path, worker_check);
@@ -2299,8 +2348,8 @@ fn api_app_with_client_state(
     axum::Router,
     mpsc::Receiver<ControllerRequest>,
     watch::Sender<ViewerSnapshot>,
-    mpsc::Receiver<super::super::BundleRequest>,
-    mpsc::Receiver<super::super::ClientStateRequest>,
+    mpsc::Receiver<BundleCall>,
+    mpsc::Receiver<PurgeCall>,
 ) {
     let (options, actions, snapshots, bundles, client_state) =
         api_options_with_client_state(backend, adjust, preferences_path, worker_check);
@@ -2316,8 +2365,8 @@ fn api_options_with_client_state(
     ServerOptions,
     mpsc::Receiver<ControllerRequest>,
     watch::Sender<ViewerSnapshot>,
-    mpsc::Receiver<super::super::BundleRequest>,
-    mpsc::Receiver<super::super::ClientStateRequest>,
+    mpsc::Receiver<BundleCall>,
+    mpsc::Receiver<PurgeCall>,
 ) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
@@ -2331,30 +2380,22 @@ fn api_options_with_client_state(
     let (_conversation_tx, conversation_rx) =
         watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, action_rx) = mpsc::channel(8);
-    let (bundle_tx, bundle_rx) = mpsc::channel(8);
-    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
-    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
-    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, client_state_rx) = mpsc::channel(8);
     let browser = super::super::tests::test_browser_source(snapshot_rx.clone());
     let mut options = ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
         snapshot_rx,
         conversation_rx,
-        ServerRequests {
-            action_tx,
-            bundle_tx,
-            receipt_tx,
-            preflight_tx,
-            move_preparation_tx,
-            client_state_tx,
-        },
+        ServerRequests { action_tx },
         browser,
     )
     .unwrap()
     .with_test_credentials("123456", b"01234567890123456789012345678901");
     options.shutdown = backend.shutdown.clone();
     options.set_upgrade_gate(backend.upgrade_gate.clone());
+    let (bundle_calls, bundle_rx) = mpsc::channel(8);
+    let (purge_calls, client_state_rx) = mpsc::channel(8);
+    *backend.bundle_calls.lock().unwrap() = Some(bundle_calls);
+    *backend.purge_calls.lock().unwrap() = Some(purge_calls);
     options.set_subagent_backend(backend);
     options.set_preferences_path(preferences_path);
     if let Some(check) = worker_check {
@@ -9025,16 +9066,14 @@ async fn purge_untracked_validates_the_selector_and_returns_the_daemon_report() 
 
     async fn round_trip(
         app: axum::Router,
-        client_state: &mut mpsc::Receiver<super::super::ClientStateRequest>,
+        client_state: &mut mpsc::Receiver<PurgeCall>,
         body: serde_json::Value,
         expected: PurgeUntrackedRequest,
         answer: Result<PurgeUntrackedResponse, PurgeUntrackedFailure>,
     ) -> Response {
         let pending = mj_core::runtime::spawn(post(app, body));
         let request = client_state.recv().await.expect("purge request");
-        let super::super::ClientStateRequest::PurgeUntracked { request, reply } = request else {
-            panic!("expected a purge-untracked client-state request");
-        };
+        let PurgeCall { request, reply } = request;
         assert_eq!(request, expected);
         reply.send(answer).expect("the handler is still waiting");
         pending.await.unwrap()

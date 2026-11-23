@@ -172,6 +172,22 @@ impl RuntimeState {
         self.projects.clone()
     }
 
+    pub(crate) async fn stop_viewer_background_task(
+        &self,
+        session_id: String,
+        background_task_id: String,
+    ) -> Result<(), crate::server::BackgroundTaskStopFailure> {
+        use crate::server::BackgroundTaskStopFailure;
+        let session = self.session_manager.session(&session_id).await.map_err(|error| {
+            tracing::warn!(%session_id, %error, "could not resolve live session for background-task stop");
+            BackgroundTaskStopFailure::SessionUnavailable
+        })?;
+        session.client().stop_background_task(background_task_id.clone()).await.map_err(|error| {
+            tracing::warn!(%session_id, %background_task_id, %error, "provider rejected background-task stop");
+            BackgroundTaskStopFailure::Provider
+        })
+    }
+
     pub async fn project_catalog(
         &self,
         refresh: bool,

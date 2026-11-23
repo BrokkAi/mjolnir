@@ -66,9 +66,12 @@ use mj_core::relay::CapacityRetry;
 use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
-    ActionOutcome, ApiError, ControllerAction, ControllerRequest, MAX_PROMPT_TEXT_BODY_BYTES,
-    ServerState, ViewerSession, ViewerSnapshot, constant_time_eq, named_body_limit,
-    require_session_record, validate_action, validate_prompt_text,
+    ActionOutcome, AdditionalMount, ApiError, BackgroundTaskStopFailure, BundleFailure,
+    CompletionHost, CompletionKind, ControllerAction, ControllerRequest, CreateBundleResponse,
+    MAX_PROMPT_TEXT_BODY_BYTES, MovePreparation, MoveSelection, PathCompletion, PreflightFailure,
+    PreflightNew, PreflightResume, Refusal, ServerState, SessionResourceAllocation,
+    ViewerClientState, ViewerPromptHistory, ViewerSession, ViewerSnapshot, constant_time_eq,
+    named_body_limit, require_session_record, validate_action, validate_prompt_text,
 };
 
 /// Response header naming the contract version this server speaks. A client

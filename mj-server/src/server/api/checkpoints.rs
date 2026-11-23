@@ -115,14 +115,11 @@ pub(super) async fn purge_untracked(
     Json(request): Json<PurgeUntrackedRequest>,
 ) -> Result<Json<PurgeUntrackedResponse>, ApiFailure> {
     validate_purge_untracked_request(&request)?;
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    state
-        .client_state_tx
-        .send(crate::server::ClientStateRequest::PurgeUntracked { request, reply })
-        .await
-        .map_err(|_| ApiFailure::unavailable("the controller is unavailable"))?;
-    let report = answer
-        .await
-        .map_err(|_| ApiFailure::unavailable("the controller is unavailable"))??;
+    let report = state
+        .subagent
+        .as_deref()
+        .ok_or_else(|| ApiFailure::unavailable("the controller is unavailable"))?
+        .purge_untracked(request)
+        .await??;
     Ok(Json(report))
 }

@@ -58,6 +58,11 @@ impl PhoneActionFailure {
     }
 }
 
+pub(super) fn next_phone_action_id() -> u64 {
+    static LAST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    LAST_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+}
+
 /// Identify one action's log entry, so a caller holding a 500 can find the
 /// daemon-log line that says what actually failed.
 pub(super) fn action_reference(action_id: u64) -> String {
@@ -174,20 +179,6 @@ pub(super) fn admit_phone_action(
         }
     }
     Ok(session_id)
-}
-
-pub(super) struct ReadReceiptPersisted {
-    pub(super) session_id: String,
-    pub(super) result: std::result::Result<u64, String>,
-    pub(super) reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
-}
-
-pub(super) struct MovePrepared {
-    pub(super) result:
-        std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
-    pub(super) reply: tokio::sync::oneshot::Sender<
-        std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,
-    >,
 }
 
 /// How often the housekeeping tick runs: hourly, unless the test-only
