@@ -371,7 +371,7 @@ impl HttpDaemonClient {
                     .body(reqwest::Body::wrap_stream(body))
                     .build()?;
                 endpoint.authorize(&mut request)?;
-                let response = self.send_once(request);
+                let response = Self::send_once(&self.http, request);
                 tokio::pin!(response);
                 let result = tokio::select! {
                     biased;

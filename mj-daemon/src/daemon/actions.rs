@@ -7,9 +7,6 @@ pub(super) async fn handle_action(
     cancellation: &CancellationToken,
 ) -> Result<DaemonReply> {
     match action {
-        DaemonAction::LoginTerminal { .. } => {
-            bail!("login requires a dedicated terminal connection")
-        }
         DaemonAction::PrepareUpgrade => {
             if mj_controller::upgrade::gate().try_close() {
                 cancellation.cancel();
@@ -45,18 +42,6 @@ pub(super) async fn handle_action(
                 phone_status: state.phone_status(),
             }))
         }
-        DaemonAction::AdoptRecovery(_) => {
-            bail!("adoption requires its dedicated cancellable connection")
-        }
-        DaemonAction::RuntimeChanges {
-            cursor,
-            wait,
-            subagent_parents,
-        } => Ok(DaemonReply::RuntimeChanges(Box::new(
-            state
-                .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
-                .await?,
-        ))),
         DaemonAction::Stop => {
             if cancellation.is_cancelled() {
                 return Ok(DaemonReply::Done);

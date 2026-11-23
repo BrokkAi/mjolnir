@@ -46,7 +46,8 @@ mod terminal_operations;
 pub use dashboard::DashboardBackend;
 use dashboard::dashboard_routes;
 pub use terminal_operations::{
-    MachinesOperations, RepositoriesOperations, SetupOperations, TerminalOperations,
+    MachinesOperations, RepositoriesOperations, SetupOperations, TerminalBytes, TerminalOperations,
+    TerminalStream, TerminalStreams,
 };
 mod events;
 

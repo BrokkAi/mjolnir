@@ -3535,7 +3535,7 @@ const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 /// Own a dedicated connection: a deadline abandons its in-flight exchange,
 /// while quota control requests continue on their original connection.
 async fn pump_quota_feed(
-    mut daemon: mj_client::daemon::DaemonClient,
+    daemon: mj_client::http::HttpDaemonClient,
     mut cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
     mut metadata: mj_client::runtime_feed::RuntimeMetadata,
     deadline: std::time::Instant,
@@ -3597,7 +3597,7 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         daemon.refresh_quota().await?;
         let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
         let pumped = pump_quota_feed(
-            mj_client::daemon::connect_existing().await?,
+            daemon.http().await?,
             cursor,
             metadata,
             deadline,
@@ -3625,7 +3625,7 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
             daemon.probe_quota_profiles(probe.clone(), false).await?;
             let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
             let pumped = pump_quota_feed(
-                mj_client::daemon::connect_existing().await?,
+                daemon.http().await?,
                 cursor,
                 metadata,
                 deadline,
@@ -5907,15 +5907,6 @@ mod tests {
         let (received, waiting) = tokio::sync::oneshot::channel();
         let server = mj_core::runtime::spawn(async move {
             let (mut control, _) = listener.accept().await.unwrap();
-            let (mut feed, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut feed).await.unwrap();
-            assert!(matches!(
-                request.action,
-                DaemonAction::RuntimeChanges { .. }
-            ));
-            received.send(()).unwrap();
-            let mut byte = [0];
-            assert_eq!(feed.read(&mut byte).await.unwrap(), 0);
             let request: RequestEnvelope = read_frame(&mut control).await.unwrap();
             assert!(matches!(request.action, DaemonAction::Identity));
             write_frame(
@@ -5934,7 +5925,24 @@ mod tests {
             .unwrap();
         });
         let mut control = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let feed = DaemonClient::connect(metadata).await.unwrap();
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let feed = mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", http.local_addr().unwrap()),
+            "quota-test",
+        )
+        .unwrap();
+        let http_server = mj_core::runtime::spawn(async move {
+            let (mut feed, _) = http.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let count = feed.read(&mut request).await.unwrap();
+            assert!(request[..count].starts_with(b"POST /api/v1/runtime/changes "));
+            received.send(()).unwrap();
+            loop {
+                if feed.read(&mut request).await.unwrap() == 0 {
+                    break;
+                }
+            }
+        });
         let observed = mj_client::runtime_feed::RuntimeMetadata::default();
         let pump = pump_quota_feed(
             feed,
@@ -5954,6 +5962,7 @@ mod tests {
         assert_eq!(latest, observed);
         control.identity().await.unwrap();
         server.await.unwrap();
+        http_server.await.unwrap();
     }
 
     #[test]

@@ -758,8 +758,8 @@ struct ListedSession {
 /// read from the runtime feed the dashboard itself follows: each session but
 /// a sub-agent whose parent is active, since suspending the parent stops it.
 /// A sub-agent left behind by a parent that is not is its own root, as a
-/// workspace close counts it. The socket is used rather than the web API so
-/// this works with the web viewer disabled.
+/// workspace close counts it. The loopback API works even when
+/// the web viewer is disabled.
 async fn session_roots(
     client: &mut daemon::DaemonClient,
 ) -> Result<BTreeMap<String, ListedSession>> {

@@ -330,7 +330,7 @@ pub(super) async fn poll_daemon_runtime(
                     replica.projection.revision,
                 )
             };
-        let mut daemon = mj_client::daemon::connect_existing().await?;
+        let daemon = mj_client::daemon::connect_existing().await?.http().await?;
         let wait = cursor.as_ref().is_some_and(|cursor| {
             !cursor.incarnation.is_empty() && cursor.subagent_parents == parents
         }) && after_revision != 0
@@ -434,13 +434,8 @@ mod expired_tail_cursor_tests {
             .run();
             return;
         }
-        use mj_client::daemon::{
-            DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
-        };
-        use mj_client::runtime_feed::{
-            RuntimeBootstrap, RuntimeCursor, RuntimeFrame, RuntimeProjection,
-        };
-        use tokio::io::AsyncReadExt;
+        use mj_client::daemon::DaemonMetadata;
+        use mj_client::runtime_feed::{RuntimeBootstrap, RuntimeFrame, RuntimeProjection};
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -459,7 +454,10 @@ mod expired_tail_cursor_tests {
         std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let _writer = mj_controller::database::install_isolated_test_writer();
         let state = crate::daemon::tests::test_runtime_state();
-        let RuntimeFrame::Snapshot { cursor, .. } =
+        let mut initial = RuntimeProjection::default();
+        initial.metadata.notification_cards = Some(Default::default());
+        mj_controller::database::notification_reconcile(initial).unwrap();
+        let RuntimeFrame::Snapshot { cursor, projection } =
             state.runtime_changes(None, false).await.unwrap()
         else {
             panic!("expected runtime bootstrap");
@@ -467,135 +465,77 @@ mod expired_tail_cursor_tests {
         let (identity, shutdown, http_server) = tail_api(&metadata, state).await;
         let replica = Arc::new(tokio::sync::Mutex::new(
             RuntimeBootstrap {
-                cursor: cursor.clone(),
-                projection: RuntimeProjection {
-                    revision: 7,
-                    ..Default::default()
-                },
+                cursor,
+                projection: *projection,
             }
             .into_replica(),
         ));
         let (scopes, scope_rx) = tokio::sync::watch::channel(BTreeSet::new());
-        let held = Arc::new(tokio::sync::Notify::new());
-        let server_held = held.clone();
+        let (accepted, identity_seen) = tokio::sync::oneshot::channel();
+        let (scope_requested, new_scope) = tokio::sync::oneshot::channel();
+        let (release_scope, scope_ready) = tokio::sync::oneshot::channel();
         let server = mj_core::runtime::spawn(async move {
-            let (mut old_poll, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope =
-                mj_client::daemon::read_frame(&mut old_poll).await.unwrap();
-            assert!(
-                matches!(request.action, DaemonAction::RuntimeChanges { cursor: Some(ref requested), wait: true, ref subagent_parents } if requested == &cursor && subagent_parents.is_empty()),
-                "startup must follow its bootstrap cursor instead of downloading another snapshot"
-            );
-            server_held.notify_one();
-            let (mut control, _) = listener.accept().await.unwrap();
-            let request = mj_client::daemon::read_frame(&mut control).await.unwrap();
-            mj_client::daemon::write_frame(&mut control, &answer_identity(&identity, request))
-                .await
-                .unwrap();
-            let (mut fresh, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut fresh).await.unwrap();
-            let DaemonAction::RuntimeChanges {
-                cursor: Some(requested),
-                wait: false,
-                subagent_parents,
-            } = request.action
-            else {
-                panic!("scope changes preserve the alert frontier while requesting a fresh scope");
-            };
-            assert_eq!(requested, cursor);
-            assert_eq!(subagent_parents, BTreeSet::from(["parent".to_owned()]));
-            mj_client::daemon::write_frame(
-                &mut fresh,
-                &ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(DaemonReply::RuntimeChanges(Box::new(
-                        RuntimeFrame::Snapshot {
-                            cursor: RuntimeCursor {
-                                alert_sequence: 7,
-                                incarnation: "replacement-daemon".into(),
-                                sequence: 1,
-                                subagent_parents: subagent_parents.clone(),
-                            },
-                            projection: Box::new(RuntimeProjection {
-                                revision: 1,
-                                metadata: mj_client::runtime_feed::RuntimeMetadata {
-                                    alert_high_sequence: 7,
-                                    alert_events: vec![mj_client::runtime_feed::AlertEvent {
-                                        identity: "test".into(),
-                                        sequence: 7,
-                                        destination: "parent".into(),
-                                        session_title: "Parent".into(),
-                                        text: "Caught up".into(),
-                                        kind: mj_core::attention::NotificationKind::Important,
-                                    }],
-                                    ..Default::default()
-                                },
-                                subagent_parents,
-                                ..Default::default()
-                            }),
-                        },
-                    ))),
-                },
-            )
-            .await
-            .unwrap();
-            let mut byte = [0];
-            assert_eq!(
-                tokio::time::timeout(Duration::from_secs(2), old_poll.read(&mut byte))
+            let mut scope_barrier = Some((scope_requested, scope_ready));
+            let mut accepted = Some(accepted);
+            // Long poll, transcript tail, changed scope, then its next poll.
+            for request_index in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = mj_client::daemon::read_frame(&mut stream).await.unwrap();
+                if request_index == 2 {
+                    let (requested, ready) = scope_barrier.take().unwrap();
+                    requested.send(()).unwrap();
+                    ready.await.unwrap();
+                }
+                mj_client::daemon::write_frame(&mut stream, &answer_identity(&identity, request))
                     .await
-                    .unwrap()
-                    .unwrap(),
-                0,
-                "the old long poll must be disconnected"
-            );
-            for sequence in [2, 2] {
-                let (mut poll, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope =
-                    mj_client::daemon::read_frame(&mut poll).await.unwrap();
-                let DaemonAction::RuntimeChanges {
-                    cursor: Some(from), ..
-                } = request.action
-                else {
-                    panic!("follow the acknowledged cursor");
-                };
-                assert_eq!(from.alert_sequence, 7);
-                let mut cursor = from.clone();
-                cursor.sequence = sequence;
-                mj_client::daemon::write_frame(
-                    &mut poll,
-                    &ResponseEnvelope {
-                        protocol_version: request.protocol_version,
-                        request_id: request.request_id,
-                        result: Ok(DaemonReply::RuntimeChanges(Box::new(RuntimeFrame::Delta {
-                            from,
-                            cursor,
-                            changes: Box::new(mj_client::runtime_feed::RuntimeDelta {
-                                revision: Some(sequence),
-                                ..Default::default()
-                            }),
-                        }))),
-                    },
-                )
-                .await
-                .unwrap();
+                    .unwrap();
+                if let Some(accepted) = accepted.take() {
+                    accepted.send(()).unwrap();
+                }
             }
         });
-        let poll = mj_core::runtime::spawn(poll_daemon_runtime(replica.clone(), 7, scope_rx));
-        tokio::time::timeout(Duration::from_secs(2), held.notified())
+        let revision = replica.lock().await.projection.revision;
+        let poll =
+            mj_core::runtime::spawn(poll_daemon_runtime(replica.clone(), revision, scope_rx));
+        tokio::time::timeout(Duration::from_secs(2), identity_seen)
             .await
+            .unwrap()
             .unwrap();
         assert!(
             tokio::time::timeout(
                 Duration::from_secs(2),
-                load_session_tail(replica.clone(), "session".into())
+                load_session_tail(replica.clone(), "session".into()),
             )
             .await
-            .expect("a long poll must not hold the replica lock")
+            .expect("pending poll must not hold the replica lock")
             .unwrap()
             .is_none()
         );
         scopes.send(BTreeSet::from(["parent".to_owned()])).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), new_scope)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut publication = RuntimeProjection::default();
+        publication.metadata.notification_cards =
+            Some(mj_core::snapshot_map::SnapshotMap::from([(
+                "parent".into(),
+                mj_client::runtime_feed::NotificationCard {
+                    since_ms: 1,
+                    badge: mj_core::attention::NotificationKind::NeedsInput,
+                    entries: vec![],
+                    dismissal: None,
+                    holder: Some("child".into()),
+                    form: Some(mj_client::runtime_feed::CardForm {
+                        source: mj_client::runtime_feed::CardFormSource::Elicitation,
+                        raised_at_ms: 1,
+                        request_id: "test".into(),
+                        message: "Caught up".into(),
+                    }),
+                },
+            )]));
+        mj_controller::database::notification_reconcile(publication).unwrap();
+        release_scope.send(()).unwrap();
         let projection = tokio::time::timeout(Duration::from_secs(2), poll)
             .await
             .unwrap()
@@ -604,10 +544,6 @@ mod expired_tail_cursor_tests {
         assert_eq!(
             projection.subagent_parents,
             BTreeSet::from(["parent".to_owned()])
-        );
-        assert_eq!(
-            replica.lock().await.cursor.as_ref().unwrap().incarnation,
-            "replacement-daemon"
         );
         assert_eq!(projection.metadata.alert_events.len(), 1);
         assert!(
@@ -620,15 +556,14 @@ mod expired_tail_cursor_tests {
                 .is_empty(),
             "the delivered batch is moved out before cloning subsequent projections"
         );
-        for _ in 0..2 {
-            let next = poll_daemon_runtime(replica.clone(), 0, scopes.subscribe())
-                .await
-                .unwrap();
-            assert!(
-                next.metadata.alert_events.is_empty(),
-                "metadata-free and unchanged deltas cannot re-enqueue the batch"
-            );
-        }
+        let next = tokio::time::timeout(
+            Duration::from_secs(2),
+            poll_daemon_runtime(replica, 0, scopes.subscribe()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(next.metadata.alert_events.is_empty());
         server.await.unwrap();
         shutdown.cancel();
         http_server.await.unwrap().unwrap();

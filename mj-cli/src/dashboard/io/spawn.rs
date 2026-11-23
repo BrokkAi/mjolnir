@@ -1193,7 +1193,7 @@ pub(crate) fn spawn_quota_probe_request(
 pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,
     pub(crate) resource_allocation: Option<mj_core::state::SessionResourceAllocation>,
-    pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
+    pub(crate) additional_mounts: Vec<mj_core::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
 }
 

@@ -136,6 +136,7 @@ impl RuntimeState {
             availability_requested: tokio::sync::Notify::new(),
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
+            login_terminals: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),

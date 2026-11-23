@@ -3,7 +3,6 @@ use super::DashboardContext;
 use anyhow::{Context, Result};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use mj_client::daemon::login_terminal::{TerminalInput, TerminalOutput};
-use mj_client::daemon::{read_frame, write_frame};
 use mj_tui::login_terminal::LoginPane;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
@@ -21,34 +20,48 @@ async fn connection(
     mut input: mpsc::UnboundedReceiver<TerminalInput>,
     updates: mpsc::Sender<Update>,
 ) -> Result<()> {
-    let client = crate::daemon::connect_or_start().await?;
-    let terminal = client.login_terminal(profile, cols, rows).await?;
-    let _placement_lease = terminal.connector;
-    let (mut read, mut write) = terminal.stream.into_split();
+    let client = crate::daemon::connect_or_start().await?.http().await?;
+    let mut terminal = client.open_login_terminal(profile, cols, rows).await?;
+    let terminal_input = terminal.input();
     updates
         .send(Update::Ready)
         .await
         .context("login pane closed")?;
-    loop {
-        // Keep this exact read alive across keyboard events: dropping a
-        // partially consumed frame and starting another corrupts framing.
-        let frame = read_frame::<TerminalOutput>(&mut read);
-        tokio::pin!(frame);
+    let receive = async {
         loop {
-            tokio::select! {
-                frame = &mut frame => {
-                    let frame = frame?;
-                    let finished = matches!(frame, TerminalOutput::Exited { .. } | TerminalOutput::Failed(_));
-                    updates.send(Update::Frame(frame)).await.context("login pane closed")?;
-                    if finished { return Ok(()); }
-                    break;
-                }
-                input = input.recv() => match input {
-                    Some(input) => write_frame(&mut write, &input).await?,
-                    None => return Ok(()),
-                }
+            let frame = terminal.next_output().await?;
+            let finished = matches!(
+                frame,
+                TerminalOutput::Exited { .. } | TerminalOutput::Failed(_)
+            );
+            updates
+                .send(Update::Frame(frame))
+                .await
+                .context("login pane closed")?;
+            if finished {
+                return Ok(());
             }
         }
+    };
+    let send = async {
+        while let Some(input) = input.recv().await {
+            if let Err(error) = terminal_input.send_input(input).await {
+                // A terminal that just exited can close input before the
+                // output reader sees its exit status.
+                if error
+                    .downcast_ref::<mj_client::http::HttpApiError>()
+                    .is_some_and(|error| error.status.as_u16() == 404)
+                {
+                    return std::future::pending().await;
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    };
+    tokio::select! {
+        result = receive => result,
+        result = send => result,
     }
 }
 
