@@ -761,6 +761,94 @@ pull_policy = "never"
     );
 }
 
+#[test]
+fn the_loopback_api_is_ready_with_phone_access_disabled() {
+    use mj_client::daemon::{
+        DaemonClient, DaemonMetadata, WebViewerStatus, api_endpoint_path_in, read_api_endpoint_from,
+    };
+    use mj_client::web::WebViewerAccess;
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let daemon_path = data.join("daemon.json");
+    let api_path = api_endpoint_path_in(&data);
+    let run = |args: &[&str]| {
+        let output =
+            mj_core::subprocess::run_with_input(upgrade_command(&storage).args(args), &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let api_info = run(&["api-info", "--json"]);
+    let metadata: DaemonMetadata =
+        serde_json::from_slice(&fs::read(&daemon_path).unwrap()).unwrap();
+    let endpoint = read_api_endpoint_from(&api_path).unwrap().unwrap();
+    let base_url = format!("http://{}/api/v1", endpoint.address);
+    let info: serde_json::Value = serde_json::from_str(&api_info).unwrap();
+    assert_eq!(info["base_url"], base_url);
+    assert!(endpoint.address.ip().is_loopback());
+    assert_eq!(endpoint.pid, metadata.pid);
+    assert_eq!(endpoint.protocol_version, metadata.protocol_version);
+    assert!(
+        endpoint.token != metadata.token,
+        "TCP and HTTP secrets must differ"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&api_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let persisted_token = fs::read_to_string(data.join("api-token")).unwrap();
+    assert!(run(&["api-token"]).trim() == persisted_token.trim());
+    assert!(endpoint.token != persisted_token.trim());
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut daemon = DaemonClient::connect(metadata).await.unwrap();
+        assert_eq!(
+            daemon.identity().await.unwrap().instance_id,
+            endpoint.instance_id
+        );
+        assert!(matches!(
+            daemon.web_access().await.unwrap(),
+            WebViewerAccess::Unavailable(_)
+        ));
+        assert_eq!(
+            daemon.status().await.unwrap().phone_status,
+            WebViewerStatus::Disabled
+        );
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (route, token, status) in [
+            ("options", &endpoint.token, reqwest::StatusCode::OK),
+            ("options", &persisted_token, reqwest::StatusCode::OK),
+            (
+                "settings",
+                &endpoint.token,
+                reqwest::StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let response = http
+                .get(format!("{base_url}/{route}"))
+                .bearer_auth(token.trim())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{route}");
+        }
+    });
+    run(&["daemon", "stop"]);
+    assert!(!daemon_path.exists());
+    assert!(read_api_endpoint_from(&api_path).unwrap().is_none());
+}
+
 /// A replacement daemon is a new start, and a client proves that from the
 /// daemon alone: no PID, no `/proc`, and the same answer on every platform.
 #[test]

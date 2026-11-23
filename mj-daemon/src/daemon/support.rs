@@ -357,13 +357,20 @@ pub(super) fn random_hex<const N: usize>() -> Result<String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-pub(super) fn write_metadata(path: &Path, metadata: &DaemonMetadata) -> Result<()> {
+pub(super) fn write_metadata(path: &Path, metadata: &impl serde::Serialize) -> Result<()> {
     let parent = path
         .parent()
         .context("daemon metadata path has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("create daemon data directory {}", parent.display()))?;
-    let temporary = parent.join(format!(".daemon.{}.tmp", std::process::id()));
+    let filename = path
+        .file_name()
+        .context("daemon metadata path has no filename")?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        filename.to_string_lossy(),
+        std::process::id()
+    ));
     let body = serde_json::to_vec_pretty(metadata)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

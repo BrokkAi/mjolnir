@@ -14,7 +14,8 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 
 - [x] (2026-11-23 16:40Z) Audited `#1043` and `#1044` against `master` (`723305327`), verified `DaemonMetadata`/`DaemonStatus` `deny_unknown_fields` constraint, `[phone].enabled` HTTP server coupling, and `/api/*` vs `/api/v1/*` overlap.
 - [x] (2026-11-23 16:50Z) Milestone 1: Collapsed `/api/*` into `/api/v1/*`, kept `/api/v1/settings*` cookie-only (`require_session`), deleted duplicate `preview_container_upgrade` / `stop_background_task` / tool-detail routes, unified `FailureBody` into `ErrorBody`, hardened `viewer_client_id` revocation checks, and migrated viewer JS, Rust tests, docs, Python e2e callers, and Playwright specs (291 `brokk-mj-server`, 150 `server_runtime`, 97 Node, 150 Playwright deterministic tests passed).
-- [ ] Milestone 2: Start an unconditional loopback HTTP API (`api-endpoint.json`) at daemon startup independent of `[phone].enabled` and Tailscale, and route local `ApiClient` discovery through it.
+- [x] (2026-11-23 17:13Z) Milestone 2: Started unconditional loopback HTTP API (`api-endpoint.json`, mode 0600, per-start loopback bearer token scoped strictly to the loopback listener) independent of `[phone].enabled` and Tailscale, initialized report backend and persisted API credential unconditionally, cleaned up `api-endpoint.json` in both epilogue and forced-exit watchdog, and switched local host `ApiClient` to direct `api-endpoint.json` discovery.
+- [ ] Milestone 2.5: Publish/forward `api-endpoint.json` for Container and SSH daemon placements too (and put shared typed `HttpDaemonClient` in `mj-client`), so Milestone 3 deletes migrated TCP `DaemonAction` variants unconditionally across all placements without dual-transport fallbacks.
 - [ ] Milestone 3: Migrate TCP `DaemonAction` families and the two remaining `#1043` dashboard git/working-context probes onto `/api/v1/*` in clean domain slices, deleting migrated TCP variants and handlers after each slice.
 - [ ] Milestone 4: Move streaming/interactive/SSH daemon paths (`RuntimeChanges`, `LoginTerminal`, SSH `ssh -L` forwarding) onto HTTP `/api/v1/*`, reduce TCP `DaemonAction` to the five frozen upgrade-management variants, and clean up remaining `mj-controller` type imports in `mj-cli`.
 
@@ -53,11 +54,16 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
   Rationale: Transport consolidation touches `mj-server`, `mj-daemon`, `mj-client`, `mj-cli`, `mj-chat`, and `tests/e2e/web/`. Small reviewed checkpoints keep every diff easy to reason about, prevent long-lived merge conflicts, and guarantee the tree compiles and stays strictly simpler after every commit.
   Date/Author: 2026-11-23 / Coordinator
 
+- Decision: Move Container and SSH HTTP endpoint forwarding (`api-endpoint.json`) ahead of Milestone 3 (as Milestone 2.5) rather than waiting for Milestone 4, and scope `loopback_token` strictly to the loopback HTTP listener (leaving it empty on the external phone listener).
+  Rationale: Auditing Milestone 3a revealed that if Container and SSH placements do not publish/forward `api-endpoint.json` when `[phone].enabled = false`, every Milestone 3 caller would need a temporary HTTP-with-TCP-fallback path. Publishing the container API port and forwarding the remote `api_address` inside the existing SSH `-L` tunnel first lets every Milestone 3 slice delete its TCP `DaemonAction` variants immediately across all placements. Keeping `loopback_token` off `serve_phone` ensures the per-start loopback secret is never accepted over an external network interface.
+  Date/Author: 2026-11-23 / Coordinator
+
 ## Outcomes & Retrospective
 
 - **Milestone 1 (complete):** Removed the 76-line duplicate `/api/*` route group in `mj-server/src/server/routes.rs`, deleted duplicate `preview_container_upgrade` and `stop_background_task` handlers and duplicate `FailureBody`, and mounted every HTTP endpoint under `/api/v1` (with `/api/v1/settings*` strictly cookie-only via `require_session`). Also hardened `viewer_client_id` to validate via `authenticated_viewer` (checking revocations) so pairing a bearer token with a revoked cookie cannot spoof a viewer identity. All 291 `brokk-mj-server`, 150 `server_runtime`, 97 Node, and 150 Playwright deterministic tests pass.
+- **Milestone 2 (complete):** Split the daemon's HTTP API startup (`server_runtime::start_api`) from the external phone listener (`server_runtime::serve_phone`). The loopback HTTP API now binds and publishes mode-0600 `api-endpoint.json` before `daemon.json` regardless of `[phone].enabled` or Tailscale availability, initializes the report backend and persisted API credential unconditionally, scopes its per-start `loopback_token` strictly to the loopback listener, and removes `api-endpoint.json` on normal and watchdog exit. Local host `ApiClient` connects directly via `api-endpoint.json` with zero TCP `WebViewerAccess`/`ApiCredential` calls, and `mj api-token` works with phone disabled.
 
-Milestones 2–4 remain.
+Milestones 2.5–4 remain.
 
 ## Context and Orientation
 

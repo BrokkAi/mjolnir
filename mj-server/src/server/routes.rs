@@ -24,6 +24,7 @@ pub(super) struct ServerState {
     pub(super) secure_cookie: bool,
     pub(super) code_guard: Arc<Mutex<CodeGuard>>,
     pub(super) api_token: Arc<str>,
+    pub(super) loopback_token: Arc<str>,
     pub(super) subagent: Option<Arc<dyn api::SubagentBackend>>,
     /// Where the remembered fast-start preferences live, so a handler can
     /// report the saved default without reading the process environment.
@@ -118,6 +119,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         secure_cookie: options.secure_cookie,
         code_guard: Arc::new(Mutex::new(CodeGuard::default())),
         api_token: options.api_token.into(),
+        loopback_token: options.loopback_token.into(),
         subagent: options.subagent,
         preferences_path: options.preferences_path,
         worker_source_check: options.worker_source_check,

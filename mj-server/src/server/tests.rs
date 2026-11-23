@@ -459,6 +459,43 @@ fn app_with_background_stop_receiver(
 }
 
 #[tokio::test]
+async fn both_bearer_credentials_authenticate_api_reads_but_settings_require_a_cookie() {
+    let mut options = detached_options();
+    options.set_api_token("test-api-token".into());
+    options.set_loopback_token("loopback-token".into());
+    let app = router(options);
+
+    for (path, token, status) in [
+        ("/api/v1/sessions", "test-api-token", StatusCode::OK),
+        ("/api/v1/sessions", "loopback-token", StatusCode::OK),
+        ("/api/v1/sessions", "", StatusCode::UNAUTHORIZED),
+        ("/api/v1/sessions", "wrong-token", StatusCode::UNAUTHORIZED),
+        (
+            "/api/v1/settings",
+            "test-api-token",
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "/api/v1/settings",
+            "loopback-token",
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
     let (app, mut requests) = app_with_background_stop_receiver(true);
     let body = r#"{"background_task_id":"terminal:background-1"}"#;
