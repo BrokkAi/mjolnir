@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 )
+
+// MbxVersion is the mbx release Mjolnir installs for host setup and Nitro
+// guests.
+const MbxVersion = "1.30.0"
 
 // RawProjectContextID is the stable context identity for a bare project at
 // the serialized path boundary.
@@ -906,6 +911,8 @@ func (s SubagentConfig) Choices(taskType SubagentTaskType) []SubagentChoice {
 		return s.Subtle
 	case SubagentTaskTypeOracle:
 		return s.Oracle
+	case SubagentTaskTypeOrchestrator:
+		return s.Primary
 	}
 	return s.Straightforward
 }
@@ -1104,6 +1111,15 @@ func (c *legacyMailboxConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ProfileApprovalChoices is profile's approval choices under this
+// configuration: the global [guardian] switch can turn the Mjolnir guardian
+// off for every profile.
+func (c Config) ProfileApprovalChoices(profile HarnessProfile) ApprovalChoices {
+	choices := profile.ApprovalChoices()
+	choices.MjolnirGuardian = choices.MjolnirGuardian && c.Guardian.Enabled
+	return choices
+}
+
 // ProfilesDiscoveryKey is the identity of the configured profile list and the
 // managed harness builds its probes would run, excluding policies and UI
 // defaults.
@@ -1114,6 +1130,9 @@ func (c Config) ProfilesDiscoveryKey() string {
 	}
 	return sha256JSONHex(inputs, "profile identities serialize")
 }
+
+// OrchestratorsConfigured is whether the orchestrator pool is configured.
+func (c Config) OrchestratorsConfigured() bool { return len(c.Subagents.Primary) > 0 }
 
 // sha256JSONHex is the lowercase hex SHA-256 of value's serde_json bytes.
 func sha256JSONHex(value any, what string) string {
@@ -1195,7 +1214,7 @@ func (c Config) GithubEventsEnabled() bool { return c.Github.Watch.Enabled && c.
 // Version 20 adds daemon placement; 21 adds review counts; 22 adds the session
 // GitHub credential default. Older strict configuration readers reject the new
 // fields instead of dropping them.
-const LegacyEC2TargetNotice = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone>`."
+const LegacyEC2TargetNotice = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone> --cpus <count> --memory-gib <GiB>`."
 
 // ConfigurationDocumentationURL is the page that documents config.toml,
 // schema version included.
@@ -1975,6 +1994,7 @@ func interpretTarget(id string, value any, version uint32) (interpretedTarget, e
 
 // configFromStored is TryFrom<StoredConfig> for Config.
 func configFromStored(stored storedConfig) (Config, error) {
+	stripProjectCredentials(stored.Bundles)
 	github := stored.Github
 	github.Watch.Enabled = github.Watch.Enabled && stored.Mailbox.Enabled
 	if err := github.Validate(); err != nil {
@@ -2115,8 +2135,34 @@ func configFromStored(stored storedConfig) (Config, error) {
 	}, nil
 }
 
+// cloneProjectBundles copies bundles deeply enough that stripping the copy's
+// credentials leaves the original alone.
+func cloneProjectBundles(bundles map[string]ProjectBundle) map[string]ProjectBundle {
+	if bundles == nil {
+		return nil
+	}
+	cloned := make(map[string]ProjectBundle, len(bundles))
+	for id, bundle := range bundles {
+		bundle.Repositories = slices.Clone(bundle.Repositories)
+		cloned[id] = bundle
+	}
+	return cloned
+}
+
+// stripProjectCredentials removes HTTP userinfo from every bundle
+// repository's source, in place.
+func stripProjectCredentials(bundles map[string]ProjectBundle) {
+	for _, bundle := range bundles {
+		for index := range bundle.Repositories {
+			bundle.Repositories[index].stripHTTPUserinfo()
+		}
+	}
+}
+
 // storedConfigFrom is From<Config> for StoredConfig.
 func storedConfigFrom(config Config) storedConfig {
+	config.Bundles = cloneProjectBundles(config.Bundles)
+	stripProjectCredentials(config.Bundles)
 	machines := make(map[string]Machine, len(config.Machines))
 	for id, machine := range config.Machines {
 		machines[id] = machine
@@ -2633,6 +2679,13 @@ func (c Config) ConfiguresTarget(id string) bool {
 	return !isStandard || !serdeEqual(standard, target)
 }
 
+// warnedYoloPaths is the config files already warned about for removed
+// `[subagents.yolo.*]` settings, so each is named once per process.
+var warnedYoloPaths = struct {
+	sync.Mutex
+	paths map[string]struct{}
+}{paths: map[string]struct{}{}}
+
 // ConfigLoadFrom reads the config from path, returning DefaultConfig when the
 // file is missing and an error when it is malformed or was written by a newer
 // Mjolnir.
@@ -2649,11 +2702,10 @@ func ConfigLoadFrom(path string) (Config, error) {
 	}
 	document, err := parseTOMLDocument(string(contents))
 	if err != nil {
-		return Config{}, fmt.Errorf("parse Mjolnir config %s: %w", path, err)
+		return Config{}, configTOMLError(path, string(contents), err)
 	}
-	if found, ok := newerVersion(document); ok {
-		return Config{}, fmt.Errorf("%s was written by a newer Mjolnir (config version %d; this build supports %d). Update Mjolnir",
-			path, found, ConfigVersion)
+	if version, ok := newerVersion(document); ok {
+		return Config{}, &ConfigLoadErrorNewerSchema{Path: path, Version: version}
 	}
 	// Every file Mjolnir writes starts with this line, so only a hand-written
 	// one lacks it. Serde's "missing field `version`" does not say which
@@ -2666,8 +2718,16 @@ func ConfigLoadFrom(path string) (Config, error) {
 		return Config{}, err
 	}
 	if hasLegacySubagentYoloChoices(document) {
-		slog.Warn("ignoring removed [subagents.yolo.*] settings; Mjolnir now uses unified [[subagents.*]] lists across all targets, and the next save removes them",
-			"config", path)
+		warnedYoloPaths.Lock()
+		_, warned := warnedYoloPaths.paths[path]
+		if !warned {
+			warnedYoloPaths.paths[path] = struct{}{}
+		}
+		warnedYoloPaths.Unlock()
+		if !warned {
+			slog.Warn("ignoring removed [subagents.yolo.*] settings; Mjolnir now uses unified [[subagents.*]] lists across all targets, and the next save removes them",
+				"config", path)
+		}
 	}
 	if removed := dropRemovedHarnessProfiles(document); len(removed) > 0 {
 		slog.Warn("ignoring profiles for a harness Mjolnir no longer supports; the next save removes them",
@@ -2684,7 +2744,7 @@ func ConfigLoadFrom(path string) (Config, error) {
 	// HarnessProfile.EnsureReady.
 	data, err := json.Marshal(document)
 	if err != nil {
-		return Config{}, fmt.Errorf("parse Mjolnir config %s: %w", path, err)
+		return Config{}, configTOMLError(path, string(contents), err)
 	}
 	type read struct {
 		config Config
@@ -2696,7 +2756,7 @@ func ConfigLoadFrom(path string) (Config, error) {
 		return read{config, err}
 	})
 	if result.err != nil {
-		return Config{}, fmt.Errorf("parse Mjolnir config %s: %w", path, result.err)
+		return Config{}, configTOMLError(path, string(contents), result.err)
 	}
 	// The configuration types read past keys they have no field for, because
 	// the daemon serves this configuration to clients that may predate a
@@ -2795,6 +2855,38 @@ func ConfigUpdateTo[T any](path string, edit func(*Config) (T, error)) (Config, 
 	return configUpdateToLocked(path, edit)
 }
 
+// ConfigUpdateToCancellable is ConfigUpdateTo with a cancellable lock wait
+// and edit.
+func ConfigUpdateToCancellable[T any](path string, cancelled func() bool, edit func(*Config) (T, error)) (Config, T, error) {
+	var zero T
+	file, err := configLockOpen(path)
+	if err != nil {
+		return Config{}, zero, err
+	}
+	lock, err := AcquireFileLockCancellable(file, cancelled)
+	if err != nil {
+		_ = file.Close()
+		return Config{}, zero, fmt.Errorf("lock config %s: %w", path, err)
+	}
+	defer func() {
+		lock.Drop()
+		_ = file.Close()
+	}()
+	return configUpdateToLocked(path, func(config *Config) (T, error) {
+		if cancelled() {
+			return zero, errors.New("configuration edit cancelled")
+		}
+		value, err := edit(config)
+		if err != nil {
+			return value, err
+		}
+		if cancelled() {
+			return zero, errors.New("configuration edit cancelled")
+		}
+		return value, nil
+	})
+}
+
 func configUpdateToLocked[T any](path string, edit func(*Config) (T, error)) (Config, T, error) {
 	var zero T
 	config, err := ConfigLoadFrom(path)
@@ -2805,6 +2897,7 @@ func configUpdateToLocked[T any](path string, edit func(*Config) (T, error)) (Co
 	if err != nil {
 		return Config{}, zero, err
 	}
+	stripProjectCredentials(config.Bundles)
 	if err := config.saveToLocked(path); err != nil {
 		return Config{}, zero, err
 	}
@@ -2913,6 +3006,18 @@ type ConfigLock struct {
 }
 
 func configLockAcquire(configPath string) (*ConfigLock, error) {
+	file, err := configLockOpen(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := configLockExclusive(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock config %s: %w", configPath, err)
+	}
+	return &ConfigLock{file: NewFileLock(file)}, nil
+}
+
+func configLockOpen(configPath string) (*os.File, error) {
 	lockPath := configLockPath(configPath)
 	parent := filepath.Dir(lockPath)
 	if err := os.MkdirAll(parent, 0o777); err != nil {
@@ -2922,11 +3027,7 @@ func configLockAcquire(configPath string) (*ConfigLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open config lock %s: %w", lockPath, err)
 	}
-	if err := configLockExclusive(file); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("lock config %s: %w", configPath, err)
-	}
-	return &ConfigLock{file: NewFileLock(file)}, nil
+	return file, nil
 }
 
 // Close releases the lock (Rust's Drop), then closes the lock file.
@@ -3158,6 +3259,24 @@ func normalizeTOML(value any) any {
 	return value
 }
 
+// tomlDocumentError is a TOML syntax error in toml's wording, keeping the
+// byte offset the parser points at.
+type tomlDocumentError struct {
+	message string
+	start   int
+}
+
+func (e *tomlDocumentError) Error() string { return e.message }
+
+// tomlErrorOffset is the byte offset a TOML syntax error points at, if any.
+func tomlErrorOffset(err error) (int, bool) {
+	var document *tomlDocumentError
+	if errors.As(err, &document) && document.start >= 0 {
+		return document.start, true
+	}
+	return 0, false
+}
+
 // parseTOMLDocument is `text.parse::<toml::Value>()`: the document as
 // generic values (normalizeTOML), with toml's "TOML parse error" wording.
 func parseTOMLDocument(text string) (map[string]any, error) {
@@ -3165,10 +3284,13 @@ func parseTOMLDocument(text string) (map[string]any, error) {
 	if _, err := toml.Decode(text, &document); err != nil {
 		var parseError toml.ParseError
 		if errors.As(err, &parseError) {
-			return nil, fmt.Errorf("TOML parse error at line %d, column %d\n%s",
-				parseError.Position.Line, parseError.Position.Col, parseError.Message)
+			return nil, &tomlDocumentError{
+				message: fmt.Sprintf("TOML parse error at line %d, column %d\n%s",
+					parseError.Position.Line, parseError.Position.Col, parseError.Message),
+				start: parseError.Position.Start,
+			}
 		}
-		return nil, fmt.Errorf("TOML parse error: %w", err)
+		return nil, &tomlDocumentError{message: "TOML parse error: " + err.Error(), start: -1}
 	}
 	if document == nil {
 		document = map[string]any{}

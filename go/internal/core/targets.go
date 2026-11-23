@@ -714,21 +714,64 @@ type DeploymentCapacityTarget struct {
 	ProbeError *string
 }
 
+type HostMemoryUsage struct {
+	UsedBytes  uint64 `json:"used_bytes"`
+	TotalBytes uint64 `json:"total_bytes"`
+}
+
+func (u *HostMemoryUsage) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "used_bytes", "total_bytes"); err != nil {
+		return err
+	}
+	type plain HostMemoryUsage
+	return json.Unmarshal(data, (*plain)(u))
+}
+
 // DeploymentCapacityUsage is one capacity reading.
 type DeploymentCapacityUsage struct {
+	EC2InstanceType *string `json:"ec2_instance_type,omitempty"`
+	// PhysicalMemory is physical RAM when the measured allocation budget is
+	// a separate pool.
+	PhysicalMemory *HostMemoryUsage `json:"physical_memory,omitempty"`
 	// MemoryPool reports whether MemoryTotalBytes is a pool set aside for
 	// sessions at boot (a Nitro host's sandbox memory) rather than the
 	// host's RAM. A pool is already net of the host's own needs, so
 	// admission applies no reserve to it.
-	MemoryPool       bool
-	CPUPercent       *uint8
-	MemoryUsedBytes  uint64
-	MemoryTotalBytes uint64
-	LogicalCores     uint64
-	DiskTotalBytes   *uint64
+	MemoryPool       bool    `json:"memory_pool"`
+	CPUPercent       *uint8  `json:"cpu_percent"`
+	MemoryUsedBytes  uint64  `json:"memory_used_bytes"`
+	MemoryTotalBytes uint64  `json:"memory_total_bytes"`
+	LogicalCores     uint64  `json:"logical_cores"`
+	DiskTotalBytes   *uint64 `json:"disk_total_bytes"`
 	// Storage is free space on the filesystems Mjolnir writes to, per machine
 	// probed: one for a host, one per instance for a fleet.
-	Storage []HostStorageSample
+	Storage []HostStorageSample `json:"storage"`
+}
+
+// MarshalJSON writes Storage as [] when empty, as serde writes a Vec.
+func (u DeploymentCapacityUsage) MarshalJSON() ([]byte, error) {
+	type plain DeploymentCapacityUsage
+	if u.Storage == nil {
+		u.Storage = []HostStorageSample{}
+	}
+	return json.Marshal(plain(u))
+}
+
+func (u *DeploymentCapacityUsage) UnmarshalJSON(data []byte) error {
+	if err := requireFields(data, "memory_pool", "memory_used_bytes", "memory_total_bytes", "logical_cores", "storage"); err != nil {
+		return err
+	}
+	type plain DeploymentCapacityUsage
+	return json.Unmarshal(data, (*plain)(u))
+}
+
+// HostMemory is the host's physical memory reading: PhysicalMemory when the
+// measured budget is a separate pool, else the measured memory itself.
+func (u *DeploymentCapacityUsage) HostMemory() HostMemoryUsage {
+	if u.PhysicalMemory != nil {
+		return *u.PhysicalMemory
+	}
+	return HostMemoryUsage{UsedBytes: u.MemoryUsedBytes, TotalBytes: u.MemoryTotalBytes}
 }
 
 // AdditionalMount is an additional directory made available to one session.
@@ -982,9 +1025,9 @@ type CommandExecutor interface {
 	// told what changed.
 	NotifyNotice(notice string)
 
-	// BeforeMoveSourceStop stops the source's children only once destination
-	// preparation has succeeded.
-	BeforeMoveSourceStop(ctx context.Context) error
+	// StopBorrowedWorkersBeforeQuiesce stops workers sharing the environment
+	// before its owner quiesces.
+	StopBorrowedWorkersBeforeQuiesce(ctx context.Context) error
 
 	// ReserveMoveDestination: the Move source has been sealed; its
 	// destination belongs exclusively to the lifecycle until queue admission
@@ -1040,16 +1083,16 @@ type CommandExecutor interface {
 // not call back into the implementer. Embed it in an executor.
 type CommandExecutorDefaults struct{}
 
-func (CommandExecutorDefaults) CancellationRequested() bool                { return false }
-func (CommandExecutorDefaults) StageStarted(ProvisionStage)                {}
-func (CommandExecutorDefaults) StageFinished(ProvisionStage)               {}
-func (CommandExecutorDefaults) NotifyNotice(string)                        {}
-func (CommandExecutorDefaults) BeforeMoveSourceStop(context.Context) error { return nil }
-func (CommandExecutorDefaults) ReserveMoveDestination()                    {}
-func (CommandExecutorDefaults) BeginResumableWork() error                  { return nil }
-func (CommandExecutorDefaults) YieldAdmissionIfResumable() bool            { return false }
-func (CommandExecutorDefaults) ShutdownInterrupted() bool                  { return false }
-func (CommandExecutorDefaults) EndResumableWork(string) error              { return nil }
+func (CommandExecutorDefaults) CancellationRequested() bool                            { return false }
+func (CommandExecutorDefaults) StageStarted(ProvisionStage)                            {}
+func (CommandExecutorDefaults) StageFinished(ProvisionStage)                           {}
+func (CommandExecutorDefaults) NotifyNotice(string)                                    {}
+func (CommandExecutorDefaults) StopBorrowedWorkersBeforeQuiesce(context.Context) error { return nil }
+func (CommandExecutorDefaults) ReserveMoveDestination()                                {}
+func (CommandExecutorDefaults) BeginResumableWork() error                              { return nil }
+func (CommandExecutorDefaults) YieldAdmissionIfResumable() bool                        { return false }
+func (CommandExecutorDefaults) ShutdownInterrupted() bool                              { return false }
+func (CommandExecutorDefaults) EndResumableWork(string) error                          { return nil }
 func (CommandExecutorDefaults) ExecuteWithStdin(*CommandSpec, io.Reader) (CommandOutput, error) {
 	return CommandOutput{}, errors.New("this command executor does not support streamed stdin")
 }
@@ -1167,8 +1210,8 @@ func (w *WithoutDeadline) StageStarted(stage ProvisionStage)  { w.executor.Stage
 func (w *WithoutDeadline) StageFinished(stage ProvisionStage) { w.executor.StageFinished(stage) }
 func (w *WithoutDeadline) NotifyNotice(notice string)         { w.executor.NotifyNotice(notice) }
 
-func (w *WithoutDeadline) BeforeMoveSourceStop(context.Context) error { return nil }
-func (w *WithoutDeadline) ReserveMoveDestination()                    {}
+func (w *WithoutDeadline) StopBorrowedWorkersBeforeQuiesce(context.Context) error { return nil }
+func (w *WithoutDeadline) ReserveMoveDestination()                                {}
 
 func (w *WithoutDeadline) BeginResumableWork() error { return w.executor.BeginResumableWork() }
 
@@ -1394,7 +1437,7 @@ func (e ProcessExecutor) ExecuteWithStdin(command *CommandSpec, input io.Reader)
 	// session is retried with the same stream. Plain process execution is not
 	// cancellable, so a transfer only ends when the child does.
 	return withSSHRefusalRetry(command, e, nil, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
-		return streamCommandWithStdin(cancellableCommand(command), command, input, func() bool { return false }, gate, nil)
+		return streamCommandWithStdin(cancellableCommand(command), command, input, func() bool { return false }, nil, gate, nil)
 	})
 }
 
@@ -1456,11 +1499,16 @@ func (w *ProgressWriter) Write(data []byte) (int, error) {
 // collected stdout, and input is not read, nor anything written to the
 // child, until the marker arrives. A session the server refused therefore
 // leaves input untouched for the caller to retry with.
+//
+// abortStdin, when given, wakes an input whose Read blocks: it is called
+// when cancellation starts, and when the child exits after stdin streaming
+// has started.
 func streamCommandWithStdin(
 	process *exec.Cmd,
 	command *CommandSpec,
 	input io.Reader,
 	isCancelled func() bool,
+	abortStdin func(),
 	gate *StartGate,
 	observer CommandOutputObserver,
 ) (CommandOutput, error) {
@@ -1514,6 +1562,15 @@ func streamCommandWithStdin(
 		delivered bool
 		err       error
 	}
+	// When input.Read fails, keep stdin open until the supervisor has
+	// terminated the child process group. Otherwise closing stdin would
+	// deliver a clean EOF and let a length-less child (such as chunked `hel
+	// worker write-file`) publish a truncated file.
+	var inputFailed atomic.Bool
+	childDone := make(chan struct{})
+	var childDoneOnce sync.Once
+	markChildDone := func() { childDoneOnce.Do(func() { close(childDone) }) }
+	defer markChildDone()
 	writerDone := make(chan inputResult, 1)
 	go func() {
 		writerDone <- func() (result inputResult) {
@@ -1565,6 +1622,8 @@ func streamCommandWithStdin(
 					break
 				}
 				if err != nil {
+					inputFailed.Store(true)
+					<-childDone
 					return inputResult{err: fmt.Errorf("read command input: %w", err)}
 				}
 			}
@@ -1610,9 +1669,22 @@ func streamCommandWithStdin(
 			}
 			if isCancelled() {
 				terminateCancellableChild(child, false)
+				markChildDone()
+				if abortStdin != nil {
+					abortStdin()
+				}
 				endReply()
 				joinWriter()
 				return nil, fmt.Errorf("operation cancelled while %s", command.Purpose)
+			}
+			if status == nil && inputFailed.Load() {
+				terminateCancellableChild(child, false)
+				markChildDone()
+				endReply()
+				if result := joinWriter(); result.err != nil {
+					return nil, result.err
+				}
+				return nil, fmt.Errorf("streamed command input failed while %s", command.Purpose)
 			}
 			if stdoutReader.isFinished() {
 				endReply()
@@ -1621,6 +1693,10 @@ func streamCommandWithStdin(
 				state, err := child.tryWait()
 				if err != nil {
 					terminateCancellableChild(child, false)
+					markChildDone()
+					if abortStdin != nil {
+						abortStdin()
+					}
 					endReply()
 					joinWriter()
 					return nil, fmt.Errorf("wait for %s: %w", command.Purpose, err)
@@ -1632,6 +1708,7 @@ func streamCommandWithStdin(
 			// then the owned group is terminated, which also releases a
 			// writer blocked on a pipe a descendant holds.
 			if status != nil {
+				markChildDone()
 				if exitedAt == nil {
 					now := time.Now()
 					exitedAt = &now
@@ -1643,6 +1720,12 @@ func streamCommandWithStdin(
 					groupKilled = true
 					if group != nil {
 						group.Kill()
+					}
+					// Unblock an input reader once stdin streaming has
+					// actually started; a refused SSH attempt before the
+					// start marker must leave input untouched for retry.
+					if (gate == nil || gate.Phase() == StartPhaseStarted) && abortStdin != nil {
+						abortStdin()
 					}
 				}
 				if drained && writerFinished() {
@@ -1659,6 +1742,7 @@ func streamCommandWithStdin(
 		}
 	}
 	status, processErr := supervise()
+	markChildDone()
 	deadline := time.Now()
 	stdoutBytes, err := stdoutReader.finish("stdout", deadline)
 	if err != nil {
@@ -1780,6 +1864,17 @@ func (g *ProcessCancellationGuard) Cancel() { g.cancelled.Store(true) }
 // both output streams while retaining the executor's process-group,
 // cancellation and SSH ownership.
 func (e CancellableProcessExecutor) ExecuteWithStdinObserved(command *CommandSpec, input io.Reader, observer CommandOutputObserver) (CommandOutput, error) {
+	return e.executeWithStdinInner(command, input, nil, observer)
+}
+
+// ExecuteWithAbortableStdin feeds input from a blocking source that can be
+// woken via abortStdin when cancellation starts or the child exits after
+// stdin streaming has started.
+func (e CancellableProcessExecutor) ExecuteWithAbortableStdin(command *CommandSpec, input io.Reader, abortStdin func()) (CommandOutput, error) {
+	return e.executeWithStdinInner(command, input, abortStdin, nil)
+}
+
+func (e CancellableProcessExecutor) executeWithStdinInner(command *CommandSpec, input io.Reader, abortStdin func(), observer CommandOutputObserver) (CommandOutput, error) {
 	running := blockingOperationCommand(command)
 	defer running.End()
 	// The stream is not read until the session has started, so a refused
@@ -1787,7 +1882,7 @@ func (e CancellableProcessExecutor) ExecuteWithStdinObserved(command *CommandSpe
 	// process group so cancellation can kill the whole group, which is what
 	// releases a writer blocked on a full pipe.
 	output, err := withSSHRefusalRetry(command, e, e.IsCancelled, func(command *CommandSpec, gate *StartGate) (CommandOutput, error) {
-		return streamCommandWithStdin(cancellableCommand(command), command, input, e.IsCancelled, gate, observer)
+		return streamCommandWithStdin(cancellableCommand(command), command, input, e.IsCancelled, abortStdin, gate, observer)
 	})
 	return output, e.describeCancellation(command, err)
 }
@@ -2282,7 +2377,7 @@ func (e CancellableProcessExecutor) runOnceOutput(command *CommandSpec, gate *St
 	if command.sensitiveStdin != nil {
 		// Owned bytes, so each attempt gets its own reader.
 		input := bytes.NewReader(command.sensitiveStdin.bytes)
-		return streamCommandWithStdin(process, command, input, e.IsCancelled, gate, nil)
+		return streamCommandWithStdin(process, command, input, e.IsCancelled, nil, gate, nil)
 	}
 	started := time.Now()
 	if err := e.checkCancelled(command.Purpose); err != nil {
@@ -2892,6 +2987,11 @@ func CommandThreadPanicMessage(payload any) string {
 	}
 }
 
+// HostSnapshotExactRefs is the internal namespace used to carry an exact
+// checkout selection from a host snapshot into an ordinary clone without
+// borrowing the snapshot's objects.
+const HostSnapshotExactRefs = "refs/mj/host-snapshot-exact"
+
 // RepositorySpec is one repository of a project bundle.
 type RepositorySpec struct {
 	// URL is the network clone URL. Managed workspaces require a configured
@@ -2901,10 +3001,10 @@ type RepositorySpec struct {
 	Destination string   `json:"destination"`
 	GitRef      *string  `json:"git_ref"`
 	// Reference is a read-only bare repository mounted into the target for
-	// Git object reuse. A missing or unusable reference is only an
-	// optimization miss. With HistoryCutoff, it is instead a Git bundle in
-	// the target that holds only the cutoff history, and the checkout
-	// fetches from it.
+	// Git object reuse. For a host-only source the snapshot is required and
+	// serves the clone. With HistoryCutoff, it is instead a Git bundle in the
+	// target that holds only the cutoff history, and the checkout fetches
+	// from it.
 	Reference *string `json:"reference,omitempty"`
 	// HistoryCutoff starts the checkout with these commits and their
 	// ancestors only. It is created by `git init` and a fetch by object ID

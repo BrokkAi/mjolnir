@@ -259,6 +259,7 @@ func stateSampleState() StateState {
 		},
 	}
 	state := NewStateState()
+	state.EnvironmentOwners.Insert(session.ID, session.ID)
 	state.Sessions.Insert(session.ID, session)
 	state.MountHistory.Insert("local", []string{"/home/test/cache"})
 	return state
@@ -512,7 +513,7 @@ func stateSubagent(kind SubagentKind, child, parent *SessionRecord, taskName, re
 	}
 }
 
-func TestASubAgentChildTakesItsProjectIdentityFromItsParent(t *testing.T) {
+func TestLedgerOwnershipControlsCheckoutProjectAndReviewAcrossLogicalAncestry(t *testing.T) {
 	config := stateSampleConfig()
 	parent := stateSampleSession()
 	parent.ID = "parent-session"
@@ -525,6 +526,8 @@ func TestASubAgentChildTakesItsProjectIdentityFromItsParent(t *testing.T) {
 		Target:                 ManagedWorktreeTargetLocal{},
 	}
 	parent.ProjectDirectory = stateStr("/worktrees/parent-session")
+	var off SessionReview = SessionReviewOff{}
+	parent.Review = &off
 	// A child is launched into the parent's worktree checkout, which is
 	// named after the parent session, and owns no worktree of its own.
 	child := stateSampleSession()
@@ -535,7 +538,26 @@ func TestASubAgentChildTakesItsProjectIdentityFromItsParent(t *testing.T) {
 	state := NewStateState()
 	state.Sessions.Insert(parent.ID, parent)
 	state.Sessions.Insert(child.ID, child)
+	state.EnvironmentOwners.Insert(parent.ID, parent.ID)
+	state.EnvironmentOwners.Insert(child.ID, parent.ID)
 	state.Subagents.Insert(child.ID, stateSubagent(SubagentKindWorker, &child, &parent, "Inspect parser", "request-1"))
+	owned := stateCheckoutSession("owned")
+	owned.ProjectDirectory = stateStr("/worktrees/owned")
+	var push SessionReview = SessionReviewPush{}
+	owned.Review = &push
+	state.Sessions.Insert(owned.ID, owned)
+	state.EnvironmentOwners.Insert(owned.ID, owned.ID)
+	relation, _ := state.Subagents.Get(child.ID)
+	relation.ChildSessionID = owned.ID
+	state.Subagents.Insert(owned.ID, relation)
+	nested := stateCheckoutSession("nested")
+	nested.State = SessionStateRunning
+	state.Sessions.Insert(nested.ID, nested)
+	state.EnvironmentOwners.Insert(nested.ID, owned.ID)
+	relation.ChildSessionID = nested.ID
+	relation.ParentSessionID = owned.ID
+	state.Subagents.Insert(nested.ID, relation)
+	state.Sessions.GetMut(child.ID).State = SessionStateRunning
 
 	if name := child.ProjectName(&config); name != "parent-session" {
 		t.Fatalf("child project name = %q", name)
@@ -545,6 +567,65 @@ func TestASubAgentChildTakesItsProjectIdentityFromItsParent(t *testing.T) {
 	}
 	if state.ProjectIdentitySession(&parent).ID != parent.ID {
 		t.Fatal("a session that is not a sub-agent keeps its own project identity")
+	}
+	if state.ProjectIdentitySession(&owned).ID != owned.ID || state.ProjectIdentitySession(&nested).ID != owned.ID {
+		t.Fatal("project identity follows the environment owner")
+	}
+	for _, c := range []struct{ session, owner string }{
+		{child.ID, parent.ID}, {owned.ID, owned.ID}, {nested.ID, owned.ID},
+	} {
+		got, err := state.WorkspaceOwner(c.session)
+		if err != nil || got.ID != c.owner {
+			t.Fatalf("workspace owner of %s: %v, %v", c.session, got, err)
+		}
+		review, failed, ok := state.reviewOwner(c.session)
+		if !ok || review == nil || review.ID != c.owner {
+			t.Fatalf("review owner of %s: %v, %q, %v", c.session, review, failed, ok)
+		}
+	}
+	if got := state.ActiveBorrowers(parent.ID); !slices.Equal(got, []string{child.ID}) {
+		t.Fatalf("parent borrowers %v", got)
+	}
+	if got := state.ActiveBorrowers(owned.ID); !slices.Equal(got, []string{nested.ID}) {
+		t.Fatalf("owned borrowers %v", got)
+	}
+	if got := state.DirectOwnedChildIDs(parent.ID); !slices.Equal(got, []string{owned.ID}) {
+		t.Fatalf("parent's owned children %v", got)
+	}
+	if got := state.DirectOwnedChildIDs(owned.ID); len(got) != 0 {
+		t.Fatalf("owned's owned children %v", got)
+	}
+	if owns, known := state.OwnsEnvironment(owned.ID); !known || !owns {
+		t.Fatal("owned owns its environment")
+	}
+	if owns, known := state.OwnsEnvironment(child.ID); !known || owns {
+		t.Fatal("child borrows its environment")
+	}
+
+	native := ViewID(parent.ID, "native")
+	state.Sessions.Insert(native, stateCheckoutSession(native))
+	state.EnvironmentOwners.Insert(native, native)
+	state.EnvironmentOwners.Insert("unknown", "unknown")
+	if _, known := state.OwnsEnvironment(native); known {
+		t.Fatal("a native view has no environment ownership")
+	}
+	if _, known := state.OwnsEnvironment("unknown"); known {
+		t.Fatal("an unknown session has no environment ownership")
+	}
+	state.Sessions.Remove(parent.ID)
+	if owner, ok := state.EnvironmentOwnerID(child.ID); !ok || owner != parent.ID {
+		t.Fatalf("the ledger owner outlives its record: %q, %v", owner, ok)
+	}
+	if _, err := state.WorkspaceOwner(child.ID); err == nil {
+		t.Fatal("a missing owner record is unavailable")
+	}
+	state.Subagents.Remove(child.ID)
+	state.EnvironmentOwners.Remove(child.ID)
+	if _, known := state.OwnsEnvironment(child.ID); known {
+		t.Fatal("an unbound session has no environment ownership")
+	}
+	if _, err := state.Checkout(child.ID); err == nil {
+		t.Fatal("an unbound session has no checkout")
 	}
 }
 
@@ -689,11 +770,15 @@ func TestCheckoutDerivationCoversAttachedManagedBundleAndBorrowedRecords(t *test
 		stateStr("/home/dev/other-project"), ManagedWorktreeTargetLocal{})
 	state.Sessions.Insert(inconsistentManaged.ID, inconsistentManaged)
 
+	for id := range state.Sessions.Keys() {
+		state.EnvironmentOwners.Insert(id, id)
+	}
 	addChild := func(id string, parent *SessionRecord) {
 		child := stateCheckoutSession(id)
 		child.ProjectDirectory = cloneStringPointer(parent.ProjectDirectory)
 		child.ManagedWorktree = nil
 		state.Sessions.Insert(child.ID, child)
+		state.EnvironmentOwners.Insert(child.ID, parent.ID)
 		state.Subagents.Insert(child.ID, stateSubagent(SubagentKindWorker, &child, parent, "Borrow checkout", "request-"+id))
 	}
 	addChild("child-attached", &localNonGit)
@@ -1825,5 +1910,40 @@ func TestOperationOwnershipHidesIntermediateMoveStatesButNotOrdinaryLiveWork(t *
 	}
 	if kind, ok := SessionStateClosing.TransitionKind(); !ok || kind != SessionTransitionKindSuspending {
 		t.Errorf("closing: got %q %v", kind, ok)
+	}
+}
+
+func TestResolveDefaultContainerSizePreservesPrecedenceAndClamping(t *testing.T) {
+	size := func(cpus, memoryGiB uint64) HostContainerSize {
+		return HostContainerSize{Cpus: cpus, MemoryBytes: memoryGiB << 30}
+	}
+	if got := ResolveDefaultContainerSize(nil, nil, nil); got != size(4, 8) {
+		t.Fatalf("baseline %+v", got)
+	}
+
+	var template ContainerTemplate
+	if err := json.Unmarshal([]byte(`{"cpus":"16","memory":"32768m"}`), &template); err != nil {
+		t.Fatal(err)
+	}
+	configured := template.DefaultHostContainerSize()
+	if got := ResolveDefaultContainerSize(configured, nil, nil); got != size(16, 32) {
+		t.Fatalf("configured %+v", got)
+	}
+	remembered, limits := size(6, 64), size(4, 48)
+	if got := ResolveDefaultContainerSize(configured, &remembered, &limits); got != size(4, 48) {
+		t.Fatalf("remembered and clamped %+v", got)
+	}
+	zero := size(0, 0)
+	if got := ResolveDefaultContainerSize(configured, nil, &zero); got != (HostContainerSize{Cpus: 1, MemoryBytes: 1}) {
+		t.Fatalf("zero limits %+v", got)
+	}
+	if got, err := ParseContainerMemory("16Gi"); err != nil || got != 16<<30 {
+		t.Fatalf("16Gi = %d, %v", got, err)
+	}
+	if got, err := ParseContainerMemory("8g"); err != nil || got != 8<<30 {
+		t.Fatalf("8g = %d, %v", got, err)
+	}
+	if _, err := ParseContainerMemory("18446744073709551615g"); err == nil {
+		t.Fatal("an overflowing limit parsed")
 	}
 }

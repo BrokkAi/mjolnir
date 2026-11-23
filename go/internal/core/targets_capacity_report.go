@@ -20,9 +20,7 @@ import (
 	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
-// CapacityWindowSummary is a host's readings over a recent window. (Ported
-// from the Rust source after this package's base, for mj-client's runtime
-// feed.)
+// CapacityWindowSummary is a host's readings over a recent window.
 type CapacityWindowSummary struct {
 	WindowSeconds      uint64   `json:"window_seconds"`
 	SampleCount        uint32   `json:"sample_count"`
@@ -182,6 +180,8 @@ type HostCapacityRow struct {
 	// fleet answered.
 	HasReading            bool                `json:"has_reading"`
 	CPUPercent            *uint8              `json:"cpu_percent"`
+	EC2InstanceType       *string             `json:"ec2_instance_type,omitempty"`
+	PhysicalMemory        *HostMemoryUsage    `json:"physical_memory,omitempty"`
 	MemoryUsedBytes       uint64              `json:"memory_used_bytes"`
 	MemoryTotalBytes      uint64              `json:"memory_total_bytes"`
 	LogicalCores          uint64              `json:"logical_cores"`
@@ -236,11 +236,25 @@ func NewHostCapacityRow(target *DeploymentCapacityTarget, state *TargetCapacityS
 	}
 	if usage != nil {
 		row.CPUPercent = usage.CPUPercent
+		row.EC2InstanceType = usage.EC2InstanceType
+		row.PhysicalMemory = usage.PhysicalMemory
 		row.MemoryUsedBytes = usage.MemoryUsedBytes
 		row.MemoryTotalBytes = usage.MemoryTotalBytes
 		row.LogicalCores = usage.LogicalCores
 	}
 	return row
+}
+
+// HostMemory is the host's physical memory reading, or false without a
+// reading.
+func (r *HostCapacityRow) HostMemory() (HostMemoryUsage, bool) {
+	if !r.HasReading {
+		return HostMemoryUsage{}, false
+	}
+	if r.PhysicalMemory != nil {
+		return *r.PhysicalMemory, true
+	}
+	return HostMemoryUsage{UsedBytes: r.MemoryUsedBytes, TotalBytes: r.MemoryTotalBytes}, true
 }
 
 // Matches reports whether name selects this row: its host, or a target it

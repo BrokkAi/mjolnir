@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"path/filepath"
 	"strconv"
@@ -15,11 +16,67 @@ import (
 	"unicode"
 )
 
+// ContainerMemoryLimit is ParseContainerMemory as the signed byte count an
+// engine takes.
+func ContainerMemoryLimit(text string) (int64, error) {
+	bytes, err := ParseContainerMemory(text)
+	if err != nil {
+		return 0, err
+	}
+	if bytes > math.MaxInt64 {
+		return 0, errors.New("out of range integral type conversion attempted")
+	}
+	return int64(bytes), nil
+}
+
+// ParseContainerMemory reads an engine memory limit in bytes, using binary
+// units for Podman suffixes.
+func ParseContainerMemory(text string) (uint64, error) {
+	text = strings.TrimSpace(text)
+	value := strings.TrimRightFunc(text, func(r rune) bool {
+		return r < 0x80 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+	})
+	var shift uint
+	var unit string
+	switch configASCIILower(text[len(value):]) {
+	case "", "b":
+		shift, unit = 0, "B"
+	case "k", "kb", "ki", "kib":
+		shift, unit = 10, "KiB"
+	case "m", "mb", "mi", "mib":
+		shift, unit = 20, "MiB"
+	case "g", "gb", "gi", "gib":
+		shift, unit = 30, "GiB"
+	case "t", "tb", "ti", "tib":
+		shift, unit = 40, "TiB"
+	default:
+		return 0, fmt.Errorf("invalid container memory limit %s", debugString(text))
+	}
+	if amount, ok := parseRustUnsigned(strings.TrimSpace(value)); ok {
+		if amount != 0 && amount > math.MaxUint64>>shift {
+			return 0, fmt.Errorf("container memory limit %s is too large", debugString(text))
+		}
+		return amount << shift, nil
+	}
+	// Keep support for fractional quantities in container upgrade settings.
+	bytes, err := parseByteSizeValue(value + unit)
+	if err != nil {
+		return 0, err
+	}
+	if bytes == math.MaxUint64 {
+		return 0, fmt.Errorf("container memory limit %s is too large", debugString(text))
+	}
+	return bytes, nil
+}
+
 type ProjectRepository struct {
 	// ID is the stable name within the bundle, used by PrimaryRepo.
 	ID string `json:"id" toml:"id"`
-	// Github is a GitHub HTTPS or SSH URL (or `owner/repository` shorthand).
+	// Github is a network Git URL (or GitHub `owner/repository` shorthand).
 	Github *string `json:"github,omitempty" toml:"github,omitempty"`
+	// MbxNamespace is the S3 build cache namespace. Defaults to the GitHub
+	// owner/repository.
+	MbxNamespace *string `json:"mbx_namespace,omitempty" toml:"mbx_namespace,omitempty"`
 	// Local is a controller-side repository whose default network remotes
 	// seed isolated sessions.
 	Local *string `json:"local,omitempty" toml:"local,omitempty"`
@@ -84,9 +141,11 @@ func (p ProjectBundle) validate(bundleID string) error {
 			return fmt.Errorf("bundle %s repository %s must declare exactly one of `github` or `local`",
 				debugString(bundleID), debugString(repository.ID))
 		}
-		if repository.Github != nil && !isGithubSource(*repository.Github) {
-			return fmt.Errorf("bundle %s repository %s is not a supported GitHub source",
-				debugString(bundleID), debugString(repository.ID))
+		if repository.Github != nil {
+			if err := validateConfiguredProjectSource(*repository.Github); err != nil {
+				return fmt.Errorf("invalid Git source for bundle %s repository %s: %w",
+					debugString(bundleID), debugString(repository.ID), err)
+			}
 		}
 		if repository.Local != nil && !filepath.IsAbs(*repository.Local) {
 			return fmt.Errorf("bundle %s repository %s local path must be absolute",
@@ -110,6 +169,9 @@ func (p ProjectBundle) validate(bundleID string) error {
 	if !ids[p.PrimaryRepo] {
 		return fmt.Errorf("bundle %s primary repository %s does not exist", debugString(bundleID), debugString(p.PrimaryRepo))
 	}
+	if _, err := p.MbxNamespaces(); err != nil {
+		return fmt.Errorf("bundle %s: %w", debugString(bundleID), err)
+	}
 	return nil
 }
 
@@ -120,6 +182,66 @@ func (p ProjectBundle) Primary() *ProjectRepository {
 		}
 	}
 	return nil
+}
+
+// MbxNamespaces is the session's default namespace followed by its other
+// allowed namespaces.
+func (p ProjectBundle) MbxNamespaces() ([]string, error) {
+	var repositories []ProjectRepository
+	if primary := p.Primary(); primary != nil {
+		repositories = append(repositories, *primary)
+	}
+	for _, repository := range p.Repositories {
+		if repository.ID != p.PrimaryRepo {
+			repositories = append(repositories, repository)
+		}
+	}
+	seen := map[string]bool{}
+	namespaces := []string{}
+	for _, repository := range repositories {
+		var namespace string
+		switch {
+		case repository.MbxNamespace != nil:
+			namespace = *repository.MbxNamespace
+		case repository.Github != nil:
+			owner, name, ok := GithubOwnerRepo(*repository.Github)
+			if !ok {
+				continue
+			}
+			namespace = owner + "/" + name
+		default:
+			continue
+		}
+		for _, segment := range strings.Split(namespace, "/") {
+			valid := segment != "" && segment != "." && segment != ".."
+			for i := 0; valid && i < len(segment); i++ {
+				b := segment[i]
+				valid = b < 0x80 && (b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' ||
+					b == '.' || b == '_' || b == '-')
+			}
+			if !valid {
+				return nil, fmt.Errorf("repository %s has invalid mbx_namespace %s",
+					debugString(repository.ID), debugString(namespace))
+			}
+		}
+		if !seen[namespace] {
+			seen[namespace] = true
+			namespaces = append(namespaces, namespace)
+		}
+	}
+	return namespaces, nil
+}
+
+// stripHTTPUserinfo removes HTTP credentials from the repository's source,
+// warning that it did.
+func (p *ProjectRepository) stripHTTPUserinfo() {
+	if p.Github == nil {
+		return
+	}
+	if clean, owned, err := ProjectSource(*p.Github, ShorthandAllowed); err == nil && owned {
+		p.Github = &clean
+		slog.Warn(HTTPUserinfoRemoved)
+	}
 }
 
 func (p ProjectRepository) SourceLabel() string {
@@ -148,6 +270,11 @@ type TargetBuildCache struct {
 	// MaxTotalSize is the shared storage budget, an mbx size string such as
 	// `100GiB`.
 	MaxTotalSize *string `json:"max_total_size,omitempty" toml:"max_total_size,omitempty"`
+	// Remote is the S3 cache read by the Nitro host on behalf of its guests.
+	Remote *string `json:"remote,omitempty" toml:"remote,omitempty"`
+	// RemoteRegion is the S3 bucket region. Defaults to the Nitro host's
+	// region.
+	RemoteRegion *string `json:"remote_region,omitempty" toml:"remote_region,omitempty"`
 	// Scheduler is machine-wide compiler admission settings shared by all
 	// builds on this host.
 	Scheduler BuildCacheScheduler `json:"scheduler" toml:"scheduler"`
@@ -159,6 +286,8 @@ func (t TargetBuildCache) MarshalJSON() ([]byte, error) {
 	object.fieldUnless(t.Directory == nil, "directory", t.Directory)
 	object.fieldUnless(t.ToolsDirectory == nil, "tools_directory", t.ToolsDirectory)
 	object.fieldUnless(t.MaxTotalSize == nil, "max_total_size", t.MaxTotalSize)
+	object.fieldUnless(t.Remote == nil, "remote", t.Remote)
+	object.fieldUnless(t.RemoteRegion == nil, "remote_region", t.RemoteRegion)
 	object.fieldUnless(t.Scheduler.IsDefault(), "scheduler", t.Scheduler)
 	return object.finish()
 }
@@ -199,6 +328,8 @@ type buildCacheSettings struct {
 	Directory           *string             `json:"directory"`
 	ToolsDirectory      *string             `json:"tools_directory"`
 	MaxTotalSize        *string             `json:"max_total_size"`
+	Remote              *string             `json:"remote"`
+	RemoteRegion        *string             `json:"remote_region"`
 	Scheduler           BuildCacheScheduler `json:"scheduler"`
 	LegacyMaxSize       json.RawMessage     `json:"max_size"`
 	LegacyTargetMaxSize json.RawMessage     `json:"target_max_size"`
@@ -210,16 +341,23 @@ func targetBuildCacheFromSettings(settings buildCacheSettings) TargetBuildCache 
 		Directory:      settings.Directory,
 		ToolsDirectory: settings.ToolsDirectory,
 		MaxTotalSize:   settings.MaxTotalSize,
+		Remote:         settings.Remote,
+		RemoteRegion:   settings.RemoteRegion,
 		Scheduler:      settings.Scheduler,
 	}
 }
 
 func (t TargetBuildCache) IsDefault() bool {
 	return t.Enabled == nil && t.Directory == nil && t.ToolsDirectory == nil && t.MaxTotalSize == nil &&
-		t.Scheduler.IsDefault()
+		t.Remote == nil && t.RemoteRegion == nil && t.Scheduler.IsDefault()
 }
 
 func (t TargetBuildCache) validate(templateID string) error {
+	if t.Remote != nil {
+		if _, _, err := MbxS3Location(*t.Remote); err != nil {
+			return fmt.Errorf("target template %s build cache: %w", debugString(templateID), err)
+		}
+	}
 	if t.ToolsDirectory != nil && !IsAbsolute(*t.ToolsDirectory) {
 		return fmt.Errorf("target template %s build cache tools_directory must be absolute", debugString(templateID))
 	}
@@ -241,32 +379,143 @@ func (t TargetBuildCache) validate(templateID string) error {
 	return nil
 }
 
+// ValidMbxS3Bucket checks the bucket name's length, alphabet and endpoints
+// for an mbx S3 remote.
+func ValidMbxS3Bucket(bucket string) bool {
+	if len(bucket) < 3 || len(bucket) > 63 {
+		return false
+	}
+	for i := 0; i < len(bucket); i++ {
+		b := bucket[i]
+		if !(b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '.' || b == '-') {
+			return false
+		}
+	}
+	alphanumeric := func(b byte) bool { return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' }
+	return alphanumeric(bucket[0]) && alphanumeric(bucket[len(bucket)-1])
+}
+
+// MbxS3Location splits an mbx S3 cache location into its bucket and prefix,
+// allowing the bucket root as its prefix.
+func MbxS3Location(remote string) (string, string, error) {
+	location, ok := strings.CutPrefix(remote, "s3://")
+	if !ok {
+		location = ""
+	}
+	bucket, prefix, _ := strings.Cut(location, "/")
+	if !ValidMbxS3Bucket(bucket) {
+		return "", "", fmt.Errorf("build cache remote %s must be s3://<bucket>/<prefix>", debugString(remote))
+	}
+	prefix = strings.Trim(prefix, "/")
+	for _, segment := range strings.Split(prefix, "/") {
+		if segment == "." || segment == ".." {
+			return "", "", fmt.Errorf("build cache remote %s contains an S3 prefix with a dot segment", debugString(remote))
+		}
+	}
+	// The IAM policy and the host proxy must read the prefix the same way;
+	// a percent escape would mean one literal key to IAM and another to S3.
+	if strings.Contains(prefix, "%") {
+		return "", "", fmt.Errorf("build cache remote %s must spell its S3 prefix without percent escapes", debugString(remote))
+	}
+	return bucket, prefix, nil
+}
+
 func isBuildCacheSchedulerMemory(value string) bool {
 	value = strings.TrimSpace(value)
 	return configASCIILower(value) == "none" || parseByteSize(value)
 }
 
-// parseByteSize is whether the bytesize crate's FromStr accepts value: a
-// whole byte count, or a number (digits and dots) with an optional space and
-// a decimal or binary unit.
+// parseByteSize is whether the bytesize crate's FromStr accepts value.
 func parseByteSize(value string) bool {
-	if _, ok := parseRustUnsigned(value); ok {
-		return true
+	_, err := parseByteSizeValue(value)
+	return err == nil
+}
+
+// parseByteSizeValue is the bytesize crate's (2.7) FromStr: a whole byte
+// count, or a number (digits and dots) with optional whitespace and a
+// decimal or binary unit.
+func parseByteSizeValue(value string) (uint64, error) {
+	if count, ok := parseRustUnsigned(value); ok {
+		return count, nil
 	}
 	end := 0
 	for end < len(value) && (value[end] >= '0' && value[end] <= '9' || value[end] == '.') {
 		end++
 	}
-	if !parseRustFloat(value[:end]) {
-		return false
+	number := value[:end]
+	if !parseRustFloat(number) {
+		reason := "invalid float literal"
+		if number == "" {
+			reason = "cannot parse float from empty string"
+		}
+		return 0, fmt.Errorf("couldn't parse %s into a ByteSize, %s", debugString(value), reason)
 	}
+	float, _ := strconv.ParseFloat(number, 64)
 	suffix := strings.TrimLeftFunc(value[end:], unicode.IsSpace)
+	var factor uint64
 	switch configASCIILower(suffix) {
-	case "b", "k", "kb", "m", "mb", "g", "gb", "t", "tb", "p", "pb", "e", "eb",
-		"ki", "kib", "mi", "mib", "gi", "gib", "ti", "tib", "pi", "pib", "ei", "eib":
-		return true
+	case "b":
+		factor = 1
+	case "k", "kb":
+		factor = 1_000
+	case "m", "mb":
+		factor = 1_000_000
+	case "g", "gb":
+		factor = 1_000_000_000
+	case "t", "tb":
+		factor = 1_000_000_000_000
+	case "p", "pb":
+		factor = 1_000_000_000_000_000
+	case "e", "eb":
+		factor = 1_000_000_000_000_000_000
+	case "ki", "kib":
+		factor = 1 << 10
+	case "mi", "mib":
+		factor = 1 << 20
+	case "gi", "gib":
+		factor = 1 << 30
+	case "ti", "tib":
+		factor = 1 << 40
+	case "pi", "pib":
+		factor = 1 << 50
+	case "ei", "eib":
+		factor = 1 << 60
+	default:
+		unit := suffix
+		if len(unit) > 3 {
+			cut := 3
+			for cut < len(unit) && !utf8RuneStart(unit[cut]) {
+				cut++
+			}
+			unit = unit[:cut] + "..."
+		}
+		return 0, fmt.Errorf("couldn't parse %s into a known SI unit, Failed to parse unit \"%s\"", debugString(suffix), unit)
 	}
-	return false
+	// Exact integer arithmetic when the number has no fractional part: f64
+	// only has a 53-bit mantissa.
+	if !strings.Contains(number, ".") {
+		if count, ok := parseRustUnsigned(number); ok {
+			if count != 0 && count > math.MaxUint64/factor {
+				return math.MaxUint64, nil
+			}
+			return count * factor, nil
+		}
+	}
+	return rustF64ToU64(float * float64(factor)), nil
+}
+
+// utf8RuneStart reports whether b begins a UTF-8 sequence.
+func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
+
+// rustF64ToU64 is Rust's saturating `f64 as u64`.
+func rustF64ToU64(value float64) uint64 {
+	switch {
+	case value != value || value <= 0:
+		return 0
+	case value >= 18446744073709551615.0:
+		return math.MaxUint64
+	}
+	return uint64(value)
 }
 
 // parseRustUnsigned is Rust's `str::parse::<u64>`: decimal digits with an
@@ -387,7 +636,8 @@ func BuildCacheConfigurationDirectory(directory string) string {
 }
 
 // defaultContainerImage is the image a container target runs when its table
-// names none: the reference image CI publishes, which `mj setup` also writes.
+// names none: the reference image CI publishes, which first-run setup also
+// writes.
 func defaultContainerImage() string { return DefaultSessionImage }
 
 // isDefaultImage reports whether a container image is exactly this build's
@@ -415,6 +665,23 @@ type ContainerTemplate struct {
 	WorkspaceStorage PodmanWorkspaceStorage `json:"workspace_storage" toml:"workspace_storage"`
 	// BuildCache is the per-target mbx build cache overrides.
 	BuildCache *TargetBuildCache `json:"build_cache,omitempty" toml:"build_cache,omitempty"`
+}
+
+// DefaultHostContainerSize is the size this template's `cpus` and `memory`
+// configure, when both are set, readable and positive.
+func (c ContainerTemplate) DefaultHostContainerSize() *HostContainerSize {
+	if c.CPUs == nil || c.Memory == nil {
+		return nil
+	}
+	cpus, ok := parseRustUnsigned(strings.TrimSpace(*c.CPUs))
+	if !ok {
+		return nil
+	}
+	memory, err := ParseContainerMemory(*c.Memory)
+	if err != nil || cpus == 0 || memory == 0 {
+		return nil
+	}
+	return &HostContainerSize{Cpus: cpus, MemoryBytes: memory}
 }
 
 func (c ContainerTemplate) MarshalJSON() ([]byte, error) {
