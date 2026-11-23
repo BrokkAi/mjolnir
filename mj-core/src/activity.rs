@@ -35,7 +35,7 @@ pub mod eot_glide;
 pub mod question_locator;
 mod tools;
 pub mod verdict;
-pub use tools::{InFlightToolCall, ToolsInFlight};
+pub use tools::{ForegroundOwner, InFlightToolCall, ToolsInFlight};
 
 /// Every fact that bears on whether a session is working.
 ///

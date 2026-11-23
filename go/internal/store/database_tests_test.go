@@ -834,7 +834,8 @@ func TestRemovingRuntimeIdentityUpgradesExistingSessionsAndPreservesReceiptHisto
 	dtEqual(t, dtQuery[int64](t, opened, "SELECT minimum_compatible_version FROM schema_compatibility"), minimumCompatibleVersion)
 	events := dtMust(loadAPIEventsFrom(path, &core.ApiEventFilter{}, dtPtr(uint64(0)), 100)).Events
 	dtEqual(t, len(events), 1)
-	dtEqual(t, dtJSON(t, events[0].Event), receipt)
+	// serde_json::to_value writes the adjacently tagged envelope.
+	dtEqual(t, json.RawMessage(dtMust(core.MarshalApiEventData(events[0].Event))), receipt)
 	// Saving/resuming the old session no longer requires the removed column.
 	dtOK(t, SaveSessionTo(path, &record))
 	dtEqual(t, dtSessionOf(dtMust(LoadStateFrom(path)), "old-session"), record)

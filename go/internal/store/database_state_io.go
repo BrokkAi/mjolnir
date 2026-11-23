@@ -1929,11 +1929,11 @@ func decodeSession(row []any, interns *sessionInterns) (*core.SessionRecord, err
 		return nil, err
 	}
 	if review != nil {
-		decoded := new(core.SessionReview)
-		if err := json.Unmarshal([]byte(*review), decoded); err != nil {
+		decoded, err := core.UnmarshalSessionReviewJSON([]byte(*review))
+		if err != nil {
 			slog.Warn("session review choice is unreadable", "error", err.Error())
 		} else {
-			record.Review = decoded
+			record.Review = &decoded
 		}
 	}
 	if record.NoProjectMemory, err = sqlRowBool(row, 32); err != nil {

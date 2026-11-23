@@ -2043,6 +2043,15 @@ func (k ManagedCheckoutKind) isWorktree() bool {
 	return k == ManagedCheckoutKindWorktree || k == ""
 }
 
+// Equal is the derived PartialEq: the zero value is Rust's default,
+// Worktree, so it equals the explicit worktree kind a decoded record holds.
+func (k ManagedCheckoutKind) Equal(other ManagedCheckoutKind) bool {
+	if k.isWorktree() || other.isWorktree() {
+		return k.isWorktree() && other.isWorktree()
+	}
+	return k == other
+}
+
 // UsesOriginDeltaSuspend reports whether this checkout suspends through an
 // origin-delta snapshot.
 func (w *ManagedWorktree) UsesOriginDeltaSuspend() bool {
