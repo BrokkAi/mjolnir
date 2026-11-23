@@ -209,6 +209,44 @@ pub fn remove_session_tool_details(data_dir: &Path, session_id: &str) -> Result<
     }
 }
 
+pub(super) fn unlink_deleted_sessions(db_path: &Path, session_ids: &[impl AsRef<str>]) {
+    for session_id in session_ids {
+        let session_id = session_id.as_ref();
+        if let Err(error) = remove_session_tool_details(data_dir_from(db_path), session_id) {
+            tracing::warn!(session_id, error = %format!("{error:#}"), "session deleted but its tool detail file could not be removed");
+        }
+    }
+}
+
+/// The writer calls this before accepting work, so the existence check and
+/// unlink cannot race a new session or tool detail append.
+pub(super) fn sweep_orphaned_tool_details(
+    connection: &rusqlite::Connection,
+    db_path: &Path,
+) -> Result<()> {
+    let entries = match fs::read_dir(data_dir_from(db_path).join("tool-details")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("scan tool details for orphaned files"),
+    };
+    let mut exists =
+        connection.prepare("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id=?1)")?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".mjtd")) else {
+            continue;
+        };
+        if mj_core::config::validate_id("session", id).is_ok()
+            && entry.file_type()?.is_file()
+            && !exists.query_row([id], |row| row.get::<_, bool>(0))?
+        {
+            unlink_deleted_sessions(db_path, &[id]);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

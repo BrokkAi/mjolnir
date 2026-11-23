@@ -7169,7 +7169,7 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
 
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
-pub(super) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
+pub(crate) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = remote.control.session_gate.clone();
     let upgrades =
@@ -8742,6 +8742,7 @@ esac
                         id,
                         &RefusingExecutor("a committed destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8753,6 +8754,7 @@ esac
                         id,
                         &RefusingExecutor("a ready destination must never be rolled back"),
                         None,
+                        mj_controller::controller::lifecycle::SuspendSettlement::Suspend,
                     )
                     .await
                     .unwrap()
@@ -8847,7 +8849,8 @@ esac
                 mj_controller::database::settle_superseded_move_source(
                     &restored,
                     Some(&source_environment.id),
-                    &operation.operation_id
+                    &operation.operation_id,
+                    true,
                 )
                 .is_err()
             );
@@ -9640,73 +9643,6 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     );
 }
 
-/// A finished reviewer is destroyed, not left as a stopped sub-agent of the
-/// session that asked for the review (the shape the earlier suspend-only close
-/// left behind). Its usage stays in the accounting table.
-#[cfg(unix)]
-#[tokio::test]
-async fn destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting() {
-    const NAME: &str = "destroying_a_finished_reviewer_removes_it_and_keeps_its_accounting";
-    const CHILD: &str = "MJ_TEST_DESTROY_FINISHED_REVIEWER";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), NAME),
-        )
-        .env(CHILD, "1")
-        .isolated_store(directory.path())
-        .env(
-            mj_core::config::SESSION_INDEX_ENV,
-            directory.path().join("sessionwiki"),
-        )
-        .env("HOME", &home)
-        .env("XDG_DATA_HOME", home.join(".local/share"))
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .run();
-        return;
-    }
-    let _writer = mj_controller::database::install_isolated_test_writer();
-    let workspace = mj_controller::database::create_workspace("Reviewer destroy").unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let parent_id = "0123456789abcdef0123456789abcdef";
-    let reviewer_id = "44444444444444444444444444444444";
-    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
-    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(parent_id),
-    }));
-    mj_controller::database::save_session(&parent).unwrap();
-    let reviewer = runtime_test_session(reviewer_id, &workspace.id, SessionState::Stopped);
-    let mut relation = runtime_test_subagent(reviewer_id, parent_id);
-    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
-    relation.task_name = "review".into();
-    mj_controller::database::save_subagent_session(&reviewer, &relation).unwrap();
-
-    let state = test_runtime_state_loading_the_store();
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        state.destroy_reviewer_child(reviewer_id.to_owned()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let stored = mj_controller::database::load_state().unwrap();
-    assert!(!stored.sessions.contains_key(reviewer_id));
-    assert!(!stored.subagents.contains_key(reviewer_id));
-    assert!(stored.sessions.contains_key(parent_id));
-    let connection = rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
-    let accounted: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM subagent_accounting WHERE child_session_id=?1 AND task_name='review'",
-            [reviewer_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(accounted, 1);
-}
-
 /// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test
 /// runs in.
 #[cfg(unix)]
@@ -10295,6 +10231,22 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     let _writer = mj_controller::database::install_isolated_test_writer();
     let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Missing).await;
 
+    let closed_id = "closed-borrower";
+    let workspace = &parent
+        .state
+        .session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .workspace_id;
+    let closed = runtime_test_session(closed_id, workspace, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+    let data = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(&data, closed_id, "detail", "{}")
+        .unwrap();
+
     let failure = tokio::time::timeout(
         Duration::from_secs(60),
         parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
@@ -10304,6 +10256,8 @@ async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     assert!(failure.is_err());
 
     let stored = mj_controller::database::load_state().unwrap();
+    assert!(stored.sessions.contains_key(closed_id));
+    assert!(data.join("tool-details/closed-borrower.mjtd").exists());
     let record = &stored.sessions[LATCH_RELAY_SESSION];
     assert_eq!(record.state, SessionState::Running, "{record:?}");
     assert!(
@@ -10394,6 +10348,7 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
         stored.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Stopped
     );
+    assert!(!stored.sessions.contains_key(stopped_id));
     assert!(
         !stored.sessions.contains_key(WORKING_CHILD)
             && !stored.subagents.contains_key(WORKING_CHILD),
@@ -11106,9 +11061,57 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
         )
         .unwrap()
     );
+    let closed_id = "closed-borrower";
+    let closed = runtime_test_session(closed_id, &workspace.id, SessionState::Stopped);
+    mj_controller::database::save_subagent_session(
+        &closed,
+        &runtime_test_subagent(closed_id, parent_id),
+    )
+    .unwrap();
+    let item = Arc::new(mj_core::transcript::TranscriptItem {
+        stable_id: "message".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: mj_core::transcript::TranscriptBody::System {
+            text: "closed child history".into(),
+        },
+    });
+    let mut projection = mj_core::state::MaterializedSession::empty(closed_id);
+    projection.applied_event_ordinal = 1;
+    projection.applied_event_digest = format!("{:064x}", 1);
+    projection.transcript.push(item.clone());
+    mj_controller::database::save_materialized_session(&projection).unwrap();
+    let data_dir = mj_core::config::data_dir();
+    mj_controller::database::tool_details::append_tool_detail(
+        &data_dir,
+        closed_id,
+        &item.stable_id,
+        &serde_json::to_string(&item.body).unwrap(),
+    )
+    .unwrap();
+    let detail = data_dir
+        .join("tool-details")
+        .join(format!("{closed_id}.mjtd"));
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
+    let mut view = ready_startup_view();
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.window = mj_core::state::ProjectionWindow::of(&projection);
+    snapshot.materialized = projection;
+    state.owner().publish_view(closed_id.into(), view);
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    let cursor = replica.cursor.clone().unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, &cursor),
+        mj_client::runtime_feed::SessionTailReply::Tail { .. }
+    ));
+    assert!(detail.is_file());
     tokio::time::timeout(
         Duration::from_secs(60),
         state.suspend_session(parent_id.to_owned()),
@@ -11116,6 +11119,23 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     .await
     .unwrap()
     .unwrap();
+
+    replica
+        .apply(state.runtime_changes(Some(cursor), false).await.unwrap())
+        .unwrap();
+    assert!(matches!(
+        state.session_tail(closed_id, replica.cursor.as_ref().unwrap()),
+        mj_client::runtime_feed::SessionTailReply::NoTail
+    ));
+    assert!(state.session_record(closed_id).is_none());
+    assert!(!state.owner().sessions.contains_key(closed_id));
+    assert!(!state.owner().transcripts.contains_key(closed_id));
+    assert!(
+        mj_controller::database::load_materialized_session(closed_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!detail.exists());
 
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
@@ -11173,10 +11193,7 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         stored.subagents.contains_key(child_id),
         "the relation stays"
     );
-    assert!(
-        worker_root.exists(),
-        "the shared environment retains the child's private root"
-    );
+    assert!(!worker_root.exists());
     assert!(
         !root.path().join("started").exists(),
         "the parked child's worker was not started"
@@ -11440,10 +11457,7 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             stored.sessions[LATCH_RELAY_SESSION].state,
             SessionState::Stopped
         );
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
-        );
+        assert!(!worker_root.exists());
         let history = mj_controller::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
@@ -11512,6 +11526,19 @@ async fn exercise_child_close_with_a_nested_workspace(
         worker_root: worker_root.clone(),
     }));
     mj_controller::database::save_subagent_session(&child, &relation).unwrap();
+    let profile = mj_controller::targets::local_nested_profile_root(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&profile).unwrap();
+    let detail_data = mj_core::config::data_dir();
+    let detail_body = mj_core::transcript::TranscriptBody::System {
+        text: "spilled child detail".into(),
+    };
+    let (offset, len) = mj_controller::database::tool_details::append_tool_detail(
+        &detail_data,
+        LATCH_RELAY_SESSION,
+        "detail",
+        &serde_json::to_string(&detail_body).unwrap(),
+    )
+    .unwrap();
     let reports = repository
         .path()
         .join(".mj/agents")
@@ -11668,9 +11695,18 @@ async fn exercise_child_close_with_a_nested_workspace(
         let closed = &stored.sessions[LATCH_RELAY_SESSION];
         assert_eq!(closed.state, SessionState::Stopped);
         assert!(closed.target.is_none() && closed.checkpoint.is_none());
-        assert!(
-            worker_root.exists(),
-            "private roots remain owned until the environment retires"
+        assert!(!worker_root.exists());
+        assert!(!profile.exists());
+        assert_eq!(
+            mj_controller::database::tool_details::read_tool_detail(
+                &detail_data,
+                LATCH_RELAY_SESSION,
+                "detail",
+                offset,
+                len,
+            )
+            .unwrap(),
+            detail_body,
         );
     }
     assert_eq!(stored.sessions[parent_id], parent);
@@ -17981,13 +18017,14 @@ async fn retired_harness_stop_keeps_independent_descendants() {
         let bound = session("bound-grandchild");
         let independent = session("independent-grandchild");
         let worker_root = |id: &str| root.path().join(id);
+        let stopped_marker = |id: &str| root.path().join(format!("{id}.stopped"));
         for id in [&child.id, &independent.id] {
             let dir = worker_root(id);
             std::fs::create_dir_all(&dir).unwrap();
             let worker = dir.join("hel");
             std::fs::write(
                 &worker,
-                "#!/bin/sh\n[ \"$3\" != --help ] || exit 0\ntouch \"$4/stopped\"\n",
+                "#!/bin/sh\n[ \"$3\" != --help ] || exit 0\ntouch \"$4.stopped\"\n",
             )
             .unwrap();
             std::fs::set_permissions(worker, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -18028,7 +18065,8 @@ async fn retired_harness_stop_keeps_independent_descendants() {
             .stop_subagents_before_close(&sibling.id, None)
             .await
             .unwrap();
-        assert!(!worker_root(&child.id).join("stopped").exists());
+        assert!(!stopped_marker(&child.id).exists());
+        assert!(worker_root(&child.id).exists());
         assert_eq!(
             database::session_environment(&child.id)
                 .unwrap()
@@ -18049,7 +18087,8 @@ async fn retired_harness_stop_keeps_independent_descendants() {
             .await
             .unwrap();
 
-        assert!(worker_root(&child.id).join("stopped").exists());
+        assert!(stopped_marker(&child.id).exists());
+        assert!(!worker_root(&child.id).exists());
         assert!(database::session_environment(&child.id).unwrap().is_none());
         assert!(
             database::load_retired_harness_session(&child.id)
@@ -18097,7 +18136,7 @@ async fn retired_harness_stop_keeps_independent_descendants() {
                 .state
         };
         assert_eq!(independent_state, SessionState::Running);
-        assert!(!worker_root(&independent.id).join("stopped").exists());
+        assert!(!stopped_marker(&independent.id).exists());
         assert_eq!(std::fs::read(&data).unwrap(), b"independent work");
     }
 }
