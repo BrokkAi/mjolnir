@@ -12954,9 +12954,42 @@ esac
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     let live = root.join("worker-live");
     std::fs::write(&live, "").unwrap();
+
+    let followup_group = "later-followup";
+    let followup_command = "later-followup-model";
+    let followup_cause = "provider refused the follow-up model";
+    mj_controller::database::enqueue_startup_deliveries(vec![
+        mj_controller::database::StartupDelivery {
+            session_id: CHILD.into(),
+            command_id: followup_command.into(),
+            step_json: serde_json::to_string(&step).unwrap(),
+            phase: "pending".into(),
+            group_id: Some(followup_group.into()),
+            accepted_ordinal: None,
+            error: None,
+        },
+    ])
+    .unwrap();
+    assert!(
+        state
+            .reject_startup(CHILD, followup_group, followup_cause)
+            .await
+            .unwrap()
+    );
+    let followup = mj_controller::database::load_startup_delivery(followup_command)
+        .unwrap()
+        .unwrap();
+    assert_eq!(followup.phase, "failed");
+    assert_eq!(followup.error.as_deref(), Some(followup_cause));
+    assert_eq!(row().phase, "pending");
+    assert!(reports().is_empty());
+    assert!(!root.join("control.log").exists());
+
     let child = mj_controller::database::read_durable_session_record(CHILD)
         .unwrap()
         .unwrap();
+    assert_eq!(child.state, SessionState::Running);
+    assert!(child.last_error.is_none());
     mj_controller::database::fail_unready_session(CHILD, CAUSE, child.state, &child.updated_at)
         .unwrap()
         .unwrap();

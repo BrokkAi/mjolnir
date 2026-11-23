@@ -2079,19 +2079,23 @@ impl RuntimeState {
         self.push_notice(session_id, reason);
     }
 
-    async fn reject_startup(
+    pub(super) async fn reject_startup(
         self: &Arc<Self>,
         session_id: &str,
         group_id: &str,
         reason: &str,
     ) -> Result<bool> {
-        let is_child = self
+        let is_initial_child_startup = self
             .owner()
             .controller()
             .state
             .subagents
-            .contains_key(session_id);
-        if is_child {
+            .get(session_id)
+            .is_some_and(|child| {
+                group_id
+                    == mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key)
+            });
+        if is_initial_child_startup {
             if !self
                 .fail_subagent_start(session_id, group_id, reason)
                 .await?
