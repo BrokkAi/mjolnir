@@ -1575,6 +1575,7 @@ impl DurableRelay {
         self.mailbox_delivery_mode = Some(mode);
     }
 
+    #[cfg(unix)]
     pub(crate) fn update_mailbox_delivery_mode(
         &mut self,
         mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
@@ -1582,6 +1583,7 @@ impl DurableRelay {
         self.mailbox_delivery_mode = mode;
     }
 
+    #[cfg(unix)]
     pub(crate) fn in_place_move_hold_active(&self) -> bool {
         self.snapshot.in_place_move_hold.is_some()
     }
