@@ -382,19 +382,15 @@ def validate_decisions(query, candidates, decisions):
     return validity
 
 
-def measure(query, fresh, engine, enumerate_rows, adjudicate):
-    """Pool anonymous candidates and count typed semantic row identities."""
-    def answer(again):
-        result = engine(query.commit, query.text, fresh=again)
-        if result["status"] != "ok" and not is_repair_stall(result):
-            raise RuntimeError(f"{query.key}: engine {result['status']}: {result.get('message', '')}")
-        return result
-
-    first = answer(False)
-    independent = enumerate_rows(query.repo, query.commit, query.text)
-    again = answer(True) if fresh else None
+def assemble_measurement(query, first, independent, again, mechanical, adjudicate):
+    """Pool anonymous candidates from pre-gathered answers and count semantic row identities."""
+    for answer in (first, again):
+        if answer is not None and answer["status"] != "ok" and not is_repair_stall(answer):
+            raise RuntimeError(f"{query.key}: engine {answer['status']}: {answer.get('message', '')}")
     sources = {"engine": first["rows"] if first["status"] == "ok" else (),
-               "enumerated": independent["rows"], "census": query.census,
+               "enumerated": independent["rows"],
+               "bifrost": mechanical["rows"] if mechanical is not None else (),
+               "census": query.census,
                "fresh": again["rows"] if again and again["status"] == "ok" else ()}
     unique = sorted({canonical(row) for rows in sources.values() for row in rows})
     ids = {row: str(index) for index, row in enumerate(unique)}
@@ -405,13 +401,39 @@ def measure(query, fresh, engine, enumerate_rows, adjudicate):
     def keys(source):
         return {decisions[ids[canonical(row)]]["key"] for row in sources[source]}
 
-    engine_keys, enum_keys, census_keys = keys("engine"), keys("enumerated"), keys("census")
-    return {"engine": sorted(engine_keys), "enumerated": sorted(engine_keys | enum_keys),
-            "gold": sorted(k for k in engine_keys | enum_keys | census_keys if validity[k]),
-            "decisive": sorted(k for k in census_keys if validity[k]),
-            "fresh": sorted(keys("fresh")) if again else None,
-            "engine_answer": first, "terra_answer": independent, "fresh_answer": again,
-            "candidates": candidates, "decisions": decisions}
+    engine_keys, enum_keys, bifrost_keys, census_keys = (
+        keys("engine"), keys("enumerated"), keys("bifrost"), keys("census")
+    )
+    all_enumerated = engine_keys | enum_keys | bifrost_keys
+    result = {"engine": sorted(engine_keys), "enumerated": sorted(all_enumerated),
+              "gold": sorted(k for k in all_enumerated | census_keys if validity[k]),
+              "decisive": sorted(k for k in census_keys if validity[k]),
+              "fresh": sorted(keys("fresh")) if again else None,
+              "engine_answer": first, "terra_answer": independent, "fresh_answer": again,
+              "candidates": candidates, "decisions": decisions}
+    if mechanical is not None:
+        result["bifrost"] = sorted(bifrost_keys)
+        result["bifrost_answer"] = mechanical
+    return result
+
+
+def measure(query, fresh, engine, enumerate_rows, adjudicate, *, bifrost_rows=None):
+    """Pool anonymous candidates and count typed semantic row identities."""
+    def answer(again):
+        result = engine(query.commit, query.text, fresh=again)
+        if result["status"] != "ok" and not is_repair_stall(result):
+            raise RuntimeError(f"{query.key}: engine {result['status']}: {result.get('message', '')}")
+        return result
+
+    # Run deterministic zero-quota real Bifrost before paid model calls so any
+    # Bifrost failure surfaces without spending engine or Terra quota.
+    mechanical = bifrost_rows(query.repo, query.commit, query.text) if (
+        query.step == DOCUMENTED and bifrost_rows is not None
+    ) else None
+    first = answer(False)
+    independent = enumerate_rows(query.repo, query.commit, query.text)
+    again = answer(True) if fresh else None
+    return assemble_measurement(query, first, independent, again, mechanical, adjudicate)
 
 
 def gate_report(manifest_hash, served, queries, records, seed):
@@ -441,19 +463,55 @@ def gate_report(manifest_hash, served, queries, records, seed):
     steps = {step: {**step_result(groups[step, "random"], decisive[step], f"{seed}/{step}"),
                     "engine_failure_count": failure_counts[step, step]}
              for step in served}
+    bifrost_records = [row for row in documented if row.get("bifrost_answer") is not None]
+    documented_report = {"reported_only": True, "random_n": len(documented), "metrics": docs,
+                         "reasons": bar_failures("documented pooled random", docs),
+                         "prescience": "not_estimable",
+                         "engine_failure_count": sum(failure_counts[DOCUMENTED, step] for step in by_step),
+                         "by_step": {step: {"random_n": len(rows),
+                                            "engine_failure_count": failure_counts[DOCUMENTED, step],
+                                            "metrics": stratum_metrics(rows, f"{seed}/{step}")}
+                                     for step, rows in sorted(by_step.items())}}
+    if bifrost_records:
+        b_tp = sum(len(set(row["gold"]) & set(row.get("bifrost", ()))) for row in bifrost_records)
+        b_ret = sum(len(set(row.get("bifrost", ()))) for row in bifrost_records)
+        b_gold = sum(len(set(row["gold"])) for row in bifrost_records)
+        b_outside_eng = sum(
+            len((set(row["gold"]) - set(row["engine"])) & set(row.get("bifrost", ())))
+            for row in bifrost_records
+        )
+        documented_report["bifrost"] = {
+            "queries_ran": len(bifrost_records),
+            "complete_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("complete")),
+            "truncated_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("truncated")),
+            "total_rows": sum(len(row["bifrost_answer"].get("rows", ())) for row in bifrost_records),
+            "gold_rows_found": b_tp,
+            "gold_rows_outside_engine": b_outside_eng,
+            "precision": fraction(b_tp, b_ret),
+            "recall": fraction(b_tp, b_gold),
+            "binary_sha256": sorted({
+                row["bifrost_answer"]["bifrost_binary_sha256"]
+                for row in bifrost_records if row["bifrost_answer"].get("bifrost_binary_sha256")
+            }),
+            "build_identity": sorted({
+                row["bifrost_answer"]["bifrost_build_identity"]
+                for row in bifrost_records if row["bifrost_answer"].get("bifrost_build_identity")
+            }),
+        }
+        candidate_sources = ["engine", "terra_enumerator", "bifrost", "census"]
+        candidate_sources_note = (
+            "Documented queries pool real Bifrost alongside the mock engine and Terra enumerator "
+            "(PLAN-rql-census.md:97)."
+        )
+    else:
+        candidate_sources = ["engine", "terra_enumerator", "census"]
+        candidate_sources_note = "The pilot omits real Bifrost from the documented gold pool. The full gate includes it."
     return {"manifest_sha256": manifest_hash, "served_steps": served,
             "steps": steps, "prescience_pooled": pooled,
             "engine_failures": failures, "engine_failure_count": len(failures),
-            "documented": {"reported_only": True, "random_n": len(documented), "metrics": docs,
-                           "reasons": bar_failures("documented pooled random", docs),
-                           "prescience": "not_estimable",
-                           "engine_failure_count": sum(failure_counts[DOCUMENTED, step] for step in by_step),
-                           "by_step": {step: {"random_n": len(rows),
-                                              "engine_failure_count": failure_counts[DOCUMENTED, step],
-                                              "metrics": stratum_metrics(rows, f"{seed}/{step}")}
-                                       for step, rows in sorted(by_step.items())}},
-            "candidate_sources": ["engine", "terra_enumerator", "census"],
-            "candidate_sources_note": "The pilot omits real Bifrost from the documented gold pool. The full gate includes it.",
+            "documented": documented_report,
+            "candidate_sources": candidate_sources,
+            "candidate_sources_note": candidate_sources_note,
             "prescience_method": "Compare decisive and other gold rows within decisive queries, "
                                  "restricted to rows the engine or Terra enumerated. "
                                  "Pool counts across added steps and report a percentile 95% bootstrap interval "

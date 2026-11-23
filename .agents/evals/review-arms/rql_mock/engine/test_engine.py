@@ -411,6 +411,41 @@ class ValidationTests(unittest.TestCase):
                 coverage = {"complete": False, "open": [{"reason": reason, "site": span()}]}
                 self.assertIn("only semantic boundaries", " ".join(validate(payload([], coverage), SOURCE.get)[2]))
 
+    # Hard-won: 82a0658a0: Terra and Sonnet excused incomplete enumeration via coverage.open
+    def test_coverage_rejects_partial_enumeration_bailouts_and_allows_semantic_frontiers(self):
+        bailouts = (
+            "The matching oneshot calls occur in many enclosing procedures; their complete contract cases have not been enumerated.",
+            "Contract cases and guard alternatives in this seed were not fully evaluated.",
+            "The bounded callee effects and remaining alternatives have not been fully resolved.",
+            "The upstream transfers to DashboardState were not fully traced.",
+            "The bounded transfer relation was not enumerated; callers require further analysis.",
+            "The listed rows are partial proofs.",
+            "Only a subset of matching callers is listed.",
+            "The full bounded upstream relation, including all return components and propagation exits, has not been resolved.",
+        )
+        for reason in bailouts:
+            with self.subTest(bailout=reason):
+                coverage = {"complete": False, "open": [{"reason": reason, "site": span()}]}
+                errors = validate(payload([], coverage), SOURCE.get)[2]
+                self.assertEqual([err.key[0] for err in errors], ["frontier-partial-enumeration"])
+                self.assertIn("incomplete or partial enumeration", str(errors[0]))
+
+        semantic = (
+            "Unresolved trait-object dispatch of IAnalyzer::signatures may affect return cases.",
+            "The standard dedup operation is not among the modeled collection operations.",
+            "This call sits inside an assert! macro token tree, which is not expanded.",
+            "External declaration body is outside the workspace.",
+        )
+        for reason in semantic:
+            with self.subTest(semantic=reason):
+                coverage = {"complete": False, "open": [{"reason": reason, "site": span()}]}
+                self.assertEqual(validate(payload([], coverage), SOURCE.get)[2], [])
+
+        for tools in (live_engine.CLAUDE_TOOLS, live_engine.prompt.TERRA_TOOLS):
+            rendered = turn_prompt(QUERY, "output", "catalogue", "menu", [], tools=tools)
+            self.assertIn("have not been enumerated", rendered)
+            self.assertIn("incomplete enumeration is rejected as a validation error", rendered)
+
     def test_source_text_is_not_a_coverage_diagnostic(self):
         rows = deepcopy(MODEL_ROWS)
         operand = rows[0]["fields"]["operand"]

@@ -1,24 +1,29 @@
 """Sealed model adapters and the host entry point for the pilot gate."""
 import argparse
 from collections import defaultdict
+import concurrent.futures
+from contextlib import ExitStack
 from dataclasses import asdict
 from functools import partial
 import json
 from pathlib import Path
 import re
+import sys
 from uuid import uuid4
 
 import brief_driver
 import driver
 
+from .bifrost_gold import BIFROST_MEMORY_CAP_GIB, BifrostRunner
 from .engine import CONFIG, RepairStalled, load_engine, locked, repair_answer
 from .engine.evidence import sync_directory
 from .engine.normalization import SourceEvidence, decode, normalize_answer, validate, validate_answer
 from .engine.prompt import TERRA_TOOLS, assert_blind, semantics_only, turn_prompt
-from .engine.runner import EngineRunner, LaunchPreflightFailure, SealedRunner
+from .engine.runner import EngineRunner, LaunchHeld, LaunchPreflightFailure, SealedRunner
 from .engine.snapshot import blob_reader, manifest_sources, prepared_snapshot
 from .engine.validation import ValidationIssue, canonical, decode
-from .fidelity import CENSUS, ROOT, gate_report, is_repair_stall, load_inputs, measure, sample, sha, validate_decisions
+from .fidelity import (CENSUS, DOCUMENTED, ROOT, assemble_measurement, gate_report, is_repair_stall,
+                       load_inputs, measure, sample, sha, validate_decisions)
 from .fidelity_symbols import touched_symbols
 
 
@@ -125,7 +130,7 @@ def model_usage(usage, command, turn, model, claude_version, directory=None):
 
 
 class LiveModels:
-    def __init__(self, config, manifest, documents, directory, terra_profile, claude_version):
+    def __init__(self, config, manifest, documents, directory, terra_profile, claude_version, *, bifrost=None):
         self.config = config
         self.manifest = manifest
         self.catalogue = documents["catalogue"]
@@ -135,7 +140,13 @@ class LiveModels:
         self.directory = directory
         self.terra_profile = terra_profile
         self.claude_version = claude_version
+        self.bifrost = bifrost
         self.sources = manifest_sources(manifest, config["repos"])
+
+    def bifrost_rows(self, repo, commit, text):
+        if self.bifrost is None:
+            raise RuntimeError("real Bifrost runner is not configured")
+        return self.bifrost.query(repo, commit, text)
 
     def sealed_task(self, commit, directory, model, profile, files, prompt, check_output):
         restricted = model == SONNET
@@ -878,8 +889,251 @@ def checkpointed_answer(engine, directory, commit, text, *, fresh=False):
     return response
 
 
-def run_sample(run, queries, fresh, engine, models, *, stop_request):
+def _bifrost_callback(models):
+    if getattr(models, "bifrost", None) is not None or not isinstance(models, LiveModels):
+        return getattr(models, "bifrost_rows", None)
+    return None
+
+
+def _run_sample_concurrent(run, queries, fresh, engine, models, *, stop_request, concurrency):
+    """Run fidelity tasks concurrently with single-owner scheduling.
+
+    The main thread owns all dispatch decisions and state transitions:
+    - Model sessions (engine, fresh, Terra, adjudicate) are bounded by `concurrency`.
+    - At most one engine/fresh task per commit runs at a time, matching `Engine`'s
+      per-commit cache lock so duplicate commits never occupy idle worker slots.
+    - Real Bifrost runs in a separate per-repo pool (at most one per repository,
+      grouped by commit so checkouts do not thrash) without consuming model slots.
+    - On stop request or any failure, dispatch halts immediately while in-flight
+      tasks drain cleanly so sessions retire and save checkpoints.
+    """
+    if stop_request.exists():
+        raise StopRequested
+    records = {}
+    pending = []
+    for query in queries:
+        path = run / query.key / "measurement.json"
+        if path.exists():
+            if models is not None:
+                records[query.key] = json.loads(path.read_bytes())
+        else:
+            pending.append(query)
+    if not pending:
+        return records
+
+    if models is None:
+        remaining = []
+        for query in pending:
+            directory = run / query.key
+            if not (directory / "engine.json").exists():
+                remaining.append(("engine", query))
+            else:
+                checkpointed_answer(engine, directory, query.commit, query.text, fresh=False)
+            if query.key in fresh:
+                if not (directory / "fresh-engine.json").exists():
+                    remaining.append(("fresh", query))
+                else:
+                    checkpointed_answer(engine, directory, query.commit, query.text, fresh=True)
+        if not remaining:
+            return records
+        active_commits = set()
+        in_flight = {}
+        halting = False
+        stopped = False
+        first_error = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            while True:
+                while not halting and len(in_flight) < concurrency:
+                    if stop_request.exists():
+                        stopped = True
+                        halting = True
+                        break
+                    chosen = next((i for i, (_, q) in enumerate(remaining) if q.commit not in active_commits), None)
+                    if chosen is None:
+                        break
+                    kind, query = remaining.pop(chosen)
+                    active_commits.add(query.commit)
+                    future = pool.submit(
+                        checkpointed_answer, engine, run / query.key, query.commit, query.text,
+                        fresh=(kind == "fresh"),
+                    )
+                    in_flight[future] = (kind, query)
+                if not in_flight:
+                    break
+                done, _ = concurrent.futures.wait(in_flight, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    kind, query = in_flight.pop(future)
+                    active_commits.remove(query.commit)
+                    error = future.exception()
+                    if error is not None:
+                        if first_error is None:
+                            first_error = error
+                        halting = True
+                    else:
+                        print(f"[fidelity] {kind} done {query.key[:12]}", file=sys.stderr, flush=True)
+        if first_error is not None:
+            raise first_error
+        if stopped:
+            raise StopRequested
+        return records
+
+    bifrost = _bifrost_callback(models)
+    gathered = {}
+    bifrost_by_repo = defaultdict(list)
+    model_queue = []
+    adj_queue = []
+    by_key = {query.key: query for query in pending}
+
+    def maybe_queue_adjudication(query_key):
+        if all(field in gathered[query_key] for field in ("bifrost", "engine", "terra", "fresh")):
+            adj_queue.append(by_key[query_key])
+
+    for query in pending:
+        directory = run / query.key
+        slot = {}
+        gathered[query.key] = slot
+        if query.step == DOCUMENTED and bifrost is not None:
+            bifrost_by_repo[query.repo].append(query)
+        else:
+            slot["bifrost"] = None
+        if query.key not in fresh:
+            slot["fresh"] = None
+
+        # Interleave Terra (Codex) with engine/fresh (Claude) so both providers run immediately.
+        model_queue.append(("terra", query))
+        if (directory / "engine.json").exists():
+            slot["engine"] = checkpointed_answer(engine, directory, query.commit, query.text, fresh=False)
+        else:
+            model_queue.append(("engine", query))
+        if query.key in fresh:
+            if (directory / "fresh-engine.json").exists():
+                slot["fresh"] = checkpointed_answer(engine, directory, query.commit, query.text, fresh=True)
+            else:
+                model_queue.append(("fresh", query))
+        maybe_queue_adjudication(query.key)
+
+    # Group each repo's Bifrost queries by commit to avoid bouncing checkouts.
+    for repo in bifrost_by_repo:
+        bifrost_by_repo[repo].sort(key=lambda query: (query.commit, query.key))
+
+    active_commits = set()
+    active_bifrost_repos = set()
+    model_in_flight = {}
+    bifrost_in_flight = {}
+    halting = False
+    stopped = False
+    first_error = None
+    total_queries = len(queries)
+
+    with ExitStack() as stack:
+        model_pool = stack.enter_context(concurrent.futures.ThreadPoolExecutor(max_workers=concurrency))
+        bifrost_pool = (
+            stack.enter_context(concurrent.futures.ThreadPoolExecutor(max_workers=len(bifrost_by_repo)))
+            if bifrost_by_repo else None
+        )
+        while True:
+            if not halting and stop_request.exists():
+                stopped = True
+                halting = True
+
+            if not halting and bifrost_pool is not None:
+                for repo, rqueue in bifrost_by_repo.items():
+                    if rqueue and repo not in active_bifrost_repos:
+                        query = rqueue.pop(0)
+                        active_bifrost_repos.add(repo)
+                        future = bifrost_pool.submit(bifrost, query.repo, query.commit, query.text)
+                        bifrost_in_flight[future] = (repo, query)
+
+            while not halting and len(model_in_flight) < concurrency:
+                if stop_request.exists():
+                    stopped = True
+                    halting = True
+                    break
+                if adj_queue:
+                    query = adj_queue.pop(0)
+                    slot = gathered[query.key]
+                    future = model_pool.submit(
+                        assemble_measurement, query, slot["engine"], slot["terra"],
+                        slot["fresh"], slot["bifrost"], models.adjudicate,
+                    )
+                    model_in_flight[future] = ("adjudicate", query)
+                    continue
+                chosen = next(
+                    (i for i, (kind, q) in enumerate(model_queue)
+                     if kind not in ("engine", "fresh") or q.commit not in active_commits),
+                    None,
+                )
+                if chosen is None:
+                    break
+                kind, query = model_queue.pop(chosen)
+                if kind == "terra":
+                    future = model_pool.submit(models.enumerate_rows, query.repo, query.commit, query.text)
+                else:
+                    active_commits.add(query.commit)
+                    future = model_pool.submit(
+                        checkpointed_answer, engine, run / query.key, query.commit, query.text,
+                        fresh=(kind == "fresh"),
+                    )
+                model_in_flight[future] = (kind, query)
+
+            all_in_flight = set(model_in_flight) | set(bifrost_in_flight)
+            if not all_in_flight:
+                break
+            done, _ = concurrent.futures.wait(all_in_flight, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                if future in bifrost_in_flight:
+                    repo, query = bifrost_in_flight.pop(future)
+                    active_bifrost_repos.remove(repo)
+                    error = future.exception()
+                    if error is not None:
+                        if first_error is None:
+                            first_error = error
+                        halting = True
+                        continue
+                    slot = gathered[query.key]
+                    assert "bifrost" not in slot
+                    slot["bifrost"] = future.result()
+                    print(f"[fidelity] bifrost done {query.key[:12]} ({repo}@{query.commit[:8]})",
+                          file=sys.stderr, flush=True)
+                    maybe_queue_adjudication(query.key)
+                else:
+                    kind, query = model_in_flight.pop(future)
+                    if kind in ("engine", "fresh"):
+                        active_commits.remove(query.commit)
+                    error = future.exception()
+                    if error is not None:
+                        if first_error is None:
+                            first_error = error
+                        halting = True
+                        continue
+                    value = future.result()
+                    if kind == "adjudicate":
+                        driver.save(run / query.key / "measurement.json", value)
+                        records[query.key] = value
+                        print(f"[fidelity] measured {query.key[:12]} ({len(records)}/{total_queries})",
+                              file=sys.stderr, flush=True)
+                    else:
+                        slot = gathered[query.key]
+                        assert kind not in slot
+                        slot[kind] = value
+                        print(f"[fidelity] {kind} done {query.key[:12]}", file=sys.stderr, flush=True)
+                        maybe_queue_adjudication(query.key)
+
+    if first_error is not None:
+        raise first_error
+    if stopped:
+        raise StopRequested
+    return records
+
+
+def run_sample(run, queries, fresh, engine, models, *, stop_request, concurrency=1):
     """Checkpoint engine answers for both phases and measure only with gold models."""
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
+    if concurrency > 1:
+        return _run_sample_concurrent(
+            run, queries, fresh, engine, models, stop_request=stop_request, concurrency=concurrency,
+        )
     records = {}
     for query in queries:
         if stop_request.exists():
@@ -897,7 +1151,8 @@ def run_sample(run, queries, fresh, engine, models, *, stop_request):
             if reask:
                 answer(query.commit, query.text, fresh=True)
             continue
-        result = measure(query, reask, answer, models.enumerate_rows, models.adjudicate)
+        bifrost = _bifrost_callback(models)
+        result = measure(query, reask, answer, models.enumerate_rows, models.adjudicate, bifrost_rows=bifrost)
         driver.save(path, result)
         records[query.key] = result
     return records
@@ -910,6 +1165,12 @@ def main(argv=None):
     parser.add_argument("--engine-config", type=Path, default=CONFIG,
                         help="Engine settings for sampling. Live mode requires the default engine configuration.")
     parser.add_argument("--terra-profile")
+    parser.add_argument("--bifrost-bin", type=Path,
+                        help="Pinned real Bifrost binary for documented gold queries (required for --live --phase full).")
+    parser.add_argument("--bifrost-memory-cap-gib", type=int, default=BIFROST_MEMORY_CAP_GIB,
+                        help="Cgroup MemoryMax in GiB for real Bifrost indexing and queries.")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Maximum concurrent model sessions (default 1; real Bifrost runs at most 1 per repo).")
     parser.add_argument("--rust-grammar", type=Path, default=Path.home() / "Projects/tree-sitter-rust")
     parser.add_argument("--js-grammar", type=Path, default=Path.home() / "Projects/tree-sitter-javascript")
     parser.add_argument("--sample-only", action="store_true")
@@ -925,6 +1186,12 @@ def main(argv=None):
         parser.error("--live requires the engine's default configuration")
     if args.live and args.phase == "full" and not args.terra_profile:
         parser.error("the full live gate requires an allotted --terra-profile")
+    if args.live and args.phase == "full" and not args.bifrost_bin:
+        parser.error("the full live gate requires --bifrost-bin for documented gold queries")
+    if args.bifrost_memory_cap_gib <= 0:
+        parser.error("--bifrost-memory-cap-gib must be positive")
+    if args.concurrency <= 0:
+        parser.error("--concurrency must be positive")
     manifest_path = args.manifest.resolve()
     digest, _, served, documents, eligible = load_inputs(manifest_path)
     engine = load_engine(args.engine_config, manifest_path=manifest_path if args.sample_only else None)
@@ -968,14 +1235,21 @@ def main(argv=None):
             return 0
         for commit in sorted({query.commit for query in queries}):
             prepared_snapshot(repos[commit], config["snapshot_repo"], commit)
+        bifrost = None if args.phase == "engine" else BifrostRunner(
+            args.bifrost_bin, config["repos"], args.run_root / "bifrost", run,
+            memory_cap_gib=args.bifrost_memory_cap_gib,
+        )
         adapter = None if args.phase == "engine" else LiveModels(
-            config, manifest, documents, run, args.terra_profile, claude_version)
+            config, manifest, documents, run, args.terra_profile, claude_version, bifrost=bifrost)
         try:
-            records = run_sample(run, queries, fresh, engine, adapter, stop_request=directory / "stop-requested")
+            records = run_sample(
+                run, queries, fresh, engine, adapter,
+                stop_request=directory / "stop-requested", concurrency=args.concurrency,
+            )
         except StopRequested:
             print(json.dumps({"status": "stop_requested"}), flush=True)
             return 3
-        except EngineQuotaHold as hold:
+        except (EngineQuotaHold, LaunchHeld) as hold:
             print(json.dumps({"status": "quota_hold", "phase": args.phase, "reason": str(hold)}), flush=True)
             return 1
         if args.phase == "engine":

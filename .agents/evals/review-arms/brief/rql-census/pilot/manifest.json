@@ -4431,10 +4431,6 @@
   "page_rows": 50,
   "plan_commit": "b2eba79248bc873e8b7f2bfc83a543cec9283d80",
   "seed": 20261120,
-  "served_steps": [
-    "contract-cases",
-    "value-transfers",
-    "guarded-paths"
-  ],
+  "served_steps": [],
   "version": 1
 }
