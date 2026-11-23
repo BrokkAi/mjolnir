@@ -9,7 +9,7 @@ pub(crate) const RETAINED_TERMINAL_COMMANDS: usize = mj_core::relay::RELAY_RETRY
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
@@ -593,8 +593,12 @@ fn visit_relay_journal_reader(
                     });
                     continue;
                 }
-                return Err(anyhow::Error::new(error))
-                    .with_context(|| format!("parse relay journal {}", path.display()));
+                return Err(anyhow::Error::new(error)).with_context(|| {
+                    format!(
+                        "parse relay journal {} at byte offset {record_offset}",
+                        path.display()
+                    )
+                });
             }
         };
         // A record that parses but whose bytes were altered fails to recompute
@@ -680,6 +684,13 @@ pub(crate) fn read_restored_relay_seed(root: &Path) -> Result<Option<RestoredRel
 
 use mj_core::config::sync_directory;
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum JournalAppendFault {
+    PartialWrite { fail_rollback: bool },
+    DirectorySync,
+}
+
 impl DurableRelay {
     #[cfg(test)]
     fn retained_event_body_count(&self) -> usize {
@@ -691,6 +702,9 @@ impl DurableRelay {
         command_id: Option<&str>,
         observation: RelayObservation,
     ) -> Result<u64> {
+        if let Some(failure) = &self.journal_append_failure {
+            bail!("relay journal appends disabled after failed rollback: {failure}");
+        }
         // Every journal write passes here, so this is the one place that
         // decides whether a ready checkpoint barrier's hold survives it. What
         // waited is journaled first, which also keeps arrival order.
@@ -749,17 +763,7 @@ impl DurableRelay {
         self.seal_active_segment_if_needed()?;
         let journal = self.root.join(RELAY_JOURNAL_DIR);
         let path = journal.join(RELAY_ACTIVE_SEGMENT);
-        let created_active_segment = !path.exists();
-        let mut file = owner_only_create_options()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("open {}", path.display()))?;
-        file.write_all(&encoded)?;
-        file.sync_data()?;
-        if created_active_segment {
-            sync_directory(&journal)?;
-        }
+        self.commit_journal_append(&journal, &path, ordinal, &encoded)?;
         mj_core::test_hooks::reach_test_hook("journal_append_before_snapshot_publication")?;
 
         // A delivered steer terminalizes its queued prompt. Capture the summary
@@ -873,6 +877,89 @@ impl DurableRelay {
         self.suppress_child_assessment()?;
         self.service_live_baselines();
         Ok(ordinal)
+    }
+
+    fn commit_journal_append(
+        &mut self,
+        journal: &Path,
+        path: &Path,
+        ordinal: u64,
+        encoded: &[u8],
+    ) -> Result<()> {
+        let append_context = || format!("append relay event {ordinal} to {}", path.display());
+        // The relay is the sole writer. Seek on a writable handle so the same
+        // handle can truncate on Windows, where append mode forbids it.
+        let mut file = owner_only_create_options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .context("open active segment")
+            .with_context(append_context)?;
+        let original_len = file
+            .seek(SeekFrom::End(0))
+            .context("seek to active segment end")
+            .with_context(append_context)?;
+        #[cfg(test)]
+        let fault = self.journal_append_fault.take();
+        #[cfg(test)]
+        let disk_full = || {
+            #[cfg(unix)]
+            {
+                std::io::Error::from_raw_os_error(libc::ENOSPC)
+            }
+            #[cfg(not(unix))]
+            {
+                std::io::Error::from(std::io::ErrorKind::StorageFull)
+            }
+        };
+        let commit = (|| -> Result<()> {
+            #[cfg(test)]
+            if matches!(fault, Some(JournalAppendFault::PartialWrite { .. })) {
+                file.write_all(&encoded[..encoded.len() / 2])
+                    .context("write record prefix")?;
+                return Err(disk_full()).context("write record");
+            }
+            file.write_all(encoded).context("write record")?;
+            file.sync_data().context("sync record")?;
+            // An empty segment may be newly created or left by a failed first
+            // append. Its first successful append must sync the directory.
+            if original_len == 0 {
+                #[cfg(test)]
+                if matches!(fault, Some(JournalAppendFault::DirectorySync)) {
+                    return Err(disk_full()).context("sync journal directory");
+                }
+                sync_directory(journal)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = commit {
+            let rollback = (|| -> Result<()> {
+                #[cfg(test)]
+                if matches!(
+                    fault,
+                    Some(JournalAppendFault::PartialWrite {
+                        fail_rollback: true
+                    })
+                ) {
+                    return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                        .context("truncate active segment");
+                }
+                file.set_len(original_len)
+                    .context("truncate active segment")?;
+                file.sync_data().context("sync truncated segment")?;
+                Ok(())
+            })();
+            let mut error = error.context(append_context());
+            if let Err(rollback_error) = rollback {
+                error = error.context(format!(
+                    "rollback failed at length {original_len}: {rollback_error:#}"
+                ));
+                self.journal_append_failure = Some(format!("{error:#}"));
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Whether appending this observation has to stage and persist a snapshot.

@@ -989,6 +989,118 @@ fn relay_recovers_an_event_fsynced_before_its_snapshot() {
     );
 }
 
+// Hard-won: #1608: retrying after a short write joined the next event to the torn record.
+#[test]
+fn failed_journal_append_restores_the_boundary_before_retry() {
+    for fault in [
+        JournalAppendFault::PartialWrite {
+            fail_rollback: false,
+        },
+        JournalAppendFault::DirectorySync,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let active = temp
+            .path()
+            .join(RELAY_JOURNAL_DIR)
+            .join(RELAY_ACTIVE_SEGMENT);
+        let observation = RelayObservation::Warning {
+            message: "retryable observation".into(),
+        };
+        let (before, operation, failures) = match fault {
+            JournalAppendFault::PartialWrite { .. } => {
+                relay.record_observation(observation.clone()).unwrap();
+                (fs::read(&active).unwrap(), "write record", 1)
+            }
+            // Check that an empty file left by the first rollback still needs
+            // a directory sync on the second attempt.
+            JournalAppendFault::DirectorySync => (Vec::new(), "sync journal directory", 2),
+        };
+        let frontier = relay.latest_ordinal();
+        let digest = relay.latest_digest().to_owned();
+
+        for _ in 0..failures {
+            relay.journal_append_fault = Some(fault);
+            let error = relay.record_observation(observation.clone()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::StorageFull
+            );
+            assert!(format!("{error:#}").contains(&format!(
+                "append relay event {} to {}: {operation}",
+                frontier + 1,
+                active.display()
+            )));
+            assert_eq!(fs::read(&active).unwrap(), before);
+            assert_eq!(relay.latest_ordinal(), frontier);
+            assert_eq!(relay.latest_digest(), digest);
+        }
+
+        assert_eq!(relay.record_observation(observation).unwrap(), frontier + 1);
+        assert_eq!(
+            relay
+                .record_observation(RelayObservation::Warning {
+                    message: "after retry".into(),
+                })
+                .unwrap(),
+            frontier + 2
+        );
+        let len_after_append = active.metadata().unwrap().len();
+        drop(relay);
+
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let attach = attach_relay(&mut relay, "attach-after-append-failure", 0);
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Attached { events, .. },
+        } = attach.body
+        else {
+            panic!("expected attach to succeed, got {:?}", attach.body);
+        };
+        assert_eq!(
+            events.iter().map(|event| event.ordinal).collect::<Vec<_>>(),
+            (1..=frontier + 2).collect::<Vec<_>>()
+        );
+        assert_eq!(active.metadata().unwrap().len(), len_after_append);
+    }
+}
+
+// Hard-won: #1608: an unknown journal boundary after failed rollback must fence the writer.
+#[test]
+fn failed_journal_append_rollback_fences_later_appends() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let observation = RelayObservation::Warning {
+        message: "journal observation".into(),
+    };
+    relay.record_observation(observation.clone()).unwrap();
+    let active = temp
+        .path()
+        .join(RELAY_JOURNAL_DIR)
+        .join(RELAY_ACTIVE_SEGMENT);
+    let before = fs::read(&active).unwrap();
+    let frontier = relay.latest_ordinal();
+    relay.journal_append_fault = Some(JournalAppendFault::PartialWrite {
+        fail_rollback: true,
+    });
+    let error = relay.record_observation(observation.clone()).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::StorageFull
+    );
+    let failure = format!("{error:#}");
+    assert!(failure.contains("rollback failed"));
+    assert!(failure.contains("truncate active segment: permission denied"));
+    let torn = fs::read(&active).unwrap();
+    assert!(torn.starts_with(&before) && torn.len() > before.len());
+    assert!(!torn.ends_with(b"\n"));
+
+    let error = relay.record_observation(observation).unwrap_err();
+    assert!(error.to_string().contains("appends disabled"));
+    assert!(error.to_string().contains(&failure));
+    assert_eq!(fs::read(&active).unwrap(), torn);
+    assert_eq!(relay.latest_ordinal(), frontier);
+}
+
 #[test]
 fn relay_truncates_a_torn_active_tail_before_appending_again() {
     let temp = tempfile::tempdir().unwrap();
@@ -1113,6 +1225,7 @@ fn recover_mode_skips_a_corrupt_record_and_recovers_its_neighbours() {
     let mut file = File::create(&path).unwrap();
     let mut previous_digest = RELAY_EVENT_GENESIS_DIGEST.to_owned();
     write_event(&mut file, 1, &mut previous_digest);
+    let corrupt_offset = file.metadata().unwrap().len();
     // A corrupt interior record: terminated (has its newline) but not valid
     // JSON, so its bytes are unrecoverable.
     file.write_all(br#"{"ordinal":2,"observation": BROKEN"#)
@@ -1125,10 +1238,11 @@ fn recover_mode_skips_a_corrupt_record_and_recovers_its_neighbours() {
     let strict = visit_relay_journal_file(&path, JournalReadMode::Strict, |_, _| {
         Ok(ControlFlow::Continue(()))
     });
-    assert!(
-        strict.is_err(),
-        "strict reads must not silently pass a corrupt record"
-    );
+    let error = strict.expect_err("strict reads must not pass a corrupt record");
+    assert!(error.to_string().contains(&format!(
+        "parse relay journal {} at byte offset {corrupt_offset}",
+        path.display()
+    )));
 
     // Recover skips it and delivers both intact neighbours, reporting one gap.
     let mut seen = Vec::new();
@@ -1270,6 +1384,10 @@ fn retry_resumes_a_relay_local_command_after_snapshot_persistence_failure() {
         relay.snapshot.dispatches["retry-local"].state,
         RelayDispatchState::Queued
     );
+    assert!(retained_events(&relay).iter().any(|event| {
+        event.command_id.as_deref() == Some("retry-local")
+            && matches!(event.observation, RelayObservation::CommandQueued { .. })
+    }));
 
     fs::remove_dir(&state_path).unwrap();
     let retried = relay.handle(relay_request(

@@ -311,6 +311,10 @@ pub struct DurableRelay {
     journal_generation: u64,
     /// Retry physical prefix cleanup once after reopen, or after a failed GC.
     journal_cleanup_pending: bool,
+    /// A failed rollback left the on-disk append boundary unknown.
+    journal_append_failure: Option<String>,
+    #[cfg(test)]
+    journal_append_fault: Option<journal::JournalAppendFault>,
     pending_live_baselines: Vec<PendingLiveBaseline>,
     pending_native_resumes: Vec<PendingNativeResume>,
     acp_activity: AcpActivityClock,
@@ -1052,6 +1056,9 @@ impl DurableRelay {
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
             journal_cleanup_pending: true,
+            journal_append_failure: None,
+            #[cfg(test)]
+            journal_append_fault: None,
             pending_live_baselines: Vec::new(),
             pending_native_resumes: Vec::new(),
             acp_activity: AcpActivityClock::default(),
