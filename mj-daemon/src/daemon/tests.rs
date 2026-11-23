@@ -1729,6 +1729,7 @@ pub(crate) fn runtime_test_session(
         title: id.into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
         last_profile: "codex".into(),
+        staged_aws_profile: None,
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
@@ -5517,7 +5518,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
             .unwrap();
     owner
         .scope(async {
-            mj_controller::database::begin_subagent_unpark("child-1", &wake, None).unwrap();
+            mj_controller::database::begin_subagent_unpark("child-1", &wake, None, None).unwrap();
             assert!(
                 !mj_controller::database::try_commit_container_upgrade("session-1", "upgrade-test")
                     .unwrap()
@@ -5550,7 +5551,8 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
                     .is_committed()
             );
             assert!(
-                mj_controller::database::begin_subagent_unpark("child-1", &wake, None).is_err()
+                mj_controller::database::begin_subagent_unpark("child-1", &wake, None, None)
+                    .is_err()
             );
         })
         .await;

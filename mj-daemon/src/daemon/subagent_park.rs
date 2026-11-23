@@ -330,7 +330,7 @@ impl RuntimeState {
                         session_id.clone(),
                     );
                     executor.begin_resumable_work()?;
-                    let controller = blocking(Controller::load).await?;
+                    let mut controller = blocking(Controller::load).await?;
                     controller
                         .unpark_subagent_worker(
                             &admission,
@@ -435,7 +435,7 @@ impl RuntimeState {
                         state.clone(),
                         session_id.clone(),
                     );
-                    let controller = blocking(Controller::load).await?;
+                    let mut controller = blocking(Controller::load).await?;
                     controller
                         .unpark_subagent_worker(&session_admission, &session_id, None, &executor)
                         .await?;

@@ -90,7 +90,13 @@ pub fn observe_worker_restart_outcome(
             tracing::warn!(session_id, expected = %intent.desired_build,
                 actual = ?snapshot.worker_build, "ready worker did not reach replacement build; releasing failed intent");
         }
-        crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
+        if !failed && !prepared
+            && (intent.desired_build.is_empty() || snapshot.worker_build.as_ref() == Some(&intent.desired_build))
+        {
+            crate::database::activate_worker_restart(session_id, &intent.operation_id)?;
+        } else {
+            crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
+        }
         Ok(())
     })
 }

@@ -2968,6 +2968,7 @@ mod tests {
             title: id.into(),
             harness_kind: HarnessKind::Codex,
             last_profile: "codex".into(),
+            staged_aws_profile: None,
             bundle_id: "project".into(),
             project_directory: None,
             managed_worktree: None,

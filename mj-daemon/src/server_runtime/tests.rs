@@ -2283,6 +2283,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         title: "Phone launch".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
         last_profile: "codex".into(),
+        staged_aws_profile: None,
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,

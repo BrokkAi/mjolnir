@@ -1099,6 +1099,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         title: "parent".into(),
         harness_kind: HarnessKind::Codex,
         last_profile: profile.to_owned(),
+        staged_aws_profile: None,
         bundle_id: "hel".into(),
         project_directory: None,
         managed_worktree: None,

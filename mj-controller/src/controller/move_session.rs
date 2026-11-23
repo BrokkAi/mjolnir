@@ -3518,7 +3518,7 @@ impl Controller {
                                 .context("in-place Move session has no target locator")?;
                             let backend = super::backend_locator(locator, session, &self.config)?;
                             let worker_root = crate::targets::worker_root(&backend, &id)?;
-                            self.prepare_worker_files_for(
+                            let staged = self.prepare_worker_files_for(
                                 &id,
                                 &backend,
                                 &worker_root,
@@ -3526,6 +3526,7 @@ impl Controller {
                                 super::worker_binary::launch::WorkerFilePreparation::RefreshProfileOnly,
                                 super::worker_binary::launch::LaunchHistory::Stored,
                             )?;
+                            self.state.sessions.get_mut(&id).unwrap().staged_aws_profile = staged.aws_profile;
                             let launch_config = self.current_worker_launch_config(&id, &backend)?;
                             rpc_sent = true;
                             conn.client
@@ -3567,7 +3568,7 @@ impl Controller {
                                     &source_backend,
                                     &source_worker_root,
                                     executor,
-                                    super::worker_binary::launch::WorkerFilePreparation::RefreshProfileOnly,
+                                    super::worker_binary::launch::WorkerFilePreparation::RestoreProfileOnly,
                                     super::worker_binary::launch::LaunchHistory::Stored,
                                 ) {
                                     Ok(_) => {
