@@ -358,6 +358,20 @@ func (p *acpProbe) resolve(id string, response core.ElicitationResponse) error {
 	return nil
 }
 
+// opened waits until the runtime's command loop takes commands, which it
+// does only once the open has published every startup event. It consumes
+// no event. Rust's tests run on a current-thread runtime, where the open
+// resumes after the agent's last startup reply before the handler for the
+// agent's next message runs; Go runs both at once, so without this barrier
+// a startup event such as SessionStarted can land between the events of
+// the agent's next request.
+func (p *acpProbe) opened() {
+	p.t.Helper()
+	if p.resolve("startup-barrier", core.ElicitationResponse{Action: core.ElicitationResponseCancel}) == nil {
+		p.t.Fatal("the startup barrier must not answer a pending form")
+	}
+}
+
 // noFinish drains events for a moment and requires that no prompt
 // finishes.
 func (p *acpProbe) noFinish(wait time.Duration) {

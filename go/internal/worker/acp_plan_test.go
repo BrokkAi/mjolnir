@@ -244,6 +244,7 @@ func openPlanProbe(t *testing.T, policy core.ExecutionPolicy, config bool, harne
 			probe.result(setting, map[string]any{"configOptions": options})
 		}
 	}
+	probe.opened()
 	return probe
 }
 
