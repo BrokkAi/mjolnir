@@ -182,3 +182,38 @@ Every other crate follows the same rules with these changes.
   values come from `-ldflags -X`. The worker build identity is computed by
   `go/scripts/build.sh` from the Git tree of the Go worker's inputs and
   passed with `-ldflags -X`.
+
+## Pinned Rust source for the rest of the port (2026-11-23)
+
+The owner wants the port completed against one Rust snapshot, tested, and
+synced with later Rust once at the end. Every crate from here on is ported
+from Rust commit 3dde0c11b5832be0a9d810662216d82f9d7e9696, which the
+already-ported packages were synced to. Read Rust only from the read-only
+checkout of that commit at
+`/home/ryansvihla/.cache/mjolnir/build/go-port-ref/rust-3dde0c11b`
+(create it with `git worktree add --detach <path> 3dde0c11b` if missing),
+never from the Rust files in your own worktree, which may be newer. Record
+the crate in `go/PORTED_FROM` with that commit.
+
+## The terminal UI on Charm (mj-chat, mj-tui, mj-cli's dashboard)
+
+ratatui and crossterm are replaced by Charm's libraries; do not port
+ratatui.
+
+- Program loop, input, mouse, paste, focus and resize: Bubble Tea v2
+  (`charm.land/bubbletea/v2`). Key handling keeps Mjolnir's bindings and
+  behaviour.
+- Drawing: screens draw into a cell buffer from
+  `github.com/charmbracelet/ultraviolet` (`uv.Buffer`/`uv.ScreenBuffer`,
+  rectangles, cells with styles), which plays the role of ratatui's Buffer
+  and Rect. Styles and colours: Lip Gloss v2 (`charm.land/lipgloss/v2`);
+  text width and wrapping: `github.com/charmbracelet/x/ansi`.
+- The few widgets Mjolnir uses (bordered block with titles, paragraph with
+  wrap, list with state, clear) and the layout splits it uses (Length,
+  Min, Fill, Ratio) are small Mjolnir-local helpers in the package that
+  needs them, written to produce the same cells ratatui produces for
+  Mjolnir's screens. Bubbles components may be used where they fit (text
+  input, viewport) as long as the rendered result is the same.
+- Golden tests render the buffer to text and compare with the copied Rust
+  golden files unchanged. A difference that Charm cannot avoid is reported
+  in the result, never hidden by editing the expected file.
