@@ -800,7 +800,7 @@ async fn a_timed_out_call_abandons_the_connection_instead_of_desynchronizing_it(
             .expect("the fixture answers hello immediately");
 
     let timed_out = client
-        .status()
+        .call_with_timeout(RelayRequest::Status, Duration::from_millis(500))
         .await
         .expect_err("the stalled status call must time out");
     assert!(
@@ -838,6 +838,85 @@ async fn a_timed_out_call_abandons_the_connection_instead_of_desynchronizing_it(
         format!("{repeated:#}").contains("relay connection abandoned after status timed out"),
         "{repeated:#}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn observation_deadline_tolerates_load_and_distinguishes_eof() {
+    let slow_reply = Duration::from_secs(25);
+    for (status, delay, reply) in [
+        (true, slow_reply, true),
+        (false, slow_reply, true),
+        (false, slow_reply, false),
+        (
+            false,
+            RELAY_OBSERVATION_TIMEOUT + Duration::from_secs(1),
+            false,
+        ),
+    ] {
+        let (controller, worker) = tokio::io::duplex(4096);
+        let mut client = duplex_relay_client(controller, SESSION_ID);
+        let peer = mj_core::runtime::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(worker);
+            let mut line = String::new();
+            BufReader::new(reader).read_line(&mut line).await.unwrap();
+            let request: RelayRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let payload = match request.request {
+                RelayRequest::Status if status => RelayResponsePayload::Status(
+                    mj_core::relay::RelaySnapshot::new(SESSION_ID.into()).operational_state(),
+                ),
+                RelayRequest::PollSubagentQueue { acknowledged: None } if !status => {
+                    RelayResponsePayload::SubagentQueue {
+                        page: mj_core::subagent::SubagentQueuePage {
+                            sequence: 1,
+                            changes: Vec::new(),
+                            has_more: false,
+                        },
+                    }
+                }
+                other => panic!("unexpected request: {}", other.method_name()),
+            };
+            tokio::time::sleep(delay).await;
+            if reply {
+                let mut body = serde_json::to_vec(&RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: request.protocol_version,
+                    body: RelayResponseBody::Ok { payload },
+                })
+                .unwrap();
+                body.push(b'\n');
+                writer.write_all(&body).await.unwrap();
+            }
+        });
+        let start = tokio::time::Instant::now();
+        let result = if status {
+            client
+                .status()
+                .await
+                .map(|state| assert_eq!(state.session_id, SESSION_ID))
+        } else {
+            client
+                .subagent_requests()
+                .await
+                .map(|(requests, _)| assert!(requests.is_empty()))
+        };
+        let elapsed = start.elapsed();
+        let expected = delay.min(RELAY_OBSERVATION_TIMEOUT);
+        assert!(
+            (expected..expected + Duration::from_millis(10)).contains(&elapsed),
+            "{elapsed:?}"
+        );
+        if reply {
+            result.unwrap();
+        } else if delay < RELAY_OBSERVATION_TIMEOUT {
+            assert!(RelayTransportDead::marks(&result.unwrap_err()));
+        } else {
+            assert!(!RelayTransportDead::marks(&result.unwrap_err()));
+            let error = client.subagent_requests().await.unwrap_err();
+            assert!(format!("{error:#}").contains("connection abandoned"));
+            assert_eq!(start.elapsed(), elapsed);
+        }
+        peer.await.unwrap();
+    }
 }
 
 #[cfg(unix)]

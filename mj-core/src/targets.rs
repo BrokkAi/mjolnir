@@ -93,7 +93,7 @@ impl ProvisionStage {
             }
             Self::WaitingForWorkerStore => "Waiting for shared target content".into(),
             Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
-            Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
+            Self::WaitingForStartSlot => "Waiting for a start slot".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),

@@ -699,6 +699,13 @@ pub struct ApiBackend {
     profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
 }
 
+struct ChildObservation {
+    record: Option<mj_core::state::SessionRecord>,
+    parking: bool,
+    active: bool,
+    view: Option<mj_client::session::ManagedSessionView>,
+}
+
 struct NotificationChildSnapshot {
     relation: mj_core::subagent::SubagentRecord,
     progress: ChildProgress,
@@ -1003,13 +1010,27 @@ impl ApiBackend {
         self: &Arc<Self>,
         parent: String,
         request: mj_core::subagent::SubagentToolRequest,
-    ) -> Result<mj_controller::database::StoredDelegationResult> {
+    ) -> Result<crate::daemon::delegation::DelegationResult> {
         let stored = blocking("load delegation effect", {
             let parent = parent.clone();
             let id = request.request_id.clone();
             move || mj_controller::database::load_delegation(&parent, &id)
         })
         .await?;
+        if stored.is_none()
+            && matches!(
+                request.action,
+                mj_core::subagent::SubagentToolAction::ListAgents
+            )
+        {
+            let result = self
+                .execute_subagent_tool_prepared(parent, request, None, None)
+                .await;
+            return Ok(crate::daemon::delegation::DelegationResult {
+                result,
+                persisted: false,
+            });
+        }
         let prepared = if let Some((prepared, result)) = stored {
             if let Some(result) = result {
                 if matches!(
@@ -1023,9 +1044,10 @@ impl ApiBackend {
                         move || mj_controller::database::retire_legacy_wait(parent, id)
                     })
                     .await?
-                    .context("legacy wait result disappeared before conversion");
+                    .context("legacy wait result disappeared before conversion")
+                    .map(Into::into);
                 }
-                return Ok(result);
+                return Ok(result.into());
             }
             prepared
         } else {
@@ -1090,7 +1112,7 @@ impl ApiBackend {
             move || mj_controller::database::record_stored_delegation_result(parent, result)
         })
         .await?;
-        Ok(stored_result)
+        Ok(stored_result.into())
     }
 
     /// Store a resolved target in durable MCP requests so a replay does not
@@ -1539,7 +1561,18 @@ impl ApiBackend {
                 // This request was read from the parent's queue, so the queue
                 // is known here unless the parent's actor went away since; the
                 // listing then shows the mailbox's part, and decides nothing.
-                let inputs = self.subagent_input_progress(parent_session_id).await?;
+                let snapshot = match self.subagent_queue_snapshot(parent_session_id).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::debug!(parent_session_id, %error, "parent queue unavailable for list_agents");
+                        None
+                    }
+                };
+                let inputs = self
+                    .input_progress_with_mailbox(parent_session_id, snapshot.as_ref())
+                    .await?;
+                let mut pending_spawns =
+                    pending_spawn_entries(parent_session_id, snapshot.as_ref()).await?;
                 let details = blocking("load children and their selections", {
                     let parent = parent_session_id.to_owned();
                     move || mj_controller::database::list_subagent_details(&parent)
@@ -1548,6 +1581,9 @@ impl ApiBackend {
                 .into_iter()
                 .filter(|detail| detail.relation.kind == mj_core::subagent::SubagentKind::Worker)
                 .collect::<Vec<_>>();
+                for detail in &details {
+                    pending_spawns.remove(&detail.relation.request_key);
+                }
                 let child_ids = details
                     .iter()
                     .map(|detail| detail.relation.child_session_id.clone())
@@ -1601,6 +1637,7 @@ impl ApiBackend {
                         let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
+                            "spawn_request_id":relation.request_key,
                             "name":name,
                             "role":listed_agent_role(relation, detail.category.as_deref()),
                             "target":record.as_ref().map(|r| &r.target_template_id),
@@ -1628,6 +1665,15 @@ impl ApiBackend {
                             entry["error"] = cause.into();
                             entry["next_action"] = mj_core::subagent::FAILED_CHILD_CLOSE_GUIDANCE.into();
                         }
+                        if record.as_ref().is_some_and(|r| r.state == SessionState::Provisioning)
+                            && let Some(projection) = &projection
+                            && let Some(lifecycle) = projection.metadata.lifecycles.iter().find(|op| {
+                                op.session_id == relation.child_session_id && !op.active_stages.is_empty()
+                            })
+                        {
+                            entry["provisioning_stages"] = serde_json::json!(lifecycle.active_stages
+                                .iter().map(|(stage, _)| stage.label()).collect::<Vec<_>>());
+                        }
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
                         if let ReportState::Held {
@@ -1653,7 +1699,15 @@ impl ApiBackend {
                         entry
                     })
                     .collect::<Vec<_>>();
-                Ok(serde_json::json!({"agents":agents}))
+                let mut listing = serde_json::json!({"agents":agents});
+                if !inputs.queue_known() {
+                    listing["queue_status"] = "unavailable".into();
+                }
+                if !pending_spawns.is_empty() {
+                    listing["pending_spawns"] =
+                        serde_json::json!(pending_spawns.into_values().collect::<Vec<_>>());
+                }
+                Ok(listing)
             }
             SubagentToolAction::SendInput {
                 child_session_id,
@@ -1929,10 +1983,38 @@ impl ApiBackend {
     )> {
         // The worker owns whether the processes a finished turn left are still
         // alive, so each child's liveness is read before its report is judged.
-        let mut live = BTreeMap::new();
+        let mut observations = Vec::with_capacity(ids.len());
         for id in &ids {
-            live.insert(id.clone(), self.live_work(id).await?);
+            let (record, parking) = self.exports.child_park_snapshot(id);
+            let active = record
+                .as_ref()
+                .is_some_and(|r| record_may_be_running(r.state));
+            let view = if active {
+                self.session_handle(id.clone())
+                    .await?
+                    .map(|handle| handle.view())
+            } else {
+                None
+            };
+            observations.push(ChildObservation {
+                record,
+                parking,
+                active,
+                view,
+            });
         }
+        let live = ids
+            .iter()
+            .zip(&observations)
+            .map(|(id, observation)| {
+                let liveness = if observation.active {
+                    liveness_of(observation.view.as_ref())
+                } else {
+                    mj_core::subagent::Liveness::Known(None)
+                };
+                (id.clone(), liveness)
+            })
+            .collect::<BTreeMap<_, _>>();
         if let Some(committed) = mj_controller::database::committed_state()? {
             let mut starts = BTreeMap::new();
             let summaries = ids
@@ -1960,7 +2042,8 @@ impl ApiBackend {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut summaries = summaries;
-            self.resolve_child_states(&mut summaries).await?;
+            self.resolve_child_states(&mut summaries, observations)
+                .await?;
             return Ok((summaries, starts));
         }
         // An offline backend has no writer publication to observe.
@@ -1980,7 +2063,8 @@ impl ApiBackend {
                 starts.insert(id.clone(), status);
             }
         }
-        self.resolve_child_states(&mut summaries).await?;
+        self.resolve_child_states(&mut summaries, observations)
+            .await?;
         Ok((summaries, starts))
     }
 
@@ -2013,9 +2097,18 @@ impl ApiBackend {
             Option<mj_core::state::MaterializedSessionSummary>,
             ChildProgress,
         )],
+        observations: Vec<ChildObservation>,
     ) -> Result<()> {
-        for (id, _, progress) in children {
-            let (record, parking) = self.exports.child_park_snapshot(id);
+        for (
+            (id, _, progress),
+            ChildObservation {
+                record,
+                parking,
+                active,
+                view,
+            },
+        ) in children.iter_mut().zip(observations)
+        {
             if parking
                 && record
                     .as_ref()
@@ -2024,16 +2117,6 @@ impl ApiBackend {
                 progress.state = ChildState::WaitingForWorker;
                 continue;
             }
-            let view = if record
-                .as_ref()
-                .is_some_and(|record| record_may_be_running(record.state))
-            {
-                self.session_handle(id.clone())
-                    .await?
-                    .map(|handle| handle.view())
-            } else {
-                None
-            };
             let connected = view
                 .as_ref()
                 .filter(|view| view.connected)
@@ -2041,9 +2124,6 @@ impl ApiBackend {
             // A projection commit can precede the actor publication for that
             // completion. Resolve the turn from one view; the retry and the
             // delivery are read together from the registry.
-            let active = record
-                .as_ref()
-                .is_some_and(|record| record_may_be_running(record.state));
             if let Some(snapshot) = connected {
                 use crate::server::api::WaitObservation;
                 let mut observation = WaitObservation {
@@ -2948,6 +3028,48 @@ pub(crate) fn record_may_be_running(state: SessionState) -> bool {
             | SessionState::Disconnected
             | SessionState::Checkpointing
     )
+}
+
+async fn pending_spawn_entries(
+    parent: &str,
+    snapshot: Option<&mj_core::state::ManagedSessionSnapshot>,
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    use mj_core::subagent::SubagentToolAction;
+    let mut requests = Vec::new();
+    if let Some(snapshot) = snapshot {
+        for request in snapshot.subagent_requests.iter() {
+            if let SubagentToolAction::Spawn { task_name, .. }
+            | SubagentToolAction::SpawnOrchestrator { task_name, .. } = &request.action
+            {
+                requests.push((request.request_id.clone(), task_name.clone()));
+            }
+        }
+    }
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let parent = parent.to_owned();
+    blocking("read pending spawns", move || {
+        let mut pending = BTreeMap::new();
+        for (id, task_name) in requests {
+            let mut entry = serde_json::json!({
+                "request_id": id,
+                "task_name": task_name,
+                "status": "pending_registration",
+            });
+            if let Some((_, Some(stored))) = mj_controller::database::load_delegation(&parent, &id)?
+            {
+                if !stored.result.is_error {
+                    continue;
+                }
+                entry["status"] = "failed".into();
+                entry["error"] = stored.result.message.into();
+            }
+            pending.insert(id, entry);
+        }
+        Ok(pending)
+    })
+    .await
 }
 
 /// The liveness a connected worker view publishes; without one it is unknown.
