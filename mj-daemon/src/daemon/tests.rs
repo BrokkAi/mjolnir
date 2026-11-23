@@ -892,41 +892,17 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
 }
 
 #[tokio::test]
-async fn subagent_discovery_does_not_hold_handoff_and_stops_when_the_daemon_shuts_down() {
-    let action = DaemonAction::SubagentOptions {
-        profile: "codex".into(),
-        model: Some("gpt-6-luna".into()),
-        config: Some(Box::new(mj_core::config::Config::default())),
-    };
-    assert!(upgrade_request_activity(&action).unwrap().is_none());
-    let state = test_runtime_state();
-    let cancellation = CancellationToken::new();
-    cancellation.cancel();
-    let metadata = test_metadata("127.0.0.1:0".parse().unwrap());
-    let error = handle_action(action, &metadata, &state, &cancellation)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "subagent discovery cancelled by daemon shutdown"
-    );
-}
-
-#[tokio::test]
 async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one() {
     let state = test_runtime_state();
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    let cancellation = CancellationToken::new();
-    handle_action(DaemonAction::RefreshQuota, &metadata, &state, &cancellation)
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    http.refresh_quota()
         .await
         .expect_err("no quota poller is attached, so nothing can probe");
 
     let (wake, mut woken) = tokio::sync::mpsc::unbounded_channel();
     state.attach_quota_refresh(wake);
     for _ in 0..3 {
-        handle_action(DaemonAction::RefreshQuota, &metadata, &state, &cancellation)
-            .await
-            .expect("refresh quota");
+        http.refresh_quota().await.expect("refresh quota");
     }
     for _ in 0..3 {
         assert_eq!(
@@ -935,13 +911,14 @@ async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one(
         );
     }
     assert!(woken.try_recv().is_err());
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     let state = test_runtime_state();
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    let cancellation = CancellationToken::new();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
     let mut config = Config::default();
     config.profiles.insert(
         "dsh".into(),
@@ -954,38 +931,25 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
         },
     );
     state.owner().install_config(config);
-    let error = handle_action(
-        DaemonAction::ProbeQuotaProfiles {
-            profile_ids: vec!["missing".into()],
-            forced: false,
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect_err("an unconfigured profile is refused");
+    let error = http
+        .probe_quota_profiles(vec!["missing".into()], false)
+        .await
+        .expect_err("an unconfigured profile is refused");
     assert!(error.to_string().contains("no profile named"), "{error:#}");
 
     let (wake, mut woken) = tokio::sync::mpsc::unbounded_channel();
     state.attach_quota_refresh(wake);
-    handle_action(
-        DaemonAction::ProbeQuotaProfiles {
-            profile_ids: vec!["dsh".into()],
-            forced: true,
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect("probe the disabled profile");
+    http.probe_quota_profiles(vec!["dsh".into()], true)
+        .await
+        .expect("probe the disabled profile");
     let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok() else {
         panic!("the poller receives the probe");
     };
     assert!(forced, "the force flag reaches the poller");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].profile_id, "dsh");
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -2006,7 +1970,7 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
         read_frame::<ResponseEnvelope>(stream).await.unwrap().result
     };
 
-    let refused = ask(&mut stream, DaemonAction::HostCapacity).await;
+    let refused = ask(&mut stream, DaemonAction::Identity).await;
     assert_eq!(
         refused.unwrap_err(),
         "daemon is shutting down; retry to reach a fresh daemon"
@@ -2130,7 +2094,7 @@ async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
             protocol_version: PROTOCOL_VERSION - 1,
             request_id: 43,
             token: metadata.token,
-            action: DaemonAction::Configuration,
+            action: DaemonAction::Identity,
         },
     )
     .await
@@ -8545,7 +8509,9 @@ async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
         for (request_id, result) in [
             (
                 7,
-                Ok(DaemonReply::DoctorErrors(vec!["x".repeat(MAX_FRAME_BYTES)])),
+                Ok(DaemonReply::UpgradeBlockers(vec![
+                    "x".repeat(MAX_FRAME_BYTES),
+                ])),
             ),
             (8, Ok(DaemonReply::Pong)),
         ] {
@@ -8566,7 +8532,7 @@ async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     assert_eq!(response.request_id, 7);
     let error = response.result.unwrap_err();
     assert!(
-        error.contains("doctor_errors response for request 7"),
+        error.contains("upgrade_blockers response for request 7"),
         "{error}"
     );
     assert!(error.contains(&MAX_FRAME_BYTES.to_string()), "{error}");
@@ -15369,7 +15335,6 @@ async fn daemon_api_exchange() {
         state: Default::default(),
     });
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let metadata = test_metadata(listener.local_addr().unwrap());
     let unsupported_machine = mj_core::config::Machine::AwsEc2 {
         aws_profile: None,
         region: "test-region".into(),
@@ -15391,132 +15356,177 @@ async fn daemon_api_exchange() {
             .profiles
             .is_empty()
     );
-    let actions = vec![
-        DaemonAction::PreviewBuildCache {
-            machine: unsupported_machine.clone(),
-        },
-        DaemonAction::InstallMbx {
-            machine: unsupported_machine,
-        },
-        DaemonAction::CheckpointArchiveSizes {
-            paths: [
-                ("archived".into(), archive.clone()),
-                ("unreadable".into(), archive.join("invalid\0archive")),
-                ("missing".into(), server_root.join("missing.tar")),
-            ]
-            .into(),
-        },
-        DaemonAction::TestTarget {
-            target_id: "missing".into(),
-        },
-        DaemonAction::ProfileLoginStatuses,
-        DaemonAction::CheckAvailability,
-        DaemonAction::DiscoverSetup {
-            scope: mj_client::discovery::DetectScope::Profiles,
-            machines: Vec::new(),
-        },
-        DaemonAction::DiscoverSetup {
-            scope: mj_client::discovery::DetectScope::Runtimes,
-            machines: Vec::new(),
-        },
-        DaemonAction::CheckProjectDirectories {
-            paths: vec![project.clone(), server_root.as_path().join("absent")],
-        },
-        DaemonAction::ResolveSetupPath {
-            machine: mj_core::config::Machine::Local { build_cache: None },
-            source: project.clone(),
-        },
-        DaemonAction::ValidateMountSource {
-            target_id: "missing".into(),
-            source: project.clone(),
-        },
-        DaemonAction::ValidateSessionMounts {
-            target_id: "missing".into(),
-            mounts: vec![mj_core::targets::AdditionalMount {
-                source: project.clone(),
-                destination: "/project".into(),
-                access: mj_core::targets::MountAccess::Ro,
-            }],
-        },
-        DaemonAction::ResolveContainerPath {
-            target_id: "local".into(),
-            source: project.clone(),
-        },
-        DaemonAction::ValidateProjectDirectory {
-            target_id: "local".into(),
-            directory: project.clone(),
-        },
-        DaemonAction::ResolveContainerPath {
-            target_id: "missing".into(),
-            source: project,
-        },
-        DaemonAction::SaveSpinnerStyle {
-            style: mj_core::config::SpinnerStyle::Wave,
-        },
+    let (http, shutdown, server) = start_test_dashboard_http_api_on(state, listener).await;
+    let actions = [
+        (
+            "/api/v1/machines/build-cache/preview",
+            Some(
+                serde_json::to_value(mj_client::http::machines::PreviewBuildCacheRequest {
+                    machine: unsupported_machine.clone(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/machines/build-cache/install",
+            Some(
+                serde_json::to_value(mj_client::http::machines::InstallMbxRequest {
+                    machine: unsupported_machine,
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/archives/sizes",
+            Some(
+                serde_json::to_value(mj_client::http::machines::CheckpointArchiveSizesRequest {
+                    paths: [
+                        ("archived".into(), archive.clone()),
+                        ("unreadable".into(), archive.join("invalid\0archive")),
+                        ("missing".into(), server_root.join("missing.tar")),
+                    ]
+                    .into(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/machines/targets/test",
+            Some(
+                serde_json::to_value(mj_client::http::machines::TestTargetRequest {
+                    target_id: "missing".into(),
+                })
+                .unwrap(),
+            ),
+        ),
+        ("/api/v1/profiles/login-statuses", None),
+        ("/api/v1/terminal/availability/check", None),
+        (
+            "/api/v1/setup/discover",
+            Some(
+                serde_json::to_value(mj_client::http::machines::DiscoverSetupRequest {
+                    scope: mj_client::discovery::DetectScope::Profiles,
+                    machines: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/setup/discover",
+            Some(
+                serde_json::to_value(mj_client::http::machines::DiscoverSetupRequest {
+                    scope: mj_client::discovery::DetectScope::Runtimes,
+                    machines: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/projects/directories/check",
+            Some(
+                serde_json::to_value(mj_client::http::machines::CheckProjectDirectoriesRequest {
+                    paths: vec![project.clone(), server_root.as_path().join("absent")],
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/setup/path/resolve",
+            Some(
+                serde_json::to_value(mj_client::http::machines::ResolveSetupPathRequest {
+                    machine: mj_core::config::Machine::Local { build_cache: None },
+                    source: project.clone(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/mounts/source/validate",
+            Some(
+                serde_json::to_value(mj_client::http::machines::ValidateMountSourceRequest {
+                    target_id: "missing".into(),
+                    source: project.clone(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/mounts/session/validate",
+            Some(
+                serde_json::to_value(mj_client::http::machines::ValidateSessionMountsRequest {
+                    target_id: "missing".into(),
+                    mounts: vec![mj_core::targets::AdditionalMount {
+                        source: project.clone(),
+                        destination: "/project".into(),
+                        access: mj_core::targets::MountAccess::Ro,
+                    }],
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/machines/container-path/resolve",
+            Some(
+                serde_json::to_value(mj_client::http::machines::ResolveContainerPathRequest {
+                    target_id: "local".into(),
+                    source: project.clone(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/projects/directory/validate",
+            Some(
+                serde_json::to_value(mj_client::http::machines::ValidateProjectDirectoryRequest {
+                    target_id: "local".into(),
+                    directory: project.clone(),
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/machines/container-path/resolve",
+            Some(
+                serde_json::to_value(mj_client::http::machines::ResolveContainerPathRequest {
+                    target_id: "missing".into(),
+                    source: project,
+                })
+                .unwrap(),
+            ),
+        ),
+        (
+            "/api/v1/terminal/spinner-style",
+            Some(
+                serde_json::to_value(mj_client::http::setup::SaveSpinnerStyleRequest {
+                    style: mj_core::config::SpinnerStyle::Wave,
+                })
+                .unwrap(),
+            ),
+        ),
     ];
-    let actions = actions
-        .into_iter()
-        .map(|action| (PROTOCOL_VERSION, action))
-        .chain([
-            (
-                PROTOCOL_VERSION,
-                DaemonAction::CheckpointSession {
-                    session_id: "removed".into(),
-                },
-            ),
-            (
-                PROTOCOL_VERSION - 1,
-                DaemonAction::CheckpointSession {
-                    session_id: "removed".into(),
-                },
-            ),
-        ]);
     let mut exchange = Vec::new();
-    for (index, (protocol_version, action)) in actions.enumerate() {
-        let server_state = state.clone();
-        let server_metadata = metadata.clone();
-        let server_listener = &listener;
-        let connect = TcpStream::connect(metadata.address);
-        let (stream, accepted) = tokio::join!(connect, server_listener.accept());
-        let (server_stream, _) = accepted.unwrap();
-        let server = mj_core::runtime::spawn(async move {
-            serve_client(
-                server_stream,
-                server_metadata,
-                server_state,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
+    for (path, body) in actions {
+        let reply = match &body {
+            Some(body) => http.post_json::<serde_json::Value>(path, body).await,
+            None => http.post_empty::<serde_json::Value>(path).await,
+        };
+        let mut reply = reply.map_err(|error| {
+            error
+                .downcast_ref::<mj_client::http::HttpApiError>()
+                .unwrap()
+                .message
+                .clone()
         });
-        let mut stream = stream.unwrap();
-        let rendered_action = serde_json::to_value(&action).unwrap();
-        write_frame(
-            &mut stream,
-            &RequestEnvelope {
-                protocol_version,
-                request_id: index as u64,
-                token: metadata.token.clone(),
-                action,
-            },
-        )
-        .await
-        .unwrap();
-        let wire: serde_json::Value = read_frame(&mut stream).await.unwrap();
-        let mut response: ResponseEnvelope = mj_core::config::with_secret_resolver(
-            mj_core::config::SecretResolver::beside(&client_config_path),
-            || serde_json::from_value(wire).unwrap(),
-        );
         // Embedded NUL is invalid on every host; only OS diagnostic wording varies.
-        if let Ok(DaemonReply::CheckpointArchiveSizes(sizes)) = &mut response.result {
-            let error = sizes.get_mut("unreadable").unwrap().as_mut().unwrap_err();
-            assert!(error.starts_with("read "), "{error}");
-            *error = "<archive metadata error>".into();
+        if path.ends_with("/sizes") {
+            let error = &mut reply.as_mut().unwrap()["unreadable"]["Err"];
+            assert!(error.as_str().unwrap().starts_with("read "));
+            *error = serde_json::json!("<archive metadata error>");
         }
-        exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
-        drop(stream);
-        server.await.unwrap();
+        exchange.push(serde_json::json!({"path": path, "request": body, "reply": reply}));
     }
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
     // Windows resolves a bare `docker` through its system directories before
     // PATH, so this fixture cannot hide a Docker the host installed. Leave the
     // host's Docker out there; Linux and macOS keep its isolated answer.
@@ -15624,12 +15634,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
         build_cache: None,
     };
     let request = mj_core::runtime::spawn(async move {
-        http.complete_path(
-            mj_core::path_completion::CompletionHost::Machine(Box::new(machine)),
-            "~/projects".into(),
-            mj_core::path_completion::CompletionKind::Directories,
-        )
-        .await
+        http.resolve_setup_path(machine, "~/projects".into()).await
     });
     let started_result = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -15881,36 +15886,12 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
             download_server.local_addr().unwrap()
         ))
         .unwrap();
-    for handoff in [true, false] {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let metadata = test_metadata(listener.local_addr().unwrap());
-        let server_metadata = metadata.clone();
-        let shutdown = CancellationToken::new();
-        let server_shutdown = shutdown.clone();
-        let server = mj_core::runtime::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            serve_client(
-                stream,
-                server_metadata,
-                test_runtime_state(),
-                server_shutdown,
-            )
-            .await
+    for handoff in [false, true] {
+        let (http, shutdown, server) = start_test_dashboard_http_api(test_runtime_state()).await;
+        let client = mj_core::runtime::spawn(async move {
+            http.install_mbx(mj_core::config::Machine::Local { build_cache: None })
+                .await
         });
-        let mut client = TcpStream::connect(metadata.address).await.unwrap();
-        write_frame(
-            &mut client,
-            &RequestEnvelope {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: 1,
-                token: metadata.token,
-                action: DaemonAction::InstallMbx {
-                    machine: mj_core::config::Machine::Local { build_cache: None },
-                },
-            },
-        )
-        .await
-        .unwrap();
         let download =
             tokio::time::timeout(Duration::from_secs(30), download_server.accept()).await;
         if download.is_err() {
@@ -15935,28 +15916,32 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
                 .any(|label| label.contains("mbx installation"))
         );
         if handoff {
+            assert!(mj_controller::upgrade::gate().try_close());
             shutdown.cancel();
-            let response: ResponseEnvelope = read_frame(&mut client).await.unwrap();
-            assert!(response.result.unwrap_err().contains("cancel"));
+            let error = client.await.unwrap().unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<mj_client::http::HttpApiError>()
+                    .is_some_and(|failure| failure.is_handoff()),
+                "{error:#}"
+            );
         } else {
-            drop(client);
+            client.abort();
+            assert!(client.await.unwrap_err().is_cancelled());
         }
-        server.await.unwrap().unwrap();
-        let mut remaining = Vec::new();
-        // A dropped response closes the incomplete HTTP body, instead of waiting for its deadline.
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            download.read_to_end(&mut remaining),
-        )
+        // The client response and shutdown need not wait for the disposable
+        // blocking probe. Wait for it to close the download and clean staging.
+        let staging = mj_core::config::data_dir().join("mbx-download");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            download.read_to_end(&mut Vec::new()).await.unwrap();
+            while fs::read_dir(&staging).unwrap().count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .unwrap()
         .unwrap();
-        assert_eq!(
-            fs::read_dir(mj_core::config::data_dir().join("mbx-download"))
-                .unwrap()
-                .count(),
-            0
-        );
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
         assert!(!root.join("home/.local/bin/mbx").exists());
     }
 }
@@ -18410,6 +18395,69 @@ async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission
             .unwrap();
     assert!(stored.sessions[&session.id].additional_mounts.is_empty());
     assert!(stored.mount_history.is_empty());
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn terminal_setup_and_viewer_round_trip_and_only_writes_refuse_during_drain() {
+    let Some(_writer) = startup_prompt_test_store(
+        "terminal_setup_and_viewer_round_trip_and_only_writes_refuse_during_drain",
+    ) else {
+        return;
+    };
+    Config::default().save().unwrap();
+    let state = test_runtime_state_loading_the_store();
+    state
+        .api_credential
+        .set("external-api-test-credential".into())
+        .unwrap();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    let original = http.config().await.unwrap();
+    let mut updated = original.clone();
+    updated.spinner = mj_core::config::SpinnerStyle::Wave;
+    let original_json = serde_json::to_string(&original).unwrap();
+    let updated_json = serde_json::to_string(&updated).unwrap();
+    let saved = http
+        .save_setup(original_json.clone(), updated_json.clone())
+        .await
+        .unwrap();
+    assert_eq!(saved.spinner, updated.spinner);
+    assert_eq!(http.config().await.unwrap().spinner, updated.spinner);
+    let access = serde_json::to_value(state.web_viewer.access()).unwrap();
+    assert_eq!(
+        serde_json::to_value(http.web_access().await.unwrap()).unwrap(),
+        access
+    );
+    assert_eq!(
+        http.api_credential().await.unwrap(),
+        "external-api-test-credential"
+    );
+
+    let gate = mj_controller::upgrade::gate();
+    gate.begin_draining();
+    assert!(http.first_run_setup_due().await.is_ok());
+    assert_eq!(http.config().await.unwrap().spinner, updated.spinner);
+    let paths = vec![mj_core::config::data_dir()];
+    assert_eq!(
+        http.check_project_directories(paths.clone()).await.unwrap(),
+        vec![(paths[0].clone(), true)]
+    );
+    assert!(gate.blockers().is_empty());
+    for error in [
+        http.save_setup(updated_json, original_json)
+            .await
+            .unwrap_err(),
+        http.save_spinner_style(original.spinner).await.unwrap_err(),
+        http.refresh_quota().await.unwrap_err(),
+    ] {
+        let failure = error
+            .downcast_ref::<mj_client::http::HttpApiError>()
+            .unwrap();
+        assert_eq!(failure.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(failure.is_handoff(), "{failure}");
+    }
+
     shutdown.cancel();
     server.await.unwrap().unwrap();
 }

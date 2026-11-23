@@ -603,14 +603,12 @@ pub(crate) fn spawn_availability_check(updates: UnboundedSender<DashboardIoUpdat
         updates,
         SAVE_ACK_TIMEOUT,
         async {
-            match daemon::connect_existing()
+            daemon::connect_existing()
                 .await?
-                .request(daemon::DaemonAction::CheckAvailability)
+                .http()
                 .await?
-            {
-                daemon::DaemonReply::Done => Ok(()),
-                _ => anyhow::bail!("daemon returned an unexpected availability acknowledgement"),
-            }
+                .check_availability()
+                .await
         },
         DashboardIoUpdate::AvailabilityCheckRequested,
     );
@@ -624,12 +622,10 @@ pub(crate) fn spawn_profile_login_statuses(
     spawn_io(
         "reading profile sign-in status",
         updates,
-        move || match machine_request(
-            mj_client::daemon::DaemonAction::ProfileLoginStatuses,
-            Arc::new(AtomicBool::new(false)),
-        )? {
-            mj_client::daemon::DaemonReply::ProfileLoginStatuses(statuses) => Ok(statuses),
-            _ => anyhow::bail!("daemon returned an unexpected profile login status reply"),
+        move || {
+            machine_request(Arc::new(AtomicBool::new(false)), |http| async move {
+                http.profile_login_statuses().await
+            })
         },
         move |result| DashboardIoUpdate::ProfileLoginStatuses { generation, result },
     )
@@ -649,12 +645,10 @@ pub(crate) fn spawn_setup_discovery(
             DetectScope::Runtimes => "detecting runtimes",
         },
         updates,
-        move |cancelled| match machine_request(
-            mj_client::daemon::DaemonAction::DiscoverSetup { scope, machines },
-            cancelled,
-        )? {
-            mj_client::daemon::DaemonReply::SetupDiscovery(report) => Ok(*report),
-            _ => anyhow::bail!("daemon returned an unexpected discovery reply"),
+        move |cancelled| {
+            machine_request(cancelled, |http| async move {
+                http.discover_setup(scope, machines).await
+            })
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
     )
@@ -723,21 +717,9 @@ pub(crate) fn spawn_spinner_style_save(
         updates,
         move || {
             mj_core::runtime::block_on(async move {
-                let mut client = daemon::connect_or_start().await?;
-                match client
-                    .request(mj_client::daemon::DaemonAction::SaveSpinnerStyle { style })
-                    .await?
-                {
-                    mj_client::daemon::DaemonReply::Done => {}
-                    reply => anyhow::bail!("unexpected spinner save reply: {reply:?}"),
-                }
-                match client
-                    .request(mj_client::daemon::DaemonAction::Configuration)
-                    .await?
-                {
-                    mj_client::daemon::DaemonReply::Configuration(config) => Ok(*config),
-                    reply => anyhow::bail!("unexpected configuration reply: {reply:?}"),
-                }
+                let client = daemon::connect_or_start().await?.http().await?;
+                client.save_spinner_style(style).await?;
+                client.config().await
             })?
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
@@ -1511,24 +1493,17 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     mj_core::runtime::spawn_blocking(move || {
-        let sizes = match machine_request(
-            mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
-                paths: targets.clone(),
-            },
-            Arc::new(AtomicBool::new(false)),
-        ) {
-            Ok(mj_client::daemon::DaemonReply::CheckpointArchiveSizes(sizes)) => sizes,
-            result => {
-                let error = match result {
-                    Err(error) => format!("{error:#}"),
-                    Ok(reply) => format!("unexpected archive size reply: {reply:?}"),
-                };
-                targets
-                    .keys()
-                    .map(|id| (id.clone(), Err(error.clone())))
-                    .collect()
-            }
-        };
+        let paths = targets.clone();
+        let sizes = machine_request(Arc::new(AtomicBool::new(false)), |http| async move {
+            http.checkpoint_archive_sizes(paths).await
+        })
+        .unwrap_or_else(|error| {
+            let error = format!("{error:#}");
+            targets
+                .keys()
+                .map(|id| (id.clone(), Err(error.clone())))
+                .collect()
+        });
         report(
             "checkpoint archive sizes",
             &updates,
@@ -2102,15 +2077,12 @@ pub(crate) fn spawn_dashboard_restore_session(
 
 /// Each disposable read owns a connection. Superseding the input closes that
 /// connection, allowing the daemon to stop its executor and reap its children.
-pub(crate) fn machine_request(
-    action: mj_client::daemon::DaemonAction,
+pub(crate) fn machine_request<T, F: std::future::Future<Output = Result<T>>>(
     cancelled: Arc<AtomicBool>,
-) -> Result<mj_client::daemon::DaemonReply> {
+    send: impl FnOnce(mj_client::http::HttpDaemonClient) -> F,
+) -> Result<T> {
     mj_core::runtime::block_on(async move {
-        let request = async move {
-            let mut client = daemon::connect_or_start().await?;
-            client.request(action).await
-        };
+        let request = async move { send(daemon::connect_or_start().await?.http().await?).await };
         tokio::pin!(request);
         loop {
             tokio::select! {

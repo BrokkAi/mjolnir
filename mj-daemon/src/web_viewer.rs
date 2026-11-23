@@ -1,7 +1,7 @@
 //! Listener recovery lives beside the daemon, independently of session control.
 
 use std::net::SocketAddr;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, atomic::AtomicBool};
 use std::time::Duration;
 
 use crate::server::{
@@ -234,7 +234,14 @@ fn ready_at(ready: &WebViewerAccess, address: SocketAddr) -> Result<WebViewerAcc
 }
 
 pub fn inspect_listener(address: SocketAddr) -> Result<Vec<WebListenerProcess>> {
-    let pids = listener_pids(address)?;
+    inspect_listener_cancellable(address, Arc::new(AtomicBool::new(false)))
+}
+
+pub(crate) fn inspect_listener_cancellable(
+    address: SocketAddr,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<WebListenerProcess>> {
+    let pids = listener_pids(address, cancelled)?;
     let mut system = sysinfo::System::new();
     let own_pid = sysinfo::Pid::from_u32(std::process::id());
     let mut requested = pids
@@ -389,7 +396,7 @@ fn open_process_handle(pid: u32) -> Result<std::os::fd::OwnedFd> {
 }
 
 #[cfg(target_os = "linux")]
-fn listener_pids(address: SocketAddr) -> Result<Vec<u32>> {
+fn listener_pids(address: SocketAddr, _cancelled: Arc<AtomicBool>) -> Result<Vec<u32>> {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
@@ -494,12 +501,9 @@ fn addresses_overlap(a: SocketAddr, b: SocketAddr) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn listener_pids(address: SocketAddr) -> Result<Vec<u32>> {
+fn listener_pids(address: SocketAddr, cancelled: Arc<AtomicBool>) -> Result<Vec<u32>> {
     use mj_controller::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
-    let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
-        std::sync::atomic::AtomicBool::new(false),
-    ))
-    .with_deadline(Duration::from_secs(5));
+    let executor = CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(5));
     let output = executor
         .execute(&CommandSpec::new(
             "lsof",
@@ -855,7 +859,7 @@ mod tests {
     async fn inspection_finds_real_listener_and_refuses_to_stop_the_current_daemon() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let pids = listener_pids(address).unwrap();
+        let pids = listener_pids(address, Arc::new(AtomicBool::new(false))).unwrap();
         assert!(
             pids.contains(&std::process::id()),
             "socket {address} owners: {pids:?}; expected {}",

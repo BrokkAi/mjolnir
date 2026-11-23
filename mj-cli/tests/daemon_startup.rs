@@ -855,8 +855,13 @@ fn the_loopback_api_is_ready_with_phone_access_disabled() {
             daemon.identity().await.unwrap().instance_id,
             endpoint.instance_id
         );
+        let terminal = mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", endpoint.address),
+            &endpoint.token,
+        )
+        .unwrap();
         assert!(matches!(
-            daemon.web_access().await.unwrap(),
+            terminal.web_access().await.unwrap(),
             WebViewerAccess::Unavailable(_)
         ));
         assert_eq!(
@@ -1181,7 +1186,6 @@ fn old_daemon_fixture() {
                                 // decode the frame: it drops the connection.
                                 // Clients must treat that as an unknown
                                 // answer, not as a reason to keep asking.
-                                DaemonAction::Configuration => break,
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {

@@ -912,6 +912,8 @@ pub(crate) use guards::*;
 mod dashboard_api;
 mod dashboard_reads;
 mod terminal_operations;
+mod terminal_repositories;
+mod terminal_setup;
 
 #[cfg(test)]
 pub(crate) mod tests;

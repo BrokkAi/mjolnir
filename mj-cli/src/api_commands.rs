@@ -3172,7 +3172,7 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
 /// Explicit credential output for callers authenticating outside the CLI.
 pub(crate) async fn api_token() -> Result<()> {
     let mut client = crate::daemon::connect_or_start().await?;
-    println!("{}", client.api_credential().await?);
+    println!("{}", client.http().await?.api_credential().await?);
     Ok(())
 }
 
@@ -5917,16 +5917,17 @@ mod tests {
             let mut byte = [0];
             assert_eq!(feed.read(&mut byte).await.unwrap(), 0);
             let request: RequestEnvelope = read_frame(&mut control).await.unwrap();
-            assert!(matches!(
-                request.action,
-                DaemonAction::ProbeQuotaProfiles { .. }
-            ));
+            assert!(matches!(request.action, DaemonAction::Identity));
             write_frame(
                 &mut control,
                 &ResponseEnvelope {
                     protocol_version: request.protocol_version,
                     request_id: request.request_id,
-                    result: Ok(DaemonReply::Done),
+                    result: Ok(DaemonReply::Identity(mj_client::daemon::DaemonIdentity {
+                        instance_id: "test".into(),
+                        build_version: "test".into(),
+                        placement: DaemonPlacement::Host,
+                    })),
                 },
             )
             .await
@@ -5951,10 +5952,7 @@ mod tests {
         tokio::time::advance(QUOTA_REFRESH_WAIT + std::time::Duration::from_secs(1)).await;
         let (_, latest) = pump.await.unwrap();
         assert_eq!(latest, observed);
-        control
-            .probe_quota_profiles(vec!["disabled".into()], false)
-            .await
-            .unwrap();
+        control.identity().await.unwrap();
         server.await.unwrap();
     }
 

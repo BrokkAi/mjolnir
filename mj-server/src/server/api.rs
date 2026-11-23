@@ -45,7 +45,9 @@ mod dashboard;
 mod terminal_operations;
 pub use dashboard::DashboardBackend;
 use dashboard::dashboard_routes;
-pub use terminal_operations::TerminalOperations;
+pub use terminal_operations::{
+    MachinesOperations, RepositoriesOperations, SetupOperations, TerminalOperations,
+};
 mod events;
 
 use std::future::Future;

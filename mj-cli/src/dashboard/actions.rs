@@ -3,7 +3,6 @@
 //! Every arm here either updates UI state directly or starts a background job,
 //! including `SetupLogin`, whose terminal connection runs in a background task.
 
-use mj_client::daemon::{DaemonAction as MachineAction, DaemonReply as MachineReply};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -481,15 +480,10 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "resolving attached directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::ResolveContainerPath {
-                        target_id,
-                        source: source.into(),
-                    },
-                    cancelled,
-                )? {
-                    MachineReply::ResolvedPath(path) => Ok(path),
-                    reply => anyhow::bail!("unexpected path reply: {reply:?}"),
+                move |cancelled| {
+                    super::io::machine_request(cancelled, |http| async move {
+                        http.resolve_container_path(target_id, source.into()).await
+                    })
                 },
                 move |result| DashboardIoUpdate::ContainerPathResolved {
                     context: input_context,
@@ -510,15 +504,10 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "resolving setup path",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::ResolveSetupPath {
-                        machine: *machine,
-                        source: requested.into(),
-                    },
-                    cancelled,
-                )? {
-                    MachineReply::ResolvedPath(path) => Ok(path),
-                    reply => anyhow::bail!("unexpected setup path reply: {reply:?}"),
+                move |cancelled| {
+                    super::io::machine_request(cancelled, |http| async move {
+                        http.resolve_setup_path(*machine, requested.into()).await
+                    })
                 },
                 move |result| DashboardIoUpdate::SetupPathResolved {
                     generation,
@@ -541,12 +530,10 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "previewing the build cache",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::PreviewBuildCache { machine: *machine },
-                    cancelled,
-                )? {
-                    MachineReply::BuildCachePreview(preview, available) => Ok((preview, available)),
-                    reply => anyhow::bail!("unexpected build cache reply: {reply:?}"),
+                move |cancelled| {
+                    super::io::machine_request(cancelled, |http| async move {
+                        http.preview_build_cache(*machine).await
+                    })
                 },
                 move |result| match result {
                     Ok((result, install_mbx_available)) => DashboardIoUpdate::BuildCachePreviewed {
@@ -582,32 +569,21 @@ pub(crate) async fn apply_dashboard_action(
                 "installing mbx",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let install_result = super::io::machine_request(
-                        MachineAction::InstallMbx {
-                            machine: *machine.clone(),
-                        },
-                        cancelled.clone(),
-                    )
-                    .and_then(|reply| match reply {
-                        MachineReply::MbxInstalled(message) => Ok(message),
-                        reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
-                    })
-                    .map_err(|error| {
-                        format!("mbx installation interrupted — run Install again: {error:#}")
-                    });
-                    let (preview_result, install_mbx_available) = match super::io::machine_request(
-                        MachineAction::PreviewBuildCache { machine: *machine },
-                        cancelled,
-                    ) {
-                        Ok(MachineReply::BuildCachePreview(preview, available)) => {
-                            (Ok(preview), available)
-                        }
-                        Ok(reply) => (
-                            Err(format!("unexpected build cache reply: {reply:?}")),
-                            false,
-                        ),
-                        Err(error) => (Err(format!("{error:#}")), false),
-                    };
+                    let install_machine = machine.clone();
+                    let install_result =
+                        super::io::machine_request(cancelled.clone(), |http| async move {
+                            http.install_mbx(*install_machine).await
+                        })
+                        .map_err(|error| {
+                            format!("mbx installation interrupted — run Install again: {error:#}")
+                        });
+                    let (preview_result, install_mbx_available) =
+                        match super::io::machine_request(cancelled, |http| async move {
+                            http.preview_build_cache(*machine).await
+                        }) {
+                            Ok((preview, available)) => (Ok(preview), available),
+                            Err(error) => (Err(format!("{error:#}")), false),
+                        };
                     Ok(MbxInstallCompletion {
                         install_result,
                         preview_result,
@@ -800,14 +776,11 @@ pub(crate) async fn apply_dashboard_action(
                     context.critical_operations.clone(),
                     label,
                     context.dashboard_io_tx.clone(),
-                    move |cancelled| match super::io::machine_request(
-                        MachineAction::CheckProjectDirectories { paths: vec![path] },
-                        cancelled,
-                    )? {
-                        MachineReply::ProjectDirectories(paths) => {
-                            Ok(paths.first().map(|(_, exists)| *exists))
-                        }
-                        reply => anyhow::bail!("unexpected directory reply: {reply:?}"),
+                    move |cancelled| {
+                        super::io::machine_request(cancelled, |http| async move {
+                            http.check_project_directories(vec![path]).await
+                        })
+                        .map(|paths| paths.first().map(|(_, exists)| *exists))
                     },
                     move |checked| DashboardIoUpdate::ProjectDirectory {
                         path: reported,
@@ -822,12 +795,10 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 format!("testing target {target_id}"),
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match crate::dashboard::io::machine_request(
-                    MachineAction::TestTarget { target_id },
-                    cancelled,
-                )? {
-                    MachineReply::Done => Ok(()),
-                    reply => bail!("unexpected target test reply: {reply:?}"),
+                move |cancelled| {
+                    crate::dashboard::io::machine_request(cancelled, |http| async move {
+                        http.test_target(target_id).await
+                    })
                 },
                 move |result| DashboardIoUpdate::TargetTest {
                     target_id: reported_id,
@@ -1191,15 +1162,11 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "validating attached directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::ValidateMountSource {
-                        target_id: target_template_id,
-                        source: requested.into(),
-                    },
-                    cancelled,
-                )? {
-                    MachineReply::MountValidation(path, forced) => Ok((path, forced)),
-                    reply => anyhow::bail!("unexpected mount reply: {reply:?}"),
+                move |cancelled| {
+                    super::io::machine_request(cancelled, |http| async move {
+                        http.validate_mount_source(target_template_id, requested.into())
+                            .await
+                    })
                 },
                 move |result| DashboardIoUpdate::MountValidation {
                     context: input_context,
@@ -1222,15 +1189,11 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "validating session directories",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::ValidateSessionMounts {
-                        target_id: target_template_id,
-                        mounts,
-                    },
-                    cancelled,
-                )? {
-                    MachineReply::SessionMountValidation(result) => Ok(result),
-                    reply => anyhow::bail!("unexpected mounts reply: {reply:?}"),
+                move |cancelled| {
+                    super::io::machine_request(cancelled, |http| async move {
+                        http.validate_session_mounts(target_template_id, mounts)
+                            .await
+                    })
                 },
                 move |result| DashboardIoUpdate::SessionMountValidation {
                     generation,
@@ -1293,21 +1256,20 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "validating project directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::ValidateProjectDirectory {
-                        target_id: target_template_id,
-                        directory: requested.into(),
-                    },
-                    cancelled,
-                )? {
-                    MachineReply::NewSessionPreflight(result) => Ok((
-                        result
-                            .project_directory
-                            .context("bare preflight returned no directory")?,
-                        result.managed_worktree,
-                        result.review_notice.is_some(),
-                    )),
-                    reply => anyhow::bail!("unexpected project preflight reply: {reply:?}"),
+                move |cancelled| {
+                    super::io::machine_request(cancelled, |http| async move {
+                        http.validate_project_directory(target_template_id, requested.into())
+                            .await
+                    })
+                    .and_then(|result| {
+                        Ok((
+                            result
+                                .project_directory
+                                .context("bare preflight returned no directory")?,
+                            result.managed_worktree,
+                            result.review_notice.is_some(),
+                        ))
+                    })
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {
                     context: input_context,
@@ -2217,7 +2179,7 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
     let task_updates = updates.clone();
     let inspecting = matches!(action, DashboardAction::InspectWebListener);
     let mut task = mj_core::runtime::spawn(async move {
-        let mut daemon = daemon::connect_existing().await?;
+        let daemon = daemon::connect_existing().await?.http().await?;
         match action {
             DashboardAction::RecoverWebViewer(recovery) => {
                 if let Err(error) = daemon.recover_web_viewer(recovery).await {

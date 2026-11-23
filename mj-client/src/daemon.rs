@@ -944,53 +944,6 @@ pub enum DaemonAction {
         cols: u16,
         rows: u16,
     },
-    PreviewBuildCache {
-        machine: mj_core::config::Machine,
-    },
-    InstallMbx {
-        machine: mj_core::config::Machine,
-    },
-    ValidateProjectDirectory {
-        target_id: String,
-        directory: PathBuf,
-    },
-    CheckpointArchiveSizes {
-        paths: std::collections::BTreeMap<String, PathBuf>,
-    },
-    SaveSpinnerStyle {
-        style: mj_core::config::SpinnerStyle,
-    },
-    SetQuotaPreferences {
-        prefer: Vec<String>,
-    },
-    TestTarget {
-        target_id: String,
-    },
-    ProfileLoginStatuses,
-    CheckAvailability,
-    DiscoverSetup {
-        scope: crate::discovery::DetectScope,
-        machines: Vec<(String, mj_core::config::Machine)>,
-    },
-    CheckProjectDirectories {
-        paths: Vec<std::path::PathBuf>,
-    },
-    ResolveContainerPath {
-        target_id: String,
-        source: std::path::PathBuf,
-    },
-    ResolveSetupPath {
-        machine: mj_core::config::Machine,
-        source: std::path::PathBuf,
-    },
-    ValidateMountSource {
-        target_id: String,
-        source: std::path::PathBuf,
-    },
-    ValidateSessionMounts {
-        target_id: String,
-        mounts: Vec<mj_core::targets::AdditionalMount>,
-    },
     Ping,
     /// Frozen upgrade handshake, available from daemon protocol 33 onward.
     /// Busy replies leave every operation and control channel running.
@@ -1008,126 +961,12 @@ pub enum DaemonAction {
     /// protocol 74, so it is deliberately not part of the frozen management
     /// subset: a client asks only a daemon of its own protocol.
     Identity,
-    /// The configuration the daemon serves. Clients read it here instead of
-    /// opening `config.toml`, which belongs to the daemon.
-    Configuration,
-    /// Whether first-run setup has work to do: a new installation, or one
-    /// whose setup did not finish. A dashboard asks before it shows the
-    /// first-run welcome, which takes the keyboard.
-    FirstRunSetupDue,
-    /// Discover and persist the first-run configuration in the daemon's own
-    /// environment. A client in another placement asks its daemon instead of
-    /// writing the client's `config.toml`.
-    RunFirstRunSetup,
-    /// Use the client's directory when both processes can see the same paths.
-    RunFirstRunSetupIn {
-        project_directory: PathBuf,
-    },
-    /// Run the doctor in the daemon's own environment and return the
-    /// actionable errors, which a client shows after first-run setup.
-    RunDoctor,
-    /// Check a project's Git remotes before a new session starts, in the
-    /// environment that owns the project paths.
-    NewSessionRemoteRepairs {
-        bundle_id: String,
-        target_id: String,
-    },
-    /// Apply the remote-tracking repairs a preflight proposed, in the
-    /// environment that owns the project checkout.
-    RepairRepositoryRemotes {
-        bundle_id: String,
-        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-    },
-    /// The project source label for a session, read in the environment that
-    /// owns the checkout.
-    SessionProjectSource {
-        session_id: String,
-    },
     Status,
-    WebViewerAccess,
-    ApiCredential,
-    /// The daemon host's Git commit author, which its sessions inherit.
-    /// Write the daemon host's global Git commit author.
-    RecoverWebViewer(crate::web::WebViewerRecovery),
-    InspectWebListener,
-    /// Legacy wire tombstone: rejected with guidance to suspend.
-    CheckpointSession {
-        session_id: String,
-    },
-    ScanRecovery {
-        all_instances: bool,
-    },
     AdoptRecovery(RecoveryAdoptionRequest),
-    DestroyRecovery {
-        session_id: String,
-        target_id: String,
-        confirmation: String,
-        all_instances: bool,
-    },
-    /// Check that a stopped session's checkpointed repositories can be
-    /// fetched again before it resumes on `target_id`.
-    ResumeRepositoryPreflight {
-        session_id: String,
-        target_id: String,
-    },
-    /// Point one of a stopped session's repositories at a new origin, then
-    /// check the sources again.
-    ReplaceResumeRepositoryOrigin {
-        session_id: String,
-        repository_id: String,
-        replacement: String,
-    },
-    /// How much session storage an archive age would free.
-    ArchiveSpacePreview {
-        older_than_days: Option<u32>,
-    },
-    /// Save the terminal Setup editor's configuration, checked against the
-    /// stored sessions it would disturb. Both are configuration JSON.
-    SaveSetup {
-        original: String,
-        updated: String,
-    },
     RuntimeChanges {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
         subagent_parents: std::collections::BTreeSet<String>,
-    },
-    /// Every host and fleet with the capacity service's latest CPU, RAM and
-    /// filesystem readings. Added in protocol 101.
-    HostCapacity,
-    /// Re-read the daemon probe definitions and sample every host.
-    RefreshCapacity,
-    /// Ask the daemon's quota poller to probe now. The daemon is the only
-    /// process that probes; the result arrives in the runtime feed. Added in
-    /// protocol 43.
-    RefreshQuota,
-    /// Probe exactly these profiles once, even disabled ones, and serve their
-    /// reports in the runtime feed. Added in protocol 99; `forced` (probe now,
-    /// off the profile's schedule, even with a fresh report) in protocol 100.
-    ProbeQuotaProfiles {
-        profile_ids: Vec<String>,
-        forced: bool,
-    },
-    /// Discover eligible subagent models in the daemon, which owns the cache.
-    SubagentOptions {
-        profile: String,
-        model: Option<String>,
-        /// Setup can probe an unsaved draft without changing live settings.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        config: Option<Box<Config>>,
-    },
-    /// Ensure valid unsaved profile definitions are hydrating. Results arrive
-    /// through runtime publications; this request does no discovery itself.
-    WarmProfileCapabilities {
-        config: Box<Config>,
-    },
-    RenameProfile {
-        old_id: String,
-        new_id: String,
-    },
-    RenameTarget {
-        old_id: String,
-        new_id: String,
     },
     Stop,
 }
@@ -1227,39 +1066,13 @@ pub enum DaemonReply {
         mac: Vec<u8>,
     },
     LoginTerminalReady,
-    BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
-    MbxInstalled(String),
-    CheckpointArchiveSizes(
-        std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
-    ),
-    SetupDiscovery(Box<crate::discovery::SetupDetection>),
-    ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
-    NewSessionPreflight(PreflightNew),
-    ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
-    ResolvedPath(std::path::PathBuf),
-    MountValidation(std::path::PathBuf, Option<String>),
-    SessionMountValidation(Option<(String, String)>),
     Pong,
     UpgradePending,
     /// Labels for the work holding an automatic handoff open, empty when
     /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
-    Configuration(Box<Config>),
-    FirstRunSetupDue(bool),
-    FirstRunSetup(Option<FirstRunSetupReport>),
-    DoctorErrors(Vec<String>),
-    RemoteRepairs(Vec<mj_core::local_git::LocalRemoteRepair>),
-    ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
-    WebViewerAccess(crate::web::WebViewerAccess),
-    ApiCredential(String),
-    WebListeners(Vec<crate::web::WebListenerProcess>),
-    SubagentOptions(mj_core::subagent::SubagentOptions),
-    HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
-    SavedSetup(Box<Config>),
-    ArchiveSpacePreview(ArchiveSpacePreview),
-    ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
@@ -1268,7 +1081,6 @@ pub enum DaemonReply {
         bytes: Vec<u8>,
         finished: bool,
     },
-    RecoveryScan(mj_core::state::RecoveryScan),
     Done,
 }
 
@@ -1276,7 +1088,7 @@ impl DaemonReply {
     /// Replies that can outgrow one frame. The daemon sends them as
     /// [`DaemonReply::ReplyChunk`] fragments and the client reassembles them.
     pub fn is_chunked(&self) -> bool {
-        matches!(self, Self::Configuration(_) | Self::RuntimeChanges(_))
+        matches!(self, Self::RuntimeChanges(_))
     }
 }
 
@@ -1960,10 +1772,7 @@ impl DaemonClient {
     /// The configuration the daemon serves. Clients use this instead of
     /// opening the daemon's `config.toml`.
     pub async fn config(&mut self) -> Result<Config> {
-        match self.request(DaemonAction::Configuration).await? {
-            DaemonReply::Configuration(config) => Ok(*config),
-            reply => bail!("unexpected daemon configuration reply {reply:?}"),
-        }
+        self.http().await?.config().await
     }
 
     /// Whether the connected daemon can resolve paths from this client.
@@ -1973,31 +1782,21 @@ impl DaemonClient {
     }
 
     pub async fn first_run_setup_due(&mut self) -> Result<bool> {
-        match self.request(DaemonAction::FirstRunSetupDue).await? {
-            DaemonReply::FirstRunSetupDue(due) => Ok(due),
-            reply => bail!("unexpected first-run setup reply {reply:?}"),
-        }
+        self.http().await?.first_run_setup_due().await
     }
 
     pub async fn run_first_run_setup(
         &mut self,
         project_directory: Option<PathBuf>,
     ) -> Result<Option<FirstRunSetupReport>> {
-        let action = match project_directory {
-            Some(project_directory) => DaemonAction::RunFirstRunSetupIn { project_directory },
-            None => DaemonAction::RunFirstRunSetup,
-        };
-        match self.request(action).await? {
-            DaemonReply::FirstRunSetup(report) => Ok(report),
-            reply => bail!("unexpected first-run setup reply {reply:?}"),
-        }
+        self.http()
+            .await?
+            .run_first_run_setup(project_directory)
+            .await
     }
 
     pub async fn run_doctor(&mut self) -> Result<Vec<String>> {
-        match self.request(DaemonAction::RunDoctor).await? {
-            DaemonReply::DoctorErrors(errors) => Ok(errors),
-            reply => bail!("unexpected doctor reply {reply:?}"),
-        }
+        self.http().await?.run_doctor().await
     }
 
     pub async fn new_session_remote_repairs(
@@ -2005,16 +1804,10 @@ impl DaemonClient {
         bundle_id: String,
         target_id: String,
     ) -> Result<Vec<mj_core::local_git::LocalRemoteRepair>> {
-        match self
-            .request(DaemonAction::NewSessionRemoteRepairs {
-                bundle_id,
-                target_id,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::RemoteRepairs(repairs) => Ok(repairs),
-            reply => bail!("unexpected new-session preflight reply {reply:?}"),
-        }
+            .new_session_remote_repairs(bundle_id, target_id)
+            .await
     }
 
     pub async fn repair_repository_remotes(
@@ -2022,26 +1815,17 @@ impl DaemonClient {
         bundle_id: String,
         repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::RepairRepositoryRemotes { bundle_id, repairs })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected remote-repair reply {reply:?}"),
-        }
+            .repair_repository_remotes(bundle_id, repairs)
+            .await
     }
 
     pub async fn session_project_source(
         &mut self,
         session_id: String,
     ) -> Result<mj_core::state::ProjectSourceIdentity> {
-        match self
-            .request(DaemonAction::SessionProjectSource { session_id })
-            .await?
-        {
-            DaemonReply::ProjectSource(source) => Ok(source),
-            reply => bail!("unexpected project-source reply {reply:?}"),
-        }
+        self.http().await?.session_project_source(session_id).await
     }
 
     pub async fn status(&mut self) -> Result<DaemonStatus> {
@@ -2053,17 +1837,11 @@ impl DaemonClient {
 
     /// Obtain the HTTP bearer credential from its daemon owner.
     pub async fn api_credential(&mut self) -> Result<String> {
-        match self.request(DaemonAction::ApiCredential).await? {
-            DaemonReply::ApiCredential(token) => Ok(token),
-            reply => bail!("unexpected API credential reply: {reply:?}"),
-        }
+        self.http().await?.api_credential().await
     }
 
     pub async fn web_access(&mut self) -> Result<crate::web::WebViewerAccess> {
-        match self.request(DaemonAction::WebViewerAccess).await? {
-            DaemonReply::WebViewerAccess(access) => Ok(access),
-            reply => bail!("unexpected web viewer reply {reply:?}"),
-        }
+        self.http().await?.web_access().await
     }
 
     pub async fn subagent_options(
@@ -2072,72 +1850,42 @@ impl DaemonClient {
         model: Option<String>,
         config: Option<Config>,
     ) -> Result<mj_core::subagent::SubagentOptions> {
-        match self
-            .request(DaemonAction::SubagentOptions {
-                profile,
-                model,
-                config: config.map(Box::new),
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::SubagentOptions(options) => Ok(options),
-            reply => bail!("unexpected subagent options reply {reply:?}"),
-        }
+            .subagent_options(profile, model, config)
+            .await
     }
 
     pub async fn warm_profile_capabilities(&mut self, config: Config) -> Result<()> {
-        match self
-            .request(DaemonAction::WarmProfileCapabilities {
-                config: Box::new(config),
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected capability hydration reply {reply:?}"),
-        }
+        self.http().await?.warm_profile_capabilities(config).await
     }
 
     pub async fn recover_web_viewer(
         &mut self,
         action: crate::web::WebViewerRecovery,
     ) -> Result<()> {
-        match self.request(DaemonAction::RecoverWebViewer(action)).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected web viewer recovery reply {reply:?}"),
-        }
+        self.http().await?.recover_web_viewer(action).await
     }
 
     pub async fn inspect_web_listener(&mut self) -> Result<Vec<crate::web::WebListenerProcess>> {
-        match self.request(DaemonAction::InspectWebListener).await? {
-            DaemonReply::WebListeners(processes) => Ok(processes),
-            reply => bail!("unexpected listener inspection reply {reply:?}"),
-        }
+        self.http().await?.inspect_web_listener().await
     }
 
     /// The capacity service's latest reading of every host and fleet. This
     /// reads what the daemon holds and never probes.
     pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
-        match self.request(DaemonAction::HostCapacity).await? {
-            DaemonReply::HostCapacity(rows) => Ok(rows),
-            reply => bail!("unexpected host-capacity reply {reply:?}"),
-        }
+        self.http().await?.host_capacity().await
     }
 
     /// Ask the daemon to refresh host capacity. Readings arrive on the feed.
     pub async fn refresh_capacity(&mut self) -> Result<()> {
-        match self.request(DaemonAction::RefreshCapacity).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected refresh-capacity reply {reply:?}"),
-        }
+        self.http().await?.refresh_capacity().await
     }
 
     /// Ask the daemon to probe every profile that is not on hold. Returns when
     /// the daemon has accepted the request, not when the probes finish.
     pub async fn refresh_quota(&mut self) -> Result<()> {
-        match self.request(DaemonAction::RefreshQuota).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected refresh-quota reply {reply:?}"),
-        }
+        self.http().await?.refresh_quota().await
     }
 
     /// Ask the daemon to probe exactly these profiles once, even disabled
@@ -2149,36 +1897,18 @@ impl DaemonClient {
         profile_ids: Vec<String>,
         forced: bool,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::ProbeQuotaProfiles {
-                profile_ids,
-                forced,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected probe-quota reply {reply:?}"),
-        }
+            .probe_quota_profiles(profile_ids, forced)
+            .await
     }
 
     pub async fn rename_profile(&mut self, old_id: String, new_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RenameProfile { old_id, new_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected rename-profile reply {reply:?}"),
-        }
+        self.http().await?.rename_profile(old_id, new_id).await
     }
 
     pub async fn rename_target(&mut self, old_id: String, new_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RenameTarget { old_id, new_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected rename-target reply {reply:?}"),
-        }
+        self.http().await?.rename_target(old_id, new_id).await
     }
 
     /// Persist a prompt the user abandoned in the chat composer.
@@ -2197,26 +1927,14 @@ impl DaemonClient {
 
     /// Write the load-balancing preference order, most preferred first.
     pub async fn set_quota_preferences(&mut self, prefer: Vec<String>) -> Result<()> {
-        match self
-            .request(DaemonAction::SetQuotaPreferences { prefer })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected quota-preference save reply {reply:?}"),
-        }
+        self.http().await?.set_quota_preferences(prefer).await
     }
 
     pub async fn scan_recovery(
         &mut self,
         all_instances: bool,
     ) -> Result<mj_core::state::RecoveryScan> {
-        match self
-            .request(DaemonAction::ScanRecovery { all_instances })
-            .await?
-        {
-            DaemonReply::RecoveryScan(scan) => Ok(scan),
-            reply => bail!("unexpected recovery-scan reply {reply:?}"),
-        }
+        self.http().await?.scan_recovery(all_instances).await
     }
 
     pub async fn adopt_recovery(
@@ -2283,18 +2001,10 @@ impl DaemonClient {
         confirmation: String,
         all_instances: bool,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::DestroyRecovery {
-                session_id,
-                target_id,
-                confirmation,
-                all_instances,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected recovery-destroy reply {reply:?}"),
-        }
+            .destroy_recovery(session_id, target_id, confirmation, all_instances)
+            .await
     }
 
     pub async fn resume_repository_preflight(
@@ -2302,16 +2012,10 @@ impl DaemonClient {
         session_id: String,
         target_id: String,
     ) -> Result<ResumeRepositorySourcePreflight> {
-        match self
-            .request(DaemonAction::ResumeRepositoryPreflight {
-                session_id,
-                target_id,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
-            reply => bail!("unexpected resume repository preflight reply {reply:?}"),
-        }
+            .resume_repository_preflight(session_id, target_id)
+            .await
     }
 
     pub async fn replace_resume_repository_origin(
@@ -2320,40 +2024,24 @@ impl DaemonClient {
         repository_id: String,
         replacement: String,
     ) -> Result<ResumeRepositorySourcePreflight> {
-        match self
-            .request(DaemonAction::ReplaceResumeRepositoryOrigin {
-                session_id,
-                repository_id,
-                replacement,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::ResumeRepositoryPreflight(preflight) => Ok(*preflight),
-            reply => bail!("unexpected repository origin replacement reply {reply:?}"),
-        }
+            .replace_resume_repository_origin(session_id, repository_id, replacement)
+            .await
     }
 
     pub async fn archive_space_preview(
         &mut self,
         older_than_days: Option<u32>,
     ) -> Result<ArchiveSpacePreview> {
-        match self
-            .request(DaemonAction::ArchiveSpacePreview { older_than_days })
+        self.http()
             .await?
-        {
-            DaemonReply::ArchiveSpacePreview(preview) => Ok(preview),
-            reply => bail!("unexpected archive space preview reply {reply:?}"),
-        }
+            .archive_space_preview(older_than_days)
+            .await
     }
 
     pub async fn save_setup(&mut self, original: String, updated: String) -> Result<Config> {
-        match self
-            .request(DaemonAction::SaveSetup { original, updated })
-            .await?
-        {
-            DaemonReply::SavedSetup(config) => Ok(*config),
-            reply => bail!("unexpected setup save reply {reply:?}"),
-        }
+        self.http().await?.save_setup(original, updated).await
     }
 
     pub async fn runtime_changes(
@@ -2788,11 +2476,8 @@ pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
 const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
-/// Dashboard reads, terminal presence, and session settings use HTTP.
-pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 4;
-/// Guidance for clients sending the removed checkpoint action.
-pub const REMOVED_CHECKPOINT_MESSAGE: &str =
-    "The checkpoint action was removed; suspend saves the session.";
+/// Terminal request-response operations use HTTP.
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 5;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2830,28 +2515,6 @@ fn terminal_action_refusal(error: anyhow::Error) -> anyhow::Error {
         DaemonRefusal(failure.message.clone()).into()
     } else {
         error
-    }
-}
-
-impl DaemonAction {
-    /// Disposable machine work uses dedicated connections. Closing one or
-    /// handing off the daemon cancels it; interrupted installs can be rerun.
-    pub fn is_cancellable_machine_action(&self) -> bool {
-        matches!(
-            self,
-            Self::InstallMbx { .. }
-                | Self::PreviewBuildCache { .. }
-                | Self::CheckpointArchiveSizes { .. }
-                | Self::TestTarget { .. }
-                | Self::ProfileLoginStatuses
-                | Self::DiscoverSetup { .. }
-                | Self::ValidateProjectDirectory { .. }
-                | Self::CheckProjectDirectories { .. }
-                | Self::ResolveContainerPath { .. }
-                | Self::ResolveSetupPath { .. }
-                | Self::ValidateMountSource { .. }
-                | Self::ValidateSessionMounts { .. }
-        )
     }
 }
 
@@ -3301,158 +2964,6 @@ mod tests {
     }
 
     // Hard-won: c502e9bdf662: cold-cache discovery failed to save and left Codex profiles out of model choices
-    #[tokio::test]
-    async fn subagent_discovery_uses_the_daemon_and_preserves_choices_and_failures() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "subagent-discovery-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let options: mj_core::subagent::SubagentOptions =
-            serde_json::from_value(serde_json::json!({
-                "models": [{"value": "gpt-6-luna", "name": "Luna", "description": null}],
-                "efforts": [{"value": "high", "name": "High", "description": null}],
-                "unavailable": ["another-profile: authentication failed"]
-            }))
-            .unwrap();
-        let expected = serde_json::to_value(&options).unwrap();
-        let mut draft = Config::default();
-        draft.profiles.insert(
-            "codex".into(),
-            serde_json::from_value(serde_json::json!({
-                "kind": "codex", "home": "/unsaved/profile",
-                "subagents": {"mode": "single_model", "model": "gpt-6-luna", "effort": "high"}
-            }))
-            .unwrap(),
-        );
-        let expected_draft = serde_json::to_value(&draft).unwrap();
-        let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            for (index, model) in [
-                None,
-                Some("gpt-6-luna".to_owned()),
-                Some("gpt-6-luna".to_owned()),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert_eq!(request.token, "subagent-discovery-test");
-                let DaemonAction::SubagentOptions {
-                    profile,
-                    model: requested,
-                    config,
-                } = request.action
-                else {
-                    panic!("unexpected discovery request")
-                };
-                assert_eq!(profile, "codex");
-                assert_eq!(requested, model);
-                assert_eq!(
-                    serde_json::to_value(config).unwrap(),
-                    if index == 1 {
-                        expected_draft.clone()
-                    } else {
-                        serde_json::Value::Null
-                    }
-                );
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: request.protocol_version,
-                        request_id: request.request_id,
-                        result: if index != 2 {
-                            Ok(DaemonReply::SubagentOptions(options.clone()))
-                        } else {
-                            Err("profile discovery cancelled".into())
-                        },
-                    },
-                )
-                .await
-                .unwrap();
-            }
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let discovered = client
-            .subagent_options("codex".into(), None, None)
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
-        let discovered = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()), Some(draft))
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
-        let error = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()), None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), "profile discovery cancelled");
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn upgrade_refusal_retries_the_identical_command_but_lost_acknowledgements_do_not() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "test-token".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let action = DaemonAction::SaveSpinnerStyle {
-            style: Default::default(),
-        };
-        let expected = serde_json::to_value(&action).unwrap();
-        let server = mj_core::runtime::spawn(async move {
-            for reply in [
-                Some(DaemonReply::UpgradePending),
-                Some(DaemonReply::Done),
-                None,
-            ] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert_eq!(serde_json::to_value(&request.action).unwrap(), expected);
-                if let Some(reply) = reply {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: Ok(reply),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-        });
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let reply = client
-            .request_with_reconnect(action.clone(), || DaemonClient::connect(metadata.clone()))
-            .await
-            .unwrap();
-        assert!(matches!(reply, DaemonReply::Done));
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        assert!(
-            client
-                .request_with_reconnect(action, || async {
-                    panic!("an ambiguous acknowledgement must not replay a mutation");
-                })
-                .await
-                .is_err()
-        );
-        server.await.unwrap();
-    }
 
     // Hard-won: 25fee3db784d: protocol-mismatch advice omitted which installed mj the user ran
     #[test]

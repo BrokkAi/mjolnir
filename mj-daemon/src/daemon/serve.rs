@@ -103,8 +103,6 @@ pub(super) async fn serve_client(
                 | DaemonAction::PrepareUpgrade
                 | DaemonAction::UpgradeBlockers
         );
-        // Hold through the acknowledgement, not merely the action's result.
-        let activity = upgrade_request_activity(&request.action);
         let result = if let DaemonAction::ProveIdentity { ref nonce } = request.action {
             use hmac::Mac;
             Ok(DaemonReply::IdentityProof {
@@ -115,14 +113,6 @@ pub(super) async fn serve_client(
             })
         } else if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
-        } else if matches!(request.action, DaemonAction::CheckpointSession { .. }) {
-            // Decode the legacy action only to explain its removal, including
-            // to clients from before the protocol bump. Authentication still applies.
-            Err(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE.to_owned())
-        } else if activity.is_err() {
-            // No work was accepted. The client can wait and retry this exact
-            // request without risking a duplicate operation.
-            Ok(DaemonReply::UpgradePending)
         } else if request.protocol_version != PROTOCOL_VERSION && !is_management {
             Err(format!(
                 "incompatible daemon protocol {}; expected {}",
@@ -331,49 +321,6 @@ pub(super) async fn serve_client(
                 // admitted requests do; no worker wait or catch-up owns it.
                 drop(admission);
                 continue;
-            }
-            if request.action.is_cancellable_machine_action() {
-                let cancelled = Arc::new(AtomicBool::new(false));
-                let guard =
-                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
-                let mut work = Box::pin(super::machine::execute(request.action, &state, cancelled));
-                let mut byte = [0u8; 1];
-                use tokio::io::AsyncReadExt;
-                let mut disconnected = false;
-                let result = tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => None,
-                    closed = stream.read(&mut byte) => {
-                        if let Err(error) = closed { tracing::debug!(%error, "machine request connection closed"); }
-                        disconnected = true;
-                        None
-                    },
-                    result = &mut work => Some(result),
-                };
-                let result = match result {
-                    Some(result) => result,
-                    None => {
-                        drop(guard);
-                        // Stop subprocess groups before their staging files are removed.
-                        work.await
-                    }
-                };
-                if disconnected {
-                    if let Err(error) = result {
-                        tracing::debug!(%error, "disconnected machine request finished");
-                    }
-                    return Ok(());
-                }
-                write_response(
-                    &mut stream,
-                    ResponseEnvelope {
-                        protocol_version: request.protocol_version,
-                        request_id,
-                        result: result.map_err(|error| format!("{error:#}")),
-                    },
-                )
-                .await?;
-                return Ok(());
             }
             Box::pin(handle_action(
                 request.action,

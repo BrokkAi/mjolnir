@@ -609,6 +609,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn install_mbx_exposes_handoff_without_replaying_the_install() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, None);
+        let server = async {
+            let (stream, line, _, body) = read_request(&initial).await;
+            assert_eq!(line, "POST /api/v1/machines/build-cache/install HTTP/1.1");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"machine": {"kind": "local"}})
+            );
+            respond(stream, UNAVAILABLE, HANDOFF).await;
+        };
+        let (_, result) = tokio::join!(
+            server,
+            client.install_mbx(mj_core::config::Machine::Local { build_cache: None })
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<HttpApiError>()
+                .unwrap()
+                .is_handoff()
+        );
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn import_rewinds_after_explicit_handoff_and_refreshes_the_endpoint() {
         let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1013,3 +1040,7 @@ mod tests {
         .unwrap();
     }
 }
+
+pub mod machines;
+pub mod repositories;
+pub mod setup;

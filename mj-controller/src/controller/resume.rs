@@ -434,22 +434,26 @@ impl Controller {
         replacement: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
-        self.replace_resume_repository_origin_with_token(
-            session_id,
-            repository_id,
-            replacement,
-            executor,
-        )
-        .await
+        match self
+            .prepare_resume_repository_origin(session_id, repository_id, replacement, executor)
+            .await?
+        {
+            ResumeOriginPreparation::Mismatch(mismatch) => {
+                Ok(ResumeRepositorySourcePreflight::RepositoryMoved(mismatch))
+            }
+            ResumeOriginPreparation::Verified(repair) => {
+                repair.save(self)?.check_remaining(self, executor)
+            }
+        }
     }
 
-    async fn replace_resume_repository_origin_with_token(
-        &mut self,
+    pub async fn prepare_resume_repository_origin(
+        &self,
         session_id: &str,
         repository_id: &str,
         replacement: &str,
         executor: &(impl CommandExecutor + Sync),
-    ) -> Result<ResumeRepositorySourcePreflight> {
+    ) -> Result<ResumeOriginPreparation> {
         let session = self
             .state
             .sessions
@@ -536,7 +540,7 @@ impl Controller {
             executor,
             github_token.as_deref(),
         )? {
-            return Ok(ResumeRepositorySourcePreflight::RepositoryMoved(
+            return Ok(ResumeOriginPreparation::Mismatch(
                 ResumeRepositorySourceMismatch {
                     session_id: session_id.to_owned(),
                     bundle_id,
@@ -547,9 +551,49 @@ impl Controller {
                 },
             ));
         }
+        Ok(ResumeOriginPreparation::Verified(Box::new(
+            VerifiedResumeOrigin {
+                previous,
+                repository_id: repository_id.to_owned(),
+                replacement,
+                project,
+                verified,
+                github_token,
+            },
+        )))
+    }
+}
+
+pub enum ResumeOriginPreparation {
+    Mismatch(ResumeRepositorySourceMismatch),
+    Verified(Box<VerifiedResumeOrigin>),
+}
+
+pub struct VerifiedResumeOrigin {
+    previous: SessionRecord,
+    repository_id: String,
+    replacement: ProjectRepository,
+    project: Option<Arc<mj_core::repository::ProjectBundleSnapshot>>,
+    verified: ResumeRepositoryBundles,
+    github_token: Option<String>,
+}
+
+impl VerifiedResumeOrigin {
+    pub fn save(self, controller: &mut Controller) -> Result<SavedResumeOrigin> {
+        let VerifiedResumeOrigin {
+            previous,
+            repository_id,
+            replacement,
+            project,
+            verified,
+            github_token,
+        } = self;
+        let session_id = previous.id.as_str();
+        let bundle_id = &previous.bundle_id;
+        let repository_id = repository_id.as_str();
         // A merged project can use different repository IDs. Its destination
         // and identity identify the authoring entry; the session keeps its IDs.
-        let saved = crate::database::saved_project(&bundle_id)?;
+        let saved = crate::database::saved_project(bundle_id)?;
         let config_repository_id = saved
             .as_ref()
             .and_then(|(_, saved)| {
@@ -596,25 +640,48 @@ impl Controller {
             repository.local = replacement.local.clone();
             Ok(())
         })?;
-        self.config = config;
+        controller.config = config;
         if let Some(project) = project {
-            self.state
+            controller
+                .state
                 .sessions
                 .get_mut(session_id)
                 .expect("session checked above")
                 .project = Some(project);
-            self.persist_session_transition_or_restore(
+            controller.persist_session_transition_or_restore(
                 session_id,
                 &previous,
                 "save repaired project source",
             )?;
         }
-        self.preflight_verified_repository_sources(
-            session_id,
+        Ok(SavedResumeOrigin {
+            session_id: previous.id,
+            repository_id: repository_id.to_owned(),
             verified,
-            Some(repository_id),
+            github_token,
+        })
+    }
+}
+
+pub struct SavedResumeOrigin {
+    session_id: String,
+    repository_id: String,
+    verified: ResumeRepositoryBundles,
+    github_token: Option<String>,
+}
+
+impl SavedResumeOrigin {
+    pub fn check_remaining(
+        self,
+        controller: &Controller,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        controller.preflight_verified_repository_sources(
+            &self.session_id,
+            self.verified,
+            Some(&self.repository_id),
             false,
-            github_token.as_deref(),
+            self.github_token.as_deref(),
             executor,
         )
     }

@@ -488,3 +488,29 @@ impl TerminalOperations for RuntimeState {
         Box::pin(async move { refresh_runtime_controller(&self).await })
     }
 }
+
+/// Terminal routes decide admission before starting a mutation. Reads and
+/// disposable preparation also use this helper and never enter the gate.
+pub(super) async fn terminal_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    mj_core::runtime::spawn_blocking(work)
+        .await
+        .context("terminal HTTP operation task panicked")?
+}
+
+pub(super) async fn process_probe<T: Send + 'static>(
+    deadline: Option<Duration>,
+    work: impl FnOnce(&CancellableProcessExecutor) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
+    let _cancel = executor.cancel_on_drop();
+    terminal_blocking(move || {
+        let executor = match deadline {
+            Some(deadline) => executor.with_deadline(deadline),
+            None => executor,
+        };
+        work(&executor)
+    })
+    .await
+}

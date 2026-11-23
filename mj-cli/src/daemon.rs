@@ -872,16 +872,17 @@ async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
     Ok(())
 }
 
-/// Wait for the web access publication that owns all local API connection
-/// details: advertised URL, listener address, and certificate pin.
+/// Wait for the viewer readiness publication over the terminal HTTP API.
+#[cfg(test)]
 pub async fn wait_for_web_access(
-    client: &mut DaemonClient,
+    client: &mj_client::http::HttpDaemonClient,
 ) -> Result<mj_client::web::WebViewerAccess> {
     wait_for_web_access_with_timeout(client, START_TIMEOUT).await
 }
 
+#[cfg(test)]
 async fn wait_for_web_access_with_timeout(
-    client: &mut DaemonClient,
+    client: &mj_client::http::HttpDaemonClient,
     timeout: Duration,
 ) -> Result<mj_client::web::WebViewerAccess> {
     tokio::time::timeout(timeout, async {
@@ -3017,19 +3018,7 @@ esac
                         runtime: Some(RUNTIME),
                     },
                 };
-                let peer = async {
-                    let mut stream = serve_container_readiness(&ready, identity.clone()).await;
-                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                    assert!(matches!(request.action, DaemonAction::WebViewerAccess));
-                    answer(
-                        &mut stream,
-                        request,
-                        Ok(DaemonReply::WebViewerAccess(
-                            mj_client::web::WebViewerAccess::Unavailable("viewer disabled".into()),
-                        )),
-                    )
-                    .await;
-                };
+                let peer = serve_container_readiness(&ready, identity.clone());
                 let check = async {
                     let mut client = connect_or_start_holding(&startup).await.unwrap();
                     crate::api_client::ApiClient::connect_to(&mut client, &identity)
@@ -3043,7 +3032,7 @@ esac
                         .await
                         .err()
                         .unwrap();
-                    assert!(format!("{error:#}").contains("viewer disabled"));
+                    assert!(format!("{error:#}").contains("restart the daemon"));
                 };
                 tokio::time::timeout(Duration::from_secs(10), async {
                     tokio::join!(check, peer);
@@ -4059,50 +4048,39 @@ esac
 
     async fn viewer_fixture(
         statuses: Vec<mj_client::web::WebViewerAccess>,
-    ) -> (DaemonClient, tokio::task::JoinHandle<()>) {
+    ) -> (
+        mj_client::http::HttpDaemonClient,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{Json, Router, routing::get};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: 1,
-            address: listener.local_addr().unwrap(),
-            token: "test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
+        let client = mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "test",
+        )
+        .unwrap();
+        let statuses = std::sync::Arc::new(std::sync::Mutex::new(statuses.into_iter()));
+        let router = Router::new().route(
+            "/api/v1/terminal/web-viewer/access",
+            get(move || {
+                let access = statuses.lock().unwrap().next();
+                async move {
+                    match access {
+                        Some(access) => Json(access),
+                        None => std::future::pending().await,
+                    }
+                }
+            }),
+        );
         let task = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut statuses = statuses.into_iter();
-            while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
-                assert!(matches!(request.action, DaemonAction::WebViewerAccess));
-                let Some(access) = statuses.next() else {
-                    // An exhausted script deliberately leaves this request
-                    // unanswered. The timed-out client closes it; no response
-                    // write can race with that expected disconnect.
-                    use tokio::io::AsyncReadExt;
-                    let mut byte = [0];
-                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
-                    break;
-                };
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: request.protocol_version,
-                        request_id: request.request_id,
-                        result: Ok(DaemonReply::WebViewerAccess(access)),
-                    },
-                )
-                .await
-                .unwrap();
-            }
+            axum::serve(listener, router).await.unwrap();
         });
-        (DaemonClient::connect(metadata).await.unwrap(), task)
+        (client, task)
     }
 
     #[tokio::test]
     async fn api_waits_for_the_viewer_without_a_retry_command() {
-        let (mut client, task) = viewer_fixture(vec![
+        let (client, task) = viewer_fixture(vec![
             mj_client::web::WebViewerAccess::Starting,
             mj_client::web::WebViewerAccess::Starting,
             mj_client::web::WebViewerAccess::Ready {
@@ -4116,17 +4094,17 @@ esac
         ])
         .await;
         assert!(matches!(
-            wait_for_web_access(&mut client).await.unwrap(),
+            wait_for_web_access(&client).await.unwrap(),
             mj_client::web::WebViewerAccess::Ready { viewer_url, .. }
                 if viewer_url == "http://127.0.0.1:1234"
         ));
-        drop(client);
-        task.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
     async fn viewer_startup_reports_failure_and_bounds_a_stalled_start() {
-        let (mut client, task) = viewer_fixture(vec![
+        let (client, task) = viewer_fixture(vec![
             mj_client::web::WebViewerAccess::Starting,
             mj_client::web::WebViewerAccess::Failed {
                 address: "127.0.0.1:1234".parse().unwrap(),
@@ -4136,27 +4114,27 @@ esac
         ])
         .await;
         assert!(
-            wait_for_web_access(&mut client)
+            wait_for_web_access(&client)
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("port unavailable")
         );
-        drop(client);
-        task.await.unwrap();
-        let (mut client, task) = viewer_fixture(vec![]).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let (client, task) = viewer_fixture(vec![]).await;
         let start = tokio::time::Instant::now();
         let timeout = Duration::from_millis(100);
         assert!(
-            wait_for_web_access_with_timeout(&mut client, timeout)
+            wait_for_web_access_with_timeout(&client, timeout)
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("timed out")
         );
         assert!(start.elapsed() >= timeout);
-        drop(client);
-        task.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
     }
     // Hard-won: #1524: a session-launched daemon inherited staged profile homes.
     #[cfg(unix)]

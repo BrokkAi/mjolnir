@@ -24,6 +24,9 @@ use std::collections::BTreeMap;
 
 pub(super) fn terminal_operation_routes(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .merge(machines::routes())
+        .merge(setup::routes())
+        .merge(repositories::routes())
         .route("/sessions/{id}/interrupt-all", post(interrupt_all))
         .route("/sessions/{id}/commands", post(submit_session_command))
         .route("/sessions/{id}/startup-prompts", post(queue_startup_prompt))
@@ -99,7 +102,9 @@ async fn terminal_auth(
     Ok(next.run(request).await)
 }
 
-pub trait TerminalOperations: Send + Sync {
+pub trait TerminalOperations:
+    MachinesOperations + SetupOperations + RepositoriesOperations
+{
     fn terminal_transcription_available(
         self: Arc<Self>,
         preferred_profile: String,
@@ -520,6 +525,19 @@ async fn transcribe_audio(
     }
 }
 
+/// Disposable terminal work can run during drain and ends when the
+/// daemon shuts down. Dropping the backend future cancels its probes.
+async fn run_terminal_read<T>(
+    state: &ServerState,
+    work: impl Future<Output = AnyResult<T>>,
+) -> Result<Json<T>, ApiFailure> {
+    tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => Err(ApiFailure::shutdown(state)),
+        result = work => Ok(Json(result?)),
+    }
+}
+
 async fn run_detached<T: Send + 'static>(
     label: &'static str,
     work: impl Future<Output = AnyResult<T>> + Send + 'static,
@@ -588,3 +606,10 @@ pub(super) fn import_acknowledgement(admission: mj_core::upgrade::Work) -> Respo
 }
 
 mod imports;
+
+mod machines;
+pub use machines::MachinesOperations;
+mod setup;
+pub use setup::SetupOperations;
+mod repositories;
+pub use repositories::RepositoriesOperations;

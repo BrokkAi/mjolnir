@@ -1671,20 +1671,15 @@ mod tests {
             .apply(state.runtime_changes(None, false).await.unwrap())
             .unwrap();
         let cursor = replica.cursor.clone();
-        let metadata = super::super::tests::test_metadata("127.0.0.1:1".parse().unwrap());
-        let cancellation = CancellationToken::new();
+        use crate::server::api::SetupOperations;
         for _ in 0..2 {
-            let reply = super::super::actions::handle_action(
-                DaemonAction::WarmProfileCapabilities {
-                    config: Box::new(config.clone()),
-                },
-                &metadata,
-                &state,
-                &cancellation,
-            )
-            .await
-            .unwrap();
-            assert!(matches!(reply, DaemonReply::Done));
+            state
+                .clone()
+                .warm_profile_capabilities(mj_client::http::setup::WarmProfileCapabilitiesRequest {
+                    config: config.clone(),
+                })
+                .await
+                .unwrap();
             catalog.options_for(&config, "draft", None).await.unwrap();
         }
         let frame =

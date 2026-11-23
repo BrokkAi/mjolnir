@@ -6723,3 +6723,42 @@ assert.match(other.text(), /standalone output/);
 "#;
     run_viewer_script("tool-detail-fold", &format!("{setup}\n{source}\n{checks}"));
 }
+
+#[tokio::test]
+async fn migrated_terminal_routes_reject_browser_and_external_bearer_before_json() {
+    let (app, _, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    for (header, credential) in [
+        (COOKIE, cookie),
+        (
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-api-token".into(),
+        ),
+    ] {
+        for (method, path) in [
+            ("GET", "/api/v1/setup/configuration"),
+            ("GET", "/api/v1/terminal/api-credential"),
+            ("GET", "/api/v1/terminal/web-viewer/access"),
+            ("POST", "/api/v1/setup/save"),
+            ("POST", "/api/v1/setup/profiles/rename"),
+            ("POST", "/api/v1/setup/targets/rename"),
+            ("POST", "/api/v1/recovery/destroy"),
+            ("POST", "/api/v1/machines/build-cache/install"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header.clone(), &credential)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from("{"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+}
