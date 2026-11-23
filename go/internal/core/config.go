@@ -3188,6 +3188,57 @@ func marshalTOML(value any) (string, error) {
 	return marshalTOMLWith(value, false)
 }
 
+// TOMLTableFromStr is `toml::from_str::<toml::Table>`, for crates above
+// core that edit a TOML document as generic values: tables are
+// map[string]any, arrays []any, integers int64, floats float64, and dates
+// their TOML text (see normalizeTOML).
+func TOMLTableFromStr(text string) (map[string]any, error) {
+	return parseTOMLDocument(text)
+}
+
+// TOMLTableToString is `toml::to_string` of a `toml::Table` (a BTreeMap, so
+// keys are written sorted): values first, then tables and arrays of tables.
+// A float64 keeps its fraction, as toml writes an f64. A date read by
+// TOMLTableFromStr is written back as a string.
+func TOMLTableToString(table map[string]any) (string, error) {
+	return marshalTOML(tomlKeepFloats(table))
+}
+
+// tomlKeepFloats marks every float64 so its JSON form keeps a fraction or an
+// exponent, which marshalTOML reads as a float rather than an integer.
+func tomlKeepFloats(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		marked := make(map[string]any, len(value))
+		for key, member := range value {
+			marked[key] = tomlKeepFloats(member)
+		}
+		return marked
+	case []any:
+		marked := make([]any, len(value))
+		for i, item := range value {
+			marked[i] = tomlKeepFloats(item)
+		}
+		return marked
+	case []map[string]any:
+		marked := make([]any, len(value))
+		for i, item := range value {
+			marked[i] = tomlKeepFloats(item)
+		}
+		return marked
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return value
+		}
+		text := strconv.FormatFloat(value, 'g', -1, 64)
+		if !strings.ContainsAny(text, ".eE") {
+			text += ".0"
+		}
+		return json.Number(text)
+	}
+	return value
+}
+
 // unmarshalTOML is toml::from_str: text decoded with BurntSushi/toml and read
 // through value's JSON form.
 func unmarshalTOML(text string, value any) error {
