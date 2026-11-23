@@ -4172,7 +4172,7 @@ async fn viewer_turn_control_preserves_an_exact_restart_target() {
     };
     let response = mj_core::runtime::spawn(
         app.oneshot(
-            Request::post("/api/actions")
+            Request::post("/api/v1/actions")
                 .header(COOKIE, cookie)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::to_vec(&action).unwrap()))
