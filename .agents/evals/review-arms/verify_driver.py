@@ -315,7 +315,8 @@ def run(batch_path, judge=None):
 
 
 def suspend(sid):
-    mj("suspend", "--session", sid, timeout=900)
+    # Completed output is already saved; quota-stopped attempts leave partial output.
+    mj("suspend", "--session", sid, "--discard-untracked", timeout=900)
 
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"

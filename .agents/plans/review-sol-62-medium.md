@@ -24,6 +24,8 @@ The original discovery worker's read-only assignment caused automatic approval r
 
 The installed 2.74.0 CLI removed `suspend --acknowledge-unpublished-work`. The captured first review was preserved and collected again without starting another review. Removing that obsolete flag at the two carrier cleanup sites in `driver.py` and the ordinary judge cleanup in `verify_driver.py` makes the study compatible with the installed command. Ordinary suspend's dry run reported no blockers, untracked work, Git operations, or Git delta.
 
+Review of the cleanup checkpoint found that ordinary judge/task sessions create untracked output files, unlike the clean carrier. The judge helper now supplies explicit `--discard-untracked` consent after a successful output is fetched and persisted; a quota-failed attempt has no accepted result and may discard partial output. Both call sites were checked, and syntax/diff checks pass. The first real verify7 judge will validate cleanup against the installed CLI. No judge result needs to be recomputed.
+
 ## Decision Log
 
 - Decision: Interpret “vs 6.1” as Sol 6.1 at medium effort, and “2xterra/high” as the saved Terra 6.1 high runs.
