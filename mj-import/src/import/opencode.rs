@@ -14,6 +14,7 @@ pub(super) fn import_issue(path: &Path) -> Result<Option<&'static str>> {
     };
     let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open OpenCode session database {}", database.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok((!mj_checkpoint::native::opencode::has_resumable_session(&conn, id)?).then_some(LEGACY))
 }
 
@@ -89,6 +90,7 @@ fn scan_database(
     candidates: &mut Vec<NativeCandidate>,
 ) -> Result<()> {
     let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     let tx = conn.unchecked_transaction()?;
     let tables = tx
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")?
@@ -186,6 +188,7 @@ pub(super) fn parse_database(
     let database = std::path::absolute(database)?;
     let database = database.as_path();
     let source = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    source.busy_timeout(std::time::Duration::from_secs(5))?;
     let has_parts: bool = source.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_part')",
         [],
@@ -200,9 +203,11 @@ pub(super) fn parse_database(
     {
         return adapter.parse_key(key.to_str().context("OpenCode key is not UTF-8")?);
     }
-    let scratch = tempfile::NamedTempFile::new()?;
+    let scratch = tempfile::tempdir()?;
+    let scratch_path = scratch.path().join("opencode.db");
     {
-        let conn = Connection::open(scratch.path())?;
+        let conn = Connection::open(&scratch_path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mut uri = url::Url::from_file_path(database)
             .map_err(|()| anyhow::anyhow!("cannot make SQLite URI for {}", database.display()))?;
         uri.query_pairs_mut().append_pair("mode", "ro");
@@ -225,6 +230,7 @@ pub(super) fn parse_database(
                     )
                     UNION ALL
                     SELECT value AS content FROM json_each(m.data, '$.content')
+                    WHERE json_type(m.data, '$.content') = 'array'
                 )
             ))) WHERE m.type = 'assistant' AND EXISTS (
                 SELECT 1 FROM native.session_part AS p WHERE p.message_id = m.id AND p.session_id = m.session_id
@@ -234,10 +240,7 @@ pub(super) fn parse_database(
     }
     let key = format!(
         "{}\u{1f}{id}",
-        scratch
-            .path()
-            .to_str()
-            .context("scratch path is not UTF-8")?
+        scratch_path.to_str().context("scratch path is not UTF-8")?
     );
     adapter.parse_key(&key)
 }

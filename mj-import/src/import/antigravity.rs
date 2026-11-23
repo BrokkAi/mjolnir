@@ -96,10 +96,17 @@ fn read_summaries(path: &Path) -> Result<BTreeMap<String, NativeMetadata>> {
         return Ok(BTreeMap::new());
     }
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     let columns = conn
         .prepare("PRAGMA table_info(conversation_summaries)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    if !["conversation_id", "title", "workspace_uris"]
+        .iter()
+        .all(|col| columns.contains(*col))
+    {
+        return Ok(BTreeMap::new());
+    }
     let parent = if columns.contains("parent_conversation_id") {
         "parent_conversation_id"
     } else {

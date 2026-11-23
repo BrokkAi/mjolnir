@@ -416,6 +416,7 @@ pub fn scan_native_sessions(
         HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode => {
             let candidates = metadata_candidates(harness, home, cache)?;
             let total = candidates.len();
+            forward(0, total, None);
             for (index, candidate) in candidates.into_iter().enumerate() {
                 forward(index + 1, total, Some(candidate.listing));
             }

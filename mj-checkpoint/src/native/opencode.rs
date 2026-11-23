@@ -110,24 +110,38 @@ pub(crate) fn retain_session(copy: &Connection, id: &str) -> Result<()> {
                 tx.execute(&format!("{delete} WHERE aggregate_id IS NOT ?1"), [id])?;
             }
             "blob" if tables_have_blob_refs => {
-                tx.execute(&format!("{delete} WHERE hash NOT IN (SELECT hash FROM blob_ref WHERE session_id = ?1)"), [id])?;
+                tx.execute(
+                    &format!(
+                        "{delete} WHERE hash NOT IN (SELECT hash FROM blob_ref WHERE session_id = ?1 AND hash IS NOT NULL)"
+                    ),
+                    [id],
+                )?;
             }
             "instruction_blob" if tables_have_instruction_state => {
-                tx.execute(&format!("{delete} WHERE hash NOT IN (
-                    SELECT value FROM instruction_state, json_each(initial_values) WHERE session_id = ?1
+                tx.execute(
+                    &format!(
+                        "{delete} WHERE hash NOT IN (
+                    SELECT value FROM instruction_state, json_each(initial_values) WHERE session_id = ?1 AND value IS NOT NULL
                     UNION
-                    SELECT value FROM instruction_state, json_each(current_values) WHERE session_id = ?1
-                )"), [id])?;
+                    SELECT value FROM instruction_state, json_each(current_values) WHERE session_id = ?1 AND value IS NOT NULL
+                )"
+                    ),
+                    [id],
+                )?;
             }
             "project" => {
                 tx.execute(
-                    &format!("{delete} WHERE id NOT IN (SELECT value FROM json_each(?1))"),
+                    &format!(
+                        "{delete} WHERE id NOT IN (SELECT value FROM json_each(?1) WHERE value IS NOT NULL)"
+                    ),
                     [&projects],
                 )?;
             }
             "workspace" => {
                 tx.execute(
-                    &format!("{delete} WHERE id NOT IN (SELECT value FROM json_each(?1))"),
+                    &format!(
+                        "{delete} WHERE id NOT IN (SELECT value FROM json_each(?1) WHERE value IS NOT NULL)"
+                    ),
                     [&workspaces],
                 )?;
             }
@@ -153,10 +167,11 @@ pub(crate) fn relocate(data: &[u8], id: &str, target_cwd: &Path) -> Result<Vec<u
     let cwd = target_cwd
         .to_str()
         .context("OpenCode working directory is not UTF-8")?;
-    let scratch = tempfile::NamedTempFile::new()?;
-    std::fs::write(scratch.path(), data)?;
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("opencode.db");
+    std::fs::write(&path, data)?;
     {
-        let mut copy = Connection::open(scratch.path())?;
+        let mut copy = Connection::open(&path)?;
         let tx = copy.transaction()?;
         for table in ["session", "session_v2"] {
             if table_exists(&tx, table)? {
@@ -171,5 +186,5 @@ pub(crate) fn relocate(data: &[u8], id: &str, target_cwd: &Path) -> Result<Vec<u
         tx.commit()?;
         copy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     }
-    Ok(std::fs::read(scratch.path())?)
+    Ok(std::fs::read(&path)?)
 }
