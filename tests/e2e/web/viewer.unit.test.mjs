@@ -1588,3 +1588,57 @@ test('service worker delegates empty expiry to shared reconcile and reports fail
   await assert.rejects(pending, /offline/);
   assert.deepEqual(seen, [[registration, 'old']]);
 });
+
+
+test('changed files loads selected patches and keeps the latest selection', async () => {
+  const url = '/api/v1/sessions/session-1/diff?json=true';
+  const first = 'path with spaces.txt';
+  const second = '-literal&file.bin';
+  const dialog = makeNode('dialog');
+  dialog.open = true;
+  const pending = new Map();
+  const requests = [];
+  const el = (tag, className = '', textContent = '') => Object.assign(makeNode(tag), {
+    className, textContent, after(node) { this.next = node; }
+  });
+  const context = vm.createContext({
+    el,
+    button: (text, className) => el('button', className, text),
+    openSessionDialog: () => dialog,
+    request: path => {
+      requests.push(path);
+      if (path === url) {
+        return Promise.resolve({
+          diff: 'summary',
+          tracked_files: [
+            { path: first, insertions: 7, deletions: 1, binary: false },
+            { path: second, binary: true },
+          ],
+          untracked_files: ['new.txt'],
+          untracked_total: 3,
+        });
+      }
+      return new Promise(resolve => pending.set(path, resolve));
+    },
+  });
+  vm.runInContext(sourceBetween('async function openChangedFiles(', 'function openChangeWorkspace('), context);
+  await context.openChangedFiles({ id: 'session-1' });
+  const list = dialog.children.find(node => node.className === 'diffstat');
+  const view = dialog.children.find(node => node.className === 'changed-files-diff');
+  assert.deepEqual(list.children.map(item => item.children.map(child => child.textContent)), [
+    [first, '+7 −1'], [second, 'binary'], ['new.txt', 'untracked'], [],
+  ]);
+  assert.equal(list.children[3].textContent, '… and 2 more untracked files');
+  assert.match(list.next.textContent, /mj fetch/);
+  assert.deepEqual(requests, [url]);
+  const firstPatch = list.children[0].children[0].onclick();
+  const secondPatch = list.children[1].children[0].onclick();
+  const firstURL = `${url}&path=${encodeURIComponent(first)}`;
+  const secondURL = `${url}&path=${encodeURIComponent(second)}`;
+  assert.deepEqual(requests, [url, firstURL, secondURL]);
+  pending.get(secondURL)({ diff: 'GIT binary patch' });
+  await secondPatch;
+  pending.get(firstURL)({ diff: '+first' });
+  await firstPatch;
+  assert.equal(view.textContent, 'GIT binary patch');
+});

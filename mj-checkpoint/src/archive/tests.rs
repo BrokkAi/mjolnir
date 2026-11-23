@@ -1944,7 +1944,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
             let head = git_line(&origin, &["rev-parse", "HEAD"]);
             let source = clone_repository(directory.path(), &origin, "source");
             fs::write(source.join("tracked"), b"baseline only\n").unwrap();
-            let tree = capture_worktree_tree(&SystemGit, &source).unwrap();
+            let tree = crate::test_support::fixture_tree_with_edit(&source, "tracked");
             git(&source, &["checkout", "--", "tracked"]);
             let point = if tagged {
                 record_review_point(
@@ -2987,120 +2987,47 @@ fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() 
     assert_eq!(absent_ref.status, 1);
 }
 
-/// Enough text that the capture's patch crosses the 64 KiB pipe buffer a
-/// child's stdout is drained through, which is where truncation and deadlock
-/// bugs in the Git plumbing would show up.
-fn large_text(marker: &str, lines: usize) -> String {
-    (0..lines)
-        .map(|line| format!("{marker} line {line} with enough text to make the patch large\n"))
-        .collect()
+fn object_files(root: &Path) -> Vec<PathBuf> {
+    fn collect(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                collect(&entry.path(), files);
+            } else {
+                files.push(entry.path());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(&root.join(".git/objects"), &mut files);
+    files.sort_unstable();
+    files
 }
 
 #[test]
-fn review_capture_sees_tracked_modified_and_untracked_changes_without_touching_the_index() {
-    let repository = tempfile::tempdir().unwrap();
-    initialize_repository(repository.path());
-    commit_file(
-        repository.path(),
-        "tracked.txt",
-        large_text("base", 800).as_bytes(),
-        "base",
-    );
+fn empty_tree_id_diffs_without_writing_an_object_in_either_git_object_format() {
+    for format in ["sha1", "sha256"] {
+        let repository = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        git(root, &["init", "-q", &format!("--object-format={format}")]);
+        git(root, &["config", "user.name", "Mjolnir Test"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        commit_file(root, "tracked.txt", b"base\n", "base");
 
-    let baseline = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
-    let status_before = git(repository.path(), &["status", "--porcelain"]);
-
-    fs::write(
-        repository.path().join("tracked.txt"),
-        large_text("changed", 800),
-    )
-    .unwrap();
-    fs::write(
-        repository.path().join("untracked.txt"),
-        large_text("added", 800),
-    )
-    .unwrap();
-    fs::write(
-        repository.path().join("staged.txt"),
-        large_text("staged", 800),
-    )
-    .unwrap();
-    git(repository.path(), &["add", "staged.txt"]);
-
-    let current = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
-    assert_ne!(
-        baseline, current,
-        "the capture must follow the working tree"
-    );
-
-    let patch =
-        diff_between_trees(&SystemGit, repository.path(), Some(&baseline), &current).unwrap();
-    assert!(
-        patch.len() > 64 * 1024,
-        "the fixture must exceed one pipe buffer, got {} bytes",
-        patch.len()
-    );
-    assert!(
-        patch.contains("tracked.txt"),
-        "modified tracked file is in the patch"
-    );
-    assert!(
-        patch.contains("untracked.txt"),
-        "untracked file is in the patch"
-    );
-    assert!(patch.contains("staged.txt"), "staged file is in the patch");
-    assert!(
-        patch.contains("+changed line 799"),
-        "the patch carries file contents"
-    );
-
-    let status_after = git(repository.path(), &["status", "--porcelain"]);
-    assert_eq!(
-        String::from_utf8_lossy(&status_before),
-        "",
-        "the repository starts clean"
-    );
-    assert!(
-        String::from_utf8_lossy(&status_after).contains("A  staged.txt"),
-        "capture leaves the real index exactly as the user left it: {}",
-        String::from_utf8_lossy(&status_after)
-    );
-    // A capture is consumed by the review that took it, so it is not pinned:
-    // Mjolnir leaves no ref of its own in a user's repository beyond the one
-    // baseline a running session depends on.
-    assert!(
-        git(repository.path(), &["for-each-ref", "refs/hel"]).is_empty(),
-        "a capture must not write a ref into the user's repository"
-    );
-    assert!(
-        !repository
-            .path()
-            .join(".git")
-            .read_dir()
-            .unwrap()
-            .any(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("hel-review-index-")
-            }),
-        "the scratch index is removed after the capture"
-    );
-}
-
-#[test]
-fn review_capture_without_a_baseline_diffs_against_the_empty_tree() {
-    let repository = tempfile::tempdir().unwrap();
-    initialize_repository(repository.path());
-    commit_file(repository.path(), "tracked.txt", b"base\n", "base");
-
-    let current = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
-    let patch = diff_between_trees(&SystemGit, repository.path(), None, &current).unwrap();
-    assert!(
-        patch.contains("new file mode") && patch.contains("+base"),
-        "an absent baseline renders the whole capture as additions: {patch}"
-    );
+        let current = git_line(root, &["rev-parse", "HEAD^{tree}"]);
+        let before = object_files(root);
+        let empty = empty_tree_id(&SystemGit, root).unwrap();
+        let patch = diff_between_trees(&SystemGit, root, None, &current).unwrap();
+        assert!(
+            patch.contains("new file mode") && patch.contains("+base"),
+            "{patch}"
+        );
+        assert_eq!(
+            numstat_between_trees(&SystemGit, root, &empty, &current).unwrap(),
+            b"1\t0\ttracked.txt\0"
+        );
+        assert_eq!(object_files(root), before, "{format}");
+    }
 }
 
 #[test]
@@ -3117,9 +3044,10 @@ fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
     commit_file(repository.path(), "tracked.txt", b"changed\n", "work");
     fs::write(repository.path().join("untracked.txt"), b"new\n").unwrap();
 
-    let details = session_diff_details(&SystemGit, repository.path(), None, None).unwrap();
+    let details = session_diff_details(&SystemGit, repository.path(), None, None, &[]).unwrap();
     assert!(
-        details.diff.contains("+changed") && details.diff.contains("untracked.txt"),
+        details.diff.contains("tracked.txt |")
+            && details.diff.contains("untracked.txt (untracked)"),
         "the diff covers committed and untracked work: {}",
         details.diff
     );
@@ -3130,39 +3058,142 @@ fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
     git(repository.path(), &["reset", "--hard", &base]);
     git(repository.path(), &["commit", "--amend", "-m", "rewritten"]);
     assert_ne!(git_line(repository.path(), &["rev-parse", "HEAD"]), base);
-    let rewritten = session_diff_details(&SystemGit, repository.path(), None, None).unwrap();
+    let rewritten = session_diff_details(&SystemGit, repository.path(), None, None, &[]).unwrap();
     assert_eq!(rewritten.head_descends_from_base, Some(false));
 }
 
-/// A session working in a subdirectory of its checkout is asked for its diff
-/// from that subdirectory, and its work is the whole checkout's, as its
-/// checkpoint is.
-// Hard-won: c4322938: subdirectory diffs omitted tracked and untracked work elsewhere in the checkout.
+// Hard-won: #1083: mj diff hashed untracked files into the user's .git/objects
 #[test]
-fn a_session_diff_from_a_subdirectory_covers_the_whole_checkout() {
+fn a_session_diff_from_a_subdirectory_covers_the_checkout_without_writing_objects() {
     let repository = tempfile::tempdir().unwrap();
     let root = repository.path();
     initialize_repository(root);
-    commit_file(root, "tracked.txt", b"base\n", "base");
-    fs::create_dir(root.join("docs")).unwrap();
-    commit_file(root, "docs/guide.md", b"guide\n", "docs");
-    let base = git_line(root, &["rev-parse", "HEAD"]);
-    fs::write(root.join("tracked.txt"), b"edited at the root\n").unwrap();
-    fs::write(root.join("notes.txt"), b"untracked at the root\n").unwrap();
-    fs::write(root.join("docs/draft.md"), b"untracked in docs\n").unwrap();
-
-    let details = session_diff_details(&SystemGit, &root.join("docs"), Some(&base), None).unwrap();
-    for line in [
-        "+edited at the root",
-        "+untracked at the root",
-        "+untracked in docs",
-    ] {
-        assert!(
-            details.diff.contains(line),
-            "{line} missing: {}",
-            details.diff
-        );
+    let text = "-tracked.txt";
+    #[cfg(unix)]
+    let special = ":(glob)literal[1].txt";
+    #[cfg(not(unix))]
+    let special = "literal[1].txt";
+    commit_file(root, text, b"base\n", "base");
+    commit_file(root, special, b"second\n", "second");
+    commit_file(root, "blob.dat", b"\0before", "binary");
+    commit_file(root, ".gitignore", b"ignored.txt\n", "ignore");
+    // Allow a textconv cache in the repository; diff must not run the driver.
+    commit_file(
+        root,
+        ".gitattributes",
+        b"-tracked.txt diff=example\n",
+        "attributes",
+    );
+    git(root, &["config", "diff.example.textconv", "echo converted"]);
+    git(root, &["config", "diff.example.cachetextconv", "true"]);
+    git(root, &["config", "diff.autoRefreshIndex", "true"]);
+    fs::File::options()
+        .write(true)
+        .open(root.join(".gitignore"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    let docs = root.join("docs");
+    fs::create_dir(&docs).unwrap();
+    fs::write(docs.join("draft.md"), b"untracked in docs\n").unwrap();
+    fs::write(root.join("ignored.txt"), b"ignored\n").unwrap();
+    for number in (0..501).rev() {
+        fs::write(root.join(format!("note-{number:03}.txt")), b"untracked\n").unwrap();
     }
+    let edited: String = (0..2500)
+        .map(|i| format!("edited line {i:04} from the root even when invoked in docs\n"))
+        .collect();
+    fs::write(root.join(text), edited).unwrap();
+    fs::write(root.join(special), b"changes to a literal special path\n").unwrap();
+    fs::write(root.join("blob.dat"), b"\0after").unwrap();
+    let before = object_files(root);
+    let index = fs::read(root.join(".git/index")).unwrap();
+
+    let summary = session_diff_details(&SystemGit, &docs, Some("HEAD"), None, &[]).unwrap();
+    assert_eq!(summary.untracked_total, Some(502));
+    assert_eq!(summary.untracked_files.len(), 500);
+    assert_eq!(summary.untracked_files.first().unwrap(), "docs/draft.md");
+    assert_eq!(summary.untracked_files.last().unwrap(), "note-498.txt");
+    assert!(summary.diff.contains("docs/draft.md (untracked)"));
+    assert!(summary.diff.contains("... and 2 more untracked files"));
+    assert!(!summary.diff.contains("ignored.txt"));
+    assert!(summary.diff.contains("3 files changed"));
+    let mut files = summary.tracked_files;
+    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    let mut expected_files = [
+        DiffStatFile {
+            path: text.into(),
+            insertions: Some(2500),
+            deletions: Some(1),
+            binary: false,
+        },
+        DiffStatFile {
+            path: special.into(),
+            insertions: Some(1),
+            deletions: Some(1),
+            binary: false,
+        },
+        DiffStatFile {
+            path: "blob.dat".into(),
+            insertions: None,
+            deletions: None,
+            binary: true,
+        },
+    ];
+    expected_files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(files, expected_files);
+
+    let patch = session_diff_details(
+        &SystemGit,
+        &docs,
+        Some("HEAD"),
+        None,
+        &[text.into(), special.into(), "blob.dat".into()],
+    )
+    .unwrap();
+    let expected = git(
+        root,
+        &[
+            "-c",
+            "diff.autoRefreshIndex=false",
+            "--literal-pathspecs",
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--",
+            text,
+            special,
+            "blob.dat",
+        ],
+    );
+    assert!(expected.len() > 64 * 1024);
+    assert_eq!(patch.diff.as_bytes(), expected);
+    assert!(patch.diff.contains("GIT binary patch"));
+    assert_eq!(patch.untracked_total, None);
+    assert!(patch.tracked_files.is_empty() && patch.untracked_files.is_empty());
+
+    let exported = session_diff_patch(&SystemGit, &docs, Some("HEAD"), None).unwrap();
+    assert_eq!(exported, patch.diff);
+
+    for requested in [
+        vec!["docs/draft.md".into(), text.into()],
+        vec![String::new()],
+    ] {
+        let error =
+            session_diff_details(&SystemGit, &docs, Some("HEAD"), None, &requested).unwrap_err();
+        assert!(
+            matches!(&error, SessionExportError::Refused(_)),
+            "{error:?}"
+        );
+        if !requested[0].is_empty() {
+            assert!(error.to_string().contains("docs/draft.md"));
+            assert!(error.to_string().contains("mj fetch"));
+        }
+    }
+    assert_eq!(object_files(root), before);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
 }
 
 #[test]
@@ -3185,16 +3216,18 @@ fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_
     fs::write(root.join("untracked.txt"), b"untracked work\n").unwrap();
 
     // A symbolic revision is resolved, not merely echoed into metadata.
-    let chosen = session_diff_details(&SystemGit, root, Some("HEAD^"), None).unwrap();
+    let chosen = session_diff_details(
+        &SystemGit,
+        root,
+        Some("HEAD^"),
+        None,
+        &["task.txt".into(), "staged.txt".into()],
+    )
+    .unwrap();
     assert_eq!(chosen.base, task_base);
     assert_eq!(chosen.head, head);
     assert_eq!(chosen.head_descends_from_base, Some(true));
-    for line in [
-        "+committed task",
-        "+unstaged work",
-        "+staged work",
-        "+untracked work",
-    ] {
+    for line in ["+committed task", "+unstaged work", "+staged work"] {
         assert!(
             chosen.diff.contains(line),
             "{line} missing: {}",
@@ -3202,7 +3235,8 @@ fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_
         );
     }
     assert!(!chosen.diff.contains("unrelated.txt"), "{}", chosen.diff);
-    let default = session_diff_details(&SystemGit, root, None, None).unwrap();
+    let default =
+        session_diff_details(&SystemGit, root, None, None, &["unrelated.txt".into()]).unwrap();
     assert_eq!(default.base, launch_base);
     assert_eq!(default.head, head);
     // The session left the launch base behind, so its diff reverts the
@@ -3220,7 +3254,7 @@ fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_
     );
 
     for invalid in ["missing-base", "--all", "", "HEAD^{tree}"] {
-        let error = session_diff_details(&SystemGit, root, Some(invalid), None).unwrap_err();
+        let error = session_diff_details(&SystemGit, root, Some(invalid), None, &[]).unwrap_err();
         assert!(matches!(error, SessionExportError::Refused(_)), "{error:?}");
     }
 }
@@ -3234,14 +3268,21 @@ fn a_session_diff_falls_back_to_the_commit_its_branch_was_created_at() {
     git(repository.path(), &["checkout", "-q", "-b", "mj/session-1"]);
     commit_file(repository.path(), "tracked.txt", b"changed\n", "work");
 
-    let patch = session_diff(&SystemGit, repository.path(), None, Some("mj/session-1")).unwrap();
+    let patch = session_diff(
+        &SystemGit,
+        repository.path(),
+        None,
+        Some("mj/session-1"),
+        &["tracked.txt".into()],
+    )
+    .unwrap();
     assert!(
         patch.contains("-base") && patch.contains("+changed"),
         "with no recorded base the branch reflog names the session's start: {patch}"
     );
 
     // The same repository with no base and no branch cannot answer at all.
-    let error = session_diff(&SystemGit, repository.path(), None, None).unwrap_err();
+    let error = session_diff(&SystemGit, repository.path(), None, None, &[]).unwrap_err();
     assert!(
         format!("{error:#}").contains("no session base recorded"),
         "unexpected error: {error:#}"
@@ -3335,122 +3376,6 @@ fn a_missing_session_file_refusal_names_the_directory_it_searched() {
 }
 
 // Hard-won: c61f0d6fe: Git 2.25 echoed --path-format=absolute, so the capture started from HEAD instead of the real index.
-#[test]
-fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
-    let repository = tempfile::tempdir().unwrap();
-    initialize_repository(repository.path());
-    for name in [
-        "unchanged",
-        "modified",
-        "deleted",
-        "staged-deleted",
-        "cached-deleted",
-    ] {
-        commit_file(repository.path(), name, b"base\n", name);
-    }
-    commit_file(
-        repository.path(),
-        ".gitignore",
-        b"unchanged\nmodified\ndeleted\nstaged-deleted\ncached-deleted\nnew-ignored\nforced\n",
-        "ignore tracked files",
-    );
-    let index_before_ignored_capture = fs::read(repository.path().join(".git/index")).unwrap();
-    let baseline_tree =
-        capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
-    fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
-    let ignored_only_tree =
-        capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
-    assert_eq!(
-        baseline_tree, ignored_only_tree,
-        "a new ignored file does not change the captured review tree"
-    );
-    assert_eq!(
-        fs::read(repository.path().join(".git/index")).unwrap(),
-        index_before_ignored_capture,
-        "the ignored-file capture leaves the real index unchanged"
-    );
-
-    fs::write(repository.path().join("modified"), b"changed\n").unwrap();
-    fs::remove_file(repository.path().join("deleted")).unwrap();
-    git(repository.path(), &["rm", "staged-deleted"]);
-    git(repository.path(), &["rm", "--cached", "cached-deleted"]);
-    fs::write(repository.path().join("forced"), b"forced\n").unwrap();
-    git(repository.path(), &["add", "-f", "forced"]);
-    let index = fs::read(repository.path().join(".git/index")).unwrap();
-    let tree = capture_worktree_tree(&crate::test_support::Git231, repository.path()).unwrap();
-    assert_eq!(
-        git(repository.path(), &["show", &format!("{tree}:unchanged")]),
-        b"base\n"
-    );
-    assert_eq!(
-        git(repository.path(), &["show", &format!("{tree}:modified")]),
-        b"changed\n"
-    );
-    assert_eq!(
-        git(repository.path(), &["show", &format!("{tree}:forced")]),
-        b"forced\n"
-    );
-    let files = git_line(repository.path(), &["ls-tree", "--name-only", &tree]);
-    for absent in ["deleted", "staged-deleted", "cached-deleted", "new-ignored"] {
-        assert!(
-            !files.lines().any(|file| file == absent),
-            "{absent}: {files}"
-        );
-    }
-    assert_eq!(
-        fs::read(repository.path().join(".git/index")).unwrap(),
-        index
-    );
-}
-
-#[test]
-fn review_capture_uses_linked_worktree_index_and_bootstraps_missing_index() {
-    let root = tempfile::tempdir().unwrap();
-    let repository = root.path().join("repo");
-    fs::create_dir(&repository).unwrap();
-    initialize_repository(&repository);
-    commit_file(&repository, "tracked", b"base\n", "base");
-    commit_file(&repository, ".gitignore", b"tracked\n", "ignore");
-    let linked = root.path().join("linked");
-    git(
-        &repository,
-        &["worktree", "add", "--detach", linked.to_str().unwrap()],
-    );
-    fs::write(linked.join("tracked"), b"linked\n").unwrap();
-    let index = git_line(
-        &linked,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-    );
-    let before = fs::read(&index).unwrap();
-    let tree = capture_worktree_tree(&SystemGit, &linked).unwrap();
-    assert_eq!(
-        git(&linked, &["show", &format!("{tree}:tracked")]),
-        b"linked\n"
-    );
-    assert_eq!(fs::read(&index).unwrap(), before);
-    fs::remove_file(&index).unwrap();
-    assert_eq!(capture_worktree_tree(&SystemGit, &linked).unwrap(), tree);
-    assert!(!Path::new(&index).exists());
-}
-
-#[test]
-fn review_capture_handles_unborn_repositories_and_rejects_corrupt_indexes() {
-    let repository = tempfile::tempdir().unwrap();
-    initialize_repository(repository.path());
-    fs::write(repository.path().join(".gitignore"), b"ignored\n").unwrap();
-    fs::write(repository.path().join("ignored"), b"ignored\n").unwrap();
-    fs::write(repository.path().join("new"), b"new\n").unwrap();
-    let tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
-    let files = git_line(repository.path(), &["ls-tree", "--name-only", &tree]);
-    assert!(files.lines().any(|name| name == "new"));
-    assert!(!files.lines().any(|name| name == "ignored"));
-    let index = repository.path().join(".git/index");
-    assert!(!index.exists());
-    fs::write(&index, b"corrupt index").unwrap();
-    assert!(capture_worktree_tree(&SystemGit, repository.path()).is_err());
-    assert_eq!(fs::read(index).unwrap(), b"corrupt index");
-}
-
 #[test]
 fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     let directory = tempfile::tempdir().unwrap();

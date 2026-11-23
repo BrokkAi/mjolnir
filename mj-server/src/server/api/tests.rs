@@ -5892,6 +5892,57 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
 }
 
 #[tokio::test]
+async fn diff_route_preserves_repeated_paths_and_export_selects_the_full_patch() {
+    let backend = Arc::new(FakeBackend {
+        diff: Some(r#"{"diff":"+new\n","base":"aaaa","head":"bbbb","tracked_files":[{"path":"tracked","insertions":1,"deletions":0,"binary":false}],"untracked_files":["new.txt"],"untracked_total":1}"#.into()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app.clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true&path=-literal&path=src%2Ffile+%26+notes&path="))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["tracked_files"][0]["path"], "tracked");
+    assert_eq!(body["untracked_files"][0], "new.txt");
+    assert_eq!(body["untracked_total"], 1);
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"patch"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/x-diff; charset=utf-8"
+    );
+    assert_eq!(
+        backend.diff_options.lock().unwrap().as_slice(),
+        [
+            DiffOptions {
+                base: Some("HEAD^".into()),
+                json: true,
+                paths: vec!["-literal".into(), "src/file & notes".into(), String::new()],
+                full_patch: false,
+            },
+            DiffOptions {
+                full_patch: true,
+                ..DiffOptions::default()
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
