@@ -527,9 +527,19 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         created_at_ms: 3,
         action: mj_core::subagent::SubagentToolAction::LegacyWaitAgents,
     };
+    let old_listing = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "old-listing".into(),
+        created_at_ms: 4,
+        action: mj_core::subagent::SubagentToolAction::ListAgents,
+    };
+    let fresh_listing = mj_core::subagent::SubagentToolRequest {
+        request_id: "fresh-listing".into(),
+        ..old_listing.clone()
+    };
     let mut queue: serde_json::Value =
         serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
-    for request in [&review_request, &legacy_request] {
+    for request in [&review_request, &legacy_request, &old_listing] {
         mj_controller::database::prepare_delegation(
             LATCH_RELAY_SESSION.into(),
             mj_controller::database::PreparedDelegation {
@@ -549,16 +559,20 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                 request_id: request.request_id.clone(),
                 completed_at_ms: 4,
                 is_error: false,
-                message: if request.request_id == "legacy-acceptance" {
-                    "old wait answer"
-                } else {
-                    "review registered"
+                message: match request.request_id.as_str() {
+                    "legacy-acceptance" => "old wait answer",
+                    "old-listing" => "old listing answer",
+                    _ => "review registered",
                 }
                 .into(),
             },
         )
         .unwrap();
     }
+    queue["requests"].as_object_mut().unwrap().insert(
+        fresh_listing.request_id.clone(),
+        serde_json::to_value(&fresh_listing).unwrap(),
+    );
     mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap()).unwrap();
     let review_result =
         mj_controller::database::load_delegation(LATCH_RELAY_SESSION, &review_request.request_id)
@@ -612,10 +626,31 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         let acceptance = gate.try_start(LATCH_RELAY_SESSION, mj_controller::recovery_gate::BackgroundWork::DelegationDelivery)
             .expect("review acceptance replies cannot wait for the review to finish");
         for result in [review_result, legacy_result] {
-            crate::daemon::delegation::deliver(&handle, &acceptance, result, async {}).await.unwrap();
+            crate::daemon::delegation::deliver(&handle, &acceptance, result.into(), async {}).await.unwrap();
+        }
+        let old_result = mj_controller::database::load_delegation(LATCH_RELAY_SESSION, &old_listing.request_id)
+            .unwrap().unwrap().1.unwrap();
+        let reconciled = std::sync::atomic::AtomicBool::new(false);
+        crate::daemon::delegation::deliver(&handle, &acceptance, old_result.into(), async {
+            reconciled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }).await.unwrap();
+        assert!(reconciled.load(std::sync::atomic::Ordering::Relaxed));
+        crate::daemon::delegation::deliver(&handle, &acceptance, crate::daemon::delegation::DelegationResult {
+            result: mj_core::subagent::SubagentToolResult {
+                request_id: fresh_listing.request_id.clone(),
+                completed_at_ms: 5,
+                is_error: false,
+                message: "new listing answer".into(),
+            },
+            persisted: false,
+        }, async { panic!("fresh listing must skip report reconciliation"); }).await.unwrap();
+        for listing in [&old_listing, &fresh_listing] {
+            assert!(mj_controller::database::load_delegation(LATCH_RELAY_SESSION, &listing.request_id).unwrap().is_none());
         }
         drop(acceptance);
         let delivered: serde_json::Value = serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+        assert_eq!(delivered["results"]["old-listing"]["message"], "old listing answer");
+        assert_eq!(delivered["results"]["fresh-listing"]["message"], "new listing answer");
         assert_eq!(delivered["results"]["review-acceptance"]["message"], "review registered");
         let compatibility: serde_json::Value = serde_json::from_str(delivered["results"]["legacy-acceptance"]["message"].as_str().unwrap()).unwrap();
         assert_eq!(compatibility["status"], "reports_arrive_as_messages");
@@ -676,9 +711,9 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             mj_core::runtime::spawn_blocking(move || {
                 mj_controller::database::record_stored_delegation_result(LATCH_RELAY_SESSION.into(), result)
             }).await.unwrap().unwrap();
-            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
+            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone().into(), async {}).await.unwrap();
             // A cached retry of the acknowledged result issues no second RPC.
-            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
+            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone().into(), async {}).await.unwrap();
         }
         drop(delivery);
         let result = tokio::time::timeout(std::time::Duration::from_secs(20), &mut moving)
@@ -703,7 +738,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                     .1
                     .is_none()
             );
-            assert_eq!(fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(), "review-acceptance\nlegacy-acceptance\n");
+            assert_eq!(fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(), "review-acceptance\nlegacy-acceptance\nold-listing\nfresh-listing\n");
         } else {
             result.unwrap();
             assert!(
@@ -714,7 +749,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             );
             assert_eq!(
                 fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(),
-                "review-acceptance\nlegacy-acceptance\nnative-mutation\n"
+                "review-acceptance\nlegacy-acceptance\nold-listing\nfresh-listing\nnative-mutation\n"
             );
         }
         channels.shutdown.shutdown().await.unwrap();
@@ -728,7 +763,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             let fresh = std::sync::Arc::new(mj_controller::recovery_gate::RecoveryGate::default());
             mj_controller::database::record_stored_delegation_result(LATCH_RELAY_SESSION.into(), stored.clone()).unwrap();
             let delivery = fresh.try_start(LATCH_RELAY_SESSION, mj_controller::recovery_gate::BackgroundWork::DelegationDelivery).unwrap();
-            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
+            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone().into(), async {}).await.unwrap();
             drop(delivery);
             let restored = mj_controller::database::load_move_operation(LATCH_RELAY_SESSION).unwrap().unwrap();
             let outcome = controller.recover_move_managed_controlled(

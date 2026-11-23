@@ -21,8 +21,8 @@ Each milestone is independently testable, reviewed through `mj-review`, committe
 - [x] (2026-11-23 15:25Z) Fast-forwarded checkout to `8a8ea94d0`, self-assigned/labeled `#1666`, `#1602`, `#1431`, `#1405`, and completed read-only design blueprints for all four milestones.
 - [x] (2026-11-23 15:30Z) Authored `.agents/plans/1666-subagent-lifecycle.md`.
 - [x] (2026-11-23 16:08Z) Milestone 1 (`#1602` + borrowed transcript cleanup on parent suspend/cross-target Move + `close` guidance wording): committed (`b6ea44833`), merged with upstream (`a99389555`), reviewed clean, pushed to `origin/master`, and `#1602` closed.
-- [x] (2026-11-23 17:40Z) Milestone 2 (`#1431` single-owner startup outcome via existing typed-exit `worker-exit.json` + removing fabricated 60 s timeout): implemented in 4 production files and validated (all targeted worker/daemon/store tests + 4-package clippy `-D warnings` + rustfmt clean); ready for `mj-review` and push.
-- [ ] Milestone 3 (`#1438` fast `list_agents` read path, `spawn` timeout correlation, load-resilient relay/startup deadlines): implementation, validation, review, and push.
+- [x] (2026-11-23 18:40Z) Milestone 2 (`#1431` single-owner startup outcome via existing typed-exit `worker-exit.json` + removing fabricated 60 s timeout + confirmed worker termination for ordinary and reviewer children): committed (`88c36a368`, `c8bbdfaa7`, `56bea2c1b`, `7e0eee545`, `97bcd7755`, `f952ffd12`), merged (`b9ddea634`), reviewed, pushed to `origin/master`, and `#1431` closed.
+- [x] (2026-11-23 18:55Z) Milestone 3 (`#1438` fast `list_agents` read path, `spawn` timeout correlation, load-resilient relay/startup deadlines): implemented and validated (5-package clippy `-D warnings`, rustfmt, 59 primary + 42 related tests); ready for `mj-review` and push.
 - [ ] Milestone 4 (`#1405` Mjolnir ACP Guardian + Codex native Guardian parent `send_message` authorization): implementation, validation, review, and push.
 
 ## Surprises & Discoveries
