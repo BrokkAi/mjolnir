@@ -129,7 +129,7 @@ Each Nitro sandbox keeps its mbx build cache inside its VM. Use an S3 remote
 to reuse Rust and C/C++ build outputs published by CI:
 
 ```sh
-mj ec2 create c8id.4xlarge --zone us-east-1a --runtime nitro \
+mj ec2 create c8id.4xlarge --zone us-east-1a --runtime nitro --cpus 4 --memory-gib 8 \
   --mbx-remote s3://your-build-cache/mbx
 ```
 

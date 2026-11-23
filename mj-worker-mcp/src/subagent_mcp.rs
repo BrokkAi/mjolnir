@@ -84,9 +84,9 @@ fn not_picked_up_advice(action: &SubagentToolAction) -> &'static str {
     match action {
         SubagentToolAction::Handback { .. } => HANDBACK_UNANSWERED_ADVICE,
         SubagentToolAction::Fetch { .. } => "The fetch is safe to repeat; call fetch again later.",
-        SubagentToolAction::ListAgents | SubagentToolAction::ListProfiles => {
-            "It changes nothing, so call it again later."
-        }
+        SubagentToolAction::ListAgents
+        | SubagentToolAction::ListTargets
+        | SubagentToolAction::ListProfiles => "It changes nothing, so call it again later.",
         SubagentToolAction::Spawn { .. } => {
             "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Continue without this child or call list_agents later to see whether it started; close it if you no longer need it."
         }
@@ -377,16 +377,16 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     mut options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
-    options.oracle |= oracle_enabled(&socket);
-    options.supervisors_enabled |= supervisors_enabled(&socket);
     let report_budget = if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::Supervisor) {
         ChildReportBudget::from_socket(&socket)?
     } else {
         None
     };
-    let launch = std::fs::read(socket.with_file_name("launch.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let launch = read_launch_settings(&socket);
+    if let Some(launch) = &launch {
+        options.oracle |= launch["oracle"] == true;
+        options.supervisors_enabled |= launch["supervisors_enabled"] == true;
+    }
     let review_role = launch
         .as_ref()
         .and_then(|launch| launch.get("reviewer_launch"))
@@ -483,6 +483,10 @@ struct SpawnArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListTargetsArgs {}
+
+#[derive(Deserialize)]
 struct ChildArgs {
     child_session_id: String,
     #[serde(default)]
@@ -535,9 +539,8 @@ fn call_with_options(
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
-    mut options: ParentTools,
+    options: ParentTools,
 ) -> Result<(Value, bool)> {
-    options.oracle |= oracle_enabled(socket);
     call_with_budget_and_options(
         socket,
         harness,
@@ -584,6 +587,9 @@ fn call_with_budget_and_options(
     let legacy_alias = params.name == "send_input"
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
     if params.name == "ask_oracle" && !options.oracle {
+        bail!("unknown sub-agent tool {:?} for {role}", params.name);
+    }
+    if params.name == "list_targets" && !options.supervisors_enabled {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
@@ -666,6 +672,12 @@ fn call_with_budget_and_options(
             message: serde_json::from_value::<AskOracleArgs>(params.arguments)?.message,
         },
         "list_agents" => SubagentToolAction::ListAgents,
+        "list_targets" => {
+            if !params.arguments.is_null() {
+                let _: ListTargetsArgs = serde_json::from_value(params.arguments)?;
+            }
+            SubagentToolAction::ListTargets
+        }
         "send_message" => {
             if params.arguments.get("child_session_id").is_some() {
                 bail!("unknown parameter `child_session_id`; use `session_id`");
@@ -914,24 +926,21 @@ fn tool_definitions_with_options(
     if options.oracle {
         tools.push(ask_oracle_tool());
     }
+    if options.supervisors_enabled {
+        tools.insert(2, read_only(tool(
+            "list_targets",
+            "List enabled execution targets, their default container sizes, and recent and hourly host capacity observations.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        )));
+    }
     tools
 }
 
-/// Whether the controller offered this session the oracle. Like the other
-/// target-side checks, it reads the launch file as plain JSON, so neither a
-/// field it does not know nor one an older file still carries can hide the tool.
-fn oracle_enabled(socket: &Path) -> bool {
+// Treat fields from older or newer launch files as optional.
+fn read_launch_settings(socket: &Path) -> Option<Value> {
     std::fs::read(socket.with_file_name("launch.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|launch| launch["oracle"] == true)
-}
-
-fn supervisors_enabled(socket: &Path) -> bool {
-    std::fs::read(socket.with_file_name("launch.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|launch| launch["supervisors_enabled"] == true)
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
 fn ask_oracle_tool() -> Value {
@@ -1591,6 +1600,51 @@ mod tests {
         let request = &by_name("request_review")["inputSchema"]["properties"];
         assert_eq!(request["paths"]["type"], "array");
         assert!(request.get("path").is_none());
+    }
+
+    #[test]
+    fn list_targets_schema_and_calls_require_a_supervisor_enabled_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("control.sock");
+        let launch = socket.with_file_name("launch.json");
+        for (role, enabled, offered) in [
+            (SubagentMcpRole::Parent, true, true),
+            (SubagentMcpRole::Parent, false, false),
+            (SubagentMcpRole::Child, true, false),
+            (SubagentMcpRole::Supervisor, true, false),
+        ] {
+            std::fs::write(&launch, json!({"supervisors_enabled": enabled}).to_string()).unwrap();
+            let (_, tools) = mcp_exchange(|input, output| {
+                run_with_options(input, output, &socket, None, role, ParentTools::default())
+            });
+            let tool = tools.iter().find(|tool| tool["name"] == "list_targets");
+            assert_eq!(tool.is_some(), offered, "{role}");
+            if let Some(tool) = tool {
+                assert_eq!(tool["annotations"]["readOnlyHint"], true);
+                assert_eq!(
+                    tool["inputSchema"],
+                    json!({"type":"object","properties":{},"additionalProperties":false})
+                );
+            }
+            let error = call_with_budget_and_options(
+                &socket,
+                None,
+                role,
+                Some(&json!({"name":"list_targets","arguments":{"target":"unexpected"}})),
+                &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                |_| Duration::from_millis(1),
+                ParentTools {
+                    supervisors_enabled: enabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(if offered {
+                "unknown field"
+            } else {
+                "unknown sub-agent tool"
+            }));
+        }
     }
 
     #[test]
@@ -2345,12 +2399,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let mut expected = SubagentMcpRole::Parent.tool_names().to_vec();
-        expected.retain(|name| *name != "ask_oracle");
+        expected.retain(|name| !matches!(*name, "ask_oracle" | "list_targets"));
         assert_eq!(names(tool_definitions(None)), expected);
         let oracle = tool_definitions_with_options(
             None,
             ParentTools {
                 oracle: true,
+                supervisors_enabled: true,
                 ..Default::default()
             },
         );
@@ -2362,10 +2417,10 @@ mod tests {
     }
 
     #[test]
-    fn oracle_is_read_from_the_launch_file_as_plain_json() {
+    fn optional_tools_are_read_from_the_launch_file_as_plain_json() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("control.sock");
-        assert!(!oracle_enabled(&socket), "no launch file");
+        assert!(read_launch_settings(&socket).is_none(), "no launch file");
         let launch = directory.path().join("launch.json");
         for (body, expected) in [
             (json!({"session_id": "s"}), false),
@@ -2378,7 +2433,11 @@ mod tests {
             (json!({"oracle": false}), false),
         ] {
             std::fs::write(&launch, body.to_string()).unwrap();
-            assert_eq!(oracle_enabled(&socket), expected, "{body}");
+            assert_eq!(
+                read_launch_settings(&socket).unwrap()["oracle"] == true,
+                expected,
+                "{body}"
+            );
         }
     }
 

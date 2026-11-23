@@ -2348,7 +2348,14 @@ print(sys.argv[sys.argv.index('--role') + 1])
             1,
             "{allow:?}"
         );
-        for tool in ["spawn", "list_agents", "send_message", "close", "fetch"] {
+        for tool in [
+            "spawn",
+            "list_agents",
+            "list_targets",
+            "send_message",
+            "close",
+            "fetch",
+        ] {
             assert!(
                 allow.contains(&format!("mcp__mj-agents__{tool}")),
                 "{tool}: {allow:?}"

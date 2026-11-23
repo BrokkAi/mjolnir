@@ -112,6 +112,8 @@ impl DashboardState {
                 .cloned()
             {
                 row.id = id.clone();
+                // Native forms notify through a managed session's card.
+                row.notifications_ignored = true;
                 row.title = view.agent.name.clone();
                 row.session_title_override = Some(format!(
                     "{} · {}",

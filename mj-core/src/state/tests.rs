@@ -2310,3 +2310,38 @@ fn remembered_subagent_policy_reads_legacy_policy_objects_and_profile_maps() {
         Default::default()
     );
 }
+
+#[test]
+fn resolve_default_container_size_preserves_precedence_and_clamping() {
+    use crate::config::parse_container_memory;
+    let size = |cpus, memory_gib: u64| HostContainerSize {
+        cpus,
+        memory_bytes: memory_gib << 30,
+    };
+    assert_eq!(resolve_default_container_size(None, None, None), size(4, 8));
+
+    let template: crate::config::ContainerTemplate = serde_json::from_value(serde_json::json!({
+        "cpus": "16",
+        "memory": "32768m",
+    }))
+    .unwrap();
+    let configured = template.default_host_container_size();
+    assert_eq!(
+        resolve_default_container_size(configured, None, None),
+        size(16, 32)
+    );
+    assert_eq!(
+        resolve_default_container_size(configured, Some(size(6, 64)), Some(size(4, 48))),
+        size(4, 48)
+    );
+    assert_eq!(
+        resolve_default_container_size(configured, None, Some(size(0, 0))),
+        HostContainerSize {
+            cpus: 1,
+            memory_bytes: 1,
+        }
+    );
+    assert_eq!(parse_container_memory("16Gi").unwrap(), 16 << 30);
+    assert_eq!(parse_container_memory("8g").unwrap(), 8 << 30);
+    assert!(parse_container_memory("18446744073709551615g").is_err());
+}

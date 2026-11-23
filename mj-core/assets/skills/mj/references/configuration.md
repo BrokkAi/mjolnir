@@ -940,7 +940,7 @@ host.
 
 ### Persistent EC2 hosts
 
-`mj ec2 create <instance-type> --zone <zone>` provisions an SSH machine with a
+`mj ec2 create <instance-type> --zone <zone> --cpus <count> --memory-gib <GiB>` provisions an SSH machine with a
 Podman target. `mj ec2 list --region <region>` lists hosts and
 `mj ec2 destroy <name> --region <region>` removes one. Instances outlive sessions.
 The former `aws-ec2` machine kind is read only for historical records and cannot
@@ -1035,7 +1035,7 @@ added afterward use the normal enabled default.
 Nitro sandboxes keep a guest-local mbx cache. Set `remote = "s3://bucket/prefix"`
 in `[machines.<id>.build_cache]` to read trusted CI's cache. Optional
 `remote_region` defaults to the Nitro host's region. New hosts can use
-`mj ec2 create --runtime nitro --mbx-remote s3://bucket/prefix` with optional
+`mj ec2 create --runtime nitro --cpus <count> --memory-gib <GiB> --mbx-remote s3://bucket/prefix` with optional
 `--mbx-remote-region` to create or reuse and attach the instance profile.
 For an existing host, use `aws ec2 associate-iam-instance-profile` and set
 the configuration keys. A manually attached role needs both

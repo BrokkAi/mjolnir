@@ -1211,14 +1211,27 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         dashboard.workspace_scrollbar.clear();
         return;
     }
-    if let Some(parent_id) = dashboard.subagent_parent_id().map(str::to_owned) {
+    if dashboard.subagent_parent_id().is_some() {
         dashboard.workspace_scrollbar.clear();
-        let title = dashboard
-            .state
-            .sessions
-            .get(&parent_id)
-            .map(|session| session.listed_title())
-            .unwrap_or(&parent_id);
+        let chain = dashboard.subagent_workspace_chain();
+        let segments = chain
+            .iter()
+            .map(|workspace| {
+                let title = dashboard
+                    .state
+                    .sessions
+                    .get(&workspace.parent_id)
+                    .map_or(workspace.parent_id.as_str(), |session| {
+                        session.listed_title()
+                    });
+                let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                if workspace.kind == mj_core::subagent::SubagentKind::Reviewer {
+                    format!("Reviewers · {title}")
+                } else {
+                    title
+                }
+            })
+            .collect::<Vec<_>>();
         let close_width = 3u16.min(inner.width);
         let close_area = Rect::new(
             inner.right().saturating_sub(close_width),
@@ -1229,19 +1242,17 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         dashboard.subagent_workspace_close_area = Some(close_area);
         let label_area = Rect::new(inner.x, inner.y, inner.width.saturating_sub(close_width), 1);
         frame.render_widget(
-            Paragraph::new(workspace_label(
-                &if dashboard.reviewers_workspace_open() {
-                    format!("Reviewers · {title}")
-                } else {
-                    title.to_owned()
-                },
+            Paragraph::new(workspace_breadcrumb(
+                &segments,
                 label_area.width,
+                dashboard.reviewers_workspace_open(),
             ))
             .style(theme::selection(true)),
             label_area,
         );
         frame.render_widget(
-            Paragraph::new(" X ").style(theme::actionable_chip()),
+            Paragraph::new(if close_width == 3 { "[X]" } else { "X" })
+                .style(theme::actionable_chip()),
             close_area,
         );
         return;
@@ -1380,6 +1391,35 @@ fn workspace_tab_line(
         Span::styled(badge.content, badge.style.bg(style.bg.unwrap_or_default())),
         Span::styled(format!("{pad} "), style),
     ])
+}
+
+fn workspace_breadcrumb(segments: &[String], width: u16, reviewers: bool) -> String {
+    const SEPARATOR: &str = " › ";
+    const ELIDED: &str = "… › ";
+    let Some(deepest) = segments.last() else {
+        return String::new();
+    };
+    let padding = if width >= 3 { " " } else { "" };
+    let available = usize::from(width) - 2 * padding.len();
+    let deepest_title = if reviewers {
+        deepest.strip_prefix("Reviewers · ").unwrap_or(deepest)
+    } else {
+        deepest
+    };
+    for index in 0..segments.len() {
+        let prefix = if index == 0 { "" } else { ELIDED };
+        let path = format!("{prefix}{}", segments[index..].join(SEPARATOR));
+        if Line::raw(&path).width() <= available {
+            return format!("{padding}{path}{padding}");
+        }
+    }
+    let title = if Line::raw(deepest).width() <= available {
+        deepest
+    } else {
+        deepest_title
+    };
+    let title = truncate_to_cells(title, available, Truncate::PLAIN);
+    format!("{padding}{title}{padding}")
 }
 
 fn workspace_label(name: &str, width: u16) -> String {

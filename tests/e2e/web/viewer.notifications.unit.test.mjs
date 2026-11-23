@@ -123,6 +123,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
   vm.runInContext(sourceBetween('function submissionBody(', 'async function submitPrompt('), context);
   vm.runInContext(sourceBetween('function publishedNotificationDismissal(', '/// Notifications, unread output'), context);
   vm.runInContext(sourceBetween('// The notifications screen\n', 'function renderSessions() {'), context);
+  vm.runInContext(sourceBetween('function sessionMenuActions(', 'function updateSessionCard('), context);
   const read = expression => vm.runInContext(expression, context);
   read('renderInbox()'); // the screen is drawn before anyone can press a button
   return {
@@ -186,7 +187,6 @@ test('published stacks own visibility, paging, and whole-stack Clear', async () 
   const session = row('a', 'working', 4, {
     notification_card: stack('needs_input', 32, [first, second]),
     subagent_parent_id: 'p',
-    notifications_ignored: true,
   });
   const path = '/api/sessions/a/notification-message';
   const view = screen([session, row('b', 'needs_input', 10, { notification_card: null }),
@@ -290,13 +290,22 @@ test('publication retires pending and accepted dismissals, even if the same targ
   }
 });
 
-test('cards run ? before !, newest first, one per session, without sub-agents or ignored sessions', () => {
+test('cards run ? before !, newest first, and muted sub-agents stay out of the inbox', () => {
+  const child = row('f', 'needs_input', 30, { subagent_parent_id: 'a' });
   const view = screen([
     row('a', 'important', 5), row('b', 'needs_input', 1), row('c', 'needs_input', 9),
-    row('d', 'important', 8), row('f', 'needs_input', 30, { subagent_parent_id: 'a' }),
+    row('d', 'important', 8), child,
     row('g', 'needs_input', 40, { notifications_ignored: true }),
   ]);
+  const toggleLabel = () => view.read("sessionMenuActions(viewerState.rows.get('f')).find(action => action[2] === 'set-session-notifications-ignored')[0]");
+  assert.deepEqual(view.ids(), ['f', 'c', 'b', 'd', 'a']);
+  assert.equal(toggleLabel(), 'Ignore');
+  child.notifications_ignored = true;
+  assert.equal(toggleLabel(), 'Stop ignoring');
+  child.notification_card = stack('needs_input', 7, [message(30, 'needs_input', 'none')]);
   assert.deepEqual(view.ids(), ['c', 'b', 'd', 'a']);
+  child.notifications_ignored = false;
+  assert.deepEqual(view.ids(), ['f', 'c', 'b', 'd', 'a']);
 });
 
 test('skip moves the card to the back and is held in the page only', () => {

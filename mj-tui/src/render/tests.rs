@@ -992,6 +992,8 @@ fn now_seconds() -> u64 {
 
 fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
     mj_core::targets::DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: Some(cpu_percent),
         memory_used_bytes: 1,
@@ -1998,6 +2000,8 @@ fn now_epoch_seconds() -> u64 {
 
 fn host_capacity_usage() -> DeploymentCapacityUsage {
     DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: Some(37),
         memory_used_bytes: 3,
@@ -2015,6 +2019,8 @@ fn capacity_pane_never_presents_missing_readings_as_zero_resource_use() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
@@ -2743,6 +2749,142 @@ fn dashboard_with_subagents(children: &[&str]) -> (DashboardState, String) {
     }
     dashboard.set_state(state);
     (dashboard, parent)
+}
+
+fn dashboard_with_nested_workspaces() -> (DashboardState, String) {
+    use mj_core::subagent::SubagentKind;
+
+    let (mut dashboard, root) = dashboard_with_subagents(&["orchestrator", "worker", "reviewer"]);
+    let mut state = dashboard.state.clone();
+    for (id, title) in [
+        (&*root, "Root"),
+        ("orchestrator", "Orchestrator"),
+        ("worker", "Worker"),
+        ("reviewer", "Reviewer"),
+    ] {
+        let session = state.sessions.get_mut(id).unwrap();
+        session.title = title.into();
+        session.acp_session_title = None;
+    }
+    state.subagents.get_mut("orchestrator").unwrap().supervisor = true;
+    for id in ["worker", "reviewer"] {
+        let relation = state.subagents.get_mut(id).unwrap();
+        relation.parent_session_id = "orchestrator".into();
+    }
+    state.subagents.get_mut("reviewer").unwrap().kind = SubagentKind::Reviewer;
+    dashboard.set_state(state);
+    serve_attention(
+        &mut dashboard,
+        &["orchestrator", "worker", "reviewer"],
+        mj_core::attention::SessionAttention::Working,
+    );
+    dashboard.focus_sessions();
+    (dashboard, root)
+}
+
+#[test]
+fn golden_subagent_workspace_depth_two() {
+    let (mut dashboard, root) = dashboard_with_nested_workspaces();
+    let mut output = String::new();
+    append_dashboard_golden(&mut output, "Top-level Sessions", 108, 26, &mut dashboard);
+    dashboard.open_subagent_workspace(root);
+    dashboard.open_subagent_workspace("orchestrator".into());
+    append_dashboard_golden(&mut output, "Depth-two sub-agents", 108, 26, &mut dashboard);
+    dashboard.open_reviewer_workspace("orchestrator".into());
+    append_dashboard_golden(&mut output, "Depth-two reviewers", 108, 26, &mut dashboard);
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "subagent-workspace-depth-two",
+        &output,
+    );
+}
+
+#[test]
+fn subagent_workspace_depth_two_navigation_and_narrow_breadcrumb() {
+    let (mut dashboard, root) = dashboard_with_nested_workspaces();
+    assert_eq!(
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        [root.as_str()]
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Right)),
+        DashboardAction::OpenSubagents {
+            parent_id: root.clone()
+        }
+    );
+    dashboard.open_subagent_workspace(root.clone());
+    assert_eq!(dashboard.selected_session_id(), Some("orchestrator"));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Right)),
+        DashboardAction::OpenSubagents {
+            parent_id: "orchestrator".into()
+        }
+    );
+    dashboard.open_subagent_workspace("orchestrator".into());
+    assert_eq!(dashboard.selected_session_id(), Some("worker"));
+
+    dashboard.state.sessions.get_mut(&root).unwrap().title = "大きなルートの名前".repeat(4);
+    let width = 25;
+    let height = crate::workspaces::workspace_pane_height(&dashboard, width);
+    assert_eq!(height, 3);
+    let mut narrow = Terminal::new(TestBackend::new(width, height)).unwrap();
+    narrow
+        .draw(|frame| crate::workspaces::render_workspace_tabs(frame, frame.area(), &mut dashboard))
+        .unwrap();
+    let lines = buffer_lines(narrow.backend().buffer());
+    assert!(lines[1].contains("… › Orchestrator"), "{lines:?}");
+    assert!(lines[1].ends_with("[X]│"), "{lines:?}");
+
+    drawn(&mut dashboard, 108, 26);
+    let close = dashboard.subagent_workspace_close_area.unwrap();
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Left),
+            (close.x + 1, close.y)
+        )),
+        DashboardAction::ExitSubagentWorkspace
+    );
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.subagent_parent_id(), Some(root.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("orchestrator"));
+    dashboard.focus_sessions();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::ExitSubagentWorkspace
+    );
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.subagent_parent_id(), None);
+    assert_eq!(dashboard.selected_session_id(), Some(root.as_str()));
+
+    dashboard.open_subagent_workspace(root.clone());
+    assert_eq!(
+        chord(&mut dashboard, crate::CommandId::OpenSubagents),
+        DashboardAction::OpenSubagents {
+            parent_id: "orchestrator".into()
+        }
+    );
+    dashboard.open_subagent_workspace("orchestrator".into());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::ExitSubagentWorkspace
+    );
+    dashboard.close_subagent_workspace();
+    assert_eq!(dashboard.selected_session_id(), Some("orchestrator"));
+    dashboard.open_reviewer_workspace("orchestrator".into());
+    assert_eq!(dashboard.selected_session_id(), Some("reviewer"));
+    for expected in ["orchestrator", root.as_str()] {
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('p'))),
+            DashboardAction::ExitSubagentWorkspace
+        );
+        dashboard.close_subagent_workspace();
+        assert_eq!(dashboard.selected_session_id(), Some(expected));
+    }
+    assert_eq!(dashboard.subagent_parent_id(), None);
 }
 
 // Hard-won: 298330b19: suspended reviewer history inflated the parent's reviewer badge.
@@ -4010,6 +4152,8 @@ fn golden_dashboard_resource_panels() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(37),
             memory_used_bytes: 3,

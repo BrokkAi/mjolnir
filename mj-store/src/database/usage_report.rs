@@ -10,9 +10,11 @@ use mj_core::usage::model_catalog;
 
 // Match the expressions indexed by migration 125. Read the selected time
 // window once, regardless of how many historical descendants its roots retain.
-const REPORT_TURNS_SQL: &str =
-    "SELECT u.session_id, u.body, s.model, s.effort, s.profile FROM session_turn_usage u
+const REPORT_TURNS_SQL: &str = "SELECT u.session_id, u.body, s.model, s.effort, s.profile,
+            COALESCE(s.category, a.category), a.kind
+    FROM session_turn_usage u
     LEFT JOIN session_turn_selections s USING(session_id, command_id)
+    LEFT JOIN subagent_accounting a ON a.child_session_id=u.session_id
     WHERE json_extract(u.body, '$.completed_at_ms') >= ?1
     AND json_extract(u.body, '$.completed_at_ms') <= ?2
     AND (?3 IS NULL OR s.profile=?3)";
@@ -36,6 +38,25 @@ pub fn load_session_usage_report(
         chrono::Utc::now().timestamp_millis(),
         &model_catalog::ModelCatalogs(models),
     )
+}
+
+fn child_usage_role(
+    member: &str,
+    category: Option<&str>,
+    kind: Option<&str>,
+) -> Result<UsageAgentRole> {
+    Ok(match (category, kind) {
+        (Some("supervisor" | "orchestrator"), _) => UsageAgentRole::Orchestrator,
+        (Some("subtle"), _) => UsageAgentRole::Subtle,
+        (Some("straightforward"), _) => UsageAgentRole::Straightforward,
+        (Some("oracle"), _) => UsageAgentRole::Oracle,
+        (Some("reviewer" | "brief_writer"), _) => UsageAgentRole::Reviewer,
+        (_, Some("oracle")) => UsageAgentRole::Oracle,
+        (_, Some("reviewer")) => UsageAgentRole::Reviewer,
+        (_, Some("worker")) => UsageAgentRole::Subagent,
+        (_, None) => UsageAgentRole::UnclassifiedSubagent,
+        (_, Some(kind)) => bail!("unknown usage agent kind {kind:?} for {member}"),
+    })
 }
 
 #[cfg(test)]
@@ -148,8 +169,6 @@ fn load_with(
         (UsageAgentRole::Subagent, BTreeMap::new()),
         (UsageAgentRole::Reviewer, BTreeMap::new()),
     ]);
-    let mut roles = BTreeMap::new();
-    let mut kinds = tx.prepare("SELECT kind FROM subagent_accounting WHERE child_session_id=?1")?;
     let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
     let rows = turns.query_map(params![since_ms.min(graph_start), now_ms, wanted], |row| {
         Ok((
@@ -160,10 +179,12 @@ fn load_with(
                 effort: row.get(3)?,
             },
             row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     for row in rows {
-        let (member, body, selection, turn_profile) = row?;
+        let (member, body, selection, turn_profile, category, kind) = row?;
         let Some(&index) = owners.get(&member) else {
             continue;
         };
@@ -181,30 +202,15 @@ fn load_with(
                 if in_rows {
                     entry.estimate.coverage.full_turn_reports += 1;
                 }
-                // Launch records can contain large prompts. Only contributing
-                // members need their role, and each is read once.
-                let role = match roles.get(&member) {
-                    _ if !in_rows => None,
-                    Some(&role) => Some(role),
-                    None => {
-                        let role = if member == entry.estimate.session_id {
-                            UsageAgentRole::Primary
+                let role = in_rows
+                    .then(|| {
+                        if member == entry.estimate.session_id {
+                            Ok(UsageAgentRole::Primary)
                         } else {
-                            let kind = kinds
-                                .query_row([&member], |row| row.get::<_, Option<String>>(0))?;
-                            match kind.as_deref() {
-                                Some("worker" | "oracle") => UsageAgentRole::Subagent,
-                                Some("reviewer") => UsageAgentRole::Reviewer,
-                                None => UsageAgentRole::UnclassifiedSubagent,
-                                Some(kind) => {
-                                    bail!("unknown usage agent kind {kind:?} for {member}")
-                                }
-                            }
-                        };
-                        roles.insert(member, role);
-                        Some(role)
-                    }
-                };
+                            child_usage_role(&member, category.as_deref(), kind.as_deref())
+                        }
+                    })
+                    .transpose()?;
                 let mut attributed = BTreeMap::new();
                 super::usage::attribute(&usage, selection, &mut attributed)?;
                 for (mut selection, totals) in attributed {
@@ -917,6 +923,99 @@ mod tests {
         assert!(historical.agent_usage.contains(&unclassified));
         assert_eq!(role_cost(&historical, UsageAgentRole::Reviewer), Ok(0));
         assert_eq!(historical.sessions, hourly.sessions);
+        Ok(())
+    }
+
+    #[test]
+    fn usage_report_classifies_recorded_turns_and_legacy_children() -> Result<()> {
+        use UsageAgentRole::*;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-roles.sqlite");
+        let now = 86_400_000;
+        let mut root = super::super::tests::session("root", "project");
+        root.state = SessionState::Running;
+        save_session_to(&path, &root)?;
+        for id in ["orchestrator", "worker", "oracle", "reviewer", "destroyed"] {
+            save_session_to(&path, &super::super::tests::session(id, "project"))?;
+        }
+
+        let connection = open(&path)?;
+        connection.execute_batch(
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name,kind,category)
+             VALUES ('orchestrator','root','orchestrator','worker','orchestrator'),
+                    ('worker','orchestrator','worker','worker',NULL),
+                    ('oracle','orchestrator','oracle','oracle',NULL),
+                    ('reviewer','orchestrator','reviewer','reviewer',NULL),
+                    ('destroyed','orchestrator','destroyed',NULL,NULL);",
+        )?;
+        // Each turn reports a distinct token count so the totals prove both
+        // category precedence and per-turn attribution within one session.
+        let turns = [
+            ("root", Some("subtle"), 1),
+            ("orchestrator", Some("supervisor"), 2),
+            ("orchestrator", None, 4),
+            ("orchestrator", Some("subtle"), 8),
+            ("worker", Some("straightforward"), 16),
+            ("worker", Some("oracle"), 32),
+            ("oracle", None, 64),
+            ("worker", Some("reviewer"), 128),
+            ("worker", Some("brief_writer"), 256),
+            ("reviewer", None, 512),
+            ("worker", None, 1024),
+            ("worker", Some("future_category"), 2048),
+            ("destroyed", None, 4096),
+        ];
+        for (index, (session, category, tokens)) in turns.into_iter().enumerate() {
+            let ordinal = index + 1;
+            let command = format!("turn-{ordinal}");
+            let turn: MaterializedTurnOutcome = serde_json::from_value(serde_json::json!({
+                "command_id": command, "completed_ordinal": ordinal, "completed_at_ms": now,
+                "outcome": {"kind":"completed","stop_reason":"EndTurn"},
+                "usage": {"scope":"turn", "input_tokens":tokens, "output_tokens":0, "total_tokens":tokens}
+            }))?;
+            connection.execute(
+                "INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body)
+                 VALUES (?1,?2,?3,?4)",
+                params![session, command, ordinal, serialize_turn_outcome(&turn)?],
+            )?;
+            connection.execute(
+                "INSERT INTO session_turn_selections(session_id,command_id,category)
+                 VALUES (?1,?2,?3)",
+                params![session, command, category],
+            )?;
+        }
+        drop(connection);
+        delete_session_from(&path, "destroyed")?;
+
+        let report = load_from(&path, &SessionUsageQuery::default(), now)?;
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].subagent_count, 5);
+        let usage = report
+            .agent_usage
+            .iter()
+            .map(|group| {
+                let input = group
+                    .models
+                    .iter()
+                    .map(|model| model.totals["input_tokens"].tokens)
+                    .sum::<u64>();
+                (group.role, input)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usage,
+            [
+                (Primary, 1),
+                (Orchestrator, 6),
+                (Subtle, 8),
+                (Straightforward, 16),
+                (Oracle, 96),
+                (Reviewer, 896),
+                (Subagent, 3072),
+                (UnclassifiedSubagent, 4096),
+            ]
+        );
         Ok(())
     }
 

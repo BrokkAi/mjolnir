@@ -334,6 +334,48 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
         .collect()
 }
 
+/// A child's durable role and latest turn selection for the parent's listing.
+pub struct SubagentListingDetails {
+    pub relation: mj_core::subagent::SubagentRecord,
+    pub category: Option<String>,
+    pub selection: mj_core::storage::UsageSelection,
+}
+
+pub fn list_subagent_details(parent: &str) -> Result<Vec<SubagentListingDetails>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT c.record_json, a.category, t.model, t.effort
+         FROM subagent_sessions c
+         LEFT JOIN subagent_accounting a USING (child_session_id)
+         LEFT JOIN sessions s ON s.session_id = c.child_session_id
+         LEFT JOIN session_turn_selections t ON t.rowid = (
+             SELECT rowid FROM session_turn_selections
+             WHERE session_id = c.child_session_id ORDER BY rowid DESC LIMIT 1
+         ) AND (t.profile IS NULL OR t.profile = s.last_profile)
+         WHERE c.parent_session_id = ?1 ORDER BY c.rowid",
+    )?;
+    statement
+        .query_map([parent], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get(1)?,
+                mj_core::storage::UsageSelection {
+                    model: row.get(2)?,
+                    effort: row.get(3)?,
+                },
+            ))
+        })?
+        .map(|row| {
+            let (record, category, selection) = row?;
+            Ok(SubagentListingDetails {
+                relation: serde_json::from_str(&record).context("decode sub-agent record")?,
+                category,
+                selection,
+            })
+        })
+        .collect()
+}
+
 /// A parent's child session ids in registration order, read from the index
 /// without decoding any record.
 pub fn list_subagent_ids(parent_session_id: &str) -> Result<Vec<String>> {

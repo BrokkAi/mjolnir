@@ -516,7 +516,10 @@ impl ViewerSnapshot {
                     target,
                 ),
                 default_resource_allocation: if mj_core::config::is_container_target(target) {
-                    let size = mj_core::state::default_container_size(
+                    let size = mj_core::state::resolve_default_container_size(
+                        target
+                            .container()
+                            .and_then(|c| c.default_host_container_size()),
                         mj_core::config::container_size_host(target)
                             .and_then(|host| state.container_sizes.get(host))
                             .copied(),

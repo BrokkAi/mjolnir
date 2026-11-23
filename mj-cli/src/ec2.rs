@@ -76,6 +76,12 @@ struct CreateArgs {
     /// Host runtime to install. Nitro hosts run workloads in isolated microVMs.
     #[arg(long, value_enum, default_value_t = Ec2Runtime::Podman)]
     runtime: Ec2Runtime,
+    /// Default CPU count for each session container.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    cpus: u32,
+    /// Default memory in GiB for each session container.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    memory_gib: u32,
     /// Read-only S3 build cache for Nitro sandboxes, as s3://bucket/prefix.
     #[arg(long)]
     mbx_remote: Option<String>,
@@ -1358,8 +1364,8 @@ fn create_attempt(
             image: image.into(),
             pull_policy: Default::default(),
             platform: Some(platform.into()),
-            cpus: None,
-            memory: None,
+            cpus: Some(args.cpus.to_string()),
+            memory: Some(format!("{}g", args.memory_gib)),
             environment: Default::default(),
             workspace_storage: Default::default(),
             build_cache: None,
@@ -2362,6 +2368,8 @@ else:
             instance_type: vec!["c8id.16xlarge".into()],
             types: Vec::new(),
             runtime: Ec2Runtime::Podman,
+            cpus: 16,
+            memory_gib: 32,
             mbx_remote: None,
             mbx_remote_region: None,
             zone: vec!["us-east-1a".into()],
@@ -2375,6 +2383,44 @@ else:
             disk_iops: None,
             zfs_cache: false,
             json: true,
+        }
+    }
+
+    #[test]
+    fn ec2_create_requires_positive_container_defaults() {
+        for (sizes, error) in [
+            (
+                vec!["--memory-gib", "32"],
+                clap::error::ErrorKind::MissingRequiredArgument,
+            ),
+            (
+                vec!["--cpus", "16"],
+                clap::error::ErrorKind::MissingRequiredArgument,
+            ),
+            (
+                vec!["--cpus", "0", "--memory-gib", "32"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                vec!["--cpus", "16", "--memory-gib", "0"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+        ] {
+            let args = [
+                "mj",
+                "ec2",
+                "create",
+                "c8id.16xlarge",
+                "--zone",
+                "us-east-1a",
+            ];
+            assert_eq!(
+                crate::Cli::try_parse_from(args.into_iter().chain(sizes))
+                    .err()
+                    .unwrap()
+                    .kind(),
+                error,
+            );
         }
     }
 
@@ -2482,6 +2528,10 @@ else:
             "ec2-fixture",
             "ec2",
             "create",
+            "--cpus",
+            "16",
+            "--memory-gib",
+            "32",
             "--type",
             "c8id.16xlarge,m8id.8xlarge",
             "--zone",
@@ -2778,6 +2828,10 @@ else:
             "ec2",
             "create",
             "c8id.16xlarge",
+            "--cpus",
+            "16",
+            "--memory-gib",
+            "32",
             "--zone",
             "us-east-1a",
             "--name",
@@ -2840,7 +2894,8 @@ else:
         assert!(fixture.join("remote-home").join(".local/bin/mbx").is_file());
         assert!(matches!(
             before.targets.get("builder"),
-            Some(TargetTemplate::SshPodman { .. })
+            Some(TargetTemplate::SshPodman { container, .. })
+                if container.cpus.as_deref() == Some("16") && container.memory.as_deref() == Some("32g")
         ));
         // A concurrent, unrelated editor change must survive destruction.
         Config::update(|config| {
@@ -2966,6 +3021,10 @@ else:
             "ec2",
             "create",
             "c8id.16xlarge",
+            "--cpus",
+            "16",
+            "--memory-gib",
+            "32",
             "--runtime",
             "nitro",
             "--zone",
@@ -3088,7 +3147,8 @@ else:
         assert_eq!(cache.remote_region.as_deref(), Some("us-west-2"));
         assert!(matches!(
             config.targets.get("builder"),
-            Some(TargetTemplate::SshNitro { .. })
+            Some(TargetTemplate::SshNitro { container, .. })
+                if container.cpus.as_deref() == Some("16") && container.memory.as_deref() == Some("32g")
         ));
         assert!(
             calls
@@ -3388,7 +3448,8 @@ else:
         );
         assert!(matches!(
             config.targets.get("builder"),
-            Some(TargetTemplate::SshPodman { .. })
+            Some(TargetTemplate::SshPodman { container, .. })
+                if container.cpus.as_deref() == Some("16") && container.memory.as_deref() == Some("32g")
         ));
         destroy(
             DestroyArgs {

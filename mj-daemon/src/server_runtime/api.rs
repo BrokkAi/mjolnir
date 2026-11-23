@@ -27,6 +27,7 @@ use crate::server::api::{
     TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
 };
 use mj_checkpoint::archive::{FetchMode, FetchedPath};
+use mj_client::runtime_feed::RuntimeProjection;
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_controller::controller::{Controller, SessionExportLayout};
 use mj_controller::targets::{
@@ -163,6 +164,10 @@ pub trait ExportRuntime: Send + Sync {
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
+
+    fn delegation_listing_projection(&self) -> Result<Option<RuntimeProjection>> {
+        Ok(None)
+    }
 
     /// Whether this session's recorded target runs with
     /// `permissions = "yolo"`. Backends without a daemon have none.
@@ -463,6 +468,10 @@ impl ExportRuntime for RuntimeState {
 
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn delegation_listing_projection(&self) -> Result<Option<RuntimeProjection>> {
+        self.runtime_publication().map(Some)
     }
 
     fn session_is_yolo_target(&self, session_id: &str) -> bool {
@@ -1466,20 +1475,33 @@ impl ApiBackend {
                     "report_dir":report_dir,
                 }))
             }
+            SubagentToolAction::ListTargets => {
+                let projection = self
+                    .exports
+                    .delegation_listing_projection()?
+                    .context("target listing is unavailable")?;
+                list_targets(
+                    &projection,
+                    parent_session_id,
+                    mj_core::clock::epoch_seconds(),
+                )
+            }
             SubagentToolAction::ListAgents => {
                 // This request was read from the parent's queue, so the queue
                 // is known here unless the parent's actor went away since; the
                 // listing then shows the mailbox's part, and decides nothing.
                 let inputs = self.subagent_input_progress(parent_session_id).await?;
-                let relations = self
-                    .list_subagents(parent_session_id.to_owned())
-                    .await?
-                    .into_iter()
-                    .filter(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker)
-                    .collect::<Vec<_>>();
-                let child_ids = relations
+                let details = blocking("load children and their selections", {
+                    let parent = parent_session_id.to_owned();
+                    move || mj_controller::database::list_subagent_details(&parent)
+                })
+                .await?
+                .into_iter()
+                .filter(|detail| detail.relation.kind == mj_core::subagent::SubagentKind::Worker)
+                .collect::<Vec<_>>();
+                let child_ids = details
                     .iter()
-                    .map(|relation| relation.child_session_id.clone())
+                    .map(|detail| detail.relation.child_session_id.clone())
                     .collect::<Vec<_>>();
                 let (observed, starts) = self.child_snapshots(child_ids).await?;
                 let summaries = observed
@@ -1487,10 +1509,16 @@ impl ApiBackend {
                     .map(|(id, summary, progress)| (id, (summary, progress)))
                     .collect::<BTreeMap<_, _>>();
                 let now_ms = u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0);
-                let agents = relations
-                    .into_iter()
-                    .map(|relation| {
-                        let record = self.exports.session_record(&relation.child_session_id);
+                let projection = self.exports.delegation_listing_projection()?;
+                let active_children = projection
+                    .as_ref()
+                    .map_or_else(BTreeMap::new, live_direct_children);
+                let agents = details.into_iter()
+                    .map(|detail| {
+                        let relation = &detail.relation;
+                        let record = projection.as_ref().and_then(|projection| {
+                            projection.records.get(&relation.child_session_id).cloned()
+                        }).or_else(|| self.exports.session_record(&relation.child_session_id));
                         // This listing reports state; the mailbox carries reports.
                         let unknown = ChildProgress {
                             finished_span: None,
@@ -1525,10 +1553,16 @@ impl ApiBackend {
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
                             "name":name,
+                            "role":listed_agent_role(relation, detail.category.as_deref()),
+                            "target":record.as_ref().map(|r| &r.target_template_id),
+                            "repos":agent_repo_urls(record.as_ref(), projection.as_ref()),
                             "profile_id":record.as_ref().map_or(&relation.profile_id, |record| &record.last_profile),
-                            "effort":relation.effort,
                             "state":state,
+                            "active_children": active_children.get(relation.child_session_id.as_str()).copied().unwrap_or(0),
                         });
+                        let selection = live_agent_selection(projection.as_ref(), &detail);
+                        entry["model"] = serde_json::json!(selection.model);
+                        entry["effort"] = serde_json::json!(selection.effort);
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
@@ -3539,6 +3573,172 @@ fn finish_facts(progress: &ChildProgress) -> mj_core::work_facts::WorkFacts {
 /// What the session list calls a child now, bounded to one line, or the task
 /// name it was spawned with when the daemon holds no record. A person may
 /// have renamed the child since it was spawned.
+fn list_targets(
+    projection: &RuntimeProjection,
+    parent_id: &str,
+    now: u64,
+) -> Result<serde_json::Value> {
+    let parent = projection
+        .records
+        .get(parent_id)
+        .context("parent session disappeared")?;
+    ensure!(
+        parent.supervisors
+            && parent
+                .subagents
+                .as_ref()
+                .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir)
+            && !projection.subagents.contains_key(parent_id),
+        "list_targets requires supervisors enabled on a parent using Mjolnir delegation"
+    );
+    let metadata = &projection.metadata;
+    let config = &metadata.config;
+    let mut active_sessions = BTreeMap::new();
+    for session in projection
+        .records
+        .values()
+        .filter(|session| session.state.is_active())
+    {
+        *active_sessions
+            .entry(session.target_template_id.as_str())
+            .or_insert(0u64) += 1;
+    }
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    let targets = config.enabled_targets().map(|(id, template)| {
+        let host = super::snapshot::host_capacity_for_target(metadata, id);
+        let reading = host.map(|host| &host.reading);
+        let memory = reading.and_then(|reading| reading.host_memory());
+        let sizing = super::snapshot::target_container_sizing(template, metadata, host);
+        let default_container_size = sizing.as_ref().map(|sizing| serde_json::json!({
+            "cpus": sizing.default.cpus,
+            "memory_gib": gib(sizing.default.memory_bytes),
+        }));
+        let capacity = sizing.and_then(|sizing| sizing.capacity).map(|capacity| serde_json::json!({
+            "committed_cpus": capacity.committed.cpus,
+            "remaining_cpus": capacity.remaining.cpus,
+            "committed_memory_gib": gib(capacity.committed.memory_bytes),
+            "remaining_memory_gib": capacity.complete.then(|| gib(capacity.remaining.memory_bytes)),
+        }));
+        let recent = reading.filter(|reading| reading.has_reading).map(|reading| serde_json::json!({
+            "sampled_age_seconds": reading.sampled_at_epoch_seconds.map(|sampled| now.saturating_sub(sampled)),
+            "cpu_percent": reading.cpu_percent,
+            "memory_used_gib": memory.map(|memory| gib(memory.used_bytes)),
+            "memory_total_gib": memory.map(|memory| gib(memory.total_bytes)),
+        }));
+        let last_1h = host.and_then(|host| host.last_1h.as_ref()).map(|window| serde_json::json!({
+            "window_seconds": window.window_seconds,
+            "sample_count": window.sample_count,
+            "cpu_percent_avg": window.cpu_percent_avg,
+            "cpu_percent_max": window.cpu_percent_max,
+            "memory_used_gib_avg": gib(window.memory_used_bytes_avg),
+            "memory_used_gib_max": gib(window.memory_used_bytes_max),
+        }));
+        serde_json::json!({
+            "target_id": id,
+            "kind": template.kind_name(),
+            "permissions": if template.is_yolo() { "yolo" } else { "guardian" },
+            "is_current_target": id == parent.target_template_id,
+            "host": {
+                "machine_id": mj_core::config::target_machine_id(template, &config.machines),
+                "ec2_instance_type": reading.and_then(|reading| reading.ec2_instance_type.as_ref()),
+                "total_cpus": reading.filter(|reading| reading.has_reading).map(|reading| reading.logical_cores),
+                "total_memory_gib": memory.map(|memory| gib(memory.total_bytes)),
+            },
+            "default_container_size": default_container_size,
+            "active_sessions": active_sessions.get(id).copied().unwrap_or(0),
+            "capacity": capacity,
+            "usage": {
+                "recent": recent,
+                "last_1h": last_1h,
+                "probe_error": reading.and_then(|reading| reading.probe_error.as_ref()),
+            },
+        })
+    }).collect::<Vec<_>>();
+    Ok(serde_json::json!({"targets": targets}))
+}
+
+fn listed_agent_role(
+    relation: &mj_core::subagent::SubagentRecord,
+    category: Option<&str>,
+) -> &'static str {
+    if relation.supervisor || matches!(category, Some("supervisor" | "orchestrator")) {
+        "orchestrator"
+    } else if category == Some("subtle") {
+        "subtle"
+    } else {
+        "straightforward"
+    }
+}
+
+fn live_direct_children(projection: &RuntimeProjection) -> BTreeMap<&str, usize> {
+    let mut counts = BTreeMap::new();
+    for relation in projection.subagents.values() {
+        // Use the same live-worker states that count against delegation slots.
+        if relation.kind == mj_core::subagent::SubagentKind::Worker
+            && projection
+                .records
+                .get(&relation.child_session_id)
+                .is_some_and(|record| record.state.has_live_worker())
+        {
+            *counts
+                .entry(relation.parent_session_id.as_str())
+                .or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn agent_repo_urls(
+    record: Option<&mj_core::state::SessionRecord>,
+    projection: Option<&RuntimeProjection>,
+) -> Vec<String> {
+    use mj_core::remote_git::{Shorthand, display_url, expand_github_source, parse_github_remote};
+    record
+        .filter(|record| record.project_directory.is_none())
+        .and_then(|record| record.project_bundle(&projection?.metadata.config))
+        .into_iter()
+        .flat_map(|bundle| &bundle.repositories)
+        .filter_map(|repository| repository.github.as_deref())
+        .filter_map(|source| {
+            if let Some(remote) = parse_github_remote(source, Shorthand::Allowed)
+                && remote.is_default_endpoint()
+            {
+                return Some(format!(
+                    "https://github.com/{}/{}",
+                    remote.owner, remote.repository
+                ));
+            }
+            expand_github_source(source)
+                .ok()
+                .map(|source| display_url(&source))
+        })
+        .collect()
+}
+
+fn live_agent_selection(
+    projection: Option<&RuntimeProjection>,
+    detail: &mj_controller::database::SubagentListingDetails,
+) -> mj_core::storage::UsageSelection {
+    let live = projection
+        .and_then(|projection| projection.sessions.get(&detail.relation.child_session_id))
+        .filter(|view| view.connected)
+        .and_then(|view| view.operational.as_ref());
+    let current = |key| {
+        live.and_then(|operational| {
+            mj_core::acp::surface::config_current_value(&operational.config_options, key)
+                .or_else(|| operational.config.get(key).cloned())
+        })
+    };
+    mj_core::storage::UsageSelection {
+        model: current("model")
+            .or_else(|| detail.selection.model.clone())
+            .or_else(|| detail.relation.model.clone()),
+        effort: current("effort")
+            .or_else(|| detail.selection.effort.clone())
+            .or_else(|| detail.relation.effort.clone()),
+    }
+}
+
 fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &str) -> String {
     record.map_or_else(
         || mj_core::state::bounded_one_line(task_name, mj_core::state::MESSAGE_NAME_CHARS),
