@@ -150,8 +150,10 @@ fn create_private_file(path: &Path) -> Result<File> {
 /// host's snapshot cache.
 ///
 /// Records the `host_snapshot_cache` row BEFORE writing the file, writes to a
-/// temporary file in the same directory, syncs, and renames to
-/// `<sha256>.hel.zip`. Never fails suspend: errors are logged at WARN.
+/// temporary file in the same directory, and renames to `<sha256>.hel.zip`.
+/// The daemon archive is the durable copy. Resume verifies the cache by hash
+/// and can upload the daemon archive on a miss, so suspend does not wait for
+/// an additional filesystem sync on the cache host. Errors are logged at WARN.
 pub fn publish_host_snapshot_cache_best_effort(
     session_id: &str,
     locator: &TargetLocator,
@@ -218,9 +220,6 @@ pub fn publish_host_snapshot_cache(
                     std::io::copy(&mut source, &mut dest).with_context(|| {
                         format!("copy archive into temp file {}", temp_path.display())
                     })?;
-                    dest.sync_all().with_context(|| {
-                        format!("sync temp snapshot cache file {}", temp_path.display())
-                    })?;
                     drop(dest);
                     fs::rename(&temp_path, &final_path).with_context(|| {
                         format!(
@@ -272,7 +271,6 @@ pub fn publish_host_snapshot_cache(
                           trap 'rm -f -- \"$tmp\"; rmdir -- \"$dir\" 2>/dev/null || true' EXIT; \
                           cat > \"$tmp\"; \
                           chmod 0600 \"$tmp\"; \
-                          sync \"$tmp\" 2>/dev/null || sync; \
                           mv -f -- \"$tmp\" \"$final\"; \
                           trap - EXIT";
             let command = mj_core::targets::ssh_command_owned(
@@ -990,6 +988,103 @@ mod tests {
         ) -> Result<CommandOutput> {
             bail!("ssh: connect to host unreachable.example port 22: Connection refused");
         }
+    }
+
+    #[cfg(unix)]
+    // Hard-won: ddd712e31: syncing a disposable cache copy wedged suspend.
+    #[test]
+    fn ssh_cache_publishes_when_sync_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct LocalSsh {
+            home: PathBuf,
+        }
+
+        impl LocalSsh {
+            fn shell_command(&self, command: &CommandSpec) -> CommandSpec {
+                assert_eq!(command.program, "ssh");
+                let script = command.args.last().expect("missing remote command");
+                let mut shell = CommandSpec::new("sh", ["-c", script]);
+                shell
+                    .env
+                    .insert("HOME".into(), self.home.display().to_string());
+                shell.env.insert(
+                    "PATH".into(),
+                    format!("{}:/usr/bin:/bin", self.home.display()),
+                );
+                shell
+            }
+        }
+
+        impl CommandExecutor for LocalSsh {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                ProcessExecutor.execute(&self.shell_command(command))
+            }
+
+            fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin(
+                &self,
+                command: &CommandSpec,
+                input: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                ProcessExecutor.execute_with_stdin(&self.shell_command(command), input)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &CommandSpec,
+                input: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+        }
+
+        const CHILD: &str = "MJ_HOST_CACHE_NO_SYNC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(
+                "controller::checkpoint::host_cache::tests::ssh_cache_publishes_when_sync_is_unavailable",
+            )
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let sync = temp.path().join("sync");
+        fs::write(&sync, "#!/bin/sh\ntouch \"$HOME/sync-called\"\nexit 1\n").unwrap();
+        fs::set_permissions(&sync, fs::Permissions::from_mode(0o700)).unwrap();
+        let archive = temp.path().join("verified.hel.zip");
+        let contents = vec![42; 128 * 1024];
+        fs::write(&archive, &contents).unwrap();
+        let sha = checkpoint_sha256(&archive).unwrap();
+        let locator = TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "fixture".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: "/srv/app".into(),
+            worker_id: Some("sess-1".into()),
+        };
+        let executor = LocalSsh {
+            home: temp.path().to_path_buf(),
+        };
+        let cached =
+            publish_host_snapshot_cache("sess-1", &locator, &archive, &sha, &executor).unwrap();
+        assert!(!temp.path().join("sync-called").exists());
+        assert_eq!(fs::read(cached).unwrap(), contents);
     }
 
     #[test]
