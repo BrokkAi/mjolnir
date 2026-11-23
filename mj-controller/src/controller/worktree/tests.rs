@@ -2780,6 +2780,10 @@ fn raw_checkout_inspection_uses_recorded_access_after_template_removal() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     let temp = tempfile::tempdir().unwrap();
     let origin = temp.path().join("origin.git");
@@ -3340,6 +3344,10 @@ fn scoped_linked_worktree_removal_preserves_siblings_and_locked_registrations() 
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
     use mj_checkpoint::archive::SystemGit;
     use mj_checkpoint::checkpoint::managed_clone_snapshot_input;
@@ -3628,6 +3636,10 @@ fn plan_workspace_to_raw_origin_delta_skips_source_origin_refresh_and_launch_bra
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_base_and_detaching_on_branch_collision()
  {
     let temp = tempfile::tempdir().unwrap();
@@ -4048,6 +4060,8 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
         Command::new("git")
             .args([
                 "clone",
+                "-c",
+                "core.autocrlf=false",
                 &origin.to_string_lossy(),
                 &checkout.to_string_lossy()
             ])
@@ -4093,6 +4107,8 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
         Command::new("git")
             .args([
                 "clone",
+                "-c",
+                "core.autocrlf=false",
                 &upstream.to_string_lossy(),
                 &restored.to_string_lossy()
             ])

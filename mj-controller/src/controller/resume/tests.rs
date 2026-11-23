@@ -3793,6 +3793,10 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn resolve_move_keep_dir_matches_worker_startup_for_subdirs_nested_repos_and_plain_dirs() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");

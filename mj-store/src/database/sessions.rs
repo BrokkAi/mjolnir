@@ -2362,7 +2362,7 @@ mod ownership_tests {
         expected.state = SessionState::Disconnected;
         expected.native_session_id = None;
         expected.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: directory.path().join(&expected.id),
+            worker_root: PathBuf::from(format!("/workers/{}", expected.id)),
         }));
         save_session_to(&path, &expected).unwrap();
         let mut stopped = expected.clone();
@@ -2401,7 +2401,7 @@ mod ownership_tests {
         expected.native_session_id = None;
         expected.last_error = Some("previous diagnosis".into());
         expected.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: directory.path().join(&expected.id),
+            worker_root: PathBuf::from(format!("/workers/{}", expected.id)),
         }));
         save_session_to(&path, &expected).unwrap();
         let mut connection = open(&path).unwrap();
