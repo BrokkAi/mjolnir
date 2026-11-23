@@ -7324,7 +7324,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
     const NAME: &str = "a_reviewer_create_failure_settles_its_open_review";
     const CHILD: &str = "MJ_TEST_REVIEWER_CREATE_FAILURE";
     let Ok(failure) = std::env::var(CHILD) else {
-        for failure in ["create", "configure"] {
+        for failure in ["create", "configure", "rejecting"] {
             let directory = tempfile::tempdir().unwrap();
             mj_controller::controller::test_support::IsolatedTest::new(
                 mj_controller::controller::test_support::test_name(module_path!(), NAME),
@@ -7425,6 +7425,36 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
             )
             .await
             .unwrap();
+    } else if failure == "rejecting" {
+        mj_controller::controller::recover_registered_subagent_startup(&relation, false).unwrap();
+        let configure = mj_controller::database::next_startup_delivery(&child.id)
+            .unwrap()
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
+        connection
+            .execute(
+                "UPDATE startup_steps SET phase='rejecting',error='provider refused the selected model' WHERE command_id=?1",
+                [&configure.command_id],
+            )
+            .unwrap();
+        let rejecting = mj_controller::database::next_startup_delivery(&child.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejecting.phase, "rejecting");
+        state.start_persisted_startup_delivery(rejecting, &CancellationToken::new());
+        // A pre-upgrade `rejecting` row must still confirm worker exit before
+        // settling the open review.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            mj_controller::database::finished_review(&parent.id, Some(review_id))
+                .unwrap()
+                .is_none(),
+            "persisted rejecting row must not settle a reviewer before worker exit is confirmed"
+        );
+        child.state = SessionState::Error;
+        child.last_error = Some("provider refused the selected model".into());
+        mj_controller::database::save_session(&child).unwrap();
     } else {
         use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand};
         use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
@@ -7527,11 +7557,7 @@ async fn a_reviewer_create_failure_settles_its_open_review() {
         assert!(record.last_error.is_some());
     } else {
         let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
-        assert!(
-            steps
-                .iter()
-                .all(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
-        );
+        assert!(steps.iter().all(|step| step.phase == "failed"));
         state.cancel_and_join_startup_prompts().await.unwrap();
     }
     state.review_host().shutdown().await.unwrap();

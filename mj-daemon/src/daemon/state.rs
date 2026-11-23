@@ -1471,10 +1471,25 @@ impl RuntimeState {
                 }
             }
             if step.phase == "rejecting"
-                && step.group_id.is_some()
-                && let Some(reason) = &step.error
+                && let Some(group_id) = step.group_id.as_deref()
             {
-                self.report_reviewer_startup_rejection(session_id, reason);
+                let reason = step.error.as_deref().unwrap_or("session startup failed");
+                match self.reject_startup(session_id, group_id, reason).await {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        self.fail_startup_queue(
+                            session_id,
+                            "child worker already accepted work; persisted startup rejection held",
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(error) => {
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
+                            .await;
+                        return;
+                    }
+                }
             }
             let settled_id = command_id;
             let final_phase = match step.phase.as_str() {

@@ -534,7 +534,9 @@ pub fn fail_startup_group(session_id: &str, group_id: &str, error: &str) -> Resu
     let error = error.to_owned();
     submit_database_write("record startup rejection", move |connection| {
         connection.execute(
-            "UPDATE startup_steps SET phase=CASE WHEN phase='pending' THEN 'failed' ELSE 'rejecting' END,error=?3 WHERE session_id=?1 AND group_id=?2 AND phase IN ('pending','delivering','accepted')",
+            "UPDATE startup_steps SET phase='failed',error=?3
+             WHERE session_id=?1 AND group_id=?2
+               AND phase IN ('pending','delivering','accepted','rejecting')",
             params![session_id, group_id, error],
         )?;
         Ok(())
