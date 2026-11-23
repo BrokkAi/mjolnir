@@ -8895,6 +8895,203 @@ fn mailbox_wake_waits_for_checkpoint_close_and_cancellation() {
     );
 }
 
+#[test]
+fn interrupt_queued_recovery_follows_only_the_same_promoted_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "original-turn", prompt("first task"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(&mut relay, "later-prompt", prompt("second task"));
+    drop(relay);
+
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let interrupt = relay
+        .operational_state()
+        .turn_controls
+        .unwrap()
+        .interrupt
+        .unwrap();
+    let target = mj_core::continuation::restart_continuation_id("original-turn");
+    assert_eq!(
+        interrupt,
+        RelayCommand::CancelTurnTarget {
+            target: TurnInterruptTarget::QueuedRestart {
+                command_id: target.clone()
+            },
+        }
+    );
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        relay.claim_pending_commands(true).unwrap()[0].command_id,
+        target
+    );
+    submit_relay(&mut relay, "interrupt-promoted", interrupt.clone());
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command, interrupt);
+    relay
+        .record_command_completed("interrupt-promoted", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    finish_prompt(&mut relay, &target);
+    assert_eq!(
+        relay.claim_pending_commands(true).unwrap()[0].command_id,
+        "later-prompt"
+    );
+    assert!(
+        relay
+            .submit_command("stale-queued-interrupt", interrupt)
+            .unwrap()
+            .is_err()
+    );
+    assert!(relay.snapshot.cancelling_prompt_id.is_none());
+}
+
+#[test]
+fn capacity_retry_interrupt_is_local_until_the_same_retry_promotes() {
+    for (promoted, crash_after_acceptance) in [(false, false), (false, true), (true, false)] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        let retry = CapacityRetry::new(1, 7, 0);
+        let retry_id = retry.command_id.clone();
+        relay.snapshot.capacity_retry = Some(retry);
+        relay.persist_snapshot().unwrap();
+        let control = relay
+            .operational_state()
+            .turn_controls
+            .unwrap()
+            .interrupt
+            .unwrap();
+        assert_eq!(
+            control,
+            RelayCommand::CancelTurnTarget {
+                target: TurnInterruptTarget::CapacityRetry {
+                    command_id: retry_id.clone()
+                },
+            }
+        );
+
+        if promoted {
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
+            assert!(relay.submit_due_capacity_retry(60_000).unwrap());
+            assert_eq!(
+                relay.claim_pending_commands(true).unwrap()[0].command_id,
+                retry_id
+            );
+        }
+        if crash_after_acceptance {
+            relay
+                .append_relay_event(
+                    Some("interrupt-retry"),
+                    RelayObservation::CommandQueued {
+                        command_id: "interrupt-retry".into(),
+                        command: control,
+                        created_at_ms: 1,
+                        insert_at_front: false,
+                    },
+                )
+                .unwrap();
+            drop(relay);
+            relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        } else {
+            submit_relay(&mut relay, "interrupt-retry", control);
+        }
+        assert!(relay.snapshot.capacity_retry.is_none());
+        if promoted {
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert_eq!(claimed[0].command_id, "interrupt-retry");
+            assert_eq!(
+                relay.snapshot.cancelling_prompt_id.as_deref(),
+                Some(retry_id.as_str())
+            );
+        } else {
+            assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+            assert_eq!(
+                relay.snapshot.handled_commands["interrupt-retry"].outcome,
+                Some(RelayCommandOutcome::Cancelled)
+            );
+            assert!(relay.snapshot.cancelling_prompt_id.is_none());
+            submit_relay(&mut relay, "later-prompt", prompt("continue ordinary work"));
+            assert_eq!(
+                relay.claim_pending_commands(true).unwrap()[0].command_id,
+                "later-prompt"
+            );
+        }
+    }
+}
+
+#[test]
+fn autonomous_interrupt_is_withheld_for_codex_and_revalidated_before_send() {
+    for policy in [
+        HarnessTurnPolicy::ClaudeAdapter,
+        HarnessTurnPolicy::Antigravity,
+        HarnessTurnPolicy::CodexAdapter,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_harness_turn_policy(policy);
+        let start_ordinal = relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        let command = RelayCommand::CancelTurnTarget {
+            target: TurnInterruptTarget::Autonomous { start_ordinal },
+        };
+        let published = relay.operational_state().turn_controls.unwrap().interrupt;
+        if policy == HarnessTurnPolicy::CodexAdapter {
+            assert!(published.is_none());
+            assert!(
+                relay
+                    .submit_command("autonomous-interrupt", command)
+                    .unwrap()
+                    .is_err()
+            );
+            continue;
+        }
+        assert_eq!(published, Some(command.clone()));
+        submit_relay(&mut relay, "autonomous-interrupt", command);
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "autonomous-interrupt"
+        );
+        assert!(
+            relay.owns_unprompted_interrupt(&TurnInterruptTarget::Autonomous { start_ordinal })
+        );
+        relay
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                origin: None,
+                autonomous: None,
+                prompt_in_flight: false,
+            })
+            .unwrap();
+        let next = relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        assert!(
+            !relay.owns_unprompted_interrupt(&TurnInterruptTarget::Autonomous { start_ordinal })
+        );
+        relay
+            .record_command_completed("autonomous-interrupt", RelayCommandOutcome::Cancelled)
+            .unwrap();
+        assert!(relay.unanswered_harness_turn_stop().is_none());
+        assert_eq!(
+            relay.operational_state().turn_controls.unwrap().interrupt,
+            Some(RelayCommand::CancelTurnTarget {
+                target: TurnInterruptTarget::Autonomous {
+                    start_ordinal: next
+                }
+            })
+        );
+    }
+}
+
 // Hard-won: 8ba3d377e: settings at the queue head made both automatic and manual steering unusable.
 #[test]
 fn published_apply_queued_preserves_settings_order_and_survives_reconnect() {

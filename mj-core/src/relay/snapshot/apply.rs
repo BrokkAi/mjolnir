@@ -606,6 +606,34 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::ApplyQueuedFor {
                     active_prompt_id, ..
                 } => snapshot.cancelling_prompt_id = Some(active_prompt_id.clone()),
+                RelayCommand::CancelTurnTarget { target } => match target {
+                    TurnInterruptTarget::ActivePrompt { command_id }
+                    | TurnInterruptTarget::QueuedRestart { command_id } => {
+                        snapshot.cancelling_prompt_id = Some(command_id.clone());
+                    }
+                    TurnInterruptTarget::CapacityRetry { command_id } => {
+                        if snapshot
+                            .active_prompt
+                            .as_ref()
+                            .is_some_and(|prompt| prompt.command_id == *command_id)
+                        {
+                            snapshot.cancelling_prompt_id = Some(command_id.clone());
+                        }
+                    }
+                    TurnInterruptTarget::GoalResume { .. }
+                    | TurnInterruptTarget::QuotaRecovery { .. } => {}
+                    TurnInterruptTarget::Autonomous { start_ordinal } => {
+                        if snapshot
+                            .cancelling_harness_turn
+                            .is_none_or(|stop| stop.first_ordinal != *start_ordinal)
+                        {
+                            snapshot.cancelling_harness_turn = Some(HarnessTurnCancel {
+                                first_ordinal: *start_ordinal,
+                                applied: false,
+                            });
+                        }
+                    }
+                },
                 RelayCommand::Cancel | RelayCommand::CancelTurn => {
                     snapshot.cancelling_prompt_id = snapshot
                         .active_prompt
@@ -778,6 +806,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 RelayCommand::Cancel
                 | RelayCommand::CancelTurn
                 | RelayCommand::CancelTurnFor { .. }
+                | RelayCommand::CancelTurnTarget { .. }
                 | RelayCommand::ApplyQueuedFor { .. }
                 | RelayCommand::ClearContext
                 | RelayCommand::GoalControl { .. }
@@ -1145,6 +1174,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         target.applied = true;
                     }
                 }
+                (RelayCommand::CancelTurnTarget { target }, RelayCommandOutcome::Cancelled) => {
+                    if let TurnInterruptTarget::Autonomous { start_ordinal } = target
+                        && let Some(stop) = &mut snapshot.cancelling_harness_turn
+                        && stop.first_ordinal == start_ordinal
+                    {
+                        stop.applied = true;
+                    }
+                }
                 // A cancel acknowledgement does not end its originating
                 // prompt, and must never retarget cancellation to a later one.
                 (
@@ -1485,6 +1522,26 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 && snapshot.cancelling_prompt_id.as_ref() == Some(active_prompt_id)
             {
                 snapshot.cancelling_prompt_id = None;
+            }
+            if let RelayCommand::CancelTurnTarget { target } = &command {
+                match target {
+                    TurnInterruptTarget::ActivePrompt { command_id }
+                    | TurnInterruptTarget::QueuedRestart { command_id }
+                    | TurnInterruptTarget::CapacityRetry { command_id } => {
+                        if snapshot.cancelling_prompt_id.as_ref() == Some(command_id) {
+                            snapshot.cancelling_prompt_id = None;
+                        }
+                    }
+                    TurnInterruptTarget::GoalResume { .. }
+                    | TurnInterruptTarget::QuotaRecovery { .. } => {}
+                    TurnInterruptTarget::Autonomous { start_ordinal } => {
+                        if snapshot.cancelling_harness_turn.is_some_and(|stop| {
+                            stop.first_ordinal == *start_ordinal && !stop.applied
+                        }) {
+                            snapshot.cancelling_harness_turn = None;
+                        }
+                    }
+                }
             }
             if matches!(command, RelayCommand::Cancel | RelayCommand::CancelTurn) {
                 snapshot.cancelling_prompt_id = None;
@@ -2102,7 +2159,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id)
             && !(crate::continuation::is_restart_continuation(id)
                 && snapshot.dispatches.values().any(|dispatch| {
-                    matches!(dispatch.command, RelayCommand::CancelTurn)
+                    (matches!(dispatch.command, RelayCommand::CancelTurn)
+                        || matches!(&dispatch.command, RelayCommand::CancelTurnTarget {
+                            target: TurnInterruptTarget::QueuedRestart { command_id }
+                        } if command_id == id))
                         && matches!(
                             dispatch.state,
                             RelayDispatchState::Queued
@@ -2259,6 +2319,7 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
         RelayCommand::Prompt { .. }
             | RelayCommand::Cancel
             | RelayCommand::CancelTurn
+            | RelayCommand::CancelTurnTarget { .. }
             | RelayCommand::SetConfig { .. }
             | RelayCommand::RestoreExecutionMode
             | RelayCommand::GoalControl { .. }

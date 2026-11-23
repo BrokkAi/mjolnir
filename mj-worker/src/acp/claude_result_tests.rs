@@ -24,10 +24,13 @@ impl Drop for ClaudeProbe {
 
 impl ClaudeProbe {
     async fn new() -> Self {
-        Self::with_replayed_autonomous_turn(false).await
+        Self::open(false, None).await
     }
 
-    async fn with_replayed_autonomous_turn(replay: bool) -> Self {
+    async fn open(
+        replay: bool,
+        terminal_owner: Option<std::sync::Weak<crate::relay::RelayCell>>,
+    ) -> Self {
         let (client, agent) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -66,7 +69,7 @@ impl ClaudeProbe {
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
-            terminal_owner: None,
+            terminal_owner,
             turn_context: Default::default(),
             verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
@@ -290,9 +293,10 @@ impl RelayPeer {
         let mut durable = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
         durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
         durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+        let relay = Arc::new(crate::relay::RelayCell::new(durable));
         let mut peer = Self {
-            probe: ClaudeProbe::new().await,
-            relay: Arc::new(crate::relay::RelayCell::new(durable)),
+            probe: ClaudeProbe::open(false, Some(Arc::downgrade(&relay))).await,
+            relay,
             in_flight: BTreeMap::new(),
             _directory: directory,
         };
@@ -335,6 +339,70 @@ impl RelayPeer {
             if matches!(self.event().await, RuntimeEvent::PromptFinished { .. }) {
                 break;
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn autonomous_interrupt_rechecks_the_turn_in_the_acp_inbox() {
+    use mj_core::relay::{RelayCommand, RelayObservation, TurnInterruptTarget};
+
+    for settled in [false, true] {
+        let mut peer = RelayPeer::new().await;
+        let start_ordinal = {
+            let mut relay = peer.relay.lock().unwrap();
+            let start_ordinal = relay
+                .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+                .unwrap();
+            crate::relay::test_support::submit_relay(
+                &mut relay,
+                "exact-interrupt",
+                RelayCommand::CancelTurnTarget {
+                    target: TurnInterruptTarget::Autonomous { start_ordinal },
+                },
+            );
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+            if settled {
+                relay
+                    .record_observation(RelayObservation::HarnessTurnSettled {
+                        origin: None,
+                        autonomous: None,
+                        prompt_in_flight: false,
+                    })
+                    .unwrap();
+                relay
+                    .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 2 })
+                    .unwrap();
+            }
+            start_ordinal
+        };
+        peer.probe
+            .commands
+            .send(CommandRequest::CancelUnpromptedTurn {
+                request_id: "exact-interrupt".into(),
+                target: TurnInterruptTarget::Autonomous { start_ordinal },
+            })
+            .await
+            .unwrap();
+        let event = loop {
+            let event = peer.probe.event().await;
+            if matches!(&event,
+                RuntimeEvent::CommandRejected { request_id, .. }
+                | RuntimeEvent::CancelApplied { request_id } if request_id == "exact-interrupt")
+            {
+                break event;
+            }
+        };
+        if settled {
+            assert!(
+                matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "exact-interrupt")
+            );
+        } else {
+            assert!(
+                matches!(event, RuntimeEvent::CancelApplied { request_id } if request_id == "exact-interrupt")
+            );
+            assert_eq!(peer.probe.message().await["method"], "session/cancel");
         }
     }
 }
@@ -396,8 +464,13 @@ async fn an_autonomous_spawn_waits_for_the_prompt_boundary_unless_it_already_end
             );
             assert!(relay.claim_pending_commands(true).unwrap().is_empty());
             let controls = relay.operational_state().turn_controls.unwrap();
-            assert_eq!(controls.interrupt, Some(RelayCommand::CancelTurn));
-            assert_eq!(controls.primary.unwrap().command, RelayCommand::CancelTurn);
+            let interrupt = RelayCommand::CancelTurnTarget {
+                target: mj_core::relay::TurnInterruptTarget::ActivePrompt {
+                    command_id: "prompt-1".into(),
+                },
+            };
+            assert_eq!(controls.interrupt, Some(interrupt.clone()));
+            assert_eq!(controls.primary.unwrap().command, interrupt);
         }
         peer.probe
             .result(&prompt, json!({"stopReason":"end_turn"}))
@@ -1013,7 +1086,7 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
 
 #[tokio::test]
 async fn autonomous_turn_spawns_are_live_edges_and_not_replayed_history() {
-    let mut probe = ClaudeProbe::with_replayed_autonomous_turn(true).await;
+    let mut probe = ClaudeProbe::open(true, None).await;
     probe.autonomous_turn("live-turn").await;
     let mut replay_seen = false;
     loop {

@@ -10090,12 +10090,13 @@ function turnControlState(session) {
   const uncertain = published ? published.status === 'unconfirmed' : steering?.status === 'unconfirmed';
   const failed = steering?.status === 'failed';
   // Older workers expose explicit interruption only, never inferred steering.
-  const legacyInterrupt = session?.targeted_turn_control_supported && session?.active_prompt_id
+  const legacyInterrupt = !published && session?.capabilities?.interrupt_turn
+    && session.targeted_turn_control_supported && session.active_prompt_id
     ? { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } } : null;
   const action = published?.primary;
   return {
     pending, uncertain, failed,
-    label: pending ? (session?.cancelling_prompt_id ? 'Interrupting…' : 'Steering…')
+    label: pending ? (published?.message || (session?.cancelling_prompt_id ? 'Interrupting…' : 'Steering…'))
       : uncertain ? 'Unconfirmed' : action?.kind === 'steer' ? 'Steer'
       : action?.kind === 'apply_queued' ? 'Apply queued' : 'Interrupt',
     message: published?.message || '',
@@ -10103,6 +10104,14 @@ function turnControlState(session) {
     interrupt: published ? published.interrupt : legacyInterrupt,
     unavailable: published?.status === 'unavailable',
   };
+}
+
+function turnControlTarget(command) {
+  const target = command?.data?.target;
+  const commandId = target?.command_id || command?.data?.active_prompt_id;
+  if (commandId) return `command:${commandId}`;
+  if (target?.kind === 'quota_recovery') return `quota:${target.completed_command_id}`;
+  return target?.kind === 'autonomous' ? `autonomous:${target.start_ordinal}` : null;
 }
 
 async function submitTurnControl(session, command) {
@@ -10115,7 +10124,7 @@ async function submitTurnControl(session, command) {
     await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'turn-control', session_id: session.id, command }) });
     await refresh();
   } catch (error) {
-    failedTurnControls.set(session.id, { message: error.message, activePromptId: command.data?.active_prompt_id });
+    failedTurnControls.set(session.id, { message: error.message, target: turnControlTarget(command) });
     await refresh();
   } finally {
     pendingTurnControls.delete(session.id);
@@ -10162,7 +10171,7 @@ function renderTurnControl(session) {
   bindTurnControlButton(cancelTurnButton, { sessionId: session.id, command: control.command, legacy: !session.turn_controls });
   const actions = document.querySelector('#turn-actions');
   const interrupt = document.querySelector('#interrupt-turn');
-  actions.hidden = held || !control.interrupt || control.command?.type === 'cancel_turn_for';
+  actions.hidden = held || !control.interrupt || ['cancel_turn_for', 'cancel_turn_target'].includes(control.command?.type);
   interrupt.disabled = pendingTurnControls.has(session.id);
   bindTurnControlButton(interrupt, { sessionId: session.id, command: control.interrupt });
   let panel = document.querySelector('#turn-control-status');
@@ -10172,7 +10181,7 @@ function renderTurnControl(session) {
   }
   panel.replaceChildren();
   if (!held && control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
-  const signature = `${session.steering?.command_id}:${session.steering?.status}:${session.active_prompt_id || ''}`;
+  const signature = `${session.steering?.command_id}:${session.steering?.status}:${turnControlTarget(control.interrupt) || session.active_prompt_id || ''}`;
   const localError = failedTurnControls.get(session.id);
   if (!(control.uncertain || control.failed || localError) || dismissedTurnControls.get(session.id) === signature) return;
   const message = session.steering?.message || localError?.message || 'Steering failed; the prompt remains queued.';
@@ -10181,7 +10190,10 @@ function renderTurnControl(session) {
   keep.onclick = () => { dismissedTurnControls.set(session.id, signature); panel.replaceChildren(); };
   panel.append(keep);
   if (held) return;
-  if (control.interrupt && session.active_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
+  const target = turnControlTarget(control.interrupt);
+  const retryTarget = localError ? localError.target : (session.steering?.active_prompt_id
+    ? `command:${session.steering.active_prompt_id}` : null);
+  if (control.interrupt && target && target === retryTarget) {
     const cancel = button('Interrupt');
     cancel.title = 'Interrupt this turn; queued input stays ordered.';
     cancel.onclick = () => submitTurnControl(session, control.interrupt);

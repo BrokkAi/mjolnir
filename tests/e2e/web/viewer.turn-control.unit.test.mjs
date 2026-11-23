@@ -19,7 +19,7 @@ test('the worker controls the action even when the displayed queue has settings 
   assert.equal(result.label, 'Apply queued');
   assert.match(result.message, /Fable/);
   assert.equal(result.interrupt.type, 'cancel_turn_for');
-  assert.equal(state({ targeted_turn_control_supported: true, active_prompt_id: 'turn-1', queued_prompts: [{ id: 'prompt-1' }] }).command.type, 'cancel_turn_for');
+  assert.equal(state({ capabilities: { interrupt_turn: true }, targeted_turn_control_supported: true, active_prompt_id: 'turn-1', queued_prompts: [{ id: 'prompt-1' }] }).command.type, 'cancel_turn_for');
 });
 
 test('reconnected pending and uncertain operations cannot silently become cancellation', () => {
@@ -34,4 +34,20 @@ test('reconnected pending and uncertain operations cannot silently become cancel
   session.cancelling_prompt_id = 'turn-1';
   assert.equal(state(session).pending, true);
   assert.equal(state(session).label, 'Interrupting…');
+});
+
+test('exact targets stay bound without an active prompt', () => {
+  for (const [target, key] of [
+    [{ kind: 'queued_restart', command_id: 'auto-continue-restart-1-prompt-1' }, 'command:auto-continue-restart-1-prompt-1'],
+    [{ kind: 'autonomous', start_ordinal: 42 }, 'autonomous:42'],
+    [{ kind: 'capacity_retry', command_id: 'server-retry-12' }, 'command:server-retry-12'],
+    [{ kind: 'quota_recovery', completed_command_id: 'previous-prompt' }, 'quota:previous-prompt'],
+    [{ kind: 'goal_resume', command_id: 'resume-goal' }, 'command:resume-goal'],
+  ]) {
+    const command = { type: 'cancel_turn_target', data: { target } };
+    const result = state({ turn_controls: { status: 'ready', primary: { kind: 'interrupt', command }, interrupt: command } });
+    assert.deepEqual(result.command, command);
+    assert.equal(context.turnControlTarget(result.interrupt), key);
+  }
+  assert.equal(state({ capabilities: { interrupt_turn: false }, targeted_turn_control_supported: true, active_prompt_id: 'next-prompt' }).interrupt, null);
 });
