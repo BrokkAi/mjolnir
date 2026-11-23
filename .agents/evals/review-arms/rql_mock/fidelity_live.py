@@ -224,7 +224,7 @@ class LiveModels:
                             "enumerate every qualifying in-scope row and write the complete JSON object to output.json"
                         ]
                         keys = {("answer-capture",)}
-                        stage = "model-answer"
+                        stage = "answer-capture"
                         if not restricted:
                             driver.save(directory / f"turn-{record['turn']}-validation.json", {"errors": diagnostics})
                         return None, diagnostics, keys, stage

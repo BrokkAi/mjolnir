@@ -627,6 +627,7 @@ class TerraOutput(unittest.TestCase):
             for schedule in (
                 ((bad, good),),
                 ((missing, good),),
+                ((missing, bad, good),),
                 ((bad, staged, good),),
                 ((bad, bad), (good,)),
                 ((missing, missing), (good,)),
