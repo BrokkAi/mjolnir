@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Result, ensure};
 use rusqlite::Connection;
 
-pub(crate) const DATABASE: &str = ".data/opencode/opencode.db";
+pub const DATABASE: &str = ".data/opencode/opencode.db";
 
 /// Split SessionWiki's shared SQLite key into its physical file and literal ID.
 pub fn database_key(path: &Path) -> Option<(&Path, &str)> {

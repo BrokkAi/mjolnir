@@ -401,6 +401,126 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
 }
 
 #[test]
+fn opencode_import_validates_captured_snapshot_against_preview() {
+    use mj_checkpoint::native::opencode::DATABASE;
+    use rusqlite::{Connection, params};
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let cwd = root.join("app");
+    initialize_repository(&cwd, "app");
+    let home = root.join("opencode");
+    let database = home.join(DATABASE);
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA wal_autocheckpoint=OFF;
+         CREATE TABLE session_v2 (
+             id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER,
+             time_updated INTEGER, parent_id TEXT
+         );
+         CREATE TABLE session_message (
+             id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER,
+             seq INTEGER, data TEXT
+         );",
+    )
+    .unwrap();
+    let id = "selected";
+    let other = "unrelated";
+    for sid in [id, other] {
+        conn.execute(
+            "INSERT INTO session_v2 VALUES (?1, ?2, 'OpenCode', 1794272400000, 1794272400000, NULL)",
+            params![sid, cwd.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+    let add_message = |conn: &Connection, sid: &str, message: &str, seq: i64| {
+        conn.execute(
+            "INSERT INTO session_message VALUES (?1, ?2, 'user', 1794272400000 + ?3, ?3, ?4)",
+            params![message, sid, seq, json!({"text": message}).to_string()],
+        )
+        .unwrap();
+    };
+    add_message(&conn, id, "preview", 1);
+
+    let harness = HarnessKind::OpenCode;
+    let located = locate_native_session(
+        harness,
+        &home,
+        &ClaudeSessionSelection::NativeSessionId(id.into()),
+    )
+    .unwrap();
+    let source_path = &located.source_path;
+    let config = test_config();
+    let archive_directory = root.join("archives");
+    let request = |transcript| NativeImportRequest {
+        harness,
+        harness_home: &home,
+        native_session_id: id,
+        source_path,
+        transcript,
+        bundle_id: "app",
+        profile_id: None,
+        title: None,
+        daemon_project_root: None,
+        archive_directory: &archive_directory,
+    };
+    let mut state = State::default();
+    let preview = read_native_transcript(harness, source_path).unwrap();
+    add_message(&conn, id, "before capture", 2);
+    let error = import_native_session(&config, &mut state, request(&preview), None).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("native session changed"),
+        "{error:#}"
+    );
+    assert!(state.sessions.is_empty());
+    assert!(fs::read_dir(&archive_directory).unwrap().next().is_none());
+
+    let preview = read_native_transcript(harness, source_path).unwrap();
+    add_message(&conn, other, "unrelated write", 1);
+    let report = |progress| {
+        if matches!(progress, ImportArchiveProgress::WritingArchive) {
+            let live = Connection::open(&database).unwrap();
+            add_message(&live, id, "after capture", 3);
+        }
+    };
+    let cancelled = AtomicBool::new(false);
+    let control = ImportControl {
+        cancelled: &cancelled,
+        progress: &report,
+        include_untracked: true,
+    };
+    let imported =
+        import_native_session(&config, &mut state, request(&preview), Some(&control)).unwrap();
+    assert!(state.sessions.contains_key(&imported.session_id));
+    assert_ne!(
+        read_native_transcript(harness, source_path).unwrap(),
+        preview
+    );
+    let archive = mj_checkpoint::archive::read_archive_verified(&imported.archive_path).unwrap();
+    let artifact = archive.manifest.payloads.iter().find(|payload| {
+        matches!(&payload.role, PayloadRole::NativeArtifact { relative_path } if relative_path == Path::new(DATABASE))
+    }).unwrap();
+    let archived_db = root.join("archived.db");
+    fs::write(&archived_db, archive.payload(artifact).unwrap()).unwrap();
+    let archived_key = PathBuf::from(format!("{}\u{1f}{id}", archived_db.display()));
+    assert_eq!(
+        read_native_transcript(harness, &archived_key).unwrap(),
+        preview
+    );
+    let archived = Connection::open(&archived_db).unwrap();
+    let message_ids = archived
+        .prepare("SELECT id FROM session_message ORDER BY seq")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(message_ids, ["preview", "before capture"]);
+}
+
+#[test]
 fn antigravity_import_recovers_workspace_from_log_when_summary_has_none() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("agy");
