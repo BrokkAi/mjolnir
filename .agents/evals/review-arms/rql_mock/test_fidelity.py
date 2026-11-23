@@ -912,6 +912,24 @@ class ModelIdentity(unittest.TestCase):
         self.assertLess(cap, full_rec_bytes)
         self.assertEqual(len(partition_reconciliation_groups("(q)", file_table, groups, max_bytes=cap)), 3)
 
+        # Compact representatives preserve verbatim byte offsets so repeated tokens on one line stay distinct.
+        line_site = {"path": "a.rs", "start_line": 1, "end_line": 1}
+        repeated_batches = [
+            {"0": {"kind": "structural_match", "sites": [line_site], "fields": {
+                "operand": {"site": line_site, "verbatim": [{"start_byte": 0, "end_byte": 3, "text": "foo"}]}}}},
+            {"1": {"kind": "structural_match", "sites": [line_site], "fields": {
+                "operand": {"site": line_site, "verbatim": [{"start_byte": 6, "end_byte": 9, "text": "foo"}]}}}},
+        ]
+        repeated_prelim = {
+            "0": {"in_scope": True, "key": "b0:first", "reason": "first foo"},
+            "1": {"in_scope": True, "key": "b1:second", "reason": "second foo"},
+        }
+        _, repeated_groups = reconciliation_groups(repeated_batches, repeated_prelim)
+        self.assertEqual(repeated_groups["b0:first"]["representative"]["fields"]["operand"],
+                         {"site": "f0:1-1", "verbatim": [[0, 3, "foo"]]})
+        self.assertEqual(repeated_groups["b1:second"]["representative"]["fields"]["operand"],
+                         {"site": "f0:1-1", "verbatim": [[6, 9, "foo"]]})
+
         query = Query("guarded-paths", "random", "fixture", "c" * 40, "(q)")
         with TemporaryDirectory() as root, patch.object(fidelity_live, "ADJUDICATION_INPUT_LIMIT", cap), \
                 patch.object(fidelity_live, "blob_reader", lambda *args: blobs.get):
