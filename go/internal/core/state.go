@@ -202,6 +202,12 @@ func (v QueuedCommandKindSetConfig) MarshalJSON() ([]byte, error) {
 	return stateMarshalExternal("set_config", plain(v))
 }
 
+// UnmarshalQueuedCommandKindJSON decodes a QueuedCommandKind for other
+// packages (the store keeps one in materialized_queued_prompts.kind_json).
+func UnmarshalQueuedCommandKindJSON(data []byte) (QueuedCommandKind, error) {
+	return unmarshalQueuedCommandKind(data)
+}
+
 func unmarshalQueuedCommandKind(data []byte) (QueuedCommandKind, error) {
 	tag, content, err := stateExternal(data)
 	if err != nil {
@@ -1223,6 +1229,12 @@ func unmarshalPodmanWorkspaceLocator(data []byte) (PodmanWorkspaceLocator, error
 		return PodmanWorkspaceLocatorHostPath(value), err
 	}
 	return nil, fmt.Errorf("unknown variant `%s`", tag)
+}
+
+// UnmarshalPodmanWorkspaceLocatorJSON decodes a PodmanWorkspaceLocator for
+// other packages (the store keeps one in session_targets.workspace_storage).
+func UnmarshalPodmanWorkspaceLocatorJSON(data []byte) (PodmanWorkspaceLocator, error) {
+	return unmarshalPodmanWorkspaceLocator(data)
 }
 
 // statePodmanStorage resolves a decoded workspace_storage field, which
