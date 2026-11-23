@@ -16,8 +16,16 @@ import (
 )
 
 func (r *DurableRelay) Handle(envelope core.RelayRequestEnvelope) core.RelayResponseEnvelope {
+	return r.handleWithAntigravityStopBaseline(envelope, nil)
+}
+
+// handleWithAntigravityStopBaseline answers envelope. observedBaselineDigest
+// is nil unless the live worker read SQLite before an Antigravity Stop; a
+// completed read can report that the row did not exist (a nil inner
+// pointer).
+func (r *DurableRelay) handleWithAntigravityStopBaseline(envelope core.RelayRequestEnvelope, observedBaselineDigest **[32]byte) core.RelayResponseEnvelope {
 	requestID := envelope.RequestID
-	body, err := r.handleInner(&envelope)
+	body, err := r.handleInner(&envelope, observedBaselineDigest)
 	if err != nil {
 		body = core.RelayResponseBodyError{Error: core.RelayProtocolError{
 			Code:      core.RelayErrorCodeInternal,
@@ -81,7 +89,7 @@ func (r *DurableRelay) envelopeRejection(envelope *core.RelayRequestEnvelope) co
 	return core.RelayProtocolRejection(envelope)
 }
 
-func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.RelayResponseBody, error) {
+func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope, observedBaselineDigest **[32]byte) (core.RelayResponseBody, error) {
 	if body := r.envelopeRejection(envelope); body != nil {
 		return body, nil
 	}
@@ -93,6 +101,11 @@ func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.Re
 	switch request := envelope.Request.(type) {
 	case core.RelayRequestHello:
 		panic("unreachable: hello is answered by envelopeRejection")
+	case core.RelayRequestAntigravityStop:
+		if err := r.antigravityStop(request.ConversationID, request.FullyIdle, request.TerminationReason, observedBaselineDigest); err != nil {
+			return nil, err
+		}
+		payload = core.RelayResponsePayloadAntigravityStopObserved{}
 	case core.RelayRequestAttach:
 		answer, refusal, err := r.attach(request.AfterOrdinal, request.AfterDigest, request.KnownStateDigest)
 		if err != nil {
@@ -120,6 +133,45 @@ func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.Re
 			return refused(refusal)
 		}
 		payload = answer
+	case core.RelayRequestHoldInPlaceMoveDispatch:
+		answer, refusal, err := r.holdInPlaceMoveDispatch(request.OperationID, request.ExpectedStoreID)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return refused(refusal)
+		}
+		payload = answer
+	case core.RelayRequestDiscardHeldMoveCommands:
+		answer, refusal, err := r.discardHeldMoveCommands(request.OperationID, request.ExpectedStoreID, request.CommandIDs)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return refused(refusal)
+		}
+		payload = answer
+	case core.RelayRequestSubmitFront:
+		answer, refusal, err := r.submitFrontCommand(request.OperationID, request.ExpectedStoreID, request.CommandID, request.Command)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return refused(refusal)
+		}
+		payload = answer
+	case core.RelayRequestReleaseInPlaceMoveDispatch:
+		answer, refusal, err := r.releaseInPlaceMoveDispatch(request.OperationID, request.ExpectedStoreID)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return refused(refusal)
+		}
+		payload = answer
+	case core.RelayRequestRestartHarnessInPlace:
+		return core.RelayError(core.RelayErrorCodeInvalidRequest,
+			"restart_harness_in_place is handled by the worker runtime", false, nil), nil
 	case core.RelayRequestReadQueuedCommand:
 		// One admitted command is bounded by RelayCommandByteBudget,
 		// independently of the total size of the durable queue.
@@ -141,6 +193,12 @@ func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.Re
 			return core.RelayError(core.RelayErrorCodeInvalidState, refusal, false, nil), nil
 		}
 		payload = core.RelayResponsePayloadCheckpointMailbox{Mailbox: mailbox}
+	case core.RelayRequestReadCheckpointNativeUse:
+		evidence, refusal := r.checkpointNativeUse(request.BarrierCommandID, &request.Cut)
+		if refusal != "" {
+			return core.RelayError(core.RelayErrorCodeInvalidState, refusal, false, nil), nil
+		}
+		payload = core.RelayResponsePayloadCheckpointNativeUse{NativeUseEvidence: evidence}
 	case core.RelayRequestReadPendingElicitation:
 		pending := core.RelayResponsePayloadPendingElicitation{}
 		if body := r.snapshot.PendingElicitations[request.ElicitationID]; body != nil {
@@ -192,7 +250,7 @@ func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.Re
 		}
 		payload = core.RelayResponsePayloadStatus{State: state}
 	case core.RelayRequestDrainMailbox:
-		answer, err := r.DrainMailbox(request.HookEvent)
+		answer, err := r.drainMailboxWithInitialSteps(request.HookEvent, request.ConversationID, request.InitialNumSteps)
 		if err != nil {
 			return nil, err
 		}
@@ -240,7 +298,8 @@ func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.Re
 		core.RelayRequestReadCredentials, core.RelayRequestInstallCredentials, core.RelayRequestSkillsState,
 		core.RelayRequestInstallSkills, core.RelayRequestGithubTokenState, core.RelayRequestInstallGithubToken,
 		core.RelayRequestRemoveGithubToken, core.RelayRequestProjectMemorySnapshot, core.RelayRequestProjectMemoryTransfer,
-		core.RelayRequestHistoryQuery, core.RelayRequestCompleteHistoryRequest, core.RelayRequestInstallProjectMemorySnapshot,
+		core.RelayRequestHistoryQuery, core.RelayRequestCompleteHistoryRequest, core.RelayRequestCompleteGuardianRequest,
+		core.RelayRequestInstallProjectMemorySnapshot,
 		core.RelayRequestReplaceProjectMemoryTree, core.RelayRequestCompleteSubagentRequest, core.RelayRequestPollSubagentQueue,
 		core.RelayRequestWaitForChange, core.RelayRequestSetSubagentAdmission, core.RelayRequestSetOperatorAway:
 		return core.RelayError(core.RelayErrorCodeInvalidState,
@@ -254,6 +313,10 @@ func (r *DurableRelay) handleInner(envelope *core.RelayRequestEnvelope) (core.Re
 		// A durable-only relay has no live history broker. The worker's
 		// connection transport intercepts this when a broker is present.
 		payload = core.RelayResponsePayloadHistoryRequests{Requests: []core.HistoryRequest{}}
+	// The live connection owns the worker's pending reviews. A sealed relay
+	// serving only the journal has none.
+	case core.RelayRequestGuardianRequests:
+		payload = core.RelayResponsePayloadGuardianRequests{Requests: []core.GuardianReviewRequest{}}
 	case core.RelayRequestRespondElicitation:
 		return core.RelayError(core.RelayErrorCodeInvalidState,
 			"elicitation responses must be handled by the live relay transport", false, nil), nil

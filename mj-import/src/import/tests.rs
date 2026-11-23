@@ -12,6 +12,7 @@ fn container_template() -> mj_core::config::ContainerTemplate {
         platform: None,
         cpus: None,
         memory: None,
+        memory_hard_limit: None,
         environment: Default::default(),
         workspace_storage: Default::default(),
     }

@@ -53,10 +53,10 @@ type BuildIdentity struct {
 // it is the same after every commit and a test build stays fresh; its commit
 // time is unknown, as for a build without Git.
 func buildIdentityForTests() BuildIdentity {
-	return BuildIdentity{
-		BuildID:       PackageVersion + "+" + testRevision,
-		WorkerBuildID: PackageVersion + "+" + testRevision,
-	}
+	// Generate the dummy digest so no literal test revision is linked into a
+	// program that uses the shared identity accessors.
+	id := fmt.Sprintf("%s+%040x", PackageVersion, 0)
+	return BuildIdentity{BuildID: id, WorkerBuildID: id}
 }
 
 // installedIdentity is Rust's `INSTALLED` (renamed beside the installed
@@ -112,7 +112,7 @@ func installed() BuildIdentity {
 	defer installedIdentity.mu.Unlock()
 	if installedIdentity.identity == nil {
 		// A test binary has no `main` of ours to install one.
-		if !testing.Testing() {
+		if !testing.Testing() && !TestFixturesEnabled() {
 			panic("the program did not install its build identity before using it")
 		}
 		identity := buildIdentityForTests()

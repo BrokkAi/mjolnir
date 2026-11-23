@@ -465,12 +465,13 @@ fn is_default_image(image: &String) -> bool {
 /// `machine`. A target table flattens [`ContainerTemplate`] into a tagged
 /// enum, where serde cannot refuse unknown keys, so the loader compares the
 /// table against this list to name the keys it ignores (R4-6).
-pub(super) const CONTAINER_TEMPLATE_KEYS: [&str; 8] = [
+pub(super) const CONTAINER_TEMPLATE_KEYS: [&str; 9] = [
     "image",
     "pull_policy",
     "platform",
     "cpus",
     "memory",
+    "memory_hard_limit",
     "environment",
     "workspace_storage",
     "build_cache",
@@ -491,6 +492,8 @@ pub struct ContainerTemplate {
     pub cpus: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_hard_limit: Option<bool>,
     /// Environment inside the container. An entry may name a secret instead
     /// of holding it; see [`super::Environment`].
     #[serde(default, skip_serializing_if = "Environment::is_empty")]
@@ -779,22 +782,15 @@ impl TargetTemplate {
     /// A copy without the settings that only matter when a session is
     /// launched.
     ///
-    /// Build cache settings are resolved once while a session is provisioned
-    /// and stored on its record, so an active session does not depend on
-    /// them. Comparing templates without them lets setup edit a machine's
-    /// build cache while sessions are running.
+    /// Build cache settings are captured at provisioning. RAM admission
+    /// policy is consulted for future launches. Both may be edited while a
+    /// session is running.
     #[must_use]
     pub fn without_launch_only_settings(&self) -> Self {
         let mut stripped = self.clone();
-        match &mut stripped {
-            Self::LocalPodman { container }
-            | Self::LocalDocker { container }
-            | Self::AppleContainer { container }
-            | Self::SshPodman { container, .. }
-            | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. }
-            | Self::SshNitro { container, .. } => container.build_cache = None,
-            Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => {}
+        if let Some(container) = stripped.container_mut() {
+            container.build_cache = None;
+            container.memory_hard_limit = None;
         }
         stripped
     }
@@ -908,6 +904,12 @@ impl TargetTemplate {
                          a Nitro sandbox always uses a volume"
                     );
                 }
+                if container.memory_hard_limit == Some(false) {
+                    bail!(
+                        "target template {id:?} cannot disable memory_hard_limit; \
+                         Nitro sandboxes use a fixed memory pool reserved at boot"
+                    );
+                }
                 Ok(())
             }
         }
@@ -955,22 +957,49 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
     )
 }
 
-/// Whether a container's RAM size is a hard admission limit on its host.
-///
-/// Apple's `container` runs each session in its own VM, and the macOS
-/// Virtualization framework does not return memory the guest frees, so a
-/// long-lived session's footprint grows toward its configured size. A Nitro
-/// sandbox takes its memory from a pool reserved at boot, which cannot be
-/// overcommitted. Every other runtime's limit is a cgroup ceiling that an
-/// idle container does not use, so its host may be overcommitted with a
-/// warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryHardLimitReason {
+    AppleContainer,
+    NitroPool,
+    TargetSetting,
+}
+
+impl MemoryHardLimitReason {
+    pub fn explanation(&self) -> &'static str {
+        match self {
+            Self::AppleContainer => "Apple containers do not give freed memory back to macOS",
+            Self::NitroPool => {
+                "Nitro sandboxes take their memory from the memory pool the host reserved at boot"
+            }
+            Self::TargetSetting => "this target is configured to enforce RAM limits",
+        }
+    }
+}
+
+/// Why a target refuses to overcommit host RAM, if it does.
+pub fn container_memory_hard_limit_reason(
+    template: &TargetTemplate,
+) -> Option<MemoryHardLimitReason> {
+    match template {
+        TargetTemplate::SshNitro { .. } => Some(MemoryHardLimitReason::NitroPool),
+        TargetTemplate::AppleContainer { container }
+        | TargetTemplate::SshAppleContainer { container, .. } => (container.memory_hard_limit
+            != Some(false))
+        .then_some(MemoryHardLimitReason::AppleContainer),
+        TargetTemplate::LocalPodman { container }
+        | TargetTemplate::SshPodman { container, .. }
+        | TargetTemplate::LocalDocker { container }
+        | TargetTemplate::SshDocker { container, .. } => (container.memory_hard_limit
+            == Some(true))
+        .then_some(MemoryHardLimitReason::TargetSetting),
+        TargetTemplate::LocalBare
+        | TargetTemplate::SshBare { .. }
+        | TargetTemplate::AwsEc2 { .. } => None,
+    }
+}
+
 pub fn container_memory_is_hard_limit(template: &TargetTemplate) -> bool {
-    matches!(
-        template,
-        TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::SshAppleContainer { .. }
-            | TargetTemplate::SshNitro { .. }
-    )
+    container_memory_hard_limit_reason(template).is_some()
 }
 
 /// The host name that prompt-history mounts on `template` should be filed

@@ -203,7 +203,7 @@ func describe(pid uint32, bootID string) Described {
 	if arguments, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
 		var parts []string
 		for _, argument := range bytes.Split(arguments, []byte{0}) {
-			parts = append(parts, captureLossy(argument))
+			parts = append(parts, fromUTF8Lossy(argument))
 		}
 		command = strings.Join(parts, " ")
 	}

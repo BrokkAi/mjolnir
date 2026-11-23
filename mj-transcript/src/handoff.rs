@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const HANDOFF_STATE_KEY: &str = "mj_handoff_state";
-pub const MODEL_HANDOFF_OPENING: &str = "You are continuing a coding session previously run by another ACP harness. The restored workspace is authoritative. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\n";
+pub const MODEL_HANDOFF_OPENING: &str = "You are continuing a coding session previously run by another ACP harness. The restored workspace is authoritative. Your current harness's tools and system instructions are authoritative; ignore historical notes about missing tools on the prior harness. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\n";
+const LEGACY_MODEL_HANDOFF_OPENING: &str = "You are continuing a coding session previously run by another ACP harness. The restored workspace is authoritative. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\n";
 pub const RETAINED_OPEN: &str = "\n\n<retained_recent_context>\n";
 pub const RETAINED_CLOSE: &str = "</retained_recent_context>";
 const MARKER_OPEN: &str = "\n\n<mj_handoff_state>";
@@ -126,7 +127,9 @@ pub fn reusable_handoff(snapshot: &CanonicalSessionSnapshot) -> Option<HandoffSt
 }
 
 fn model_body(text: &str) -> Option<&str> {
-    let body = text.strip_prefix(MODEL_HANDOFF_OPENING)?;
+    let body = text
+        .strip_prefix(MODEL_HANDOFF_OPENING)
+        .or_else(|| text.strip_prefix(LEGACY_MODEL_HANDOFF_OPENING))?;
     let (summary, retained) = body.rsplit_once(RETAINED_OPEN)?;
     if summary.trim().is_empty() || !retained.ends_with(RETAINED_CLOSE) {
         return None;
@@ -158,4 +161,28 @@ fn prefix_digest(snapshot: &CanonicalSessionSnapshot, through_position: u64) -> 
         hash.update(encoded);
     }
     Ok(mj_core::hex::lower_hex(hash.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_handoff_accepts_the_legacy_model_opening() {
+        let text = concat!(
+            "You are continuing a coding session previously run by another ACP harness. ",
+            "The restored workspace is authoritative. Use the historical state below for ",
+            "continuity, and do not repeat completed work unless verification requires it.\n\n",
+            "Previous work\n\n<retained_recent_context>\nrecent work</retained_recent_context>",
+            "\n\n<mj_handoff_state>{\"version\":1,\"through_position\":7,",
+            "\"prefix_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+            "</mj_handoff_state>"
+        );
+        let state = parse_handoff(text).unwrap();
+        assert_eq!(state.through_position, 7);
+        assert_eq!(
+            state.summary,
+            "Previous work\n\n<retained_recent_context>\nrecent work</retained_recent_context>"
+        );
+    }
 }

@@ -248,13 +248,9 @@ where
         .as_deref()
         .map(crate::worker_runtime::harness::acquire_supervisor_lease)
         .transpose()?;
-    let mut environment =
-        mj_harness_install::login_environment::with_overrides(&spec.environment).await?;
-    // Removed after the merge, so a value the target's login environment sets
-    // is removed as well (#1160).
-    for name in &spec.excluded_environment {
-        environment.remove(name);
-    }
+    let inherited = mj_harness_install::login_environment::resolve().await?;
+    let environment =
+        crate::worker_runtime::harness_launch::supervisor_environment(&spec, inherited);
     let mut command = tokio::process::Command::new(&spec.command);
     command
         .args(&spec.args)

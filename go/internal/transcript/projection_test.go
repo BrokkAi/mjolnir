@@ -744,10 +744,10 @@ func TestGoldenMailboxDeliveryTranscript(t *testing.T) {
 		projectionApplyObservation(t, &session, projectionQueued(fmt.Sprintf("mixed-event-%d", index),
 			core.RelayCommandDeliverMailboxEvent{Event: event}, int64(event.CreatedAtMs)))
 	}
-	projectionApplyObservation(t, &session, projectionQueued("mixed-event-wake", core.RelayCommandMailboxWake{Events: events}, 600))
+	projectionApplyObservation(t, &session, projectionQueued("mailbox-wake-mixed-events", core.RelayCommandMailboxWake{Events: events}, 600))
 
 	// A wake starts an autonomous turn, with no invented local user prompt.
-	projectionApplyObservation(t, &session, projectionStarted("mixed-event-wake", 700))
+	projectionApplyObservation(t, &session, projectionStarted("mailbox-wake-mixed-events", 700))
 	projectionApplyObservation(t, &session, projectionUntaggedAgentChunk("Working on the delivered messages."))
 	// Hook acknowledgments can carry a batch, and a replay must retain each
 	// original position rather than append another copy.
@@ -1593,7 +1593,7 @@ func TestInterruptedPromptBeforeRestartProducesOneUnreadInterruption(t *testing.
 					t.Fatalf("content = %s", body.Content)
 				}
 			} else {
-				if len(body.Content) != 2 || text(0) != core.RestartRecoveryNote || text(1) != variant.original {
+				if len(body.Content) != 1 || text(0) != core.RestartRecoveryNote {
 					t.Fatalf("content = %s", body.Content)
 				}
 			}
@@ -1604,7 +1604,7 @@ func TestInterruptedPromptBeforeRestartProducesOneUnreadInterruption(t *testing.
 // Hard-won: d8947861e: interrupting a mailbox wake left the projected session running.
 func TestInterruptedMailboxWakeWithContinuationReturnsToIdle(t *testing.T) {
 	session := core.MaterializedSessionEmpty("session")
-	const commandID = "mailbox-wake"
+	const commandID = "mailbox-wake-parent"
 	continuationID := core.RestartContinuationID(commandID)
 	projectionApplyObservation(t, &session, projectionQueued(commandID, core.RelayCommandMailboxWake{Events: []core.MailboxEvent{{
 		Key:         "parent:message:1",
@@ -2859,18 +2859,18 @@ func TestInterruptedMailboxWakeBeforeRestartProducesOneUnreadInterruption(t *tes
 	for _, restartFirst := range []bool{false, true} {
 		for _, nativeRunning := range []bool{false, true} {
 			session := core.MaterializedSessionEmpty("session")
-			projectionApplyObservation(t, &session, projectionQueued("mailbox-wake", core.RelayCommandMailboxWake{Events: []core.MailboxEvent{{
+			projectionApplyObservation(t, &session, projectionQueued("mailbox-wake-parent", core.RelayCommandMailboxWake{Events: []core.MailboxEvent{{
 				Key:         "parent-message",
 				Source:      "parent",
 				Wake:        true,
 				CreatedAtMs: 1,
 				Body:        core.MailboxEventBodyParentMessage{Text: "continue"},
 			}}}, 10))
-			projectionApplyObservation(t, &session, projectionStarted("mailbox-wake", 20))
-			if session.ActiveTurn == nil || !session.ActiveTurn.BelongsTo("mailbox-wake") {
+			projectionApplyObservation(t, &session, projectionStarted("mailbox-wake-parent", 20))
+			if session.ActiveTurn == nil || !session.ActiveTurn.BelongsTo("mailbox-wake-parent") {
 				t.Fatalf("active turn = %#v", session.ActiveTurn)
 			}
-			if projectionFindItem(&session, "user:mailbox-wake") != nil {
+			if projectionFindItem(&session, "user:mailbox-wake-parent") != nil {
 				t.Fatal("the wake has a user row")
 			}
 			if nativeRunning {
@@ -2880,12 +2880,12 @@ func TestInterruptedMailboxWakeBeforeRestartProducesOneUnreadInterruption(t *tes
 			if restartFirst {
 				projectionApplyObservation(t, &session, core.RelayObservationSessionRestarted{})
 			}
-			continuationID := core.RestartContinuationID("mailbox-wake")
+			continuationID := core.RestartContinuationID("mailbox-wake-parent")
 			restarted := core.OutcomeReasonWorkerRestarted
 			projectionApplyObservation(t, &session, core.RelayObservationCommandInterrupted{
 				ContinuationID: &continuationID,
 				Reason:         &restarted,
-				CommandID:      "mailbox-wake",
+				CommandID:      "mailbox-wake-parent",
 				Command:        core.RelayCommandKindPrompt,
 				Message:        "bridge restarted",
 			})

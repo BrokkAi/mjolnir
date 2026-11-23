@@ -426,13 +426,11 @@ where
                     }
                     permission_output_count.mark();
                     permission_step_clock.begin_client_work();
-                    let plan_permission = is_plan_permission(&request);
-                    let claude_plan_approval = is_claude_plan_approval(&request, permission_harness);
+                    let plan_permission = PlanPermission::recognize(&request, permission_harness);
                     // The worker's policy owns tool approval, including provider
                     // asks that survive full-access mode. Plans still need consent.
                     if permission_policy.is_unconstrained()
-                        && !plan_permission
-                        && !claude_plan_approval
+                        && plan_permission.is_none()
                     {
                         let Some(response) = allow_permission_response(&request) else {
                             let message = format!(
@@ -458,7 +456,7 @@ where
                         );
                         return responder.respond(response);
                     }
-                    if let Some(response) = permission_owned_mcp.response(&request) {
+                    if plan_permission.is_none() && let Some(response) = permission_owned_mcp.response(&request) {
                         tracing::debug!(
                             harness = %permission_harness.display_name(),
                             session_id = %request.session_id,
@@ -468,8 +466,7 @@ where
                         );
                         return responder.respond(response);
                     }
-                    if !plan_permission
-                        && !claude_plan_approval
+                    if plan_permission.is_none()
                         && let Some(response) = gh_permission_response(
                             &request,
                             permission_tool_input(
@@ -491,8 +488,7 @@ where
                     // Review permissions that reached ACP after the existing
                     // native and owned-tool approvals.
                     let mut guardian_preface = None;
-                    if !plan_permission
-                        && !claude_plan_approval
+                    if plan_permission.is_none()
                         && let Some(guardian) = permission_guardian
                     {
                         let input = permission_tool_input(&request.tool_call, &permission_tool_content);
@@ -553,18 +549,28 @@ where
                             }
                         }
                     }
-                    // Preserve Muse's Guardian forms; YOLO plans use plan review.
-                    let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
-                        && !permission_policy.is_unconstrained();
                     let native_child = permission_native_agents.lock().expect("native agent router poisoned")
                         .is_child(&request.session_id.to_string());
-                    if !native_child && !prefer_form_over_plan_review && plan_permission {
+                    // Claude still needs consent when plan text is absent or its policy
+                    // mode is unavailable without ContinueInBypass. In those cases the
+                    // normal permission card presents its policy-filtered modes so lower
+                    // modes stay selectable.
+                    let plan_review = if let Some(plan) = plan_permission
+                        && !native_child
+                        && plan.can_implement(&request, permission_enforcement)
+                    {
+                        let value = serde_json::to_value(&request)
+                            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+                        (plan == PlanPermission::Codex || permission_plan_text(&value).is_some())
+                            .then_some((plan, value))
+                    } else {
+                        None
+                    };
+                    if let Some((plan, value)) = plan_review {
                         let id = format!(
                             "plan-review-{}",
                             permission_review_ids.fetch_add(1, Ordering::Relaxed)
                         );
-                        let value = serde_json::to_value(&request)
-                            .map_err(|_| agent_client_protocol::Error::internal_error())?;
                         let review = normalized_plan_review(id.clone(), &value);
                         let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
                         let implementation = permission_implementation_slot
@@ -618,7 +624,7 @@ where
                             let mut handoff_completion = None;
                             let selection = response.map_or_else(
                                 || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
-                                |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_enforcement),
+                                |response| plan.answer(&request, response.harness_response(), permission_enforcement),
                             ).and_then(|selection| match selection {
                                 PlanPermissionAnswer::Native(answer) => Ok(answer),
                                 PlanPermissionAnswer::ContinueInBypass => {
@@ -657,29 +663,11 @@ where
                         });
                         return Ok(());
                     }
-                    // A permission request that is_plan_permission() did not classify
-                    // is shown as a generic permission form below. Log its raw shape
-                    // so an agent whose request form we do not yet recognize stays
-                    // diagnosable from worker.log.
-                    match serde_json::to_value(&request) {
-                        Ok(raw) => tracing::debug!(
-                            target: "acp::plan_diag",
-                            operation = "unclassified_permission_request",
-                            request = %raw,
-                            "permission request not classified as a plan review; raw payload follows"
-                        ),
-                        Err(error) => tracing::debug!(
-                            target: "acp::plan_diag",
-                            operation = "unclassified_permission_request",
-                            %error,
-                            "permission request not classified as a plan review and could not be serialized"
-                        ),
-                    }
                     let id = format!("{permission_id_prefix}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                     // The worker alone decides which answers this form offers, and
                     // accepts only those (see `permission_choices`).
                     let PermissionAnswers { choices, skip } =
-                        permission_choices(&request, permission_harness, permission_enforcement);
+                        permission_choices(&request, plan_permission, permission_enforcement);
                     let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
                         "const": choice.option_id.to_string(), "title": choice.title,
                     })).collect();
@@ -722,7 +710,7 @@ where
                         skip: skip.is_some(),
                         tool_call_id: (!native_child).then(|| request.tool_call.tool_call_id.to_string()),
                     });
-                    let identity = if plan_permission || claude_plan_approval {
+                    let identity = if plan_permission.is_some() {
                         AwayRequest::Plan
                     } else {
                         away_permission_identity(&request, permission_tool_input(&request.tool_call, &permission_tool_content))
@@ -756,8 +744,11 @@ where
                         };
                         let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
-                        let answer = if matches!(response, Some(PendingAnswer::OperatorAway)) && (plan_permission || claude_plan_approval) {
-                            permission_plan_response(&request, ElicitationResponse::Decline)
+                        let answer = if !cancellation.is_cancelled()
+                            && matches!(response, Some(PendingAnswer::OperatorAway))
+                            && let Some(plan) = plan_permission
+                        {
+                            plan.decline(&request)
                         } else { RequestPermissionResponse::new(outcome) };
                         let result = responder.respond(answer);
                         if let Err(error) = result {

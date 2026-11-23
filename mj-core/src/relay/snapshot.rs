@@ -243,7 +243,7 @@ pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[S
 }
 
 impl RelayCommand {
-    /// Effective prompt, including the worker-authored restart note.
+    /// Effective prompt. Ordinary restart continuations send only the recovery note.
     pub fn prompt_blocks_for_command(
         &self,
         command_id: &str,
@@ -252,12 +252,9 @@ impl RelayCommand {
         if crate::continuation::is_restart_continuation(command_id)
             && !crate::acp::prompt_is_slash_command(&prompt)
         {
-            let mut prompt = prompt.into_owned();
-            prompt.insert(
-                0,
-                ContentBlock::from(crate::continuation::RESTART_RECOVERY_NOTE.to_owned()),
-            );
-            Some(std::borrow::Cow::Owned(prompt))
+            Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                crate::continuation::RESTART_RECOVERY_NOTE.to_owned(),
+            )]))
         } else {
             Some(prompt)
         }
@@ -1143,14 +1140,17 @@ impl RelayOperationalState {
     }
 
     /// What this session is doing. Older workers can publish an inferred idle
-    /// state even while their authoritative native inventory reports a task.
+    /// state even while their authoritative native inventory reports a task,
+    /// so a reported task takes the classification of the same facts. The
+    /// daemon's quota check, published over the worker's state, still shows.
     #[must_use]
     pub fn activity_state(&self) -> crate::activity::ActivityState {
         self.activity
             .clone()
-            .filter(|_| {
-                BackgroundCommand::oldest_antigravity_task_start(&self.background_commands)
-                    .is_none()
+            .filter(|published| {
+                matches!(published, crate::activity::ActivityState::CheckingQuota)
+                    || BackgroundCommand::oldest_antigravity_task_start(&self.background_commands)
+                        .is_none()
             })
             .unwrap_or_else(|| crate::activity::classify(&self.facts()))
     }

@@ -419,8 +419,8 @@ func (d *bridgeDriver) permission(ctx context.Context, request schema.RequestPer
 			return *response, nil
 		}
 	}
-	// A harness without its own guardian: the Mjolnir guardian answers the
-	// request, or hands it to the person's form.
+	// Review permissions that reached ACP after the existing native and
+	// owned-tool approvals.
 	guardianPreface := ""
 	if !planPermission && !claudePlanApproval && d.guardian != nil {
 		answer, preface, answered, err := d.guardianReview(ctx, &request, input)
@@ -2162,6 +2162,10 @@ func drainRequestsFromThePreviousBridge(requests <-chan CommandRequest) {
 		case CommandRequestStopBackgroundTask:
 			sendResolution(request.Resolved, errors.New("ACP bridge restarted before stopping task"))
 			variant = "StopBackgroundTask"
+		case CommandRequestReloadLaunchConfig:
+			sendResolution(request.Resolved, errors.New("ACP bridge restarted before applying launch configuration"))
+			releaseReloadLeases(request.Leases)
+			variant = "ReloadLaunchConfig"
 		}
 		slog.Debug("dropping a request queued for the previous ACP bridge",
 			"operation", "acp_bridge_restart", "variant", variant, "request_id", requestID)

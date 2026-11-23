@@ -82,9 +82,10 @@ func (s *harnessStartup) observeEvent(restarting, ready bool) {
 
 // runRelayCoordinatorWithShells runs the coordinator of a started harness,
 // with the completed-turn classifier this worker resolves for itself.
-func runRelayCoordinatorWithShells(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, dispatchWakes *dispatchWakeChannel, commands *commandChannel, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, capture *WorkObserver, startup harnessStartup) error {
+func runRelayCoordinatorWithShells(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, dispatchWakes *dispatchWakeChannel, commands *commandChannel, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, antigravityTasks *AntigravityTaskMonitor, capture *WorkObserver, startup harnessStartup) error {
 	verdict := verdictClientResolve(ctx, nil)
-	return runRelayCoordinator(ctx, relay, events, dispatchWakes, commands, userShells, kimiTasks, verdict, capture, &startup)
+	return runRelayCoordinator(ctx, relay, events, dispatchWakes, commands, userShells,
+		&taskMonitors{kimi: kimiTasks, antigravity: antigravityTasks}, verdict, capture, &startup)
 }
 
 // runRelayCoordinatorWithVerdict runs the coordinator with the given
@@ -92,7 +93,21 @@ func runRelayCoordinatorWithShells(ctx context.Context, relay *RelayCell, events
 // one handle to each thing it serves; a struct of them would only rename the
 // arguments.
 func runRelayCoordinatorWithVerdict(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, dispatchWakes *dispatchWakeChannel, commands *commandChannel, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, verdict *VerdictClient, capture *WorkObserver) error {
-	return runRelayCoordinator(ctx, relay, events, dispatchWakes, commands, userShells, kimiTasks, verdict, capture, nil)
+	return runRelayCoordinator(ctx, relay, events, dispatchWakes, commands, userShells,
+		&taskMonitors{kimi: kimiTasks}, verdict, capture, nil)
+}
+
+// taskMonitors are the native task trackers the coordinator serves.
+type taskMonitors struct {
+	kimi        *KimiTaskMonitor
+	antigravity *AntigravityTaskMonitor
+}
+
+func (m *taskMonitors) prepareEvent(ctx context.Context, relay *RelayCell, event *core.RuntimeEvent) error {
+	if err := prepareKimiRuntimeEvent(ctx, m.kimi, relay, event); err != nil {
+		return err
+	}
+	return prepareAntigravityRuntimeEvent(ctx, m.antigravity, relay, *event)
 }
 
 // coordinatorTimer is a persisted wall deadline and the monotonic instant
@@ -157,7 +172,7 @@ func coordinatorTimerAt(at time.Time) (<-chan time.Time, func()) {
 // runRelayCoordinator records runtime events and dispatches commands until
 // the ACP runtime stops, the harness fails to start, or ctx is cancelled
 // (Rust: the task is aborted).
-func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, dispatchWakes *dispatchWakeChannel, commands *commandChannel, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, verdict *VerdictClient, capture *WorkObserver, startup *harnessStartup) error {
+func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan core.RuntimeEvent, dispatchWakes *dispatchWakeChannel, commands *commandChannel, userShells *UserShellRegistry, monitors *taskMonitors, verdict *VerdictClient, capture *WorkObserver, startup *harnessStartup) error {
 	// The coordinator owns the receiving side of the dispatch wakes: once it
 	// stops, a sender sees the closed channel.
 	defer dispatchWakes.closeReceiver()
@@ -234,10 +249,16 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 	inFlight := map[string]core.RelayCommand{}
 	configuration := sessionConfigurationOpening
 	var kimiPoll <-chan time.Time
-	if kimiTasks != nil {
+	if monitors.kimi != nil {
 		ticker := time.NewTicker(kimiTaskPollInterval)
 		defer ticker.Stop()
 		kimiPoll = ticker.C
+	}
+	var antigravityPoll <-chan time.Time
+	if monitors.antigravity != nil {
+		ticker := time.NewTicker(antigravityTaskPollInterval)
+		defer ticker.Stop()
+		antigravityPoll = ticker.C
 	}
 	loginReads := make(chan loginReadResult, 1)
 	loginPending := false
@@ -303,6 +324,28 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 		cutHeld := guard.WorkerWritesHeld()
 		held := cutHeld || guard.ClosePending()
 		guard.Unlock()
+		if !cutHeld {
+			guard := relay.Lock()
+			pendingSettle := guard.HasPendingAntigravityTurnSettle()
+			guard.Unlock()
+			if pendingSettle {
+				stopped, err := settleAntigravityTurn(ctx, relay, inFlight, events, &configuration, userShells, monitors, capturing(), startup)
+				if err != nil {
+					return err
+				}
+				if stopped {
+					shutdownVerdicts()
+					return nil
+				}
+				if err := recoverAuthentication(relay); err != nil {
+					return err
+				}
+				if err := dispatch(); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if !held {
 			guard := relay.Lock()
 			var err error
@@ -432,9 +475,9 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 			fired, stop := coordinatorTimerAt(stopTimer.wake)
 			stopC, stops = fired, append(stops, stop)
 		}
-		kimiC := kimiPoll
+		kimiC, antigravityC := kimiPoll, antigravityPoll
 		if held {
-			kimiC = nil
+			kimiC, antigravityC = nil, nil
 		}
 		var verdictC <-chan verdictTaskResult
 		if verdictPending > 0 && !held {
@@ -453,7 +496,7 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 			// Already received readiness precedes an uncommitted expiry.
 			// Bound the prefix by the actual queue so fresh chatter cannot
 			// starve the startup decision.
-			stopped, err := recordQueuedRuntimeEvents(ctx, relay, inFlight, events, &configuration, userShells, kimiTasks, len(events), capturing(), startup)
+			stopped, err := recordQueuedRuntimeEvents(ctx, relay, inFlight, events, &configuration, userShells, monitors, len(events), capturing(), startup)
 			if err != nil || stopped {
 				return stopped, err
 			}
@@ -501,7 +544,7 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 			// A wake only says durable work may now be available. Runtime
 			// events already in the channel always belong before any newly
 			// admitted checkpoint cut.
-			stopped, err := recordQueuedRuntimeEvents(ctx, relay, inFlight, events, &configuration, userShells, kimiTasks, len(events), capturing(), startup)
+			stopped, err := recordQueuedRuntimeEvents(ctx, relay, inFlight, events, &configuration, userShells, monitors, len(events), capturing(), startup)
 			if err != nil || stopped {
 				return stopped, err
 			}
@@ -517,7 +560,7 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 				}
 				return true, nil
 			}
-			stopped, err := recordRuntimeEventBatch(ctx, relay, inFlight, event, events, &configuration, userShells, kimiTasks, capturing(), startup)
+			stopped, err := recordRuntimeEventBatch(ctx, relay, inFlight, event, events, &configuration, userShells, monitors, capturing(), startup)
 			if err != nil || stopped {
 				return stopped, err
 			}
@@ -578,7 +621,7 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 			if ended != nil {
 				return false, ended
 			}
-			stopped, err := recordEventsInOrder(ctx, relay, inFlight, deferred, events, &configuration, userShells, kimiTasks, capturing(), startup)
+			stopped, err := recordEventsInOrder(ctx, relay, inFlight, deferred, events, &configuration, userShells, monitors, capturing(), startup)
 			if err != nil || stopped {
 				return stopped, err
 			}
@@ -586,7 +629,10 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 			return false, dispatch()
 		}
 		onKimiPoll := func() (bool, error) {
-			return false, kimiTasks.refresh(ctx, relay, false)
+			return false, monitors.kimi.refresh(ctx, relay, false)
+		}
+		onAntigravityPoll := func() (bool, error) {
+			return false, monitors.antigravity.refresh(ctx, relay, false)
 		}
 		onLoginRead := func(result loginReadResult) (bool, error) {
 			loginPending = false
@@ -694,6 +740,8 @@ func runRelayCoordinator(ctx context.Context, relay *RelayCell, events <-chan co
 				action = onStop
 			case <-kimiC:
 				action = onKimiPoll
+			case <-antigravityC:
+				action = onAntigravityPoll
 			case <-verdictPoll:
 				action = func() (bool, error) { return false, nil }
 			case result := <-loginC:
@@ -897,20 +945,20 @@ func captureWhileOpen(ctx context.Context, capture *DispatchCapture, relay *Rela
 // recordOneRuntimeEvent prepares, observes (for a sub-agent's finishing
 // prompt) and records one runtime event, then the events that arrived while
 // it was observed.
-func recordOneRuntimeEvent(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, event core.RuntimeEvent, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
-	return recordEventsInOrder(ctx, relay, inFlight, []core.RuntimeEvent{event}, events, sessionConfiguration, userShells, kimiTasks, capture, startup)
+func recordOneRuntimeEvent(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, event core.RuntimeEvent, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, monitors *taskMonitors, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
+	return recordEventsInOrder(ctx, relay, inFlight, []core.RuntimeEvent{event}, events, sessionConfiguration, userShells, monitors, capture, startup)
 }
 
 // recordEventsInOrder records queue in order. What arrives while one event
 // is observed belongs after it, and is itself a later event of the same
 // kind: it is judged by the same rule, so an autonomous turn that ends
 // inside an observation is observed too.
-func recordEventsInOrder(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, queue []core.RuntimeEvent, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
+func recordEventsInOrder(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, queue []core.RuntimeEvent, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, monitors *taskMonitors, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
 	for len(queue) > 0 {
 		event := queue[0]
 		queue = queue[1:]
 		var deferred []core.RuntimeEvent
-		stopped, err := observeAndRecord(ctx, relay, inFlight, event, events, &deferred, sessionConfiguration, userShells, kimiTasks, capture, startup)
+		stopped, err := observeAndRecord(ctx, relay, inFlight, event, events, &deferred, sessionConfiguration, userShells, monitors, capture, startup)
 		if err != nil {
 			return false, err
 		}
@@ -925,7 +973,42 @@ func recordEventsInOrder(ctx context.Context, relay *RelayCell, inFlight map[str
 // observeAndRecord applies one rule for "a managed child's turn ended": a
 // prompt of ours finishing, or the harness ending a turn it started on its
 // own. Such an event is observed before it is recorded.
-func observeAndRecord(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, event core.RuntimeEvent, events <-chan core.RuntimeEvent, deferred *[]core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
+// settleAntigravityTurn records the queued ACP output ahead of the Stop's
+// durable turn boundary, then settles the turn the Stop ended.
+func settleAntigravityTurn(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, monitors *taskMonitors, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
+	stopped, err := recordQueuedRuntimeEvents(ctx, relay, inFlight, events, sessionConfiguration, userShells, monitors, len(events), capture, startup)
+	if err != nil || stopped {
+		return stopped, err
+	}
+	guard := relay.Lock()
+	pending := guard.HasPendingAntigravityTurnSettle()
+	guard.Unlock()
+	if !pending {
+		return false, nil
+	}
+	if monitors.antigravity != nil {
+		if err := monitors.antigravity.refresh(ctx, relay, true); err != nil {
+			return false, err
+		}
+	}
+	var deferred []core.RuntimeEvent
+	var facts *core.WorkFacts
+	if capture != nil {
+		observed := captureWhileOpen(ctx, capture, relay, events, &deferred)
+		facts = &observed
+	}
+	guard = relay.Lock()
+	guard.OfferSettleFacts(facts)
+	_, settleErr := guard.SettlePendingAntigravityHarnessTurn()
+	guard.OfferSettleFacts(nil)
+	guard.Unlock()
+	if settleErr != nil {
+		return false, settleErr
+	}
+	return recordEventsInOrder(ctx, relay, inFlight, deferred, events, sessionConfiguration, userShells, monitors, capture, startup)
+}
+
+func observeAndRecord(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, event core.RuntimeEvent, events <-chan core.RuntimeEvent, deferred *[]core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, monitors *taskMonitors, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
 	_, finishingPrompt := event.(core.RuntimeEventPromptFinished)
 	if !finishingPrompt {
 		guard := relay.Lock()
@@ -935,7 +1018,7 @@ func observeAndRecord(ctx context.Context, relay *RelayCell, inFlight map[string
 	var workFacts *core.WorkFacts
 	if capture != nil && finishingPrompt {
 		prepared := make(chan error, 1)
-		go func() { prepared <- prepareKimiRuntimeEvent(ctx, kimiTasks, relay, &event) }()
+		go func() { prepared <- monitors.prepareEvent(ctx, relay, &event) }()
 		facts := captureWhileOpen(ctx, capture, relay, events, deferred)
 		if err := <-prepared; err != nil {
 			return false, err
@@ -944,7 +1027,7 @@ func observeAndRecord(ctx context.Context, relay *RelayCell, inFlight map[string
 			return false, err
 		}
 		workFacts = &facts
-	} else if err := prepareKimiRuntimeEvent(ctx, kimiTasks, relay, &event); err != nil {
+	} else if err := monitors.prepareEvent(ctx, relay, &event); err != nil {
 		return false, err
 	}
 	trackUserShellCompletion(userShells, event)
@@ -1009,18 +1092,18 @@ func recordRuntimeEventWithStartup(relay *RelayCell, inFlight map[string]core.Re
 // ACP runtime before admitting a checkpoint barrier. A command event may
 // itself materialize several durable observations, and queued notification
 // events belong to the cut ahead of any waiting barrier.
-func recordRuntimeEventBatch(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, first core.RuntimeEvent, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
-	stopped, err := recordOneRuntimeEvent(ctx, relay, inFlight, first, events, sessionConfiguration, userShells, kimiTasks, capture, startup)
+func recordRuntimeEventBatch(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, first core.RuntimeEvent, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, monitors *taskMonitors, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
+	stopped, err := recordOneRuntimeEvent(ctx, relay, inFlight, first, events, sessionConfiguration, userShells, monitors, capture, startup)
 	if err != nil || stopped {
 		return stopped, err
 	}
-	return recordQueuedRuntimeEvents(ctx, relay, inFlight, events, sessionConfiguration, userShells, kimiTasks, len(events), capture, startup)
+	return recordQueuedRuntimeEvents(ctx, relay, inFlight, events, sessionConfiguration, userShells, monitors, len(events), capture, startup)
 }
 
 // recordQueuedRuntimeEvents records at most maximum events already queued,
 // without waiting for more. A closed event channel interrupts the commands
 // in flight and stops the coordinator.
-func recordQueuedRuntimeEvents(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, kimiTasks *KimiTaskMonitor, maximum int, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
+func recordQueuedRuntimeEvents(ctx context.Context, relay *RelayCell, inFlight map[string]core.RelayCommand, events <-chan core.RuntimeEvent, sessionConfiguration *sessionConfiguration, userShells *UserShellRegistry, monitors *taskMonitors, maximum int, capture *DispatchCapture, startup *harnessStartup) (bool, error) {
 	for recorded := 0; recorded < maximum; recorded++ {
 		select {
 		case event, open := <-events:
@@ -1030,7 +1113,7 @@ func recordQueuedRuntimeEvents(ctx context.Context, relay *RelayCell, inFlight m
 				}
 				return true, nil
 			}
-			stopped, err := recordOneRuntimeEvent(ctx, relay, inFlight, event, events, sessionConfiguration, userShells, kimiTasks, capture, startup)
+			stopped, err := recordOneRuntimeEvent(ctx, relay, inFlight, event, events, sessionConfiguration, userShells, monitors, capture, startup)
 			if err != nil || stopped {
 				return stopped, err
 			}
@@ -1113,10 +1196,10 @@ func recordRuntimeEventLocked(relay *RelayGuard, inFlight map[string]core.RelayC
 		relay.SetSteeringSupported(event.SteeringSupported)
 		// Every bridge that advertises the steering extension queues the
 		// steer until the running turn can take it, at its next tool
-		// boundary. Do not require a second capability: the extension is the
-		// whole contract, and some bridges (Muse) implement it without
-		// advertising `idleBehaviors`.
-		relay.SetAutomaticSteering(event.SteeringSupported != nil && *event.SteeringSupported)
+		// boundary. Hook-based harnesses (Claude, Antigravity) also steer
+		// automatically when their boundary hook is installed.
+		automatic := relay.EffectiveSteeringSupported()
+		relay.SetAutomaticSteering(automatic != nil && *automatic)
 	case core.RuntimeEventBridgeRetired:
 		return relay.retireAgentTerminalConnection(event.TerminalConnectionID)
 	case core.RuntimeEventContextClearing:

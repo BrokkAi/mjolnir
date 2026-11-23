@@ -145,6 +145,19 @@ func (r *DurableRelay) checkpointMailbox(barrierCommandID string, cut *core.Rela
 	return mailbox, "", nil
 }
 
+// checkpointNativeUse is the worker-owned native-session-use evidence at a
+// ready barrier's cut, or the reason it cannot be read there.
+func (r *DurableRelay) checkpointNativeUse(barrierCommandID string, cut *core.RelayCursor) (*core.NativeSessionUseEvidence, string) {
+	if !r.atCheckpointCut(barrierCommandID, cut) {
+		return nil, "the relay is no longer at this checkpoint cut"
+	}
+	if r.snapshot.NativeUseEvidence == nil {
+		return nil, ""
+	}
+	evidence := *r.snapshot.NativeUseEvidence
+	return &evidence, ""
+}
+
 // spoilCheckpointCut marks the ready barrier's cut spoiled by background
 // work that started after it, and ends its hold.
 func (r *DurableRelay) spoilCheckpointCut() error {

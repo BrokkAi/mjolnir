@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
+	"github.com/BrokkAi/mjolnir/go/internal/workermcp"
 )
 
 // ClaudeLoginIdentity is one observed identity shared by credential
@@ -154,9 +154,10 @@ func readClaudeLoginFingerprint(ctx context.Context, path string) (*string, erro
 // role it backs: a parent delegates through it, a child only hands its
 // report back.
 type SubagentMcpSocket struct {
-	Path                  string
-	Role                  core.SubagentMcpRole
-	AgentMailboxesEnabled bool
+	Path                 string
+	Role                 core.SubagentMcpRole
+	Oracle               bool
+	OrchestratorsEnabled bool
 	// SubtleSubagents says whether a parent's spawn tool offers the subtle
 	// task type.
 	SubtleSubagents bool
@@ -167,6 +168,16 @@ type SubagentMcpSocket struct {
 	// Legacy shared Codex homes use ACP; shared Claude homes skip these
 	// tools entirely.
 	ProfileRegistration bool
+}
+
+// toolNames are the `mj-agents` tools this socket's server lists, and so the
+// tools a harness that asks before an MCP tool is allowed: Rust's
+// `socket.role.tool_names(socket.oracle, socket.orchestrators_enabled)`.
+// core's SubagentMcpRole.ToolNames takes the oracle and orchestrator flags
+// once the mj-core sync ports them; until then it lists the base role's
+// tools.
+func (s *SubagentMcpSocket) toolNames() []string {
+	return slices.Clone(s.Role.ToolNames(s.Oracle, s.OrchestratorsEnabled))
 }
 
 // ReviewerMcpServer is one configured MCP server exposed to the reviewer
@@ -297,6 +308,19 @@ func (s *LaunchSpec) StartupModel() *string {
 	return &copied
 }
 
+// applyReloadAcceptedConfig forgets the accepted selectors a launch
+// configuration reload replaces: all of them for another harness, the model
+// alone when the reload names one.
+func (s *LaunchSpec) applyReloadAcceptedConfig(launchConfig *core.WorkerLaunchConfig) {
+	accepted, unlock := s.AcceptedConfig.Lock()
+	defer unlock()
+	if s.Harness != launchConfig.Harness {
+		*accepted = core.AcceptedSessionConfig{}
+	} else if launchConfig.InitialModel != nil {
+		accepted.Model = nil
+	}
+}
+
 // memoryMCPServer is the project-history server's name.
 const memoryMCPServer = "mj-memory"
 
@@ -393,7 +417,7 @@ func sessionRequestMeta(spec *LaunchSpec, includeHistoryTools bool) schema.Meta 
 			}
 		}
 		if socket := spec.SubagentMCPSocket; socket != nil {
-			for _, tool := range socket.Role.ToolNames() {
+			for _, tool := range socket.toolNames() {
 				allowed = append(allowed, fmt.Sprintf("mcp__%s__%s", core.SubagentMCPServer, tool))
 			}
 			if socket.ReviewTools {
@@ -465,8 +489,6 @@ func subagentACPMCP(spec *LaunchSpec) *schema.McpServer {
 		spec.Harness.ID(),
 		"--role",
 		socket.Role.ID(),
-		"--agent-mailboxes-enabled",
-		strconv.FormatBool(socket.AgentMailboxesEnabled),
 	}
 	if !socket.SubtleSubagents {
 		// Only the non-default value is passed, for older workers.
@@ -514,13 +536,13 @@ func ownedACPMCPTools(spec *LaunchSpec) []ownedMcpServerTools {
 		// The history server lists its tools only with a history socket.
 		var tools []string
 		if spec.ProjectMemory != nil && spec.ProjectMemory.HistorySocket != nil {
-			tools = ToolNames()
+			tools = workermcp.ToolNames()
 		}
 		owned = append(owned, ownedMcpServerTools{server: server.Stdio.Name, tools: tools})
 	}
 	if server := subagentACPMCP(spec); server != nil && server.Stdio != nil && spec.SubagentMCPSocket != nil {
 		owned = append(owned, ownedMcpServerTools{
-			server: server.Stdio.Name, tools: slices.Clone(spec.SubagentMCPSocket.Role.ToolNames()),
+			server: server.Stdio.Name, tools: spec.SubagentMCPSocket.toolNames(),
 		})
 	}
 	if server := reviewACPMCP(spec); server != nil && server.Stdio != nil {

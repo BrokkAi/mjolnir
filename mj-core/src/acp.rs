@@ -80,8 +80,15 @@ pub fn plan_review_keep_planning() -> ElicitationResponse {
 }
 
 pub fn normalized_plan_review(id: String, value: &serde_json::Value) -> ElicitationRequest {
-    let plan = nested_string(value, &["plan", "plan_content", "planContent"])
-        .unwrap_or("The agent did not provide plan text in its review request.");
+    let plan = if value.get("toolCall").is_some() {
+        permission_plan_text(value)
+    } else {
+        // Grok's native plan RPC carries the proposal directly in its params.
+        ["plan", "plan_content", "planContent"]
+            .into_iter()
+            .find_map(|key| value.get(key)?.as_str())
+    }
+    .unwrap_or("The agent did not provide plan text in its review request.");
     ElicitationRequest {
         id,
         title: Some("Plan review".into()),
@@ -151,21 +158,8 @@ pub fn normalized_plan_review(id: String, value: &serde_json::Value) -> Elicitat
     }
 }
 
-pub fn nested_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
-    match value {
-        serde_json::Value::Object(object) => {
-            for key in keys {
-                if let Some(value) = object.get(*key).and_then(serde_json::Value::as_str) {
-                    return Some(value);
-                }
-            }
-            object.values().find_map(|value| nested_string(value, keys))
-        }
-        serde_json::Value::Array(values) => {
-            values.iter().find_map(|value| nested_string(value, keys))
-        }
-        _ => None,
-    }
+pub fn permission_plan_text(request: &serde_json::Value) -> Option<&str> {
+    request.pointer("/toolCall/rawInput/plan")?.as_str()
 }
 
 pub fn session_config_choices(

@@ -81,14 +81,16 @@ func TestPackageVersionMismatchesNeedApplyExceptForAnyVersion(t *testing.T) {
 // Hard-won: review of b0f32d6: restoring the mise shims put them ahead of the build-cache launchers, bypassing mbx for mise-installed cmake.
 func TestBuildCacheLaunchersStayAheadOfProjectShims(t *testing.T) {
 	environment := map[string]string{
-		"PATH":              "/managed-node/bin:/wrap:/usr/bin",
+		"PATH":              "/managed-node/bin:/worker/bin:/wrap:/usr/bin",
 		"MJ_BUILD_TOOL_BIN": "/wrap",
+		"MJ_GITHUB_CLI_BIN": "/worker/bin",
+		"MBX_SHIMS_DIR":     "/worker/mbx-shims",
 		"MISE_DATA_DIR":     "/data",
 	}
 	if err := projectToolsApplyEnvironment(environment, []string{"/workspace/repo"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := environment["PATH"]; got != "/wrap:/data/shims:/managed-node/bin:/usr/bin" {
+	if got := environment["PATH"]; got != "/wrap:/worker/bin:/data/shims:/managed-node/bin:/usr/bin" {
 		t.Fatalf("PATH = %s", got)
 	}
 }

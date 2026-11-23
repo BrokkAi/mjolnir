@@ -127,6 +127,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image,
                     pull_policy: Default::default(),
@@ -269,6 +270,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image,
                     pull_policy: Default::default(),
@@ -405,6 +407,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image,
                     pull_policy: Default::default(),
@@ -648,6 +651,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    memory_hard_limit: None,
                     build_cache: None,
                     image,
                     pull_policy: Default::default(),

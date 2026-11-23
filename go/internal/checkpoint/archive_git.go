@@ -37,6 +37,31 @@ type GitCommandRunner interface {
 	Run(repository string, command *GitCommand) (GitOutput, error)
 }
 
+// gitFileRunner is a GitCommandRunner that writes a command's standard
+// output directly to a file rather than buffering it in memory (an override
+// of Rust's GitCommandRunner::run_to_file).
+type gitFileRunner interface {
+	RunToFile(repository string, command *GitCommand, output *os.File) (GitOutput, error)
+}
+
+// runToFile runs command with its stdout written to output. A runner without
+// its own RunToFile runs the command and writes the captured output, as the
+// Rust trait's default method does. The returned Stdout is empty. The caller
+// keeps owning output.
+func runToFile(runner GitCommandRunner, repository string, command *GitCommand, output *os.File) (GitOutput, error) {
+	if fileRunner, ok := runner.(gitFileRunner); ok {
+		return fileRunner.RunToFile(repository, command, output)
+	}
+	result, err := runner.Run(repository, command)
+	if err != nil {
+		return GitOutput{}, err
+	}
+	if _, err := output.Write(result.Stdout); err != nil {
+		return GitOutput{}, err
+	}
+	return GitOutput{Status: result.Status, Stdout: []byte{}, Stderr: result.Stderr}, nil
+}
+
 // GitCommand is one Git invocation. Empty Stdin and Env are nil.
 type GitCommand struct {
 	Arguments []string
@@ -70,6 +95,26 @@ var NonInteractiveGitEnv = [2][2]string{
 type SystemGit struct{}
 
 func (SystemGit) Run(repository string, command *GitCommand) (GitOutput, error) {
+	process := prepareGitCommand(repository, command)
+	output, err := core.RunWithInput(process, command.Stdin)
+	if err != nil {
+		return GitOutput{}, fmt.Errorf("run git in %s: %w", repository, err)
+	}
+	return GitOutput{Status: output.Status.ExitCode(), Stdout: output.Stdout, Stderr: output.Stderr}, nil
+}
+
+// RunToFile runs Git with its stdout written directly to output. The caller
+// keeps owning output.
+func (SystemGit) RunToFile(repository string, command *GitCommand, output *os.File) (GitOutput, error) {
+	process := prepareGitCommand(repository, command)
+	result, err := core.RunWithInputToFile(process, command.Stdin, output)
+	if err != nil {
+		return GitOutput{}, fmt.Errorf("run git in %s: %w", repository, err)
+	}
+	return GitOutput{Status: result.Status.ExitCode(), Stdout: result.Stdout, Stderr: result.Stderr}, nil
+}
+
+func prepareGitCommand(repository string, command *GitCommand) *exec.Cmd {
 	process := exec.Command("git", command.Arguments...)
 	process.Dir = repository
 	// Later entries win in os/exec, as later `Command::env` calls do in Rust.
@@ -80,14 +125,33 @@ func (SystemGit) Run(repository string, command *GitCommand) (GitOutput, error) 
 	for _, pair := range command.Env {
 		process.Env = append(process.Env, pair[0]+"="+pair[1])
 	}
-	if ssh, ok := core.LocalGitSSHCommand(); ok {
+	ownSSHCommand := slices.ContainsFunc(command.Env, func(pair [2]string) bool {
+		return pair[0] == "GIT_SSH_COMMAND"
+	})
+	if ssh, ok := core.LocalGitSSHCommand(); ok && !ownSSHCommand {
 		process.Env = append(process.Env, "GIT_SSH_COMMAND="+ssh)
 	}
-	output, err := core.RunWithInput(process, command.Stdin)
-	if err != nil {
-		return GitOutput{}, fmt.Errorf("run git in %s: %w", repository, err)
+	return process
+}
+
+// syntheticGitIdentity is a stable identity for internal commits and
+// reflogs; it is never written to user config.
+func syntheticGitIdentity() [][2]string {
+	return [][2]string{
+		{"GIT_AUTHOR_NAME", "Mjolnir"},
+		{"GIT_AUTHOR_EMAIL", "mjolnir@localhost"},
+		{"GIT_COMMITTER_NAME", "Mjolnir"},
+		{"GIT_COMMITTER_EMAIL", "mjolnir@localhost"},
 	}
-	return GitOutput{Status: output.Status.ExitCode(), Stdout: output.Stdout, Stderr: output.Stderr}, nil
+}
+
+// syntheticGitCommitIdentity: commit objects use a fixed date for stable
+// IDs; reflogs must use current time because Git does not list epoch-zero
+// stash reflog entries.
+func syntheticGitCommitIdentity() [][2]string {
+	return append(syntheticGitIdentity(),
+		[2]string{"GIT_AUTHOR_DATE", "@0 +0000"},
+		[2]string{"GIT_COMMITTER_DATE", "@0 +0000"})
 }
 
 // GitHistoryMode is how much committed history a snapshot has to carry.
@@ -146,9 +210,6 @@ type UntrackedFiles int
 const (
 	UntrackedFilesInclude UntrackedFiles = iota
 	UntrackedFilesExclude
-	// UntrackedFilesIgnoreNestedRepositories is explicit user consent to omit
-	// untracked nested Git repositories.
-	UntrackedFilesIgnoreNestedRepositories
 )
 
 func CollectGitSnapshot(runner GitCommandRunner, repository string, spec *GitCollectionSpec) (RepositorySnapshot, error) {
@@ -682,20 +743,38 @@ func MigrateReviewRef(runner GitCommandRunner, repository string, legacy string,
 	return err
 }
 
+// absoluteGitPath resolves Git's path output against repository without
+// requiring --path-format (Git 2.31).
+func absoluteGitPath(repository string, output []byte) (string, error) {
+	path, err := core.FromGitBytes(bytes.TrimSuffix(output, []byte("\n")))
+	if err != nil {
+		return "", err
+	}
+	// std::path::absolute, which snapshot.rs uses as well.
+	return snapshotAbsolute(gitJoin(repository, path))
+}
+
 // gitDirectories returns the worktree's own Git directory and the
 // repository's common one, which are the same directory in the main
 // worktree.
 func gitDirectories(runner GitCommandRunner, repository string) (gitDir string, commonDir string, err error) {
-	output, err := gitText(runner, repository,
-		[]string{"rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir"})
+	gitDirOutput, err := gitBytes(runner, repository, []string{"rev-parse", "--absolute-git-dir"}, nil,
+		"locate Git directory")
 	if err != nil {
-		return "", "", fmt.Errorf("locate the Git directories: %w", err)
+		return "", "", err
 	}
-	lines := gitLines(output)
-	if len(lines) < 2 {
-		return "", "", fmt.Errorf("git rev-parse named no common directory: %s", output)
+	commonOutput, err := gitBytes(runner, repository, []string{"rev-parse", "--git-common-dir"}, nil,
+		"locate common Git directory")
+	if err != nil {
+		return "", "", err
 	}
-	return lines[0], lines[1], nil
+	if gitDir, err = absoluteGitPath(repository, gitDirOutput); err != nil {
+		return "", "", err
+	}
+	if commonDir, err = absoluteGitPath(repository, commonOutput); err != nil {
+		return "", "", err
+	}
+	return gitDir, commonDir, nil
 }
 
 func sameDirectory(left string, right string) (bool, error) {
@@ -2019,6 +2098,150 @@ type preparedWorktree struct {
 	operation  *collectedOperation
 }
 
+// unquoteGitPath decodes a Git C-quoted path, including octal-escaped native
+// bytes.
+func unquoteGitPath(path []byte) (string, error) {
+	quoted, ok := bytes.CutPrefix(path, []byte(`"`))
+	if !ok {
+		return core.FromGitBytes(path)
+	}
+	quoted, ok = bytes.CutSuffix(quoted, []byte(`"`))
+	if !ok {
+		return "", errors.New("unterminated quoted worktree path")
+	}
+	var decoded []byte
+	for len(quoted) > 0 {
+		b := quoted[0]
+		quoted = quoted[1:]
+		if b != '\\' {
+			decoded = append(decoded, b)
+			continue
+		}
+		if len(quoted) == 0 {
+			return "", errors.New("incomplete worktree path escape")
+		}
+		escape := quoted[0]
+		quoted = quoted[1:]
+		switch {
+		case escape == 'a':
+			decoded = append(decoded, 7)
+		case escape == 'b':
+			decoded = append(decoded, 8)
+		case escape == 't':
+			decoded = append(decoded, '\t')
+		case escape == 'n':
+			decoded = append(decoded, '\n')
+		case escape == 'v':
+			decoded = append(decoded, 11)
+		case escape == 'f':
+			decoded = append(decoded, 12)
+		case escape == 'r':
+			decoded = append(decoded, '\r')
+		case escape == '\\' || escape == '"':
+			decoded = append(decoded, escape)
+		case escape >= '0' && escape <= '7':
+			if len(quoted) < 2 || quoted[0] < '0' || quoted[0] > '7' || quoted[1] < '0' || quoted[1] > '7' {
+				return "", errors.New("invalid octal worktree path escape")
+			}
+			value := uint16(escape-'0')*64 + uint16(quoted[0]-'0')*8 + uint16(quoted[1]-'0')
+			quoted = quoted[2:]
+			if value > 0xff {
+				return "", errors.New("worktree path octal escape exceeds one byte")
+			}
+			decoded = append(decoded, byte(value))
+		default:
+			return "", errors.New("invalid worktree path escape")
+		}
+	}
+	return core.FromGitBytes(decoded)
+}
+
+// registeredWorktreePaths reads registered checkout paths without pruning
+// them. Old-Git path checks apply only inside the requested checkout.
+func registeredWorktreePaths(runner GitCommandRunner, repository string) ([]string, error) {
+	topLevel, err := gitCanonicalize(repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", repository, err)
+	}
+	listed, err := runGit(runner, repository, []string{"worktree", "list", "--porcelain", "-z"}, nil)
+	if err != nil {
+		return nil, err
+	}
+	const newlineError = "Git cannot list newline worktree paths; upgrade Git to 2.36 or newer"
+	delimiter := byte(0)
+	if listed.Status == 129 {
+		// Older target Git rejects -z. Its line format cannot represent a
+		// newline path, so inspect registration paths before interpreting
+		// it.
+		if strings.Contains(topLevel, "\n") {
+			return nil, errors.New(newlineError)
+		}
+		_, commonDirectory, err := gitDirectories(runner, repository)
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(filepath.Join(commonDirectory, "worktrees"))
+		switch {
+		case err == nil:
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				raw, err := os.ReadFile(filepath.Join(commonDirectory, "worktrees", entry.Name(), "gitdir"))
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
+				if err != nil {
+					return nil, fmt.Errorf("read legacy worktree registration: %w", err)
+				}
+				raw = bytes.TrimSuffix(raw, []byte("\n"))
+				registered, err := core.FromGitBytes(raw)
+				if err != nil {
+					return nil, err
+				}
+				checkout, ok := checkpointParent(registered)
+				if !ok {
+					return nil, errors.New("worktree registration has no checkout")
+				}
+				if !archivePathStartsWith(checkout, repository) && !archivePathStartsWith(checkout, topLevel) {
+					continue
+				}
+				if bytes.Contains(raw, []byte("\n")) {
+					return nil, errors.New(newlineError)
+				}
+			}
+		case errors.Is(err, fs.ErrNotExist):
+		default:
+			return nil, fmt.Errorf("inspect legacy worktree registrations: %w", err)
+		}
+		if listed, err = runGit(runner, repository, []string{"worktree", "list", "--porcelain"}, nil); err != nil {
+			return nil, err
+		}
+		delimiter = '\n'
+	}
+	if listed.Status != 0 {
+		return nil, gitFailure("list linked worktrees", &listed)
+	}
+	var paths []string
+	for _, line := range bytes.Split(listed.Stdout, []byte{delimiter}) {
+		raw, ok := bytes.CutPrefix(line, []byte("worktree "))
+		if !ok {
+			continue
+		}
+		var path string
+		if delimiter == '\n' {
+			path, err = unquoteGitPath(raw)
+		} else {
+			path, err = core.FromGitBytes(raw)
+		}
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
 // discoverLinkedWorktrees returns the linked worktrees of `repository`'s
 // checkout that live inside it, at any depth, parents before children.
 //
@@ -2036,22 +2259,12 @@ func discoverLinkedWorktrees(runner GitCommandRunner, repository string) ([]link
 	if err != nil {
 		return nil, err
 	}
-	// Git 2.31 has no `worktree list -z`; a path with a newline in it cannot
-	// be listed there, and is left out like any other unlistable directory.
-	listed, err := gitBytes(runner, repository, []string{"worktree", "list", "--porcelain"}, nil, "list linked worktrees")
+	registered, err := registeredWorktreePaths(runner, repository)
 	if err != nil {
 		return nil, err
 	}
 	var found []linkedWorktreeDirectory
-	for _, line := range bytes.Split(listed, []byte("\n")) {
-		raw, ok := bytes.CutPrefix(line, []byte("worktree "))
-		if !ok {
-			continue
-		}
-		path, err := core.FromGitBytes(raw)
-		if err != nil {
-			return nil, err
-		}
+	for _, path := range registered {
 		// `worktree list` names the user's worktrees anywhere on disk. Only a
 		// path that can lie inside the checkout may fail the capture, so
 		// decide that lexically, against the top level as given and resolved.
@@ -2412,16 +2625,41 @@ func relocatedReviewRefs(
 // untracked files are named from there, and `git apply` run from a
 // subdirectory skips every path outside it.
 func RestoreGitSnapshot(runner GitCommandRunner, repository string, snapshot *RepositorySnapshot) error {
-	return restoreGitSnapshotForSession(runner, repository, snapshot, nil, true)
+	_, err := restoreGitSnapshotForSession(runner, repository, snapshot, nil, true)
+	return err
 }
 
+// LegacyRestoreOptions adjust how a legacy (non-origin-delta) snapshot is
+// restored.
+type LegacyRestoreOptions struct {
+	// DetachOnBranchCollision checks out a detached HEAD, with a notice,
+	// when the saved branch already exists at a different commit, instead
+	// of moving that branch.
+	DetachOnBranchCollision bool
+}
+
+// restoreGitSnapshotForSession restores a snapshot and returns the resume
+// notices describing anything it could not give back as captured.
 func restoreGitSnapshotForSession(
 	runner GitCommandRunner,
 	repository string,
 	snapshot *RepositorySnapshot,
 	session *string,
 	restoreContents bool,
-) error {
+) ([]string, error) {
+	return restoreGitSnapshotForSessionWithOptions(runner, repository, snapshot, session, restoreContents,
+		LegacyRestoreOptions{})
+}
+
+func restoreGitSnapshotForSessionWithOptions(
+	runner GitCommandRunner,
+	repository string,
+	snapshot *RepositorySnapshot,
+	session *string,
+	restoreContents bool,
+	options LegacyRestoreOptions,
+) ([]string, error) {
+	notices := []string{}
 	metadata := &snapshot.Metadata
 	// Raw snapshots restore ref metadata only, even when the caller asks to
 	// restore repositories. Other sessions may be using this checkout.
@@ -2434,26 +2672,26 @@ func restoreGitSnapshotForSession(
 		}
 	}
 	if !restoreContents && !carriesMjolnirRefs {
-		return nil
+		return notices, nil
 	}
 	if metadata.RemoteWorkspace {
 		if err := core.ValidateNetworkURL(metadata.Origin); err != nil {
-			return err
+			return nil, err
 		}
 		for _, url := range metadata.PushURLs {
 			if err := core.ValidateNetworkURL(url); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if restoreContents && metadata.Branch != nil {
 		if err := ensureBranchAvailableForCheckout(runner, repository, *metadata.Branch); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	operation, payloads := metadata.GitOperation, snapshot.OperationPayloads
 	if (operation == nil) != (payloads == nil) {
-		return errors.New("the snapshot's Git operation metadata and payloads disagree")
+		return nil, errors.New("the snapshot's Git operation metadata and payloads disagree")
 	}
 	// A bundle fetched through HEAD cannot carry a linked worktree's commits,
 	// and it may have no HEAD of its own, so such a bundle is only unpacked
@@ -2462,19 +2700,15 @@ func restoreGitSnapshotForSession(
 		len(snapshot.LinkedWorktrees) > 0
 	if len(snapshot.CommittedBundle) > 0 {
 		if err := importCommittedBundle(runner, repository, snapshot.CommittedBundle, importsWithoutHead); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	savedRefs, err := relocatedReviewRefs(runner, repository, metadata, session)
 	if err != nil {
-		return err
-	}
-	if operation != nil {
-		if err := verifyObjects(runner, repository, operation); err != nil {
-			return err
-		}
+		return nil, err
 	}
 	cloneRefs := len(metadata.SavedRefs) > 0 || len(metadata.StashStack) > 0
+	var preservedCollidingBranch *string
 	if restoreContents {
 		checkoutTarget := "FETCH_HEAD"
 		if len(snapshot.CommittedBundle) == 0 || importsWithoutHead {
@@ -2484,16 +2718,56 @@ func restoreGitSnapshotForSession(
 			branch := *metadata.Branch
 			if _, err := gitBytes(runner, repository, []string{"check-ref-format", "--branch", branch}, nil,
 				"validate restored branch"); err != nil {
-				return err
+				return nil, err
 			}
-			if _, err := gitBytes(runner, repository, []string{"checkout", "-B", branch, checkoutTarget}, nil,
+			detachForCollision := false
+			if options.DetachOnBranchCollision {
+				existing, err := runGit(runner, repository,
+					[]string{"rev-parse", "--verify", "--quiet", "refs/heads/" + branch + "^{commit}"}, nil)
+				if err != nil {
+					return nil, err
+				}
+				switch existing.Status {
+				case 0:
+					existingCommit, err := trimOutput(existing.Stdout, "read existing branch")
+					if err != nil {
+						return nil, err
+					}
+					resolved, err := gitBytes(runner, repository,
+						[]string{"rev-parse", "--verify", checkoutTarget + "^{commit}"}, nil, "resolve restored commit")
+					if err != nil {
+						return nil, fmt.Errorf("%s: %w", checkoutAdvice(snapshot), err)
+					}
+					targetCommit, err := trimOutput(resolved, "resolve restored commit")
+					if err != nil {
+						return nil, err
+					}
+					if existingCommit != targetCommit {
+						detachForCollision = true
+						preserved := "refs/heads/" + branch
+						preservedCollidingBranch = &preserved
+						notices = append(notices, fmt.Sprintf(
+							"Checked out detached HEAD at %s because branch '%s' already exists at %s in the fresh clone.",
+							targetCommit, branch, existingCommit))
+					}
+				case 1:
+				default:
+					return nil, gitFailure("read existing branch", &existing)
+				}
+			}
+			if detachForCollision {
+				if _, err := gitBytes(runner, repository, []string{"checkout", "--detach", checkoutTarget}, nil,
+					"restore detached commit on branch collision"); err != nil {
+					return nil, fmt.Errorf("%s: %w", checkoutAdvice(snapshot), err)
+				}
+			} else if _, err := gitBytes(runner, repository, []string{"checkout", "-B", branch, checkoutTarget}, nil,
 				"restore committed branch"); err != nil {
-				return fmt.Errorf("%s: %w", checkoutAdvice(snapshot), err)
+				return nil, fmt.Errorf("%s: %w", checkoutAdvice(snapshot), err)
 			}
 		} else {
 			if _, err := gitBytes(runner, repository, []string{"checkout", "--detach", checkoutTarget}, nil,
 				"restore detached commit"); err != nil {
-				return fmt.Errorf("%s: %w", checkoutAdvice(snapshot), err)
+				return nil, fmt.Errorf("%s: %w", checkoutAdvice(snapshot), err)
 			}
 		}
 	}
@@ -2507,36 +2781,42 @@ func restoreGitSnapshotForSession(
 			if !restoreContents && !mjolnirRef {
 				continue
 			}
+			if preservedCollidingBranch != nil && *preservedCollidingBranch == name {
+				continue
+			}
 			operationRef := operation != nil && slices.ContainsFunc(operationRefNamespaces[:], func(namespace string) bool {
 				return strings.HasPrefix(name, namespace)
 			})
+			if operationRef {
+				continue
+			}
 			if !strings.HasPrefix(name, "refs/heads/") && !strings.HasPrefix(name, "refs/tags/") &&
-				!strings.HasPrefix(name, "refs/notes/") && !mjolnirRef && !operationRef {
-				return fmt.Errorf("saved Git ref has an unsupported namespace: %s", name)
+				!strings.HasPrefix(name, "refs/notes/") && !mjolnirRef {
+				return nil, fmt.Errorf("saved Git ref has an unsupported namespace: %s", name)
 			}
 			if _, err := gitBytes(runner, repository, []string{"check-ref-format", name}, nil,
 				"validate saved Git ref"); err != nil {
-				return err
+				return nil, err
 			}
 			if _, err := gitBytes(runner, repository, []string{"cat-file", "-e", oid}, nil,
 				"verify saved Git ref object"); err != nil {
-				return err
+				return nil, err
 			}
 			if !mjolnirRef {
 				if _, err := gitBytes(runner, repository, []string{"update-ref", name, oid}, nil,
 					"restore saved Git ref"); err != nil {
-					return err
+					return nil, err
 				}
 				continue
 			}
 			existing, err := runGit(runner, repository, []string{"rev-parse", "--verify", "--quiet", name}, nil)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			old := ""
 			if existing.Status == 0 {
 				if old, err = trimOutput(existing.Stdout, "read destination review ref"); err != nil {
-					return err
+					return nil, err
 				}
 			}
 			if old != "" {
@@ -2551,7 +2831,7 @@ func restoreGitSnapshotForSession(
 			}
 			if _, err := gitBytes(runner, repository, []string{"update-ref", name, oid, old}, nil,
 				"restore durable review ref"); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if restoreContents {
@@ -2559,45 +2839,51 @@ func restoreGitSnapshotForSession(
 				entry := metadata.StashStack[index]
 				if _, err := gitBytes(runner, repository, []string{"cat-file", "-e", entry.Commit}, nil,
 					"verify saved stash commit"); err != nil {
-					return err
+					return nil, err
 				}
 				if _, err := gitBytes(runner, repository,
 					[]string{"update-ref", "--create-reflog", "-m", entry.Message, "refs/stash", entry.Commit}, nil,
 					"restore saved stash entry"); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		}
 	}
 	if !restoreContents {
-		return nil
+		return notices, nil
 	}
 	if err := restoreRemoteWorkspaceConfiguration(runner, repository, metadata); err != nil {
-		return err
+		return nil, err
 	}
 	if len(snapshot.StagedPatch) > 0 {
 		if _, err := gitBytes(runner, repository, []string{"apply", "--binary", "--index", "-"}, snapshot.StagedPatch,
 			"restore staged Git patch"); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if len(snapshot.UnstagedPatch) > 0 {
 		if _, err := gitBytes(runner, repository, []string{"apply", "--binary", "-"}, snapshot.UnstagedPatch,
 			"restore unstaged Git patch"); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := restoreUntrackedTar(repository, snapshot.UntrackedTar); err != nil {
-		return err
+		return nil, err
 	}
 	if operation != nil {
-		if err := operationRestore(runner, repository, operation, payloads); err != nil {
-			return err
+		notice, err := operationRestore(repository, operation, payloads)
+		if err != nil {
+			return nil, err
 		}
+		notices = append(notices, notice)
 	}
 	// After the checkout is whole: a worktree cannot take a branch the
 	// checkout holds, and its directory must not exist when it is added.
-	return restoreLinkedWorktrees(runner, repository, snapshot.LinkedWorktrees)
+	worktreeNotices, err := restoreLinkedWorktrees(runner, repository, snapshot.LinkedWorktrees)
+	if err != nil {
+		return nil, err
+	}
+	return append(notices, worktreeNotices...), nil
 }
 
 // importCommittedBundle writes the bundle to a temporary file in the
@@ -2628,7 +2914,8 @@ func importCommittedBundle(runner GitCommandRunner, repository string, data []by
 // restoreLinkedWorktrees recreates the checkout's linked worktrees, parents
 // before children, each with the HEAD, index, files, operation and lock it
 // was captured with.
-func restoreLinkedWorktrees(runner GitCommandRunner, repository string, worktrees []LinkedWorktreeSnapshot) error {
+func restoreLinkedWorktrees(runner GitCommandRunner, repository string, worktrees []LinkedWorktreeSnapshot) ([]string, error) {
+	notices := []string{}
 	ordered := make([]*LinkedWorktreeSnapshot, len(worktrees))
 	for index := range worktrees {
 		ordered[index] = &worktrees[index]
@@ -2643,11 +2930,13 @@ func restoreLinkedWorktrees(runner GitCommandRunner, repository string, worktree
 		return gitComparePaths(left.Metadata.Path, right.Metadata.Path)
 	})
 	for _, worktree := range ordered {
-		if err := restoreLinkedWorktree(runner, repository, worktree); err != nil {
-			return fmt.Errorf("restore linked worktree %s: %w", worktree.Metadata.Path, err)
+		worktreeNotices, err := restoreLinkedWorktree(runner, repository, worktree)
+		if err != nil {
+			return nil, fmt.Errorf("restore linked worktree %s: %w", worktree.Metadata.Path, err)
 		}
+		notices = append(notices, worktreeNotices...)
 	}
-	return nil
+	return notices, nil
 }
 
 // listedWorktree is one entry of `git worktree list --porcelain`.
@@ -2689,18 +2978,18 @@ func listWorktrees(runner GitCommandRunner, repository string) ([]listedWorktree
 	return worktrees, nil
 }
 
-func restoreLinkedWorktree(runner GitCommandRunner, repository string, worktree *LinkedWorktreeSnapshot) error {
+func restoreLinkedWorktree(runner GitCommandRunner, repository string, worktree *LinkedWorktreeSnapshot) ([]string, error) {
 	metadata := &worktree.Metadata
 	if err := validateWorktreeRelativePath(metadata.Path); err != nil {
-		return err
+		return nil, err
 	}
 	if err := ensureNoSymlinkAncestors(repository, metadata.Path); err != nil {
-		return err
+		return nil, err
 	}
 	directory := gitJoin(repository, metadata.Path)
 	if _, err := gitBytes(runner, repository, []string{"cat-file", "-e", metadata.HeadCommit + "^{commit}"}, nil,
 		"verify the linked worktree's commit"); err != nil {
-		return err
+		return nil, err
 	}
 	_, err := os.Lstat(directory)
 	switch {
@@ -2709,26 +2998,26 @@ func restoreLinkedWorktree(runner GitCommandRunner, repository string, worktree 
 		// not ours to overwrite.
 		restored, err := isRestoredLinkedWorktree(runner, repository, directory, metadata.HeadCommit)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !restored {
-			return fmt.Errorf("%s already exists and is not a worktree of this repository at %s",
+			return nil, fmt.Errorf("%s already exists and is not a worktree of this repository at %s",
 				directory, metadata.HeadCommit)
 		}
-		return nil
+		return []string{}, nil
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return fmt.Errorf("inspect %s: %w", directory, err)
+		return nil, fmt.Errorf("inspect %s: %w", directory, err)
 	}
 
 	canonicalRepository, err := gitCanonicalize(repository)
 	if err != nil {
-		return fmt.Errorf("resolve %s: %w", repository, err)
+		return nil, fmt.Errorf("resolve %s: %w", repository, err)
 	}
 	target := gitJoin(canonicalRepository, metadata.Path)
 	listed, err := listWorktrees(runner, repository)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// A registration whose directory is gone is reused rather than refused.
 	arguments := []string{"worktree", "add"}
@@ -2748,24 +3037,24 @@ func restoreLinkedWorktree(runner GitCommandRunner, repository string, worktree 
 		branch := *metadata.Branch
 		if _, err := gitBytes(runner, repository, []string{"check-ref-format", "--branch", branch}, nil,
 			"validate the linked worktree's branch"); err != nil {
-			return err
+			return nil, err
 		}
 		current, err := runGit(runner, repository,
 			[]string{"rev-parse", "--verify", "--quiet", "refs/heads/" + branch + "^{commit}"}, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var existing *string
 		switch current.Status {
 		case 0:
 			commit, err := trimOutput(current.Stdout, "decode a worktree branch commit")
 			if err != nil {
-				return err
+				return nil, err
 			}
 			existing = &commit
 		case 1:
 		default:
-			return gitFailure("read the linked worktree's branch", &current)
+			return nil, gitFailure("read the linked worktree's branch", &current)
 		}
 		heldElsewhere := slices.ContainsFunc(listed, func(entry listedWorktree) bool {
 			return gitComparePaths(entry.path, target) != 0 && entry.branch != nil && *entry.branch == branch
@@ -2795,20 +3084,21 @@ func restoreLinkedWorktree(runner GitCommandRunner, repository string, worktree 
 		arguments = append(arguments, metadata.HeadCommit)
 	}
 	if _, err := gitSuccess(runner, repository, &GitCommand{Arguments: arguments}, "add the linked worktree"); err != nil {
-		return err
+		return nil, err
 	}
 	// All or nothing: a worktree left half-restored would be taken for a
 	// finished one by a retry, which skips it and loses its dirty state.
-	if err := restoreLinkedWorktreeState(runner, repository, directory, worktree); err != nil {
+	notices, err := restoreLinkedWorktreeState(runner, repository, directory, worktree)
+	if err != nil {
 		_, removal := gitSuccess(runner, repository, &GitCommand{
 			Arguments: []string{"worktree", "remove", "--force", "--force", directory},
 		}, "remove the partly restored linked worktree")
 		if removal != nil {
-			return fmt.Errorf("also failed to clean up: %v: %w", removal, err)
+			return nil, fmt.Errorf("also failed to clean up: %v: %w", removal, err)
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return notices, nil
 }
 
 // restoreLinkedWorktreeState applies a linked worktree's dirty state,
@@ -2818,34 +3108,34 @@ func restoreLinkedWorktreeState(
 	repository string,
 	directory string,
 	worktree *LinkedWorktreeSnapshot,
-) error {
+) ([]string, error) {
+	notices := []string{}
 	metadata := &worktree.Metadata
 	if len(worktree.StagedPatch) > 0 {
 		if _, err := gitBytes(runner, directory, []string{"apply", "--binary", "--index", "-"}, worktree.StagedPatch,
 			"restore the linked worktree's staged Git patch"); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if len(worktree.UnstagedPatch) > 0 {
 		if _, err := gitBytes(runner, directory, []string{"apply", "--binary", "-"}, worktree.UnstagedPatch,
 			"restore the linked worktree's unstaged Git patch"); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := restoreUntrackedTar(directory, worktree.UntrackedTar); err != nil {
-		return err
+		return nil, err
 	}
 	switch operation, payloads := metadata.GitOperation, worktree.OperationPayloads; {
 	case operation == nil && payloads == nil:
 	case operation != nil && payloads != nil:
-		if err := verifyObjects(runner, directory, operation); err != nil {
-			return err
+		notice, err := operationRestore(directory, operation, payloads)
+		if err != nil {
+			return nil, err
 		}
-		if err := operationRestore(runner, directory, operation, payloads); err != nil {
-			return err
-		}
+		notices = append(notices, notice)
 	default:
-		return errors.New("the linked worktree's Git operation metadata and payloads disagree")
+		return nil, errors.New("the linked worktree's Git operation metadata and payloads disagree")
 	}
 	if metadata.LockReason != nil {
 		arguments := []string{"worktree", "lock"}
@@ -2854,10 +3144,10 @@ func restoreLinkedWorktreeState(
 		}
 		arguments = append(arguments, directory)
 		if _, err := gitSuccess(runner, repository, &GitCommand{Arguments: arguments}, "lock the linked worktree"); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return notices, nil
 }
 
 // isRestoredLinkedWorktree reports whether `directory` is already a worktree
@@ -3025,6 +3315,31 @@ func gitBytes(runner GitCommandRunner, repository string, arguments []string, st
 // argument type.
 func gitBytesOwned(runner GitCommandRunner, repository string, arguments []string, action string) ([]byte, error) {
 	return gitBytes(runner, repository, arguments, nil, action)
+}
+
+// HiddenTrackedPaths lists the tracked paths whose index flags
+// (skip-worktree, assume-unchanged) can hide tracked edits from Git's stash
+// machinery.
+func HiddenTrackedPaths(runner GitCommandRunner, checkout string) ([]string, error) {
+	listed, err := gitBytes(runner, checkout, []string{"ls-files", "-v", "-z"}, nil, "inspect hidden tracked files")
+	if err != nil {
+		return nil, err
+	}
+	paths := []string{}
+	for _, entry := range bytes.Split(listed, []byte{0}) {
+		if len(entry) == 0 || (entry[0] != 'S' && !(entry[0] >= 'a' && entry[0] <= 'z')) {
+			continue
+		}
+		if len(entry) < 2 || entry[1] != ' ' {
+			return nil, errors.New("malformed Git index flag entry")
+		}
+		path, err := core.FromGitBytes(entry[2:])
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 func gitText(runner GitCommandRunner, repository string, arguments []string) (string, error) {
@@ -3312,7 +3627,7 @@ func (k worktreeTar) label() string {
 func buildUntrackedTar(
 	repository string,
 	nulPaths []byte,
-	policy UntrackedFiles,
+	_ UntrackedFiles,
 	linkedWorktrees map[string]struct{},
 	progress func(GitSnapshotProgress) error,
 ) ([]byte, error) {
@@ -3350,15 +3665,6 @@ func buildUntrackedTar(
 				return nil, fmt.Errorf("resolve %s: %w", source, err)
 			}
 			if _, linked := linkedWorktrees[directory]; linked {
-				continue
-			}
-		}
-		if policy == UntrackedFilesIgnoreNestedRepositories {
-			nested, err := isNestedRepository(source, metadata)
-			if err != nil {
-				return nil, err
-			}
-			if nested {
 				continue
 			}
 		}

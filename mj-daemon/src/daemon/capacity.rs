@@ -11,7 +11,9 @@ use super::*;
 use crate::pollers::CapacityProbeSet;
 use mj_client::runtime_feed::RuntimeHostCapacity;
 use mj_controller::targets::HostCapacityRow;
+use mj_core::config::{MemoryHardLimitReason, container_memory_hard_limit_reason};
 use mj_core::snapshot_map::SharedSnapshot;
+use mj_core::state::SessionResourceAllocation;
 use mj_core::targets::storage::TargetStorageView;
 use mj_core::targets::{
     CapacityWindowSummary, DeploymentCapacityKind, DeploymentCapacityUsage, TargetCapacityState,
@@ -513,13 +515,13 @@ impl RuntimeState {
     pub(crate) async fn admit_container_launch(
         self: &Arc<Self>,
         target_id: &str,
-        allocation: Option<mj_core::state::SessionResourceAllocation>,
+        allocation: Option<SessionResourceAllocation>,
         session_id: Option<&str>,
         replaced: BTreeSet<String>,
         source: Option<ContainerCapacityCommitment>,
     ) -> Result<ContainerAdmission<'_>> {
         let checked_target_id = target_id.to_owned();
-        let (container, hard_memory) = blocking(move || {
+        let (container, reason) = blocking(move || {
             let controller = Controller::load()?;
             let template = controller
                 .config
@@ -528,7 +530,7 @@ impl RuntimeState {
                 .with_context(|| format!("unknown target {checked_target_id:?}"))?;
             Ok((
                 mj_core::config::is_container_target(template),
-                mj_core::config::container_memory_is_hard_limit(template),
+                container_memory_hard_limit_reason(template),
             ))
         })
         .await?;
@@ -540,6 +542,7 @@ impl RuntimeState {
         if !container {
             return Ok(empty());
         }
+        let hard_memory = reason.is_some();
         let input = match self.container_capacity_input(target_id).await {
             Ok(Some(input)) => input,
             result if hard_memory => {
@@ -561,7 +564,7 @@ impl RuntimeState {
             }
             Ok(None) => return Ok(empty()),
         };
-        let Some(allocation) = allocation else {
+        let Some(allocation @ SessionResourceAllocation::Container { .. }) = allocation else {
             return Err(anyhow::Error::new(Refusal::unusable(
                 "container sessions require an explicit CPU and RAM allocation; choose a size before continuing")
                 .with_code("container-size-required")));
@@ -589,8 +592,10 @@ impl RuntimeState {
             ))
         })
         .await?;
-        if capacity.refuses(&allocation, hard_memory) {
-            return Err(capacity_refusal(capacity, &allocation));
+        if let Some(reason) = reason
+            && capacity.refuses(&allocation, true)
+        {
+            return Err(capacity_refusal(capacity, &allocation, reason));
         }
         let warning = capacity.overcommit_warning(&allocation);
         if let Some(warning) = &warning {
@@ -626,13 +631,17 @@ impl RuntimeState {
 fn capacity_refusal(
     capacity: mj_core::state::HostContainerCapacity,
     allocation: &mj_core::state::SessionResourceAllocation,
+    reason: MemoryHardLimitReason,
 ) -> anyhow::Error {
     let code = if capacity.complete {
         "container-capacity-exceeded"
     } else {
         "container-capacity-unknown"
     };
-    anyhow::Error::new(Refusal::unusable(capacity.refusal_message(allocation)).with_code(code))
+    anyhow::Error::new(
+        Refusal::unusable(capacity.refusal_message(allocation, reason.explanation()))
+            .with_code(code),
+    )
 }
 
 pub(crate) fn capacity_with_reservations<'a>(
@@ -1119,7 +1128,7 @@ mod tests {
             memory_bytes: 16 << 30,
         };
 
-        let error = capacity_refusal(capacity, &allocation);
+        let error = capacity_refusal(capacity, &allocation, MemoryHardLimitReason::TargetSetting);
         let refusal = mj_core::refusal::Refusal::of(&error).expect("user-facing refusal");
 
         assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
@@ -1164,6 +1173,22 @@ mod tests {
             "apple".into(),
             mj_core::config::TargetTemplate::AppleContainer { container },
         );
+        let hard_limit = mj_core::config::ContainerTemplate {
+            memory_hard_limit: Some(true),
+            ..config.targets["podman"].container().unwrap().clone()
+        };
+        config.targets.insert(
+            "strict-podman".into(),
+            mj_core::config::TargetTemplate::LocalPodman {
+                container: hard_limit.clone(),
+            },
+        );
+        config.targets.insert(
+            "strict-docker".into(),
+            mj_core::config::TargetTemplate::LocalDocker {
+                container: hard_limit,
+            },
+        );
         config.profiles.insert(
             "codex".into(),
             mj_core::config::HarnessProfile {
@@ -1182,7 +1207,9 @@ mod tests {
                 tokio_util::sync::CancellationToken::new(),
             )
         });
-        let target_ids = vec!["podman".into(), "apple".into()];
+        let target_ids = ["podman", "apple", "strict-podman", "strict-docker"]
+            .map(str::to_owned)
+            .to_vec();
         let target = mj_controller::targets::DeploymentCapacityTarget {
             id: "local".into(),
             host: "local".into(),
@@ -1253,22 +1280,43 @@ mod tests {
         mj_controller::database::save_session(&busy).unwrap();
         drop(initial);
 
-        for session_id in [None, Some("resume"), Some("move")] {
-            let replaced = if session_id == Some("move") {
-                BTreeSet::from(["move".into()])
-            } else {
-                BTreeSet::new()
-            };
-            let result = state
-                .admit_container_launch("apple", Some(allocation(16)), session_id, replaced, None)
-                .await;
-            let error = result
-                .err()
-                .expect("Apple RAM overcommit must refuse create, resume and move");
-            assert_eq!(
-                Refusal::of(&error).unwrap().code(),
-                Some("container-capacity-exceeded")
-            );
+        for (target, expected_reason) in [
+            (
+                "apple",
+                "Apple containers do not give freed memory back to macOS",
+            ),
+            (
+                "strict-podman",
+                "this target is configured to enforce RAM limits",
+            ),
+            (
+                "strict-docker",
+                "this target is configured to enforce RAM limits",
+            ),
+        ] {
+            for session_id in [None, Some("resume"), Some("move")] {
+                let replaced = if session_id == Some("move") {
+                    BTreeSet::from(["move".into()])
+                } else {
+                    BTreeSet::new()
+                };
+                let error = state
+                    .admit_container_launch(
+                        target,
+                        Some(allocation(16)),
+                        session_id,
+                        replaced,
+                        None,
+                    )
+                    .await
+                    .err()
+                    .expect("RAM overcommit must refuse create, resume and move");
+                let refusal = Refusal::of(&error).unwrap();
+                assert_eq!(refusal.code(), Some("container-capacity-exceeded"));
+                assert!(refusal.message().contains(expected_reason));
+                assert_eq!(refusal.message().contains("macOS"), target == "apple");
+                assert!(!refusal.message().contains("Nitro"));
+            }
         }
         // Drive the actual daemon entry points too, so a caller cannot silently
         // bypass the common admission function in a later refactor.
@@ -1487,16 +1535,19 @@ mod tests {
         assert_eq!(admitted.warning, None, "CPU overcommit does not warn");
         drop(admitted);
 
-        // Missing owner sizing refuses Apple only; the cgroup warning describes
-        // uncertainty instead of treating sentinel zeroes as measured capacity.
+        // Missing owner sizing refuses strict targets and warns on the rest.
         busy.resource_allocation = None;
         mj_controller::database::save_session(&busy).unwrap();
-        assert!(
-            state
-                .admit_container_launch("apple", Some(allocation(4)), None, BTreeSet::new(), None)
+        for target in ["apple", "strict-podman", "strict-docker"] {
+            let error = state
+                .admit_container_launch(target, Some(allocation(4)), None, BTreeSet::new(), None)
                 .await
-                .is_err()
-        );
+                .err()
+                .expect("an incomplete budget must refuse strict targets");
+            let refusal = Refusal::of(&error).unwrap();
+            assert_eq!(refusal.code(), Some("container-capacity-unknown"));
+            assert!(refusal.message().contains("no recorded RAM size"));
+        }
         let admitted = state
             .admit_container_launch("podman", Some(allocation(4)), None, BTreeSet::new(), None)
             .await

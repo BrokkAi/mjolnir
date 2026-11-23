@@ -2,9 +2,10 @@
 
 // Crash-boundary hooks and subprocess fixtures for isolated tests.
 //
-// The default build contains only the no-op hook. Environment lookup, marker
-// files, and waiting are compiled in solely with the `testhooks` build tag
-// (Rust's `test-hooks` feature); see test_hooks_on.go and test_hooks_off.go.
+// Runtime hooks and shared test fixtures stay inactive until explicitly
+// enabled via EnableTestHooks or EnableTestFixtures. A test package opts in
+// to the fixtures by calling EnableTestFixtures from an init function in one
+// of its test files (Rust's `enable_test_fixtures_on_startup!`).
 
 package core
 
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -24,7 +26,23 @@ import (
 var (
 	fakeWorkerOnce sync.Once
 	fakeWorkerPath string
+
+	testHooksEnabled    atomic.Bool
+	testFixturesEnabled atomic.Bool
 )
+
+// EnableTestHooks turns on the crash-boundary hooks for this process.
+func EnableTestHooks() { testHooksEnabled.Store(true) }
+
+// TestHooksEnabled reports whether EnableTestHooks was called.
+func TestHooksEnabled() bool { return testHooksEnabled.Load() }
+
+// EnableTestFixtures opts a test process into shared library fixtures.
+// Runtime hooks require their own opt-in.
+func EnableTestFixtures() { testFixturesEnabled.Store(true) }
+
+// TestFixturesEnabled reports whether EnableTestFixtures was called.
+func TestFixturesEnabled() bool { return testFixturesEnabled.Load() }
 
 // testGlideEndpoint is the GLiDE endpoint a test process routes the default
 // classifier source to, set once (Rust TEST_GLIDE_ENDPOINT, a OnceLock).
@@ -55,18 +73,13 @@ func TestGlideEndpoint() (string, bool) {
 }
 
 // ReachTestHook stops at the named crash boundary when an isolated test asks
-// for it through MJ_TEST_HOOK; in the default build it does nothing.
+// for it through MJ_TEST_HOOK: it marks <MJ_TEST_HOOK_DIR>/<name>.reached and
+// waits up to 120 seconds for <name>.continue. It does nothing until
+// EnableTestHooks is called.
 func ReachTestHook(name string) error {
-	if !testHooksEnabled {
+	if !TestHooksEnabled() {
 		return nil
 	}
-	return reachTestHookEnabled(name)
-}
-
-// reachTestHookEnabled is the `test-hooks` build of ReachTestHook: it marks
-// <MJ_TEST_HOOK_DIR>/<name>.reached and waits up to 120 seconds for
-// <name>.continue.
-func reachTestHookEnabled(name string) error {
 	if value, ok := os.LookupEnv("MJ_TEST_HOOK"); !ok || value != name {
 		return nil
 	}
@@ -233,8 +246,9 @@ const (
 	LatchRelayRunning            = "MJ_TEST_LATCH_RELAY_RUNNING"
 	LatchCheckpointOnly          = "MJ_TEST_LATCH_CHECKPOINT_ONLY"
 	// LatchRelayFreshNative opens a new native session with this id instead
-	// of reloading one, as a restored worker does when the harness has no
-	// record of the session it was asked to reload.
+	// of reloading one, as a restored worker does when its launch names no
+	// native session, or when the harness has no record of the session it
+	// was asked to reload.
 	LatchRelayFreshNative = "MJ_TEST_LATCH_FRESH_NATIVE"
 	// LatchRelayReplacedUnused, with LatchRelayFreshNative: the native
 	// session the new one replaced because this session never used it.

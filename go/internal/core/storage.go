@@ -332,6 +332,10 @@ func (r *FinishedReviewResolution) UnmarshalJSON(data []byte) error {
 
 // TurnReviewState is durable review work, findings and declined findings
 // for this session.
+//
+// One row per session. The review host's actor is its only writer: it keeps
+// the session part (DeclinedFindings, PushFindings) in memory, adds the
+// reviews it has open, and saves the whole row in the order it decides.
 type TurnReviewState struct {
 	// DeclinedFindings are findings the author declined to fix with
 	// `override_review`, newest last. Every before-push review of this
@@ -339,15 +343,53 @@ type TurnReviewState struct {
 	// repositories. A baseline move removes that repository from their
 	// coverage. Bounded to DeclinedFindingsBytes.
 	DeclinedFindings []DeclinedFinding `json:"declined_findings"`
+	// PushFindings is the exact trees covered by each outstanding
+	// before-push findings verdict. No two records share a repository root.
+	PushFindings []PushFindingsRecord `json:"push_findings,omitempty"`
+	// OpenReviews are the reviews that are open, or were when the daemon
+	// stopped. No two share a repository root.
+	OpenReviews []OpenReview `json:"open_reviews,omitempty"`
+}
+
+// OpenReview is one open review as it is stored.
+type OpenReview struct {
 	// Active is a review that was running when the daemon stopped. On
-	// recovery it is cleared without advancing the baseline.
+	// recovery one without a group is cleared without advancing the
+	// baseline.
 	Active *string `json:"active"`
-	// PushFindings is the exact trees covered by the last before-push
-	// findings verdict.
-	PushFindings *PushFindingsRecord `json:"push_findings,omitempty"`
 	// ActiveGroup: a reviewer group survives daemon handoff with its exact
-	// commands and children.
-	ActiveGroup *ActiveReviewGroup `json:"active_group,omitempty"`
+	// commands and children. On the wire "group".
+	ActiveGroup *ActiveReviewGroup `json:"group"`
+}
+
+// ReviewID is which review this is: the group's review ID, or the marker of
+// one that never got a group.
+func (r *OpenReview) ReviewID() (string, bool) {
+	if r.ActiveGroup != nil {
+		return r.ActiveGroup.Driver.ReviewID, true
+	}
+	if r.Active != nil {
+		return *r.Active, true
+	}
+	return "", false
+}
+
+// Roots are the repository roots the review covers: those its capture
+// returned. A review that has no group yet covers none.
+func (r *OpenReview) Roots() []string {
+	roots := []string{}
+	if r.ActiveGroup != nil {
+		for _, delta := range r.ActiveGroup.Driver.Deltas {
+			roots = append(roots, delta.Root)
+		}
+	}
+	return roots
+}
+
+// IsStored reports whether the stored row still has anything to say about
+// this review.
+func (r *OpenReview) IsStored() bool {
+	return r.Active != nil || r.ActiveGroup != nil
 }
 
 func (s TurnReviewState) MarshalJSON() ([]byte, error) {
@@ -359,6 +401,32 @@ func (s TurnReviewState) MarshalJSON() ([]byte, error) {
 // DeclinedFindingsBytes is how many bytes of declined findings and reasons
 // a session keeps. The oldest entries go first.
 const DeclinedFindingsBytes = 24 * 1024
+
+// ReplaceFindings stores record as the outstanding verdict for its roots,
+// replacing every record that shares a root with it: the latest verdict for
+// a root is the one the author must answer.
+func (s *TurnReviewState) ReplaceFindings(record PushFindingsRecord) {
+	roots := make([]string, 0, len(record.Trees))
+	for root := range record.Trees {
+		roots = append(roots, root)
+	}
+	s.RetireFindings(roots)
+	s.PushFindings = append(s.PushFindings, record)
+}
+
+// RetireFindings stops covering roots with outstanding findings. A record
+// that also covers other roots keeps them, so the author can still answer it
+// for those; a record left with none is dropped.
+func (s *TurnReviewState) RetireFindings(roots []string) {
+	s.PushFindings = slices.DeleteFunc(s.PushFindings, func(record PushFindingsRecord) bool {
+		for root := range record.Trees {
+			if slices.Contains(roots, root) {
+				delete(record.Trees, root)
+			}
+		}
+		return len(record.Trees) == 0
+	})
+}
 
 // AdvanceReviewBases stops covering the repositories whose review base
 // moved, dropping entries left with none. An entry without recorded
@@ -484,6 +552,13 @@ type PushFindingsRecord struct {
 	// array as serde writes a tuple.
 	Trees     map[string][2]string `json:"trees"`
 	Synthesis string               `json:"synthesis"`
+}
+
+// Covers reports whether the verdict covers the worktree whose repository
+// root is root.
+func (r *PushFindingsRecord) Covers(root string) bool {
+	_, ok := r.Trees[root]
+	return ok
 }
 
 func (r PushFindingsRecord) MarshalJSON() ([]byte, error) {

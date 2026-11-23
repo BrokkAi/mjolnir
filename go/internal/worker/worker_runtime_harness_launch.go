@@ -2,8 +2,9 @@
 
 // Select the concrete executable before starting a harness.
 //
-// Rust re-exports core's find_command here as `harness_launch::find_command`;
-// Go callers use core.FindCommand directly.
+// Rust re-exports mj-harness-install's find_command here as
+// `harness_launch::find_command`; Go callers use harnessinstall.FindCommand
+// directly.
 
 //go:build unix
 
@@ -27,6 +28,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
+	"github.com/BrokkAi/mjolnir/go/internal/workerreview"
 )
 
 // PreparedHarnessLaunch keeps this preparation alive until the supervisor
@@ -34,8 +37,8 @@ import (
 type PreparedHarnessLaunch struct {
 	Spec        AcpSupervisorSpec
 	environment map[string]string
-	managed     *core.ManagedHarness
-	managedNode *core.ManagedNodeRuntime
+	managed     *harnessinstall.ManagedHarness
+	managedNode *harnessinstall.ManagedNodeRuntime
 }
 
 // Release drops the installation leases this preparation holds.
@@ -55,7 +58,7 @@ func PrepareHarnessLaunch(ctx context.Context, harness core.HarnessKind, policy 
 		spec.Environment = map[string]string{}
 	}
 	delete(spec.Environment, core.FastinoKeyEnvironment)
-	environment, err := core.WithOverrides(ctx, spec.Environment)
+	environment, err := harnessinstall.WithOverrides(ctx, spec.Environment)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +87,7 @@ func PrepareHarnessLaunch(ctx context.Context, harness core.HarnessKind, policy 
 			return nil, err
 		}
 		if needed {
-			node, err := core.EnsureNodeRuntime(ctx, environment)
+			node, err := harnessinstall.EnsureNodeRuntime(ctx, environment)
 			if err != nil {
 				return nil, fmt.Errorf("prepare Node.js for %s: %w", harness.DisplayName(), err)
 			}
@@ -111,7 +114,7 @@ func PrepareHarnessLaunch(ctx context.Context, harness core.HarnessKind, policy 
 			spec.Environment[name] = value
 		}
 	}
-	located, err := core.Locate(ctx, policy, harness, executionPolicy, spec.Command, spec.Args, environment)
+	located, err := harnessinstall.Locate(ctx, policy, harness, executionPolicy, spec.Command, spec.Args, environment)
 	if err != nil {
 		launch.Release()
 		return nil, fmt.Errorf("prepare %s: %w", harness.DisplayName(), err)
@@ -140,7 +143,7 @@ func PrepareHarnessLaunch(ctx context.Context, harness core.HarnessKind, policy 
 		if !filepath.IsAbs(provider) && len(workerRuntimePathComponents(provider)) > 1 {
 			provider = core.Join(spec.Cwd, provider)
 		}
-		found, ok, err := core.FindCommand(provider, environment)
+		found, ok, err := harnessinstall.FindCommand(provider, environment)
 		if err != nil {
 			launch.Release()
 			return nil, err
@@ -293,7 +296,7 @@ func needsNodeRuntime(ctx context.Context, harness core.HarnessKind, environment
 	dshIsNative := false
 	if harness == core.HarnessKindDsh {
 		if _, ok := environment["PATH"]; ok {
-			command, found, err := core.FindCommandPath("dsh-acp", environment)
+			command, found, err := harnessinstall.FindCommandPath("dsh-acp", environment)
 			if err != nil {
 				return false, err
 			}
@@ -383,7 +386,7 @@ func removeStaleConfigurationLink(destination string, source string) {
 }
 
 func resolveCommand(command string, environment map[string]string) (string, error) {
-	found, ok, err := core.FindCommand(command, environment)
+	found, ok, err := harnessinstall.FindCommand(command, environment)
 	if err != nil {
 		return "", err
 	}
@@ -419,14 +422,14 @@ func prepareReviewGate(launch *core.WorkerLaunchConfig) ([]string, error) {
 		notices = append(notices, fmt.Sprintf("Before-push review is not available for %s; this session runs without review.", launch.Harness.DisplayName()))
 		return notices, nil
 	}
-	runner := NewBoundedGit(WorkspaceStateTimeout)
+	runner := workerreview.NewBoundedGit(workerreview.WorkspaceStateTimeout)
 	cancelRunner := runner.CancellationGuard()
 	defer cancelRunner.Cancel()
 	roots := append([]string{launch.Cwd}, reviewerWorkspaceDirectories(launch)...)
-	for _, repository := range DiscoverRepositories(runner, roots) {
+	for _, repository := range workerreview.DiscoverRepositories(runner, roots) {
 		// Every session that may request review records where its work
 		// starts, so its first review covers the commits made after it.
-		if _, err := EnsureSessionStartHead(runner, repository, launch.SessionID); err != nil {
+		if _, err := workerreview.EnsureSessionStartHead(runner, repository, launch.SessionID); err != nil {
 			return nil, err
 		}
 		// Only a gated primary also holds its pushes to review.
@@ -434,16 +437,16 @@ func prepareReviewGate(launch *core.WorkerLaunchConfig) ([]string, error) {
 			continue
 		}
 		var reason *string
-		installed, err := InstallPrePushHook(runner, repository)
+		installed, err := workerreview.InstallPrePushHook(runner, repository)
 		if err != nil {
 			text := err.Error()
 			reason = &text
 		} else {
 			switch installed := installed.(type) {
-			case HookInstallRefusedExistingBackup:
+			case workerreview.HookInstallRefusedExistingBackup:
 				text := fmt.Sprintf("%s already exists", installed.Path)
 				reason = &text
-			case HookInstallRefusedWorkTreeHooksDirectory:
+			case workerreview.HookInstallRefusedWorkTreeHooksDirectory:
 				text := fmt.Sprintf("%s is inside the work tree and is not ignored", installed.Path)
 				reason = &text
 			}

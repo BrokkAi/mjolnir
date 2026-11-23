@@ -16,7 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
-	"unicode"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -26,6 +26,63 @@ const ConfigVersion = 24
 
 // ProductDir is the directory name under the platform configuration and data roots.
 const ProductDir = "mjolnir"
+
+// ConfigLoadError is configuration load context with metadata safe to report
+// without the TOML input. Callers find it with errors.As.
+type ConfigLoadError interface {
+	error
+	isConfigLoadError()
+}
+
+// ConfigLoadErrorToml is a file that is not valid TOML, or does not read as
+// a configuration. Location is the 1-based line and column of the fault,
+// when the parser reports one.
+type ConfigLoadErrorToml struct {
+	Path     string
+	Location *[2]int
+	// Err is the parser's error, which names the source line and so may
+	// hold a secret.
+	Err error
+}
+
+// ConfigLoadErrorNewerSchema is a file a newer Mjolnir wrote.
+type ConfigLoadErrorNewerSchema struct {
+	Path    string
+	Version uint32
+}
+
+func (*ConfigLoadErrorToml) isConfigLoadError()        {}
+func (*ConfigLoadErrorNewerSchema) isConfigLoadError() {}
+
+// Error is anyhow's alternate display: the context, then its cause.
+func (e *ConfigLoadErrorToml) Error() string {
+	return fmt.Sprintf("parse Mjolnir config %s: %v", e.Path, e.Err)
+}
+
+func (e *ConfigLoadErrorToml) Unwrap() error { return e.Err }
+
+func (e *ConfigLoadErrorNewerSchema) Error() string {
+	return fmt.Sprintf("%s was written by a newer Mjolnir (config version %d; this build supports %d). Update Mjolnir",
+		e.Path, e.Version, ConfigVersion)
+}
+
+// configTOMLError wraps a TOML error in ConfigLoadErrorToml, with the line
+// and column (in characters) of the byte the parser points at.
+func configTOMLError(path, contents string, err error) error {
+	var location *[2]int
+	if start, ok := tomlErrorOffset(err); ok {
+		offset := min(start, len(contents))
+		// Rust's floor_char_boundary.
+		for offset > 0 && offset < len(contents) && contents[offset]&0xC0 == 0x80 {
+			offset--
+		}
+		prefix := contents[:offset]
+		line := strings.Count(prefix, "\n") + 1
+		column := utf8.RuneCountInString(prefix[strings.LastIndexByte(prefix, '\n')+1:]) + 1
+		location = &[2]int{line, column}
+	}
+	return &ConfigLoadErrorToml{Path: path, Location: location, Err: err}
+}
 
 // newerVersion is the config version in document when it is above this
 // build's.
@@ -130,8 +187,7 @@ func dropRemovedHarnessProfiles(document map[string]any) []string {
 }
 
 // hasLegacySubagentYoloChoices is whether document carried non-empty legacy
-// `[subagents.yolo.*]` choices that this build drops on load. (Ported from
-// the Rust source after this package's base.)
+// `[subagents.yolo.*]` choices that this build drops on load.
 func hasLegacySubagentYoloChoices(document map[string]any) bool {
 	subagents, ok := document["subagents"].(map[string]any)
 	if !ok {
@@ -497,38 +553,6 @@ func ValidateRelativeDestination(path string) error {
 }
 
 func isSeparator(r rune) bool { return os.IsPathSeparator(uint8(r)) && r < 0x80 }
-
-// isGithubSource reports whether a bundle repository's `github` value may
-// load.
-//
-// The shared GitHub parser is tried first. The looser rule after it keeps
-// loading every value that loaded before the parser existed, because a
-// rejected value here fails the whole configuration: anything with exactly
-// one `/`, such as `git@gitlab.com:o/r`, which resolution uses as a plain Git
-// URL, or a shorthand with a name GitHub would not allow, which resolution
-// rejects when the repository is used.
-func isGithubSource(source string) bool {
-	source = strings.TrimSpace(source)
-	if source == "" || strings.HasPrefix(source, "-") || strings.ContainsFunc(source, unicode.IsSpace) {
-		return false
-	}
-	if ParseGithubRemote(source, ShorthandAllowed) != nil {
-		return true
-	}
-	repositoryPath := source
-	for _, prefix := range []string{"https://github.com/", "git@github.com:", "ssh://git@github.com/"} {
-		if rest, ok := strings.CutPrefix(source, prefix); ok {
-			repositoryPath = rest
-			break
-		}
-	}
-	// Rust's trim_end_matches removes every trailing repetition.
-	for strings.HasSuffix(repositoryPath, ".git") {
-		repositoryPath = strings.TrimSuffix(repositoryPath, ".git")
-	}
-	parts := strings.Split(repositoryPath, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
-}
 
 // AtomicWrite replaces path without exposing a partially written
 // configuration or state file.

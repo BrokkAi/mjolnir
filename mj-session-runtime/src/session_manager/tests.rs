@@ -1585,8 +1585,7 @@ async fn worker_history_poll_executes_real_index_queries_without_delegation() {
 #[tokio::test]
 async fn guardian_actor_cascades_requests_added_after_attachment() {
     use mj_core::guardian::{
-        GUARDIAN_CONFIG_INVALID_TOML, GUARDIAN_CONFIG_NEEDS_UPGRADE, GUARDIAN_CONFIG_UNREADABLE,
-        GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
+        DaemonGuardianFailure, GuardianReviewOutcome, GuardianReviewRequest, GuardianReviewResult,
         WOLF_STAGE1_ALLOW_THRESHOLD,
     };
 
@@ -1696,19 +1695,25 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
         (
             "invalid-config",
             GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_CONFIG_INVALID_TOML.into(),
+                reason: DaemonGuardianFailure::ConfigInvalidToml.as_str().into(),
+            },
+        ),
+        (
+            "invalid-settings",
+            GuardianReviewOutcome::AskPerson {
+                reason: DaemonGuardianFailure::ConfigInvalidSchema.as_str().into(),
             },
         ),
         (
             "newer-config",
             GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_CONFIG_NEEDS_UPGRADE.into(),
+                reason: DaemonGuardianFailure::ConfigNeedsUpgrade.as_str().into(),
             },
         ),
         (
             "unreadable-config",
             GuardianReviewOutcome::AskPerson {
-                reason: GUARDIAN_CONFIG_UNREADABLE.into(),
+                reason: DaemonGuardianFailure::ConfigUnreadable.as_str().into(),
             },
         ),
     ] {
@@ -1718,6 +1723,13 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
             "guardian-disabled" => guardian_off_config.save().unwrap(),
             "invalid-config" => {
                 mj_core::config::atomic_write(&config_path, b"invalid SECRET_DATA").unwrap();
+            }
+            "invalid-settings" => {
+                let config = format!(
+                    "version = {}\n[guardian]\nenabled = \"false\"\n",
+                    mj_core::config::CONFIG_VERSION
+                );
+                mj_core::config::atomic_write(&config_path, config.as_bytes()).unwrap();
             }
             "newer-config" => {
                 let config = format!("version = {}\n", mj_core::config::CONFIG_VERSION + 1);

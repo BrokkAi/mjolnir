@@ -4703,7 +4703,6 @@ mod preparation_tests {
         let root = temp.path().to_path_buf();
         let (status, _preparation) = watch::channel(PreparationSnapshot::default());
         let cancellation = CancellationToken::new();
-        let step_root = root.clone();
         let step_status = status.clone();
         let step_cancellation = cancellation.clone();
         let (release_blocking_tx, release_blocking_rx) = std::sync::mpsc::channel::<()>();
@@ -4711,14 +4710,18 @@ mod preparation_tests {
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             supervise_preparation::<()>(&root, &status, &cancellation, async move {
-                let budget = preparation_step(
-                    &step_root,
-                    &step_status,
-                    "acp-setup",
-                    Duration::from_millis(200),
-                    &step_cancellation,
-                )
-                .await?;
+                // Set the step snapshot and budget directly without running
+                // `preparation_step`'s startup-breadcrumb disk write inside the
+                // 200ms budget, so heavy parallel load cannot expire the step
+                // before the blocked closure is spawned.
+                let budget = PreparationStepBudget::new("acp-setup", Duration::from_millis(200));
+                step_status.send_modify(|snapshot| {
+                    snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
+                        step: "acp-setup".to_owned(),
+                        since_ms: chrono::Utc::now().timestamp_millis(),
+                    });
+                    snapshot.step_deadline = Some(budget.deadline);
+                });
                 bounded_blocking_preparation_step(&budget, &step_cancellation, move |_| {
                     let _ = release_blocking_rx.recv();
                     let _ = blocking_finished_tx.send(());

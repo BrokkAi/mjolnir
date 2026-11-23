@@ -51,7 +51,7 @@ def ask(kind):
             }}}
     else:
         method = "session/request_permission"
-        params = {"sessionId": session_id, "toolCall": {"toolCallId": "live-plan", "kind": "switch_mode", "title": "Ready to code?", "rawInput": {"plan": "Component plan\n\nInspect reusable controls, then validate terminal input.", "planFilePath": "/workspace/plan.md"}}, "options": [{"optionId": value, "name": value, "kind": "reject_once" if value == "reject" else "allow_always"} for value in ["default", "auto", "bypassPermissions", "reject"]]}
+        params = {"sessionId": session_id, "toolCall": {"toolCallId": "plan-review:live-plan", "kind": "switch_mode", "status": "pending", "title": "Implement this plan?", "rawInput": {"plan": "Component plan\n\nInspect reusable controls, then validate terminal input."}}, "options": [{"optionId": "implement_plan", "name": "Yes, implement this plan", "kind": "allow_once"}, {"optionId": "revise_plan", "name": "No, and tell Codex what to do differently", "kind": "reject_once"}]}
     ident = f"live-{kind}"
     send({"jsonrpc": "2.0", "id": ident, "method": method, "params": params})
     while (message := read_message()) is not None:

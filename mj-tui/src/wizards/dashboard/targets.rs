@@ -440,7 +440,7 @@ impl DashboardState {
         let target_id = nth_key(&self.config.targets, wizard.target());
         let uses_remaining = wizard.remember_container_size().is_some();
         let capacity = self.host_container_capacity(&target_id);
-        // Remaining capacity is advisory except for Apple container RAM.
+        // Remaining capacity is advisory except where RAM has a hard limit.
         // Editors still cap values at the physical host totals. Only a new
         // session is refused here: a resumed or moved session may already be
         // counted in the projection, and the daemon excludes it when deciding.
@@ -450,23 +450,15 @@ impl DashboardState {
         let result = wizard.resource_editor().allocation(limits, uses_remaining);
         let (allocation, error) = wizard.sizing_mut();
         match result {
-            Ok(value)
-                if uses_remaining
-                    && capacity.is_some_and(|capacity| {
-                        capacity.refuses(
-                            &value,
-                            mj_core::config::container_memory_is_hard_limit(
-                                &self.config.targets[&target_id],
-                            ),
-                        )
-                    }) =>
-            {
-                *error = capacity.map(|capacity| capacity.refusal_message(&value));
-                *allocation = None;
-            }
             Ok(value) => {
-                *allocation = Some(value);
-                *error = None;
+                *error = capacity.filter(|_| uses_remaining).and_then(|capacity| {
+                    let template = self.config.targets.get(&target_id)?;
+                    let reason = mj_core::config::container_memory_hard_limit_reason(template)?;
+                    capacity
+                        .refuses(&value, true)
+                        .then(|| capacity.refusal_message(&value, reason.explanation()))
+                });
+                *allocation = error.is_none().then_some(value);
             }
             Err(reason) => {
                 *allocation = None;

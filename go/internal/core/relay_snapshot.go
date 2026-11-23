@@ -79,15 +79,15 @@ func HoldFollowUpText(kind HoldFollowUpKind, running []string) string {
 	)
 }
 
-// RelayCommandPromptBlocksForCommand is the effective prompt, including the
-// worker-authored restart note. False when the command carries no prompt.
+// RelayCommandPromptBlocksForCommand is the effective prompt. Ordinary restart
+// continuations send only the recovery note. False when the command carries no prompt.
 func RelayCommandPromptBlocksForCommand(command RelayCommand, commandID string) ([]acpschema.ContentBlock, bool) {
 	prompt, ok := RelayCommandPromptBlocks(command)
 	if !ok {
 		return nil, false
 	}
 	if IsRestartContinuation(commandID) && !PromptIsSlashCommand(prompt) {
-		return append([]acpschema.ContentBlock{relayTextBlock(RestartRecoveryNote)}, prompt...), true
+		return []acpschema.ContentBlock{relayTextBlock(RestartRecoveryNote)}, true
 	}
 	return prompt, true
 }
@@ -377,6 +377,37 @@ type BackgroundCommand struct {
 	CanStop bool `json:"can_stop"`
 }
 
+const backgroundCommandAntigravityPrefix = "antigravity:"
+
+// BackgroundCommandAntigravity is an Antigravity native task, which the
+// worker cannot stop.
+func BackgroundCommandAntigravity(id string, startedAtMs int64, command string) BackgroundCommand {
+	return BackgroundCommand{
+		ID:          backgroundCommandAntigravityPrefix + id,
+		StartedAtMs: startedAtMs,
+		Command:     command,
+		CanStop:     false,
+	}
+}
+
+// BackgroundCommandOldestAntigravityTaskStart is the oldest start among
+// Antigravity native tasks. The existing relay inventory distinguishes
+// native tasks from hosted terminals by ID, including in snapshots from
+// older tracking workers.
+func BackgroundCommandOldestAntigravityTaskStart(commands []BackgroundCommand) *int64 {
+	var oldest *int64
+	for _, command := range commands {
+		if !strings.HasPrefix(command.ID, backgroundCommandAntigravityPrefix) {
+			continue
+		}
+		if oldest == nil || command.StartedAtMs < *oldest {
+			startedAtMs := command.StartedAtMs
+			oldest = &startedAtMs
+		}
+	}
+	return oldest
+}
+
 // BackgroundTaskStopTarget is the process owner behind one stoppable
 // background-command id.
 //
@@ -587,14 +618,32 @@ func (c *RelayCursor) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(c))
 }
 
+// InPlaceMoveHold is the durable dispatch hold taken by a same-target
+// in-place Move, bound to the relay's store_id. While present, queued
+// prompts and config entries are not promoted or claimed.
+type InPlaceMoveHold struct {
+	OperationID               string   `json:"operation_id"`
+	CapturedPendingCommandIDs []string `json:"captured_pending_command_ids"`
+	HarnessRestarted          bool     `json:"harness_restarted,omitempty"`
+}
+
+// MarshalJSON writes no captured commands as [], as serde writes the Vec.
+func (h InPlaceMoveHold) MarshalJSON() ([]byte, error) {
+	type plain InPlaceMoveHold
+	v := plain(h)
+	v.CapturedPendingCommandIDs = relayNonNil(v.CapturedPendingCommandIDs)
+	return relayMarshalJSON(v)
+}
+
 // RelayOperationalState is the public operational state a worker publishes.
 //
 // Rust held several fields behind Arc to share them between snapshots; here
 // they are plain values. Slices without omitempty must be non-nil to encode
 // as [] rather than null.
 type RelayOperationalState struct {
-	Assessment  *TurnAssessment `json:"assessment,omitempty"`
-	OpenRequest *OpenRequest    `json:"open_request,omitempty"`
+	InPlaceMoveHold *InPlaceMoveHold `json:"in_place_move_hold,omitempty"`
+	Assessment      *TurnAssessment  `json:"assessment,omitempty"`
+	OpenRequest     *OpenRequest     `json:"open_request,omitempty"`
 	// Always serialized (Rust Arc<NotificationStack> with serde default).
 	NotificationStack        NotificationStack `json:"notification_stack"`
 	NotificationsReadThrough uint64            `json:"notifications_read_through"`
@@ -634,8 +683,7 @@ type RelayOperationalState struct {
 	// Retired at protocol 70: workers no longer set it, and no reader asks
 	// it. It stays so that an older daemon still decodes the snapshot.
 	AuthenticationRetryWaiting *string `json:"authentication_retry_waiting,omitempty"`
-	// The Jev rate limit still in force for this worker, if any. (Rust
-	// 4273087e6, after this file's base; ported for mj-worker's relay.)
+	// The Jev rate limit still in force for this worker, if any.
 	JevRateLimit *RateLimitKind `json:"jev_rate_limit,omitempty"`
 	// Worker-published: the access-token hash of the failed turn this
 	// worker still owes a retry for. Present while the durable intent holds
@@ -741,9 +789,9 @@ type RelayOperationalState struct {
 	// first. Live operational state, like ActiveAgentTerminals: it is
 	// derived from what the relay can see now, not from the journal.
 	BackgroundCommands []BackgroundCommand `json:"background_commands,omitempty"`
-	// Whether provider-owned background work is known for this worker
-	// process. Only Kimi needs this today; older workers and other harnesses
-	// omit it.
+	// Whether this worker's provider task inventory is synchronized. Kimi
+	// and Antigravity workers report it when they support native task
+	// tracking.
 	BackgroundWorkKnown *bool `json:"background_work_known,omitempty"`
 }
 
@@ -905,6 +953,8 @@ func (s *RelayOperationalState) Facts() ActivityFacts {
 		ToolsInFlight:          toolsInFlight,
 		BackgroundStartedAtMs:  backgroundStartedAtMs,
 		BackgroundCommands:     len(s.BackgroundCommands) + s.NativeAgentCount,
+		AntigravityTaskStartedAtMs: BackgroundCommandOldestAntigravityTaskStart(
+			s.BackgroundCommands),
 		ExpectedContinuation:   s.ExpectedContinuation,
 		InferredIdleSinceMs:    s.InferredIdleSinceMs,
 		ActiveUserShells:       len(s.ActiveUserShells),
@@ -927,11 +977,11 @@ func (s *RelayOperationalState) Facts() ActivityFacts {
 	}
 }
 
-// ActivityState is what this session is doing: the worker's published
-// answer, or the same classification of the same facts when the worker is
-// too old to publish one.
+// ActivityState is what this session is doing. Older workers can publish an
+// inferred idle state even while their authoritative native inventory
+// reports a task.
 func (s *RelayOperationalState) ActivityState() ActivityState {
-	if s.Activity.Kind != "" {
+	if s.Activity.Kind != "" && BackgroundCommandOldestAntigravityTaskStart(s.BackgroundCommands) == nil {
 		return s.Activity
 	}
 	facts := s.Facts()
@@ -961,6 +1011,10 @@ func (s *RelayOperationalState) HasWorkInFlight() bool {
 // SafeToReplace reports whether a controller may replace this worker without
 // losing work.
 func (s *RelayOperationalState) SafeToReplace(harness HarnessKind) bool {
+	return s.SafeToReplaceFor(harness, WorkerReplacementOther)
+}
+
+func (s *RelayOperationalState) SafeToReplaceFor(harness HarnessKind, replacement WorkerReplacement) bool {
 	if s.HarnessPreparationFailed() {
 		// This process can never start its harness. Accepted commands stay
 		// in the journal; independently running processes must still settle.
@@ -972,7 +1026,7 @@ func (s *RelayOperationalState) SafeToReplace(harness HarnessKind) bool {
 			len(s.ToolsInFlight) == 0
 	}
 	facts := s.Facts()
-	return SafeToReplace(&facts, harness)
+	return SafeToReplaceFor(&facts, harness, replacement)
 }
 
 // SafeToMove is Move's purpose-specific interruption decision.
@@ -985,7 +1039,8 @@ func (s *RelayOperationalState) SafeToMove(harness HarnessKind, purpose MovePurp
 }
 
 // HarnessPreparationFailed: terminal startup failure; this worker cannot
-// retry preparation in place.
+// retry preparation in place. Only an older worker, still serving after the
+// failure, reports it.
 func (s *RelayOperationalState) HarnessPreparationFailed() bool {
 	_, failed := s.HarnessPreparation.(HarnessPreparationFailed)
 	return failed
@@ -1578,6 +1633,9 @@ type RelaySnapshot struct {
 	CancelledCommandAdmissions []string                       `json:"cancelled_command_admissions,omitempty"`
 	HandledCommands            map[string]HandledRelayCommand `json:"handled_commands"`
 	Dispatches                 map[string]RelayDispatchRecord `json:"dispatches"`
+	// Active same-target in-place Move dispatch hold, bound to this relay's
+	// store_id.
+	InPlaceMoveHold *InPlaceMoveHold `json:"in_place_move_hold,omitempty"`
 }
 
 // UnmarshalJSON refuses unknown fields, as serde's deny_unknown_fields does.
@@ -1809,7 +1867,14 @@ func (s *RelaySnapshot) OperationalState() RelayOperationalState {
 	if config == nil {
 		config = map[string]string{}
 	}
+	var inPlaceMoveHold *InPlaceMoveHold
+	if s.InPlaceMoveHold != nil {
+		hold := *s.InPlaceMoveHold
+		hold.CapturedPendingCommandIDs = slices.Clone(hold.CapturedPendingCommandIDs)
+		inPlaceMoveHold = &hold
+	}
 	return RelayOperationalState{
+		InPlaceMoveHold:               inPlaceMoveHold,
 		Assessment:                    s.Assessment,
 		OpenRequest:                   openRequest,
 		NotificationStack:             s.NotificationStack,
@@ -2455,8 +2520,10 @@ func (v HarnessPreparationStarted) MarshalJSON() ([]byte, error) {
 	return relayInternalJSON("state", "started", nil)
 }
 
-// Preparation stopped at Step. The worker keeps serving its relay, so
-// the session can still be checkpointed and closed.
+// Preparation stopped at Step, and that worker kept serving its relay.
+// Only older workers report this. A current worker whose harness cannot
+// start exits, and its exit record carries a WorkerHarnessStartupFailure
+// instead. Daemons still read it from older workers.
 type HarnessPreparationFailed struct {
 	Step  string `json:"step"`
 	Error string `json:"error"`
@@ -2743,6 +2810,9 @@ type RelayObservationCommandQueued struct {
 	CommandID   string       `json:"command_id"`
 	Command     RelayCommand `json:"command"`
 	CreatedAtMs int64        `json:"created_at_ms"`
+	// InsertAtFront queues the command at the head of the pending queue
+	// (SubmitFront during an in-place Move).
+	InsertAtFront bool `json:"insert_at_front,omitempty"`
 }
 
 func (RelayObservationCommandQueued) isRelayObservation() {}

@@ -79,42 +79,116 @@ func UnmarshalMachineFindingJSON(data []byte) (MachineFinding, error) {
 	return nil, daemonUnknownVariant(name, []string{"Answered", "Unreachable"})
 }
 
-// LocalEngine is one of this computer's container engines, as a check found
-// it.
-type LocalEngine struct {
-	// Missing is why it cannot run sessions, or nil when it can.
-	Missing *string `json:"missing"`
-	// Installed is whether its command is on this computer at all. A standard
-	// runtime for an engine that was never installed is left out without a
-	// word; one that is installed but not working is named.
-	Installed bool `json:"installed"`
+// AvailabilityVerdictKind is AvailabilityVerdict's variant. The zero value
+// is Unknown, Rust's default.
+type AvailabilityVerdictKind uint8
+
+const (
+	AvailabilityVerdictUnknown AvailabilityVerdictKind = iota
+	AvailabilityVerdictAvailable
+	AvailabilityVerdictMissing
+)
+
+// AvailabilityVerdict applies to the entry's current configuration.
+// Internally tagged by "status" in snake_case: {"status":"available"},
+// {"status":"missing","reason":...}, {"status":"unknown"}.
+type AvailabilityVerdict struct {
+	Kind AvailabilityVerdictKind
+	// Reason is why the entry is missing, when Kind is
+	// AvailabilityVerdictMissing.
+	Reason string
 }
 
-func (v *LocalEngine) UnmarshalJSON(data []byte) error {
-	type plain LocalEngine
+// MissingReason is why the entry is missing, false unless it is.
+func (v AvailabilityVerdict) MissingReason() (string, bool) {
+	if v.Kind == AvailabilityVerdictMissing {
+		return v.Reason, true
+	}
+	return "", false
+}
+
+func (v AvailabilityVerdict) MarshalJSON() ([]byte, error) {
+	switch v.Kind {
+	case AvailabilityVerdictAvailable:
+		return daemonInternalJSON("status", "available", nil)
+	case AvailabilityVerdictMissing:
+		return daemonInternalJSON("status", "missing", struct {
+			Reason string `json:"reason"`
+		}{v.Reason})
+	}
+	return daemonInternalJSON("status", "unknown", nil)
+}
+
+func (v *AvailabilityVerdict) UnmarshalJSON(data []byte) error {
+	name, err := daemonSplitInternal(data, "status")
+	if err != nil {
+		return err
+	}
+	switch name {
+	case "available":
+		*v = AvailabilityVerdict{Kind: AvailabilityVerdictAvailable}
+		return nil
+	case "missing":
+		var fields struct {
+			Reason string `json:"reason"`
+		}
+		if err := daemonDecodeStruct(data, &fields, false); err != nil {
+			return err
+		}
+		*v = AvailabilityVerdict{Kind: AvailabilityVerdictMissing, Reason: fields.Reason}
+		return nil
+	case "unknown":
+		*v = AvailabilityVerdict{Kind: AvailabilityVerdictUnknown}
+		return nil
+	}
+	return daemonUnknownVariant(name, []string{"available", "missing", "unknown"})
+}
+
+// AvailabilityNote is one line under a target picker. A machine that did not
+// answer is muted and can name several runtimes in one line.
+type AvailabilityNote struct {
+	Text    string `json:"text"`
+	Full    string `json:"full"`
+	Routine bool   `json:"routine"`
+}
+
+func (v *AvailabilityNote) UnmarshalJSON(data []byte) error {
+	type plain AvailabilityNote
 	return daemonDecodeStruct(data, (*plain)(v), false)
 }
 
-// AvailabilityChecked is what one availability check found and changed.
-type AvailabilityChecked struct {
-	// Profiles is every configured profile as it was checked, and why it is
-	// missing (nil when it is not).
-	Profiles map[string]DaemonPair[core.HarnessProfile, *string] `json:"profiles"`
-	// Local is this computer's engines, by runtime kind (`podman`, `docker`,
-	// `apple-container`).
-	Local map[string]LocalEngine `json:"local"`
-	// Machines is what each SSH and EC2 machine can run.
-	Machines      []MachineRuntimeProbe `json:"machines"`
-	AddedProfiles []string              `json:"added_profiles"`
-	AddedRuntimes map[string][]string   `json:"added_runtimes"`
+type RuntimeAvailability struct {
+	Profiles               map[string]AvailabilityVerdict `json:"profiles"`
+	Targets                map[string]AvailabilityVerdict `json:"targets"`
+	TargetNotes            []AvailabilityNote             `json:"target_notes"`
+	MachinesWithoutRuntime map[string]string              `json:"machines_without_runtime"`
+	// Browser is the explanations prepared for browser and API clients in
+	// the daemon; never serialized.
+	Browser BrowserAvailabilityReasons `json:"-"`
+	// UninstalledEngines is the local engines whose command is absent
+	// regardless of the last probe.
+	UninstalledEngines sortedStringSet `json:"uninstalled_engines"`
 }
 
-func (v AvailabilityChecked) MarshalJSON() ([]byte, error) {
-	type plain AvailabilityChecked
-	return daemonMarshalStruct(plain(v))
+func (v RuntimeAvailability) MarshalJSON() ([]byte, error) {
+	type plain RuntimeAvailability
+	value := plain(v)
+	if value.UninstalledEngines == nil {
+		value.UninstalledEngines = sortedStringSet{}
+	}
+	return daemonMarshalStruct(value)
 }
 
-func (v *AvailabilityChecked) UnmarshalJSON(data []byte) error {
-	type plain AvailabilityChecked
+func (v *RuntimeAvailability) UnmarshalJSON(data []byte) error {
+	type plain RuntimeAvailability
 	return daemonDecodeStruct(data, (*plain)(v), false)
+}
+
+// BrowserAvailabilityReasons is the public wording for the same missing
+// verdicts. Only in-process projection code needs both versions. The
+// terminal feed carries its own wording.
+type BrowserAvailabilityReasons struct {
+	Profiles    map[string]string
+	Targets     map[string]string
+	TargetNotes []AvailabilityNote
 }

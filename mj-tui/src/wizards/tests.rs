@@ -3479,14 +3479,6 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
 
 fn wizard_with_capacity(template: TargetTemplate, remaining: HostContainerSize) -> DashboardState {
     let mut config = config();
-    let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
-        panic!("podman fixture target");
-    };
-    let template = match template {
-        TargetTemplate::LocalPodman { .. } => TargetTemplate::LocalPodman { container },
-        TargetTemplate::AppleContainer { .. } => TargetTemplate::AppleContainer { container },
-        _ => panic!("unexpected test target"),
-    };
     config.targets.insert("podman".into(), template);
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     set_container_capacity_for_targets(
@@ -3554,25 +3546,37 @@ fn apple_container_cpu_overcommit_does_not_warn_and_can_submit() {
 }
 
 #[test]
-fn apple_container_ram_overcommit_blocks_submission() {
-    let dashboard = wizard_with_capacity(
-        TargetTemplate::AppleContainer {
-            container: config().targets["podman"].container().unwrap().clone(),
+fn hard_ram_overcommit_blocks_submission_with_the_targets_reason() {
+    let container = config().targets["podman"].container().unwrap().clone();
+    let apple = TargetTemplate::AppleContainer {
+        container: container.clone(),
+    };
+    let docker = TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            memory_hard_limit: Some(true),
+            ..container
         },
-        HostContainerSize {
-            cpus: 12,
-            memory_bytes: 4 << 30,
-        },
-    );
-    let wizard = new_wizard(&dashboard);
-    assert!(wizard.resource_allocation.is_none());
-    assert!(
-        wizard
-            .sizing_error
-            .as_deref()
-            .is_some_and(|error| { error.contains("RAM is a hard limit on this host") })
-    );
-    assert!(!target_advance_enabled(&dashboard, wizard));
+    };
+    for (target, reason) in [
+        (
+            apple,
+            "Apple containers do not give freed memory back to macOS",
+        ),
+        (docker, "this target is configured to enforce RAM limits"),
+    ] {
+        let dashboard = wizard_with_capacity(
+            target,
+            HostContainerSize {
+                cpus: 12,
+                memory_bytes: 4 << 30,
+            },
+        );
+        let wizard = new_wizard(&dashboard);
+        assert!(wizard.resource_allocation.is_none());
+        let message = wizard.sizing_error.as_deref().unwrap();
+        assert!(message.contains(reason), "{message}");
+        assert!(!target_advance_enabled(&dashboard, wizard));
+    }
 }
 
 #[test]

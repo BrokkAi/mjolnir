@@ -143,6 +143,53 @@ func (r *DurableRelay) classifiesTurns() bool {
 	return !r.snapshot.ManagedSubagent
 }
 
+// settleLocalQuota settles a typed quota stop without GLiDE: a top-level
+// session's explicit provider usage-limit code, or a managed child's quota
+// stop when its worker recovers child quota.
+func (r *DurableRelay) settleLocalQuota() error {
+	current := r.snapshot.Assessment
+	// Storing a settlement calls back here through the journal tail.
+	if current == nil || !current.Current() || current.Action != nil {
+		return nil
+	}
+	child := r.snapshot.ManagedSubagent
+	diagnostic := current.Completion.Diagnostic
+	var qualifies bool
+	if child {
+		continuation := &r.snapshot.Continuation
+		ownsQuotaFrontier := !continuation.QuotaSuppressed &&
+			continuation.UserCommandID != nil &&
+			continuation.CompletedCommandID != nil && *continuation.CompletedCommandID == current.TurnID
+		qualifies = r.recoversChildQuota &&
+			ownsQuotaFrontier &&
+			current.Status == core.StatusPending &&
+			((diagnostic != nil && diagnostic.IsUsageLimit()) ||
+				core.ClassifyPromptCompletion(current.Completion.StopReason) == core.PromptCompletionQuotaLimit)
+	} else {
+		qualifies = r.verdictHarness != nil &&
+			!r.jevDisabled &&
+			current.Verdict == nil &&
+			current.Glide == nil &&
+			(current.Status == core.StatusPending || current.Status == core.StatusFailed) &&
+			diagnostic != nil && diagnostic.IsTypedUsageLimitCode()
+	}
+	if !qualifies {
+		return nil
+	}
+	a := *current
+	action := core.AssessmentActionRecoverQuota
+	a.Action = &action
+	a.RetryAtMs = nil
+	if !child && r.automaticActionSuppressed() {
+		a.Status = core.StatusSuperseded
+		a.Reason = "automatic_action_suppressed"
+	} else {
+		a.Status = core.StatusDeferred
+		a.Reason = "quota_resolution_required"
+	}
+	return r.storeAssessment(a)
+}
+
 // suppressChildAssessment persists suppression so replaying controllers and
 // older assessment readers never wait for a child classification. Keep the
 // shared event format.
@@ -151,7 +198,8 @@ func (r *DurableRelay) suppressChildAssessment() error {
 		return nil
 	}
 	r.repliedVerdict = RepliedVerdictState{}
-	if r.snapshot.Assessment == nil || !r.snapshot.Assessment.Current() {
+	if r.snapshot.Assessment == nil || !r.snapshot.Assessment.Current() ||
+		(r.snapshot.Assessment.Action != nil && *r.snapshot.Assessment.Action == core.AssessmentActionRecoverQuota) {
 		return nil
 	}
 	assessment := *r.snapshot.Assessment
@@ -177,6 +225,9 @@ func (r *DurableRelay) publishAssessmentDiagnostic() {
 // The Unix worker is the only production caller; these assessment operations
 // stay compiled on Windows so their tests still build there.
 func (r *DurableRelay) preparePendingAssessment() error {
+	if err := r.settleLocalQuota(); err != nil {
+		return err
+	}
 	if !r.classifiesTurns() {
 		return r.suppressChildAssessment()
 	}
@@ -309,7 +360,8 @@ func (r *DurableRelay) reaskBackgroundAfterRestart() error {
 	}
 	turn := TurnAssessmentIdentity{TurnID: current.TurnID, CompletedOrdinal: current.CompletedOrdinal}
 	askedThisTurn := r.repliedVerdict.askedTurn != nil && *r.repliedVerdict.askedTurn == turn
-	if current.Glide == nil && askedThisTurn {
+	recoversQuota := current.Action != nil && *current.Action == core.AssessmentActionRecoverQuota
+	if current.Glide == nil && (recoversQuota || askedThisTurn) {
 		return nil
 	}
 	a := *current
@@ -446,6 +498,13 @@ func (r *DurableRelay) glideRuntime() (core.ActivityFacts, int) {
 	return r.ActivityFacts(), r.nativeAgentCount()
 }
 
+func (r *DurableRelay) automaticActionSuppressed() bool {
+	return len(r.snapshot.AssessmentQuestions) > 0 ||
+		r.snapshot.Goal.BudgetLimited() ||
+		(r.snapshot.Goal.Snapshot != nil && r.snapshot.Goal.Snapshot.Status == "paused") ||
+		len(r.snapshot.QueuedPrompts) > 0
+}
+
 func (r *DurableRelay) applyGlideAssessment(ordinal uint64, glide core.Probabilities) (string, error) {
 	current := r.snapshot.Assessment
 	if current == nil || current.Revision != ordinal || !current.Current() {
@@ -478,10 +537,7 @@ func (r *DurableRelay) applyGlideAssessment(ordinal uint64, glide core.Probabili
 	a.Action = &action
 	a.Status = core.StatusAssessed
 	a.RetryAtMs = nil
-	suppressed := len(r.snapshot.AssessmentQuestions) > 0 ||
-		r.snapshot.Goal.BudgetLimited() ||
-		(r.snapshot.Goal.Snapshot != nil && r.snapshot.Goal.Snapshot.Status == "paused") ||
-		len(r.snapshot.QueuedPrompts) > 0
+	suppressed := r.automaticActionSuppressed()
 	var reason string
 	if suppressed {
 		a.Status = core.StatusSuperseded

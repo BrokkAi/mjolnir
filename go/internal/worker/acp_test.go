@@ -738,12 +738,13 @@ func codexSessionTitles(t *testing.T, projectMemory *string, prompt []schema.Con
 
 func workerSocket(role core.SubagentMcpRole) SubagentMcpSocket {
 	return SubagentMcpSocket{
-		Path:                  "/worker/subagents.sock",
-		Role:                  role,
-		AgentMailboxesEnabled: true,
-		SubtleSubagents:       true,
-		ReviewTools:           false,
-		ProfileRegistration:   false,
+		Path:                 "/worker/subagents.sock",
+		Role:                 role,
+		Oracle:               false,
+		OrchestratorsEnabled: false,
+		SubtleSubagents:      true,
+		ReviewTools:          false,
+		ProfileRegistration:  false,
 	}
 }
 

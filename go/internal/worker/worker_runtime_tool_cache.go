@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
 
 func toolCachePrepare(cwd string, environment map[string]string) error {
@@ -118,7 +119,7 @@ func toolCachePrepare(cwd string, environment map[string]string) error {
 			return err
 		}
 		for _, tool := range []string{"bazel", "bazelisk"} {
-			real, found, err := core.FindCommand(tool, environment)
+			real, found, err := harnessinstall.FindCommand(tool, environment)
 			if err != nil {
 				return err
 			}
@@ -133,7 +134,7 @@ func toolCachePrepare(cwd string, environment map[string]string) error {
 		}
 	}
 	if toolCacheHasAny(cwd, []string{"CMakeLists.txt", "Makefile", "makefile", "GNUmakefile"}) {
-		mbx, found, err := core.FindCommand("mbx", environment)
+		mbx, found, err := harnessinstall.FindCommand("mbx", environment)
 		if err != nil {
 			return err
 		}
@@ -144,7 +145,7 @@ func toolCachePrepare(cwd string, environment map[string]string) error {
 			}
 			if supported {
 				for _, tool := range []string{"cmake", "make", "gmake", "ninja"} {
-					real, found, err := core.FindCommand(tool, environment)
+					real, found, err := harnessinstall.FindCommand(tool, environment)
 					if err != nil {
 						return err
 					}
@@ -239,7 +240,7 @@ unset mj_path mj_path_set mj_rest mj_entry mj_more
 `
 
 func preserveGoSettings(home string, environment map[string]string) error {
-	goCommand, found, err := core.FindCommand("go", environment)
+	goCommand, found, err := harnessinstall.FindCommand("go", environment)
 	if err != nil {
 		return err
 	}

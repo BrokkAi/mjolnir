@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -418,8 +419,7 @@ func (m *ClaudePermissionMode) UnmarshalText(text []byte) error {
 type ApprovalChoices struct {
 	// ClaudePermissionMode: see HarnessProfile.ClaudePermissionMode.
 	ClaudePermissionMode ClaudePermissionMode
-	// MjolnirGuardian: see HarnessProfile.mjolnir_guardian (Rust d8caed8c4;
-	// the profile field is not ported yet, so profiles keep the default).
+	// MjolnirGuardian: see HarnessProfile.MjolnirGuardian.
 	MjolnirGuardian bool
 }
 
@@ -1350,14 +1350,8 @@ func applyExecutionEnforcementEnvironment(enforcement ExecutionEnforcement, envi
 	}
 }
 
-// Guardian is who reviews this harness's tool approvals under configured
-// approvals (a raw target), so the person is not asked about every action.
-//
-// Codex, Claude Code, Grok Build, Muse Code and Antigravity ship their own
-// reviewer, selected through ExecutionEnforcement. Kimi Code, OpenCode and DSH
-// ship none: they only ask, and a permission prompt alone is not a guardian.
-// The Mjolnir worker answers their permission requests with Codex's guardian
-// policy instead, on a read-only session of the same harness and model.
+// Guardian is whether the harness ships a native reviewer under configured
+// approvals. Kimi Code, OpenCode and DSH rely on Mjolnir's reviewer.
 func (k HarnessKind) Guardian() GuardianReviewer {
 	switch k {
 	case HarnessKindKimi, HarnessKindOpenCode, HarnessKindDsh:
@@ -1366,15 +1360,10 @@ func (k HarnessKind) Guardian() GuardianReviewer {
 	return GuardianReviewerHarness
 }
 
-// MjolnirGuardianReviews reports whether the Mjolnir worker reviews this
-// harness's tool approvals: the target keeps configured approvals, the
-// harness ships no reviewer of its own, and the profile has not turned the
-// Mjolnir guardian off. When it does not, each approval the harness asks for
-// goes to the person.
+// MjolnirGuardianReviews reports whether requests that reach Mjolnir are
+// eligible for its guardian.
 func (k HarnessKind) MjolnirGuardianReviews(policy ExecutionPolicy, choices ApprovalChoices) bool {
-	return policy == ExecutionPolicyConfiguredApprovals &&
-		k.Guardian() == GuardianReviewerMjolnir &&
-		choices.MjolnirGuardian
+	return policy == ExecutionPolicyConfiguredApprovals && choices.MjolnirGuardian
 }
 
 // LaunchFlagFor is the launch flag the bridge command line carries, if any.
@@ -1462,18 +1451,6 @@ func (k HarnessKind) NativeSessionDirs() []string {
 // with a log line.
 func (k HarnessKind) MCPServersNeedAdvertisedHTTP() bool { return k == HarnessKindMuse }
 
-// ExtraManagedEntrypoint is an executable a managed install must create
-// beside its pinned entrypoint, relative to the install root.
-func (k HarnessKind) ExtraManagedEntrypoint() (string, bool) {
-	switch k {
-	case HarnessKindGrok:
-		return "bin/agent", true
-	case HarnessKindClaude:
-		return "node_modules/.bin/claude", true
-	}
-	return "", false
-}
-
 // BridgeArgs is the harness-specific arguments that start its ACP stdio
 // server.
 func (k HarnessKind) BridgeArgs(policy ExecutionPolicy) []string {
@@ -1544,6 +1521,64 @@ func (QuotaProviderDeepSeek) DisplayName() string  { return "DeepSeek" }
 func (QuotaProviderZai) DisplayName() string       { return "Z.ai" }
 func (QuotaProviderMeta) DisplayName() string      { return "Meta" }
 func (p QuotaProviderOther) DisplayName() string   { return p.Value }
+
+// QuotaProvider serializes as serde's externally tagged enum: a unit variant
+// is its name and Other is `{"Other": name}`.
+func (QuotaProviderAnthropic) MarshalJSON() ([]byte, error) { return []byte(`"Anthropic"`), nil }
+func (QuotaProviderOpenAI) MarshalJSON() ([]byte, error)    { return []byte(`"OpenAI"`), nil }
+func (QuotaProviderGoogle) MarshalJSON() ([]byte, error)    { return []byte(`"Google"`), nil }
+func (QuotaProviderXAI) MarshalJSON() ([]byte, error)       { return []byte(`"XAI"`), nil }
+func (QuotaProviderMoonshot) MarshalJSON() ([]byte, error)  { return []byte(`"Moonshot"`), nil }
+func (QuotaProviderDeepSeek) MarshalJSON() ([]byte, error)  { return []byte(`"DeepSeek"`), nil }
+func (QuotaProviderZai) MarshalJSON() ([]byte, error)       { return []byte(`"Zai"`), nil }
+func (QuotaProviderMeta) MarshalJSON() ([]byte, error)      { return []byte(`"Meta"`), nil }
+func (p QuotaProviderOther) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"Other": p.Value})
+}
+
+// UnmarshalQuotaProviderJSON reads serde's externally tagged QuotaProvider.
+// Fields holding a QuotaProvider decode through it.
+func UnmarshalQuotaProviderJSON(data []byte) (QuotaProvider, error) {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		switch name {
+		case "Anthropic":
+			return QuotaProviderAnthropic{}, nil
+		case "OpenAI":
+			return QuotaProviderOpenAI{}, nil
+		case "Google":
+			return QuotaProviderGoogle{}, nil
+		case "XAI":
+			return QuotaProviderXAI{}, nil
+		case "Moonshot":
+			return QuotaProviderMoonshot{}, nil
+		case "DeepSeek":
+			return QuotaProviderDeepSeek{}, nil
+		case "Zai":
+			return QuotaProviderZai{}, nil
+		case "Meta":
+			return QuotaProviderMeta{}, nil
+		case "Other":
+			return nil, errors.New("invalid type: unit variant, expected newtype variant")
+		}
+		return nil, serdeUnknownVariant(name, "Anthropic", "OpenAI", "Google", "XAI", "Moonshot", "DeepSeek", "Zai", "Meta", "Other")
+	}
+	var tagged map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tagged); err != nil || len(tagged) != 1 {
+		return nil, fmt.Errorf("invalid type: %s, expected enum QuotaProvider", serdeUnexpected(data))
+	}
+	for variant, content := range tagged {
+		if variant != "Other" {
+			return nil, serdeUnknownVariant(variant, "Anthropic", "OpenAI", "Google", "XAI", "Moonshot", "DeepSeek", "Zai", "Meta", "Other")
+		}
+		var value string
+		if err := json.Unmarshal(content, &value); err != nil {
+			return nil, err
+		}
+		return QuotaProviderOther{Value: value}, nil
+	}
+	panic("unreachable")
+}
 
 // QuotaProviderOrdinal is the position of p's variant in declaration order,
 // which with QuotaProviderOther's name is Rust's derived Ord.
@@ -1777,6 +1812,11 @@ type HarnessProfile struct {
 	// permission. Unconstrained targets always bypass permissions. Only valid
 	// on a Claude profile.
 	ClaudePermissionMode *ClaudePermissionMode `json:"claude_permission_mode,omitempty" toml:"claude_permission_mode,omitempty"`
+	// MjolnirGuardian is whether the Mjolnir guardian answers this profile's
+	// tool approvals where the target keeps configured approvals (localhost,
+	// guardian SSH). On by default. Turn it off to send pending harness
+	// approval requests directly to the person.
+	MjolnirGuardian bool `json:"mjolnir_guardian" toml:"mjolnir_guardian"`
 	// AWS is the IAM role Mjolnir assumes for each session of a profile that
 	// authenticates with the AWS credential chain (Bedrock), so the session
 	// gets short-lived credentials limited to that role instead of a copy of
@@ -1810,6 +1850,7 @@ func (h HarnessProfile) MarshalJSON() ([]byte, error) {
 	object.fieldUnless(isFalse(h.LoadBalancingMayConsumeCredits), "load_balancing_may_consume_credits", h.LoadBalancingMayConsumeCredits)
 	object.fieldUnless(h.CodexProfile == nil, "codex_profile", h.CodexProfile)
 	object.fieldUnless(h.ClaudePermissionMode == nil, "claude_permission_mode", h.ClaudePermissionMode)
+	object.fieldUnless(isTrue(h.MjolnirGuardian), "mjolnir_guardian", h.MjolnirGuardian)
 	object.fieldUnless(h.AWS == nil, "aws", h.AWS)
 	object.fieldUnless(len(h.Models) == 0, "models", h.Models)
 	object.fieldUnless(isTrue(h.ThirdPartyModels), "third_party_models", h.ThirdPartyModels)
@@ -1821,7 +1862,7 @@ func (h *HarnessProfile) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	type plain HarnessProfile
-	value := plain{Enabled: true, ThirdPartyModels: true}
+	value := plain{Enabled: true, ThirdPartyModels: true, MjolnirGuardian: true}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
@@ -1976,7 +2017,7 @@ func (h HarnessProfile) QuotaProvider() QuotaProvider {
 // NewHarnessProfile creates an enabled profile with all optional settings
 // unset.
 func NewHarnessProfile(kind HarnessKind, home string) HarnessProfile {
-	return HarnessProfile{Enabled: true, ThirdPartyModels: true, Kind: kind, Home: home}
+	return HarnessProfile{Enabled: true, ThirdPartyModels: true, MjolnirGuardian: true, Kind: kind, Home: home}
 }
 
 func (h HarnessProfile) DiscoveryInputs() ProfileDiscoveryInputs {
@@ -2031,9 +2072,7 @@ func (h HarnessProfile) ApprovalChoices() ApprovalChoices {
 	if h.ClaudePermissionMode != nil {
 		mode = *h.ClaudePermissionMode
 	}
-	// MjolnirGuardian stays on until HarnessProfile.mjolnir_guardian is
-	// ported (Rust d8caed8c4).
-	return ApprovalChoices{ClaudePermissionMode: mode, MjolnirGuardian: true}
+	return ApprovalChoices{ClaudePermissionMode: mode, MjolnirGuardian: h.MjolnirGuardian}
 }
 
 // ConfigureExecutionEnvironment applies the launch environment for policy.
@@ -2112,7 +2151,7 @@ func (h HarnessProfile) AuthScheme() AuthScheme {
 		return AuthSchemeApiKey{EnvKey: envKey}
 	}
 	if h.Kind == HarnessKindClaude {
-		if value, ok := h.Environment.Get("CLAUDE_CODE_USE_BEDROCK"); ok && (value == "1" || value == "true" || value == "TRUE") {
+		if auth, ok := ClaudeEnvironmentAuthFrom(h.Environment.Resolved()); ok && auth.Kind == ClaudeEnvironmentAuthBedrock {
 			return AuthSchemeAwsCredentialChain{}
 		}
 	}
@@ -2801,10 +2840,10 @@ const (
 // harness and for providers that do not use Codex's own OpenAI login.
 //
 // Codex records the choice as `auth_mode` in `auth.json`: "apikey" after
-// `codex login --with-api-key` and "chatgpt" after a ChatGPT login. Anything
-// but "apikey", a missing file included, counts as a ChatGPT login, because
-// such a profile has no API key of its own: a key could only reach it from
-// somewhere else.
+// `codex login --with-api-key` and "chatgpt" after a ChatGPT login. A
+// missing file leaves the target free to supply credentials. An unreadable
+// or unrecognized file still protects a possible ChatGPT login from
+// inherited API credentials.
 func (h HarnessProfile) CodexLogin() (CodexLogin, bool) {
 	if h.Kind != HarnessKindCodex {
 		return 0, false
@@ -2812,13 +2851,18 @@ func (h HarnessProfile) CodexLogin() (CodexLogin, bool) {
 	if provider, err := h.CodexProvider(); err == nil && provider != nil && !provider.UsesCodexLogin() {
 		return 0, false
 	}
+	bytes, err := os.ReadFile(HarnessAuthenticationMarker(h.Kind, h.Home))
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false
+	}
+	if err != nil {
+		return CodexLoginChatGpt, true
+	}
 	authMode := ""
-	if bytes, err := os.ReadFile(HarnessAuthenticationMarker(h.Kind, h.Home)); err == nil {
-		var value any
-		if json.Unmarshal(bytes, &value) == nil {
-			if object, ok := value.(map[string]any); ok {
-				authMode, _ = object["auth_mode"].(string)
-			}
+	var value any
+	if json.Unmarshal(bytes, &value) == nil {
+		if object, ok := value.(map[string]any); ok {
+			authMode, _ = object["auth_mode"].(string)
 		}
 	}
 	if authMode == "apikey" {
@@ -2853,4 +2897,24 @@ func (h HarnessProfile) ExcludeHarnessEnvironment(environment map[string]string)
 		names = append(names, name)
 	}
 	return names
+}
+
+// MissingNativeLoginReason reports whether this profile's native login file
+// is missing on disk when it is required to launch a session.
+//
+// Codex AuthSchemeNativeLogin profiles require `auth.json` at launch unless
+// an accepted API-key/token environment variable is supplied.
+func (h HarnessProfile) MissingNativeLoginReason(id string) (string, bool) {
+	if h.Kind != HarnessKindCodex || !h.AuthScheme().UsesNativeLoginFile() {
+		return "", false
+	}
+	for _, name := range [3]string{"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"} {
+		if h.SuppliesAPIKey(name) {
+			return "", false
+		}
+	}
+	if info, err := os.Stat(h.AuthenticationMarker()); err == nil && info.Mode().IsRegular() {
+		return "", false
+	}
+	return fmt.Sprintf("Codex login file auth.json is missing; run `mj login --profile %s`", id), true
 }

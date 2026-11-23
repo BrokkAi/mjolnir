@@ -11,6 +11,94 @@ use mj_core::worker_launch::HarnessRuntimePolicy;
 
 use super::{AcpSupervisorSpec, harness};
 
+pub(crate) fn supervisor_environment(
+    spec: &AcpSupervisorSpec,
+    inherited: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut environment = inherited.clone();
+    environment.extend(spec.environment.clone());
+    // Remove exclusions after the merge so a target's login environment
+    // cannot reintroduce a variable already stripped from the spec (#1160).
+    for name in &spec.excluded_environment {
+        environment.remove(name);
+    }
+    environment
+}
+
+/// Refresh the accepted model and the temporary-directory record for the
+/// session bridge that is about to start.
+pub(crate) fn finalize_session_bridge(launch: &crate::acp::LaunchSpec) -> Result<()> {
+    let Some(path) = &launch.bridge_spec_path else {
+        return Ok(());
+    };
+    let root = path
+        .parent()
+        .context("ACP supervisor spec needs a worker root")?;
+    let mut spec = AcpSupervisorSpec::read(path)?;
+    let before = spec.environment.clone();
+    let model = launch.startup_model();
+    super::pin_accepted_bridge_selectors(launch.harness, &mut spec.environment, model.as_deref())?;
+    if spec.environment != before {
+        spec.write_spec(path)?;
+    }
+
+    let environment = supervisor_environment(&spec, &launch.environment);
+    let names = if cfg!(windows) {
+        &["TMP", "TEMP", "USERPROFILE"][..]
+    } else {
+        &["TMPDIR"][..]
+    };
+    let directory = names
+        .iter()
+        .find_map(|&name| {
+            environment
+                .get(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(default_temp_directory);
+    let directory = if directory.is_absolute() {
+        directory
+    } else {
+        // The supervisor applies its spec's cwd from its own launch directory.
+        std::path::absolute(&launch.cwd)?
+            .join(&spec.cwd)
+            .join(directory)
+    };
+    let text = directory
+        .to_str()
+        .context("session temporary directory is not UTF-8")?;
+    mj_core::config::atomic_write(&root.join("session-temp-dir"), text.as_bytes())
+        .context("record the session temporary directory")
+}
+
+fn default_temp_directory() -> PathBuf {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let name = libc::_CS_DARWIN_USER_TEMP_DIR;
+        // SAFETY: A null buffer with length zero asks for the required size.
+        let length = unsafe { libc::confstr(name, std::ptr::null_mut(), 0) };
+        if length > 0 {
+            let mut bytes = vec![0_u8; length];
+            // SAFETY: The buffer is writable for exactly length bytes.
+            let written = unsafe { libc::confstr(name, bytes.as_mut_ptr().cast(), length) };
+            if (1..=length).contains(&written) {
+                bytes.truncate(written - 1);
+                return PathBuf::from(std::ffi::OsString::from_vec(bytes));
+            }
+        }
+    }
+    if cfg!(windows) {
+        PathBuf::from(r"C:\Windows\Temp")
+    } else if cfg!(target_os = "android") {
+        PathBuf::from("/data/local/tmp")
+    } else {
+        PathBuf::from("/tmp")
+    }
+}
+
 /// Keep this preparation alive until the supervisor holds its installation lease.
 pub struct PreparedHarnessLaunch {
     pub spec: AcpSupervisorSpec,

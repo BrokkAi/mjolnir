@@ -74,11 +74,14 @@ func TestAQueuedOverrideWithOneReasonDecodesAsOnePair(t *testing.T) {
 	if !reflect.DeepEqual(action, SubagentToolAction(want)) {
 		t.Fatalf("got %#v", action)
 	}
-	pairs := `{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}]}}`
+	pairs := `{"action":"override_review","params":{"overrides":[{"finding":"F","reason":"R"}],"path":"/other"}}`
 	action = subagentTestDecodeAction(t, pairs)
 	again := subagentTestDecodeAction(t, string(subagentTestEncode(t, action)))
 	if !reflect.DeepEqual(again, action) {
 		t.Fatalf("got %#v, want %#v", again, action)
+	}
+	if override, ok := action.(SubagentToolActionOverrideReview); !ok || override.Path == nil || *override.Path != "/other" {
+		t.Fatalf("got %#v", action)
 	}
 }
 
@@ -91,7 +94,7 @@ func TestOnlyChildMutationsHoldAnInPlaceMoveDrain(t *testing.T) {
 		},
 		SubagentToolActionSendInput{ChildSessionID: "child", Message: "continue"},
 		SubagentToolActionSendMessage{ChildSessionID: "child", Message: "legacy note"},
-		SubagentToolActionLegacyInterruptAgent{ChildSessionID: "child"},
+		SubagentToolActionSpawnOrchestrator{TaskName: "task", Instructions: "work"},
 		SubagentToolActionCloseAgent{ChildSessionID: "child"},
 		SubagentToolActionOverrideReview{Overrides: []ReviewOverride{{Finding: "finding", Reason: "reason"}}},
 		SubagentToolActionSetReviewBaseline{Commit: "abc123"},
@@ -102,6 +105,7 @@ func TestOnlyChildMutationsHoldAnInPlaceMoveDrain(t *testing.T) {
 		}
 	}
 	for _, observation := range []SubagentToolAction{
+		SubagentToolActionLegacyInterruptAgent{ChildSessionID: "child"},
 		SubagentToolActionListProfiles{},
 		SubagentToolActionListAgents{},
 		SubagentToolActionLegacyWaitAgents{},
@@ -192,6 +196,24 @@ func TestPoliciesPreserveLegacyRecordsButPublicPolicyRejectsBooleans(t *testing.
 		t.Fatalf("got %#v", oldFlat)
 	}
 	for _, harness := range []HarnessKind{HarnessKindClaude, HarnessKindCodex, HarnessKindDsh, HarnessKindOpenCode} {
+		worker := SubagentRecord{
+			Kind:            SubagentKindWorker,
+			ChildSessionID:  "child",
+			ParentSessionID: "parent",
+			TaskName:        "task",
+			ProfileID:       "codex",
+			RequestKey:      "req",
+			HandbackTool:    true,
+		}
+		orchestrator := worker
+		orchestrator.Orchestrator = true
+		enabled := SubagentPolicy{Mode: SubagentPolicyMjolnir, Orchestrators: true}
+		if got := enabled.ForLaunch(harness, nil); !reflect.DeepEqual(got, enabled) {
+			t.Fatalf("%s top level: got %#v", harness, got)
+		}
+		if got := enabled.ForLaunch(harness, &orchestrator); got.Mode != SubagentPolicyMjolnir || got.Orchestrators {
+			t.Fatalf("%s orchestrator: got %#v", harness, got)
+		}
 		for _, policy := range []SubagentPolicy{
 			{Mode: SubagentPolicyNative},
 			{Mode: SubagentPolicyMjolnir},
@@ -199,12 +221,39 @@ func TestPoliciesPreserveLegacyRecordsButPublicPolicyRejectsBooleans(t *testing.
 			defaultEffort,
 			{Mode: SubagentPolicyNone},
 		} {
-			if got := policy.ForLaunch(harness, true); !reflect.DeepEqual(got, SubagentPolicy{Mode: SubagentPolicyNone}) {
+			if got := policy.ForLaunch(harness, &worker); !reflect.DeepEqual(got, SubagentPolicy{Mode: SubagentPolicyNone}) {
 				t.Fatalf("%s child: got %#v", harness, got)
 			}
-			if got := policy.ForLaunch(harness, false); !reflect.DeepEqual(got, policy) {
+			if got := policy.ForLaunch(harness, &orchestrator); !reflect.DeepEqual(got, policy) {
+				t.Fatalf("%s orchestrator: got %#v", harness, got)
+			}
+			if got := policy.ForLaunch(harness, nil); !reflect.DeepEqual(got, policy) {
 				t.Fatalf("%s parent: got %#v", harness, got)
 			}
+		}
+		// Depth-2 invariant: top-level -> orchestrator ok; orchestrator ->
+		// worker ok; orchestrator -> orchestrator/oracle refused; worker ->
+		// worker refused.
+		if err := ValidateSubagentParent(nil, true, SubagentKindWorker, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateSubagentParent(&orchestrator, false, SubagentKindWorker, false); err != nil {
+			t.Fatal(err)
+		}
+		if ValidateSubagentParent(&orchestrator, false, SubagentKindWorker, true) == nil {
+			t.Fatal("an orchestrator spawned an orchestrator")
+		}
+		if ValidateSubagentParent(&orchestrator, false, SubagentKindOracle, false) == nil {
+			t.Fatal("a borrowed orchestrator spawned an oracle")
+		}
+		if ValidateSubagentParent(&worker, false, SubagentKindWorker, false) == nil {
+			t.Fatal("a worker spawned a worker")
+		}
+		if err := ValidateSubagentParent(&worker, false, SubagentKindReviewer, false); err != nil {
+			t.Fatal(err)
+		}
+		// Keep existing serde round-trip check below for completeness.
+		for _, policy := range []SubagentPolicy{{Mode: SubagentPolicyNative}, {Mode: SubagentPolicyNone}} {
 			var decoded SubagentPolicy
 			if err := json.Unmarshal(subagentTestEncode(t, policy), &decoded); err != nil {
 				t.Fatal(err)
@@ -525,7 +574,7 @@ func TestReviewToolsBelongToTheReviewServerAndNoMjAgentsRole(t *testing.T) {
 	}
 	for _, role := range []SubagentMcpRole{SubagentMcpRoleParent, SubagentMcpRoleMessageOnly, SubagentMcpRoleFetchOnly, SubagentMcpRoleChild} {
 		for _, tool := range ReviewMCPTools {
-			if slices.Contains(role.ToolNames(), tool) {
+			if slices.Contains(role.ToolNames(true, true), tool) {
 				t.Fatalf("%s lists %s", role, tool)
 			}
 		}
@@ -540,7 +589,7 @@ func TestAnOldInterruptRequestRemainsReadableButIsNotAnOfferedTool(t *testing.T)
 	if !reflect.DeepEqual(old.Action, SubagentToolAction(SubagentToolActionLegacyInterruptAgent{ChildSessionID: "child"})) {
 		t.Fatalf("got %#v", old.Action)
 	}
-	if slices.Contains(SubagentMcpRoleParent.ToolNames(), "interrupt") {
+	if slices.Contains(SubagentMcpRoleParent.ToolNames(true, true), "interrupt") {
 		t.Fatal("interrupt is offered")
 	}
 }
@@ -563,7 +612,7 @@ func TestAPersistedSendMessageRequestRemainsReadable(t *testing.T) {
 	if !reflect.DeepEqual(cachedAlias.Action, SubagentToolAction(SubagentToolActionSendInput{ChildSessionID: "child", Message: "continue too"})) {
 		t.Fatalf("got %#v", cachedAlias.Action)
 	}
-	tools := SubagentMcpRoleParent.ToolNames()
+	tools := SubagentMcpRoleParent.ToolNames(true, true)
 	if !slices.Contains(tools, "send_message") || slices.Contains(tools, "send_input") || slices.Contains(tools, "interrupt") {
 		t.Fatal(tools)
 	}
@@ -588,8 +637,8 @@ func TestWaitSerializesWithoutParamsAndOldShapesDeserialize(t *testing.T) {
 		t.Fatalf("got %#v", decoded)
 	}
 	for _, role := range []SubagentMcpRole{SubagentMcpRoleParent, SubagentMcpRoleChild} {
-		if slices.Contains(role.ToolNames(), "wait") || slices.Contains(role.ToolNames(), "await_children") {
-			t.Fatal(role.ToolNames())
+		if slices.Contains(role.ToolNames(true, true), "wait") || slices.Contains(role.ToolNames(true, true), "await_children") {
+			t.Fatal(role.ToolNames(true, true))
 		}
 	}
 	for _, oldShape := range []string{
@@ -942,17 +991,24 @@ func TestAChildHasHandedBackOnlyWhenItsFinalReportAnswersTheNewestPrompt(t *test
 
 func TestDelegationPolicyOffersATaskTypeOnlyWhenSubtleIsConfigured(t *testing.T) {
 	both := DelegationPolicy(4, true)
-	if !strings.Contains(both, "Set `task_type` to `straightforward`") ||
-		!strings.Contains(both, "A subtle\ntask gets a smarter, more expensive agent.") {
-		t.Fatal(both)
+	for _, part := range []string{
+		"Set `task_type` to `straightforward`",
+		"for bounded work with a single clear path",
+		"for multi-file implementation (even from a settled design), multi-stage\noperational runs or troubleshooting",
+		"A subtle task gets a smarter, more\nexpensive agent.",
+		"When a `straightforward` child stalls or returns incomplete after one\ncorrection, escalate that slice to `subtle` rather than taking it over yourself.",
+	} {
+		if !strings.Contains(both, part) {
+			t.Fatalf("missing %q: %s", part, both)
+		}
 	}
 	// With only straightforward, there is no choice: the parent delegates
 	// straightforward work and keeps work that needs judgment.
 	one := DelegationPolicy(4, false)
 	for _, part := range []string{
 		"`close` tools; Mjolnir supplies the configured\nchild model and effort. Delegate straightforward work: ",
-		"Do work that needs judgment yourself",
-		"Judge difficulty, not brief length.\nUp to 4 children",
+		"Keep multi-file\nimplementation, troubleshooting, ambiguous diagnosis, design choices",
+		"Judge by scope and branching,\nnot brief length or command runtime.\nUp to 4 children",
 	} {
 		if !strings.Contains(one, part) {
 			t.Fatalf("missing %q: %s", part, one)
@@ -965,6 +1021,9 @@ func TestDelegationPolicyOffersATaskTypeOnlyWhenSubtleIsConfigured(t *testing.T)
 		t.Fatal(one)
 	}
 	if !strings.Contains(one, "Decide who builds and when, yourself included") {
+		t.Fatal(one)
+	}
+	if !strings.Contains(one, "delegate any resulting edits, test-fixture repairs, and merge conflicts that\nfit your configured children once they go beyond a few calls. Where a child\nalready owns that slice and matches its scope, prefer resuming it via\n`send_message`") {
 		t.Fatal(one)
 	}
 	for _, text := range []string{"task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"} {
@@ -990,6 +1049,22 @@ func TestDurableLegacySpawnSelectorsAreIgnoredAndTaskTypeDefaults(t *testing.T) 
 	for _, key := range []string{"profile_id", "model", "effort"} {
 		if _, ok := transcriptGet(params, key); ok {
 			t.Fatalf("%s was written", key)
+		}
+	}
+
+	for _, spelling := range []string{"supervisor", "orchestrator"} {
+		request := `{"action":"spawn","params":{"task_name":"legacy","instructions":"report","task_type":"` + spelling + `"}}`
+		action := subagentTestDecodeAction(t, request)
+		spawn, ok := action.(SubagentToolActionSpawn)
+		if !ok || spawn.TaskType != SubagentTaskTypeOrchestrator {
+			t.Fatalf("%s: got %#v", spelling, action)
+		}
+		params, _ := transcriptGet(transcriptParse(subagentTestEncode(t, action)), "params")
+		if taskType, _ := transcriptGetStr(params, "task_type"); taskType != "supervisor" {
+			t.Fatalf("%s: task_type written as %q", spelling, taskType)
+		}
+		if parsed, err := ParseSubagentMcpRole(spelling); err != nil || parsed != SubagentMcpRoleOrchestrator {
+			t.Fatalf("%s: got %q %v", spelling, parsed, err)
 		}
 	}
 	var role SubagentMcpRole

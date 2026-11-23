@@ -287,32 +287,6 @@ pub(crate) fn pin_accepted_bridge_selectors(
     Ok(())
 }
 
-/// Bring the bridge's supervisor spec up to date with what this session has
-/// accepted, so the next bridge process starts on it.
-///
-/// The spec is written once, before the worker's first bridge starts, and
-/// every later bridge re-execs the supervisor against that same file. A
-/// session accepts its model after that point far more often than before it:
-/// a session created with an explicit model applies the selector once the
-/// session exists, and a model set later never reaches the file at all. So a
-/// pin taken only at worker start is missing exactly when it is needed, and
-/// every in-worker resume reopens the harness on the profile default. Rewrite
-/// it from the live accepted configuration at each launch instead.
-#[cfg(unix)]
-pub(crate) fn repin_bridge_selectors(
-    path: &Path,
-    harness: HarnessKind,
-    model: Option<&str>,
-) -> Result<()> {
-    let mut spec = AcpSupervisorSpec::read(path)?;
-    let environment = spec.environment.clone();
-    pin_accepted_bridge_selectors(harness, &mut spec.environment, model)?;
-    if spec.environment == environment {
-        return Ok(());
-    }
-    spec.write_spec(path)
-}
-
 #[cfg(unix)]
 mod discovery;
 #[cfg(unix)]

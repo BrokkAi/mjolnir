@@ -149,6 +149,7 @@ pub fn apply_value(
         for (key, target) in replacement.as_object_mut().unwrap() {
             if key != "kind"
                 && let Some(old) = old_parent.get(key)
+                && (key != "memory_hard_limit" || defaults.get(key) != Some(old))
             {
                 *target = old.clone();
             }

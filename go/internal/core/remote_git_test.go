@@ -8,6 +8,40 @@ import (
 	"testing"
 )
 
+func TestDisplayNetworkURLNormalizesGithubAndKeepsAlternateRoutes(t *testing.T) {
+	for _, input := range []string{
+		"git@github.com:BrokkAi/mjolnir.git",
+		"git@github.com:BrokkAi/mjolnir",
+		"github.com:BrokkAi/mjolnir.git",
+		"ssh://git@github.com/BrokkAi/mjolnir",
+		"https://github.com/BrokkAi/mjolnir",
+		"https://GITHUB.COM/BrokkAi/mjolnir/",
+		"http://github.com/BrokkAi/mjolnir",
+		"https://user:token@github.com/BrokkAi/mjolnir",
+	} {
+		if got := DisplayNetworkURL(input); got != "https://github.com/BrokkAi/mjolnir.git" {
+			t.Errorf("%s: %q", input, got)
+		}
+	}
+	got := DisplayNetworkURLs([]string{
+		"git@github.com:BrokkAi/mjolnir.git",
+		"https://github.com/BrokkAi/mjolnir",
+		"https://user:token@github.com/BrokkAi/mjolnir/",
+		"ssh://git@ssh.github.com:443/BrokkAi/mjolnir.git",
+		"ssh://git@github.com:22/BrokkAi/mjolnir.git",
+		"https://user:secret@git.example/repo",
+	})
+	want := []string{
+		"https://github.com/BrokkAi/mjolnir.git",
+		"ssh://ssh.github.com:443/BrokkAi/mjolnir.git",
+		"ssh://github.com:22/BrokkAi/mjolnir.git",
+		"https://git.example/repo",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("display = %q", got)
+	}
+}
+
 func TestGithubShorthandExpandsToHTTPS(t *testing.T) {
 	github := "BrokkAi/hel"
 	repository := ProjectRepository{ID: "repo", Github: &github, Destination: "repo"}
@@ -162,9 +196,33 @@ func TestNetworkURLValidationRejectsLocalAndHelperEndpoints(t *testing.T) {
 		"ssh://git@example.com/repo.git",
 		"git://example.com/repo.git",
 		"git@example.com:org/repo.git",
+		"git@example.com:path@[::1]:repo.git",
 	} {
 		if err := ValidateNetworkURL(url); err != nil {
 			t.Errorf("rejected %s: %v", url, err)
+		}
+		if IsHostOnlyGitSource(url) {
+			t.Errorf("classified %s as host-only", url)
+		}
+	}
+	for _, url := range []string{
+		"git://127.192.1.9/repo.git",
+		"ssh://git@[::1]/repo.git",
+		"git@LOCALHOST:repo.git",
+	} {
+		if err := ValidateNetworkURL(url); err != nil {
+			t.Errorf("rejected %s: %v", url, err)
+		}
+		if !IsHostOnlyGitSource(url) {
+			t.Errorf("missed host-only source %s", url)
+		}
+	}
+	for _, url := range []string{"file:///tmp/repo", "relative/repo", `C:\git\repo`} {
+		if ValidateNetworkURL(url) == nil {
+			t.Errorf("accepted %s", url)
+		}
+		if !IsHostOnlyGitSource(url) {
+			t.Errorf("missed host-only source %s", url)
 		}
 	}
 }

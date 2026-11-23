@@ -215,9 +215,9 @@ func (r *DurableRelay) turnControls() core.TurnControls {
 			switch r.steeringDeliveryMode {
 			case SteeringDeliveryModeAcp, SteeringDeliveryModeAcpWithMailbox:
 				deliverable = r.steeringSupported == nil || *r.steeringSupported
-			case SteeringDeliveryModeClaudePostToolBatch:
+			case SteeringDeliveryModeHookPostToolBatch:
 				_, deliverable = core.SteeringTextContext(payload.Prompt)
-			case SteeringDeliveryModeClaudeTurnEnd:
+			case SteeringDeliveryModeHookTurnEnd:
 				deliverable = false
 			}
 			dispatch, dispatched := r.snapshot.Dispatches[head.CommandID]
@@ -332,6 +332,212 @@ func (r *DurableRelay) DeliverAgentMessage(source, key, text string) error {
 // submitCommand accepts a command. The protocol error is the command's
 // refusal (Rust's inner Err); err is a failure to apply it (the outer Err).
 func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
+	return r.submitCommandInner(commandID, command, false)
+}
+
+// verifyExpectedStoreID refuses an in-place Move request bound to another
+// relay store.
+func (r *DurableRelay) verifyExpectedStoreID(expectedStoreID string) *core.RelayProtocolError {
+	if strings.TrimSpace(expectedStoreID) == "" {
+		return relayProtocolRefusal(core.RelayErrorCodeInvalidRequest, "expected_store_id is required", false)
+	}
+	if r.snapshot.StoreID == nil || *r.snapshot.StoreID != expectedStoreID {
+		actual := "<none>"
+		var actualStoreID *string
+		if r.snapshot.StoreID != nil {
+			actual = *r.snapshot.StoreID
+			copied := *r.snapshot.StoreID
+			actualStoreID = &copied
+		}
+		refusal := core.NewRelayProtocolError(
+			core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("relay store_id mismatch: expected %s, actual %s", expectedStoreID, actual),
+			false,
+			core.RelayErrorDetailStoreMismatch{ExpectedStoreID: expectedStoreID, ActualStoreID: actualStoreID},
+		)
+		return &refusal
+	}
+	return nil
+}
+
+// holdInPlaceMoveDispatch atomically holds queue dispatch for a same-target
+// in-place Move and returns the pending commands captured with the hold.
+func (r *DurableRelay) holdInPlaceMoveDispatch(operationID, expectedStoreID string) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
+	if strings.TrimSpace(operationID) == "" {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidRequest, "operation_id is required", false), nil
+	}
+	if refusal := r.verifyExpectedStoreID(expectedStoreID); refusal != nil {
+		return nil, refusal, nil
+	}
+	if existing := r.snapshot.InPlaceMoveHold; existing != nil {
+		if existing.OperationID == operationID {
+			return core.RelayResponsePayloadInPlaceMoveDispatchHeld{
+				CapturedPendingCommandIDs: slices.Clone(existing.CapturedPendingCommandIDs),
+			}, nil, nil
+		}
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("dispatch is already held by in-place move operation %s", existing.OperationID), false), nil
+	}
+	captured := make([]string, 0, len(r.snapshot.QueuedPrompts))
+	for _, queued := range r.snapshot.QueuedPrompts {
+		captured = append(captured, queued.CommandID)
+	}
+	r.snapshot.InPlaceMoveHold = &core.InPlaceMoveHold{
+		OperationID:               operationID,
+		CapturedPendingCommandIDs: slices.Clone(captured),
+	}
+	if err := r.persistSnapshot(); err != nil {
+		return nil, nil, err
+	}
+	return core.RelayResponsePayloadInPlaceMoveDispatchHeld{CapturedPendingCommandIDs: captured}, nil, nil
+}
+
+// discardHeldMoveCommands idempotently discards held pending commands for
+// the active in-place Move hold of operationID.
+func (r *DurableRelay) discardHeldMoveCommands(operationID, expectedStoreID string, commandIDs []string) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
+	if refusal := r.verifyExpectedStoreID(expectedStoreID); refusal != nil {
+		return nil, refusal, nil
+	}
+	if r.inPlaceHarnessRestartInFlight != nil {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			"cannot discard held commands while an in-place harness restart is in progress", true), nil
+	}
+	hold := r.snapshot.InPlaceMoveHold
+	if hold == nil {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState, "no active in-place move dispatch hold", false), nil
+	}
+	if hold.OperationID != operationID {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("dispatch is held by a different in-place move operation %s", hold.OperationID), false), nil
+	}
+	captured := slices.Clone(hold.CapturedPendingCommandIDs)
+	for _, commandID := range commandIDs {
+		if !slices.Contains(captured, commandID) {
+			return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidRequest,
+				fmt.Sprintf("command %s was not captured by in-place move hold %s", commandID, operationID), false), nil
+		}
+	}
+	for _, commandID := range commandIDs {
+		if slices.ContainsFunc(r.snapshot.QueuedPrompts, func(queued core.StoredQueuedRelayCommand) bool {
+			return queued.CommandID == commandID
+		}) {
+			if _, err := r.RecordCommandRejected(commandID, core.OutcomeReasonAdmissionRejected, "Discarded by in-place move"); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	return core.RelayResponsePayloadHeldMoveCommandsDiscarded{}, nil, nil
+}
+
+// submitFrontCommand submits a continuation to the head of the pending
+// queue while operationID holds dispatch.
+func (r *DurableRelay) submitFrontCommand(operationID, expectedStoreID, commandID string, command core.RelayCommand) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
+	if refusal := r.verifyExpectedStoreID(expectedStoreID); refusal != nil {
+		return nil, refusal, nil
+	}
+	if r.inPlaceHarnessRestartInFlight != nil {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			"cannot submit to front while an in-place harness restart is in progress", true), nil
+	}
+	hold := r.snapshot.InPlaceMoveHold
+	if hold == nil {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			"SubmitFront requires an active in-place move dispatch hold", false), nil
+	}
+	if hold.OperationID != operationID {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("SubmitFront rejected: dispatch is held by a different in-place move operation %s", hold.OperationID), false), nil
+	}
+	return r.submitCommandInner(commandID, command, true)
+}
+
+// releaseInPlaceMoveDispatch idempotently releases the hold of operationID
+// and resumes queue promotion.
+func (r *DurableRelay) releaseInPlaceMoveDispatch(operationID, expectedStoreID string) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
+	if refusal := r.verifyExpectedStoreID(expectedStoreID); refusal != nil {
+		return nil, refusal, nil
+	}
+	if r.inPlaceHarnessRestartInFlight != nil {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			"cannot release in-place move dispatch hold while an in-place harness restart is in progress", true), nil
+	}
+	hold := r.snapshot.InPlaceMoveHold
+	if hold == nil {
+		return core.RelayResponsePayloadInPlaceMoveDispatchReleased{}, nil, nil
+	}
+	if hold.OperationID != operationID {
+		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("dispatch is held by a different in-place move operation %s", hold.OperationID), false), nil
+	}
+	r.snapshot.InPlaceMoveHold = nil
+	if err := r.persistSnapshot(); err != nil {
+		return nil, nil, err
+	}
+	if _, _, err := r.promoteNextQueuedCommand(); err != nil {
+		return nil, nil, err
+	}
+	return core.RelayResponsePayloadInPlaceMoveDispatchReleased{}, nil, nil
+}
+
+// admitInPlaceHarnessRestart is the serialized admission of a harness-only
+// restart under the in-place Move hold of operationID.
+func (r *DurableRelay) admitInPlaceHarnessRestart(operationID, expectedStoreID string) (InPlaceHarnessRestartDecision, *core.RelayProtocolError) {
+	if refusal := r.verifyExpectedStoreID(expectedStoreID); refusal != nil {
+		return 0, refusal
+	}
+	hold := r.snapshot.InPlaceMoveHold
+	if hold == nil {
+		return 0, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			"RestartHarnessInPlace requires an active in-place move dispatch hold", false)
+	}
+	if hold.OperationID != operationID {
+		return 0, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("RestartHarnessInPlace rejected: dispatch is held by a different in-place move operation %s", hold.OperationID), false)
+	}
+	if r.inPlaceHarnessRestartInFlight != nil {
+		return 0, relayProtocolRefusal(core.RelayErrorCodeInvalidState, "an in-place harness restart is already in progress", true)
+	}
+	if hold.HarnessRestarted {
+		return InPlaceHarnessRestartAlreadyRestarted, nil
+	}
+	if r.turnInProgress() || r.effectfulCommandInProgress() {
+		return 0, relayProtocolRefusal(core.RelayErrorCodeInvalidState,
+			"cannot restart harness in place while a turn or effectful command is in progress", true)
+	}
+	inFlight := operationID
+	r.inPlaceHarnessRestartInFlight = &inFlight
+	return InPlaceHarnessRestartProceed, nil
+}
+
+func (r *DurableRelay) cancelInPlaceHarnessRestart(operationID string) {
+	if r.inPlaceHarnessRestartInFlight != nil && *r.inPlaceHarnessRestartInFlight == operationID {
+		r.inPlaceHarnessRestartInFlight = nil
+	}
+}
+
+func (r *DurableRelay) markInPlaceHarnessRestarted(operationID, expectedStoreID string) error {
+	if r.snapshot.StoreID == nil || *r.snapshot.StoreID != expectedStoreID {
+		return fmt.Errorf("relay store_id changed before completing in-place harness restart for %s", operationID)
+	}
+	if r.inPlaceHarnessRestartInFlight == nil || *r.inPlaceHarnessRestartInFlight != operationID {
+		return fmt.Errorf("in-place harness restart for %s is no longer in flight", operationID)
+	}
+	hold := r.snapshot.InPlaceMoveHold
+	if hold == nil {
+		return fmt.Errorf("in-place move dispatch hold disappeared before completing harness restart for %s", operationID)
+	}
+	if hold.OperationID != operationID {
+		return fmt.Errorf("in-place move dispatch hold owner changed to %s before completing harness restart for %s", hold.OperationID, operationID)
+	}
+	hold.HarnessRestarted = true
+	if err := r.persistSnapshot(); err != nil {
+		return err
+	}
+	r.inPlaceHarnessRestartInFlight = nil
+	return nil
+}
+
+func (r *DurableRelay) submitCommandInner(commandID string, command core.RelayCommand, insertAtFront bool) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
 	invalidRequest := func(message string) (core.RelayResponsePayload, *core.RelayProtocolError, error) {
 		return nil, relayProtocolRefusal(core.RelayErrorCodeInvalidRequest, message, false), nil
 	}
@@ -343,6 +549,22 @@ func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand
 	}
 	if !core.ValidCommandID(commandID) {
 		return invalidRequest("invalid command ID")
+	}
+	// A wake is known by its ID wherever its type is gone: restored from a
+	// checkpoint or replayed, it is a plain prompt under its wake ID. So a
+	// wake needs that ID, and that ID names only a wake or such a prompt.
+	wakeID := core.CarriesMailboxWake(commandID)
+	var misnamed bool
+	switch command.(type) {
+	case core.RelayCommandMailboxWake:
+		misnamed = !wakeID
+	case core.RelayCommandPrompt:
+		misnamed = false
+	default:
+		misnamed = wakeID
+	}
+	if misnamed {
+		return invalidRequest("a mailbox-wake command ID names only a mailbox wake or the prompt it was saved as")
 	}
 	if prompt, ok := command.(core.RelayCommandPrompt); ok {
 		if maintenance, args, isContext := core.ContextCommandOf(prompt.Prompt); isContext {
@@ -410,8 +632,7 @@ func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand
 		return invalidRequest("cannot install empty prompt context or replace context attached to an active prompt")
 	}
 	if _, clear := command.(core.RelayCommandClearContext); clear {
-		if r.verdictHarness == nil ||
-			(*r.verdictHarness != core.HarnessKindCodex && *r.verdictHarness != core.HarnessKindClaude && *r.verdictHarness != core.HarnessKindKimi) {
+		if !r.supportsClearContext() {
 			return invalidState("This harness does not support /clear")
 		}
 		if r.snapshot.NativeSessionID == nil ||
@@ -513,12 +734,11 @@ func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand
 	if refusal != nil {
 		return invalidState(refusal.Error())
 	}
-	// Stop is also accepted while Claude Code works on its own after a
-	// background task: the cancel interrupts the running cycle, and that
-	// cycle's result ends the turn (ClaudeTurnResult). A Codex turn of this
-	// kind is a native goal, which has its own controls. An in-flight native
-	// resume is also a cancellable request, even without a prompt.
-	claudeHarnessTurn := r.harnessTurns == HarnessTurnPolicyClaudeAdapter && r.snapshot.HarnessTurn != nil
+	// Claude and Antigravity can cancel a cycle they started on their own.
+	// Codex native goals have their own controls. An in-flight native resume
+	// is also cancellable without a prompt.
+	cancellableHarnessTurn := (r.harnessTurns == HarnessTurnPolicyClaudeAdapter || r.harnessTurns == HarnessTurnPolicyAntigravity) &&
+		r.snapshot.HarnessTurn != nil
 	if _, cancel := command.(core.RelayCommandCancel); cancel {
 		recovery := r.snapshot.Continuation.QuotaRecovery
 		resumeInFlight := false
@@ -533,7 +753,7 @@ func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand
 		if (recovery == nil || recovery.Submitted) &&
 			r.snapshot.ActivePrompt == nil &&
 			!resumeInFlight &&
-			!claudeHarnessTurn &&
+			!cancellableHarnessTurn &&
 			(retry == nil || retry.Submitted) {
 			message := "there is no active prompt to cancel"
 			if r.snapshot.HarnessTurn != nil {
@@ -580,6 +800,17 @@ func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand
 		case core.RelayCommandBeginCheckpoint, core.RelayCommandClose:
 		default:
 			return invalidState("session is being preserved for Move; resume it to run commands")
+		}
+	}
+	if _, prompt := command.(core.RelayCommandPrompt); r.snapshot.ManagedSubagent && prompt {
+		if ordinal, retry := core.GeneratedPromptQuotaRetry.RetryOrdinal(commandID); retry {
+			continuation := &r.snapshot.Continuation
+			assessment := r.snapshot.Assessment
+			if assessment == nil || assessment.CompletedOrdinal != ordinal ||
+				continuation.UserCommandID == nil ||
+				!r.quotaRecoveryAdmissible(*continuation.UserCommandID, assessment.TurnID) {
+				return invalidRequest("the child quota continuation no longer matches its completed turn")
+			}
 		}
 	}
 	if schedule, ok := command.(core.RelayCommandSetQuotaRecovery); ok {
@@ -687,9 +918,10 @@ func (r *DurableRelay) submitCommand(commandID string, command core.RelayCommand
 		}
 	}
 	acceptedOrdinal, err := r.appendRelayEvent(&commandID, core.RelayObservationCommandQueued{
-		CommandID:   commandID,
-		Command:     command,
-		CreatedAtMs: core.EpochMillis(),
+		CommandID:     commandID,
+		Command:       command,
+		CreatedAtMs:   core.EpochMillis(),
+		InsertAtFront: insertAtFront,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -939,7 +1171,8 @@ func (r *DurableRelay) ClaimPendingCommandsUpTo(acpSessionConfigured bool, maxim
 	// Mailbox and user input share the same serialized steering decision.
 	// Claim the events into the durable queue before dispatch, so a hook,
 	// retry, restart or idle wake cannot also deliver them.
-	if r.steeringDeliveryMode == SteeringDeliveryModeAcpWithMailbox && len(r.snapshot.QueuedPrompts) == 0 {
+	if r.snapshot.InPlaceMoveHold == nil &&
+		r.steeringDeliveryMode == SteeringDeliveryModeAcpWithMailbox && len(r.snapshot.QueuedPrompts) == 0 {
 		if _, steering := r.automaticSteerActivePrompt(); steering &&
 			slices.ContainsFunc(r.snapshot.PendingMailboxEvents, func(event core.MailboxEvent) bool { return event.Wake }) {
 			if err := r.enqueueMailboxWake(); err != nil {
@@ -1136,7 +1369,7 @@ func (r *DurableRelay) ClaimPendingCommandsUpTo(acpSessionConfigured bool, maxim
 // without being asked. It goes through admission like an Escape steer, so
 // the journal and every client see the same steering operation.
 func (r *DurableRelay) submitAutomaticSteer() error {
-	if r.liveBaselinePending() {
+	if r.liveBaselinePending() || r.snapshot.InPlaceMoveHold != nil {
 		return nil
 	}
 	activePromptID, queuedPromptID, ok := r.automaticSteerTarget()
@@ -1186,7 +1419,7 @@ func (r *DurableRelay) automaticSteerActivePrompt() (string, bool) {
 	if !r.automaticSteering || r.checkpointOnly || r.hasHeldClaudeTurn() {
 		return "", false
 	}
-	if r.steeringDeliveryMode == SteeringDeliveryModeClaudeTurnEnd {
+	if r.steeringDeliveryMode == SteeringDeliveryModeHookTurnEnd {
 		return "", false
 	}
 	// Automatic steering is only useful for a Hel-owned prompt. In a
@@ -1306,7 +1539,7 @@ func (r *DurableRelay) dispatchRelayLocalLifecycle() error {
 // ACP turns. Run commands honor the caller's concurrency limit; cancellation
 // controls bypass it so a full shell pool can always be stopped.
 func (r *DurableRelay) ClaimPendingUserShellCommandsUpTo(maximumRuns int) ([]core.ClaimedRelayCommand, error) {
-	if r.liveBaselinePending() {
+	if r.liveBaselinePending() || r.snapshot.InPlaceMoveHold != nil {
 		maximumRuns = 0
 	}
 	if r.checkpointOnly || r.snapshot.CheckpointBarrier != nil {
@@ -1993,7 +2226,7 @@ func (r *DurableRelay) pendingCloseBarrierID() (string, bool) {
 // previously queued input. It returns the ordinal of the promotion it
 // journaled, if any.
 func (r *DurableRelay) promoteNextQueuedCommand() (uint64, bool, error) {
-	if r.liveBaselinePending() {
+	if r.liveBaselinePending() || r.snapshot.InPlaceMoveHold != nil {
 		return 0, false, nil
 	}
 	var recovery *core.StoredQueuedRelayCommand
@@ -2116,7 +2349,7 @@ func (r *DurableRelay) enqueueMailboxWake() error {
 // deliver, with the queued prompt's hidden context.
 func (r *DurableRelay) pendingHookSteering(hookEvent string) (core.MailboxHookSteering, string, bool) {
 	if hookEvent != "PostToolBatch" ||
-		r.steeringDeliveryMode != SteeringDeliveryModeClaudePostToolBatch ||
+		r.steeringDeliveryMode != SteeringDeliveryModeHookPostToolBatch ||
 		// A turn being interrupted discards its input; the prompt runs next.
 		r.turnCancellationPending() {
 		return core.MailboxHookSteering{}, "", false
@@ -2168,11 +2401,24 @@ func (r *DurableRelay) pendingHookSteering(hookEvent string) (core.MailboxHookSt
 // so an unresolved or unsafe provider never receives a developer message
 // between a tool call and its output (#1277). PostToolBatch drains are
 // unaffected.
-func (r *DurableRelay) DrainMailbox(hookEvent string) (core.RelayResponsePayload, error) {
+func (r *DurableRelay) DrainMailbox(hookEvent string, conversationID *string) (core.RelayResponsePayload, error) {
+	return r.drainMailboxWithInitialSteps(hookEvent, conversationID, nil)
+}
+
+func (r *DurableRelay) drainMailboxWithInitialSteps(hookEvent string, conversationID *string, initialNumSteps *int64) (core.RelayResponsePayload, error) {
 	if hookEvent != "PostToolUse" && hookEvent != "PostToolBatch" {
 		return nil, errors.New("unsupported mailbox hook event")
 	}
 	empty := core.RelayResponsePayloadMailboxDrained{}
+	if conversationID != nil && *conversationID != "" &&
+		r.snapshot.NativeSessionID != nil && *conversationID != *r.snapshot.NativeSessionID {
+		return empty, nil
+	}
+	if r.harnessTurns == HarnessTurnPolicyAntigravity && hookEvent == "PostToolBatch" {
+		if err := r.antigravityPreInvocation(conversationID, initialNumSteps); err != nil {
+			return nil, err
+		}
+	}
 	if hookEvent == "PostToolUse" &&
 		(r.mailboxDeliveryMode == nil || *r.mailboxDeliveryMode != core.MailboxDeliveryModeToolBoundary) {
 		return empty, nil

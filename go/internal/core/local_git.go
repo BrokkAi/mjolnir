@@ -720,6 +720,38 @@ const noNetworkRemote = "the project's Git repository has no remote; SSH and con
 // another transport a target cannot reach.
 const localRemoteURL = "the project's Git remote is not a network URL (it is a local path or an unsupported transport); SSH and container targets need an https://, ssh://, git://, or user@host:path remote"
 
+// DiscoverProjectSource reads the fetch URL for a project discovered from a
+// checkout. Ordinary local-backed projects keep their independent branch and
+// push routing. stripped reports that HTTP credentials were removed from the
+// URL.
+func DiscoverProjectSource(path string, executor CommandExecutor) (source string, stripped bool, err error) {
+	url, originErr := remoteURL(path, "origin", false, executor)
+	if originErr != nil {
+		listed, err := gitOutput(path, []string{"remote"}, executor, "list Git remotes")
+		if err != nil {
+			return "", false, err
+		}
+		remotes, err := parseLines(listed.Stdout, "Git remote names")
+		if err != nil {
+			return "", false, err
+		}
+		switch {
+		case len(remotes) == 0:
+			return "", false, errors.New(noNetworkRemote)
+		case containsString(remotes, "origin"):
+			return "", false, originErr
+		case len(remotes) == 1:
+			url, err = remoteURL(path, remotes[0], false, executor)
+			if err != nil {
+				return "", false, err
+			}
+		default:
+			return "", false, errors.New("multiple Git remotes and no origin; select a project by URL")
+		}
+	}
+	return ProjectSource(url, ShorthandRejected)
+}
+
 func defaultFetchRemote(remotes []string) (string, error) {
 	switch {
 	case len(remotes) == 0:
@@ -777,17 +809,13 @@ func resolveLocalRepositoryWithRemote(path string, executor CommandExecutor, rep
 				if branch == nil {
 					return NetworkGitSource{}, errors.New("missing branch for remote tracking repair")
 				}
-				pushURLs := make([]string, len(source.PushURLs))
-				for i, url := range source.PushURLs {
-					pushURLs[i] = DisplayURL(url)
-				}
 				return NetworkGitSource{}, LocalRemoteRepair{
 					Path:              path,
 					Branch:            *branch,
 					MissingRemote:     remote,
 					ReplacementRemote: replacementRemote,
-					FetchURL:          DisplayURL(source.FetchURL),
-					PushURLs:          pushURLs,
+					FetchURL:          DisplayNetworkURL(source.FetchURL),
+					PushURLs:          DisplayNetworkURLs(source.PushURLs),
 				}
 			}
 			return NetworkGitSource{}, fmt.Errorf("current branch names Git remote %s, but that remote is not configured", debugString(remote))

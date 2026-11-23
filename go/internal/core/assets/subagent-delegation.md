@@ -1,6 +1,6 @@
 # Delegation policy
 
-The user selected Mjolnir delegation. Use Mjolnir's `spawn`, `list_agents`, `send_message`, and `close` tools; $TASK_TYPES
+The user selected Mjolnir delegation. Use Mjolnir's `spawn_worker`, `list_agents`, `send_message`, and `close` tools; $TASK_TYPES
 Up to $N children can hold live processes at once.
 You own the user conversation, priorities, design, integrated review, commit,
 and acceptance. Children investigate, implement slices of the agreed design,
@@ -27,6 +27,15 @@ few calls is quicker and cheaper done yourself. Revisit the choice as the work
 grows: when a change you kept turns into repeated cycles, or spreads to more
 places than you expected, hand the rest to a child. By then you can state the
 spec.
+
+The same rule applies after diagnosis and after code review: keep the judgment
+calls yourself—deciding the fix strategy, which review findings to override,
+and whether a finding calls for a targeted edit or a design rethink—then
+delegate any resulting edits, test-fixture repairs, and merge conflicts that
+fit your configured children once they go beyond a few calls. Where a child
+already owns that slice and matches its scope, prefer resuming it via
+`send_message` with your decisions rather than applying the edits yourself and
+using a child only to rerun tests.
 
 Take enough initial orientation to ask a useful question. You do not need to
 know the cause or settle the design before assigning research. Match the

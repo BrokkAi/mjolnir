@@ -971,7 +971,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         ),
         WorkerCommand::Fetch {
             path,
-            roots,
+            mut roots,
             temp,
             list,
         } => {
@@ -980,6 +980,12 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 mj_checkpoint::archive::FetchMode::Content
             };
+            // The session temporary directory is part of the caller's `--temp`
+            // permission. An older worker never wrote this file; `--temp` then
+            // keeps today's rule: this process's temporary directory and `/tmp`.
+            if temp && let Some(session_temp) = recorded_session_temp_dir() {
+                roots.push(session_temp);
+            }
             let fetched = mj_checkpoint::archive::fetch_session_path(
                 &path,
                 &roots,
@@ -1066,6 +1072,35 @@ fn push_error(error: PushBranchError) -> anyhow::Error {
             anyhow::Error::new(ExportRefused(refusal.to_string()))
         }
         PushBranchError::Failed(error) => error,
+    }
+}
+
+/// File name, beside the installed `hel`, of the session temporary directory.
+const SESSION_TEMP_DIR_FILE: &str = "session-temp-dir";
+
+/// The session temporary directory recorded next to this worker binary.
+///
+/// `argv[0]` is `{worker root}/hel` even when that path is a symlink. The
+/// file is absent when an older worker started the session.
+fn recorded_session_temp_dir() -> Option<PathBuf> {
+    let argv0 = PathBuf::from(std::env::args_os().next()?);
+    let parent = argv0.parent()?;
+    // SSH and EC2 targets launch `.local/share/hel/workers/<id>/hel` relative to
+    // the directory the command runs in, so resolve a relative parent against
+    // it. An empty parent means `hel` came from a `PATH` search: there is no
+    // worker root to read, and the working directory must not stand in for it.
+    let install_dir = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else if parent.as_os_str().is_empty() {
+        return None;
+    } else {
+        std::env::current_dir().ok()?.join(parent)
+    };
+    let directory = std::fs::read_to_string(install_dir.join(SESSION_TEMP_DIR_FILE)).ok()?;
+    if directory.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(directory))
     }
 }
 
@@ -1289,6 +1324,111 @@ mod tests {
                 || String::from_utf8_lossy(&output.stderr).contains("incomplete fetch transfer")
         );
         assert_eq!(std::fs::read(&saved.path).unwrap(), bytes);
+    }
+
+    // Hard-won: #1661: fetch refused the session's own TMPDIR.
+    #[test]
+    fn fetch_allows_the_session_temp_dir_when_the_process_temp_dir_differs() {
+        use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
+        const CHILD: &str = "MJ_TEST_FETCH_SESSION_TEMP";
+        let mode = std::env::var(CHILD).ok();
+        if let Some(mode) = mode.as_deref() {
+            let path = PathBuf::from(std::env::var("MJ_TEST_FETCH_PATH").unwrap());
+            let outcome = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(run_command(
+                    Command::Worker(WorkerArgs {
+                        command: WorkerCommand::Fetch {
+                            path,
+                            roots: Vec::new(),
+                            temp: true,
+                            list: false,
+                        },
+                    }),
+                    None,
+                ));
+            match (mode, outcome) {
+                ("allow", Ok(())) => return,
+                ("allow", Err(error)) => panic!("{error:#}"),
+                ("refuse", Err(error)) => {
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains("outside the directories a session shares"),
+                        "{message}"
+                    );
+                    return;
+                }
+                ("refuse", Ok(())) => panic!("a path outside every fetch root was fetched"),
+                _ => panic!("unknown fetch child mode {mode}"),
+            }
+        }
+
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let session_temp = tempfile::TempDir::new_in(&scratch).unwrap();
+        let process_temp = tempfile::TempDir::new_in(&scratch).unwrap();
+        let outside = tempfile::TempDir::new_in(&scratch).unwrap();
+        let evidence = session_temp.path().join("evidence.txt");
+        std::fs::write(&evidence, b"session-temp-ok").unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"no").unwrap();
+        let marker = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(SESSION_TEMP_DIR_FILE);
+        std::fs::write(&marker, session_temp.path().to_str().unwrap()).unwrap();
+        struct Remove(PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _remove = Remove(marker);
+
+        let name = "tests::fetch_allows_the_session_temp_dir_when_the_process_temp_dir_differs";
+        let run = |mode: &str, path: &Path| {
+            let command = CommandSpec::new(
+                std::env::current_exe().unwrap().to_string_lossy(),
+                ["--exact", name, "--nocapture", "--quiet"],
+            );
+            let mut command = command;
+            command.env.insert(CHILD.into(), mode.into());
+            command.env.insert(
+                "MJ_TEST_FETCH_PATH".into(),
+                path.to_string_lossy().into_owned(),
+            );
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                command.env.insert(
+                    key.into(),
+                    process_temp.path().to_string_lossy().into_owned(),
+                );
+            }
+            CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(30))
+                .execute(&command)
+                .unwrap()
+        };
+        let allowed = run("allow", &evidence);
+        assert_eq!(
+            allowed.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+        assert!(
+            allowed
+                .stdout
+                .windows(b"session-temp-ok".len())
+                .any(|window| window == b"session-temp-ok"),
+            "fetched payload missing: {}",
+            String::from_utf8_lossy(&allowed.stdout)
+        );
+        let refused = run("refuse", &secret);
+        assert_eq!(
+            refused.status,
+            0,
+            "the refusal is asserted in the child: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
     }
 
     #[test]

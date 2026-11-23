@@ -201,7 +201,10 @@ fn one_ssh_call_answers_every_runtime_check_of_an_apple_silicon_mac() {
             "podman",
             "i=0; while [ $i -lt 2048 ]; do printf '%050d\\n' $i >&2; i=$((i+1)); done; exit 1",
         ),
-        ("docker", "echo '27.3.1 linux'"),
+        (
+            "docker",
+            r#"echo '{"ServerVersion":"27.3.1","OSType":"linux"}'"#,
+        ),
         ("sw_vers", "echo 26.1"),
         (
             "container",
