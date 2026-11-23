@@ -14,6 +14,8 @@
 package tui
 
 import (
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
@@ -196,13 +198,67 @@ func (d *DashboardState) holdForGitIdentity(resume GitIdentityResume) DashboardA
 // needed, and otherwise asks for the missing part. A check that failed is
 // reported and does not hold the session back.
 func (d *DashboardState) ApplyGitIdentityCheck(identity client.GitIdentity, err error) {
-	panic("unported: mj-tui/src/dialogs/git_identity.rs DashboardState::apply_git_identity_check")
+	// Rust takes the gate (leaving it Settled) before looking at it.
+	gate := d.gitIdentityGate
+	d.gitIdentityGate = GitIdentityGate{}
+	if gate.Kind != GitIdentityGateChecking {
+		return
+	}
+	resume := gate.Resume
+	switch {
+	case err == nil && !identity.NeedsSetup():
+		d.ClearNotice()
+		d.settleGitIdentity(resume)
+	case err == nil:
+		if _, dashboard := d.mode.(ModeDashboard); dashboard {
+			// The dialog settles the gate; until then, the next new session
+			// checks again.
+			d.gitIdentityGate = GitIdentityGate{Kind: GitIdentityGateUnchecked}
+			d.ClearNotice()
+			dialog := newGitIdentityDialog(resume, identity.Name, identity.Email)
+			d.mode = ModeGitIdentity{&dialog}
+		} else {
+			// The user moved on while Git was read; the dialog does not open
+			// over their work, and the request still runs.
+			d.gitIdentityGate = GitIdentityGate{Kind: GitIdentityGateUnchecked}
+			d.SetNotice(gitIdentityUnsetNotice)
+			d.resumeAfterGitIdentity(resume)
+		}
+	default:
+		d.SetFailureNotice(fmt.Sprintf("Could not read the Git identity on this host: %s", err))
+		d.settleGitIdentity(resume)
+	}
 }
 
 // ApplyGitIdentitySave takes the result of saving the identity. A failure
 // keeps the dialog and what was typed, with the reason under the fields.
 func (d *DashboardState) ApplyGitIdentitySave(identity client.GitIdentity, err error) {
-	panic("unported: mj-tui/src/dialogs/git_identity.rs DashboardState::apply_git_identity_save")
+	open, isOpen := d.mode.(ModeGitIdentity)
+	saving := isOpen && open.saving
+	if err == nil {
+		var name, email string
+		if identity.Name != nil {
+			name = *identity.Name
+		}
+		if identity.Email != nil {
+			email = *identity.Email
+		}
+		d.SetNotice(fmt.Sprintf("Git identity saved: %s <%s>", name, email))
+		if saving {
+			d.mode = ModeDashboard{}
+			d.settleGitIdentity(open.resume)
+		} else {
+			d.gitIdentityGate = GitIdentityGate{Kind: GitIdentityGateSettled}
+		}
+		return
+	}
+	if saving {
+		open.saving = false
+		message := err.Error()
+		open.error = &message
+		return
+	}
+	d.SetFailureNotice(fmt.Sprintf("Could not save the Git identity: %s", err))
 }
 
 // TakeGitIdentityFollowup is the new-session action a settled identity check
@@ -220,13 +276,127 @@ func (d *DashboardState) settleGitIdentity(resume GitIdentityResume) {
 }
 
 func (d *DashboardState) resumeAfterGitIdentity(resume GitIdentityResume) {
-	panic("unported: mj-tui/src/dialogs/git_identity.rs DashboardState::resume_after_git_identity")
+	var action DashboardAction
+	switch resume := resume.(type) {
+	case GitIdentityResumeBeginNew:
+		// The new-session flow opens over the dashboard only; a user who
+		// opened something else meanwhile is told how to continue.
+		if _, dashboard := d.mode.(ModeDashboard); !dashboard {
+			if d.gitIdentityGate.Kind == GitIdentityGateSettled {
+				d.SetNotice("Git identity checked; start the new session again.")
+			}
+			return
+		}
+		action = d.beginNew()
+	case GitIdentityResumeLaunch:
+		action = resume.Launch
+	}
+	if _, none := action.(DashboardActionNone); action != nil && !none {
+		d.gitIdentityFollowup = action
+	}
 }
 
 func (d *DashboardState) handleGitIdentityEvent(event tea.Msg, dialog GitIdentityDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs/git_identity.rs DashboardState::handle_git_identity_event")
+	if dialog.saving {
+		d.lastEventConsumed = true
+		d.mode = ModeGitIdentity{&dialog}
+		return DashboardActionNone{}
+	}
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	skip := false
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[GitIdentityControl]:
+		skip = true
+	case chat.InteractionEdit[GitIdentityControl]:
+		var field *chat.TextInput
+		switch interaction.ID {
+		case GitIdentityControlName:
+			field = &dialog.name
+		case GitIdentityControlEmail:
+			field = &dialog.email
+		}
+		if field != nil {
+			chat.TextFieldApply(field, interaction.Edit)
+		}
+		d.mode = ModeGitIdentity{&dialog}
+		return DashboardActionNone{}
+	case chat.InteractionActivate[GitIdentityControl]:
+		if interaction.ID == GitIdentityControlSkip {
+			skip = true
+			break
+		}
+		dialog.saving = true
+		dialog.error = nil
+		action := DashboardActionSaveGitIdentity{Name: dialog.name.String(), Email: dialog.email.String()}
+		d.mode = ModeGitIdentity{&dialog}
+		return action
+	}
+	if skip {
+		d.mode = ModeDashboard{}
+		d.SetNotice(gitIdentitySkippedNotice)
+		d.settleGitIdentity(dialog.resume)
+		return DashboardActionNone{}
+	}
+	d.mode = ModeGitIdentity{&dialog}
+	return DashboardActionNone{}
 }
 
 func renderGitIdentityDialog(frame *chat.Frame, area uv.Rectangle, dialog *GitIdentityDialog, surfaces *chat.FrameSurfaces) {
-	panic("unported: mj-tui/src/dialogs/git_identity.rs render_git_identity_dialog")
+	popup := centeredModal(frame, surfaces, 60, 12, area)
+	inner := chat.RectInner(popup, chat.Margin{Horizontal: 1, Vertical: 1})
+	form := &dialog.form
+	form.BeginFrame()
+	title := dismissibleModalTitle(&form.Form, popup, "Set up Git identity", chat.Title(true), !dialog.saving)
+	frame.RenderWidget(chat.Modal().WithTitle(title), popup)
+	row := func(offset, height int) uv.Rectangle {
+		return uv.Rect(inner.Min.X, inner.Min.Y+offset, inner.Dx(), min(height, max(inner.Dy()-offset, 0)))
+	}
+	frame.RenderWidget(
+		chat.NewParagraph(chat.RawText(gitIdentityExplanation)).
+			WithStyle(chat.Style{}.Foreground(chat.ThemePalette().Muted)).
+			WithWrap(chat.Wrap{Trim: true}),
+		row(0, 3),
+	)
+	for _, field := range []struct {
+		offset int
+		label  string
+		input  *chat.TextInput
+		id     GitIdentityControl
+	}{
+		{4, "Name:  ", &dialog.name, GitIdentityControlName},
+		{5, "Email: ", &dialog.email, GitIdentityControlEmail},
+	} {
+		rect := row(field.offset, 1)
+		labelWidth := min(len(field.label), rect.Dx())
+		frame.RenderWidget(chat.RawLine(field.label), uv.Rect(rect.Min.X, rect.Min.Y, labelWidth, rect.Dy()))
+		chat.TextFieldRender(
+			frame,
+			uv.Rect(rect.Min.X+labelWidth, rect.Min.Y, rect.Dx()-labelWidth, rect.Dy()),
+			field.input,
+			&form.Form,
+			field.id,
+		)
+	}
+	var status *chat.Line
+	if dialog.saving {
+		line := chat.StyledLine("Saving Git identity…", chat.Muted())
+		status = &line
+	} else if dialog.error != nil {
+		line := chat.StyledLine(*dialog.error, chat.Style{}.Foreground(chat.ThemePalette().Warning))
+		status = &line
+	}
+	if status != nil {
+		frame.RenderWidget(*status, row(7, 1))
+	}
+	footerHeight := 0
+	if inner.Dy() > 0 {
+		footerHeight = 1
+	}
+	footer := uv.Rect(inner.Min.X, max(inner.Max.Y-1, 0), inner.Dx(), footerHeight)
+	form.RenderActions(frame, footer, []chat.ButtonSpec[GitIdentityControl]{
+		{ID: GitIdentityControlSkip, Label: "Skip", Enabled: !dialog.saving},
+		{ID: GitIdentityControlSave, Label: "Save", Enabled: !dialog.saving},
+	})
+	form.EndFrame(GitIdentityControlName)
 }
