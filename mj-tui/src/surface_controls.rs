@@ -666,7 +666,9 @@ mod tests {
         terminal
             .draw(|frame| crate::render::render(frame, dashboard))
             .unwrap();
-        buffer_lines(terminal.backend().buffer())
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        lines
     }
 
     fn draw_buffer(dashboard: &mut DashboardState, size: (u16, u16)) -> ratatui::buffer::Buffer {

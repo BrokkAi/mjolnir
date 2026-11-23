@@ -219,10 +219,10 @@ fn wait_for_exit_without_reaping(pid: u32) {
 mod tests {
     use super::*;
     use std::io::Read;
-    use std::os::fd::OwnedFd;
+    use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::Stdio;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // Hard-won: #1625: isolated tests leaked surviving process-group members on exit.
     #[test]
@@ -251,9 +251,34 @@ mod tests {
         let mut sentinel = acceptor.join().expect("sentinel accept thread panicked");
         // The kernel closes all file descriptors of a killed process even if
         // container PID 1 does not reap zombies, so EOF confirms termination.
-        sentinel
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        // Wait with poll(2) rather than SO_RCVTIMEO: macOS returns EINVAL from
+        // setsockopt(SO_RCVTIMEO) on an AF_UNIX stream once the peer has closed.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut pollfd = libc::pollfd {
+            fd: sentinel.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = loop {
+            let remaining_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(i32::MAX as u128) as i32;
+            // SAFETY: `pollfd` points to one live `libc::pollfd` with an open descriptor.
+            let rc = unsafe { libc::poll(&mut pollfd, 1, remaining_ms) };
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("poll sentinel stream failed: {err}");
+            }
+            break rc;
+        };
+        assert!(
+            ready > 0,
+            "isolated process-group member should be terminated on exit"
+        );
         let mut byte = [0_u8; 1];
         let read = sentinel
             .read(&mut byte)
