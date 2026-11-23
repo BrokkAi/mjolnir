@@ -6759,6 +6759,7 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         let mut without_child = with_child.clone();
         without_child.sessions.remove(&child.id);
         without_child.subagents.remove(&child.id);
+        without_child.environment_owners.remove(&child.id);
         without_child
             .mount_history
             .insert("host".into(), vec![directory.path().join("without-child")]);
