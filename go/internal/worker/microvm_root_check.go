@@ -18,8 +18,11 @@
 package worker
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -47,7 +50,64 @@ const microvmMaxLinks = 40
 // MicrovmCheckImage refuses the replacement of a VM that runs as user with
 // environment path by the image imageID unless the transfer can run in it.
 func MicrovmCheckImage(layout MicrovmLayout, imageID string, user string, path string) error {
-	panic("unported: mj-worker/src/microvm/root_check.rs check_image")
+	switch userPart, _, _ := strings.Cut(user, ":"); userPart {
+	case "", "0", "root":
+	default:
+		return fmt.Errorf("the image check supports sandboxes that run as root, not %s", microvmDebugString(user))
+	}
+	disk := MicrovmRootImage(layout, imageID)
+	if !microvmIsFile(disk) {
+		return fmt.Errorf("image %s has no root disk", imageID)
+	}
+	unshare, err := MicrovmFindTool("unshare")
+	if err != nil {
+		return err
+	}
+	mount, err := MicrovmFindTool("mount")
+	if err != nil {
+		return err
+	}
+	engine, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate the engine binary: %w", err)
+	}
+	directory := filepath.Join("/run/mj-microvm-check", MicrovmScratchSuffix())
+	if err := os.MkdirAll(directory, 0o777); err != nil {
+		return fmt.Errorf("create %s: %w", directory, microvmIOError(err))
+	}
+	const script = `set -eu; "$1" -o loop,ro,noload,nodev,nosuid,noexec "$2" "$3"; exec "$4" microvm root-check-inner "$3" "$5"`
+	output, outputErr := MicrovmRunUnchecked(unshare, []string{
+		"--mount",
+		"--propagation",
+		"private",
+		"--",
+		"sh",
+		"-c",
+		script,
+		"mj-root-check",
+		mount,
+		disk,
+		directory,
+		engine,
+		path,
+	})
+	// The mount went with the namespace; only the empty mount point is left.
+	removed := os.Remove(directory)
+	if outputErr != nil {
+		return outputErr
+	}
+	if removed != nil {
+		return fmt.Errorf("remove %s: %w", directory, microvmIOError(removed))
+	}
+	if !output.Status.Success() {
+		// The inner process reports as an engine failure; the caller adds its own.
+		reason := MicrovmTail(microvmLossy(output.Stderr), 20)
+		for strings.HasPrefix(reason, "Error: ") {
+			reason = strings.TrimPrefix(reason, "Error: ")
+		}
+		return errors.New(reason)
+	}
+	return nil
 }
 
 // MicrovmCheckMounted is the inner half of MicrovmCheckImage, run inside
@@ -61,7 +121,32 @@ func MicrovmCheckMounted(root string, path string) error {
 }
 
 func microvmRootCheckProblems(root string, path string) []string {
-	panic("unported: mj-worker/src/microvm/root_check.rs problems")
+	problems := []string{}
+	for _, program := range microvmRequiredPrograms {
+		found, ok := "", false
+		for _, directory := range strings.Split(path, ":") {
+			if directory == "" {
+				directory = "."
+			}
+			file, exists, err := microvmRootCheckResolve(root, directory+"/"+program)
+			if err == nil && exists && microvmIsExecutableFile(file) {
+				found, ok = file, true
+				break
+			}
+		}
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Sprintf("`%s` is not an executable on PATH (%s)", program, path))
+		case program == "tar":
+			if missing := microvmMissingTarOptions(found); len(missing) > 0 {
+				problems = append(problems, fmt.Sprintf("its `tar` lacks the options the restore uses (%s); it needs GNU tar", strings.Join(missing, ", ")))
+			}
+		}
+	}
+	if reason := microvmCreatableDirectory(root, microvmControlRoot); reason != nil {
+		problems = append(problems, fmt.Sprintf("%s cannot be created: %s", microvmControlRoot, reason.Error()))
+	}
+	return problems
 }
 
 // microvmMissingTarOptions: the restore runs `tar` with these long options,
@@ -70,7 +155,17 @@ func microvmRootCheckProblems(root string, path string) []string {
 // `unlink-first` and `occurrence`, so the static counterpart of that check
 // is a search of the binary, which nothing executes.
 func microvmMissingTarOptions(tar string) []string {
-	panic("unported: mj-worker/src/microvm/root_check.rs missing_tar_options")
+	binary, err := os.ReadFile(tar)
+	if err != nil {
+		return microvmTarOptions[:]
+	}
+	var missing []string
+	for _, option := range microvmTarOptions {
+		if !bytes.Contains(binary, []byte(option)) {
+			missing = append(missing, option)
+		}
+	}
+	return missing
 }
 
 func microvmIsExecutableFile(file string) bool {
@@ -82,7 +177,47 @@ func microvmIsExecutableFile(file string) bool {
 // following symlinks inside the image only; ok is false when it does not
 // exist. An absolute link restarts at root and `..` never leaves it.
 func microvmRootCheckResolve(root string, path string) (resolved string, ok bool, err error) {
-	panic("unported: mj-worker/src/microvm/root_check.rs resolve")
+	root = filepath.Clean(root)
+	current := root
+	pending := microvmRootCheckComponents(path)
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case ".":
+		case "..":
+			if current != root {
+				current = filepath.Dir(current)
+			}
+		default:
+			next := filepath.Join(current, part)
+			info, err := os.Lstat(next)
+			if err != nil {
+				return "", false, nil
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				links++
+				if links > microvmMaxLinks {
+					return "", false, errors.New("too many levels of symbolic links")
+				}
+				target, err := os.Readlink(next)
+				if err != nil {
+					return "", false, fmt.Errorf("read link %s: %w", next, microvmIOError(err))
+				}
+				if strings.HasPrefix(target, "/") {
+					current = root
+				}
+				pending = append(microvmRootCheckComponents(target), pending...)
+			} else {
+				if len(pending) != 0 && !info.IsDir() {
+					return "", false, fmt.Errorf("%s is not a directory", next)
+				}
+				current = next
+			}
+		}
+	}
+	return current, true, nil
 }
 
 // microvmRootCheckComponents is Rust's Path::components of path, keeping
@@ -101,5 +236,36 @@ func microvmRootCheckComponents(path string) []string {
 // of the image for root: every existing component is a directory (through
 // links), and the rest can be created.
 func microvmCreatableDirectory(root string, path string) error {
-	panic("unported: mj-worker/src/microvm/root_check.rs creatable_directory")
+	walked := ""
+	for _, part := range microvmRootCheckComponents(path) {
+		walked += "/" + part
+		found, ok, err := microvmRootCheckResolve(root, walked)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if !microvmIsDir(found) {
+				return fmt.Errorf("%s is not a directory", walked)
+			}
+			continue
+		}
+		// Absent, or a link to nothing: `mkdir -p` creates the first and
+		// fails on the second, where the link occupies the name.
+		parent := walked[:strings.LastIndex(walked, "/")]
+		if parent == "" {
+			parent = "/"
+		}
+		parentPath, ok, err := microvmRootCheckResolve(root, parent)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("the parent directory disappeared")
+		}
+		if _, err := os.Lstat(filepath.Join(parentPath, part)); err == nil {
+			return fmt.Errorf("%s is a link to nothing", walked)
+		}
+		return nil
+	}
+	return nil
 }

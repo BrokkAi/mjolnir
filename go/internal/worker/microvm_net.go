@@ -11,10 +11,15 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // microvmBlockBase is the address block VM subnets are carved from:
@@ -82,13 +87,48 @@ func MicrovmIsEngineTap(name string) bool {
 // unprivileged process may attach to a persistent TAP only if it owns it. A
 // stale device from an earlier run is replaced, since its owner may differ.
 func MicrovmTapUp(link MicrovmLink, owner MicrovmOwner) error {
-	panic("unported: mj-worker/src/microvm/net.rs tap_up")
+	ip, err := MicrovmFindTool("ip")
+	if err != nil {
+		return err
+	}
+	if err := MicrovmTapDown(link.Tap); err != nil {
+		return err
+	}
+	uid, gid := strconv.FormatUint(uint64(owner.UID), 10), strconv.FormatUint(uint64(owner.GID), 10)
+	if _, err := MicrovmRunChecked(ip, []string{"tuntap", "add", "dev", link.Tap, "mode", "tap", "user", uid, "group", gid}); err != nil {
+		return err
+	}
+	address := link.Host.String() + "/30"
+	if _, err := MicrovmRunChecked(ip, []string{"addr", "replace", address, "dev", link.Tap}); err != nil {
+		return err
+	}
+	if _, err := MicrovmRunChecked(ip, []string{"link", "set", link.Tap, "up"}); err != nil {
+		return err
+	}
+	return nil
 }
 
 // MicrovmTapDown removes a TAP device. An absent device is the goal state,
 // not an error.
 func MicrovmTapDown(tap string) error {
-	panic("unported: mj-worker/src/microvm/net.rs tap_down")
+	if !MicrovmIsEngineTap(tap) {
+		return fmt.Errorf("%s is not a microvm TAP device name", microvmDebugString(tap))
+	}
+	ip, err := MicrovmFindTool("ip")
+	if err != nil {
+		return err
+	}
+	output, err := MicrovmRunUnchecked(ip, []string{"link", "del", tap})
+	if err != nil {
+		return err
+	}
+	if !output.Status.Success() {
+		stderr := microvmLossy(output.Stderr)
+		if !strings.Contains(stderr, "Cannot find device") {
+			return fmt.Errorf("remove TAP device %s: %s", tap, MicrovmTail(stderr, 5))
+		}
+	}
+	return nil
 }
 
 // MicrovmTapExists reports whether a TAP device exists.
@@ -100,14 +140,59 @@ func MicrovmTapExists(tap string) bool {
 // microvmNetRuleset is the nftables ruleset, applied as one atomic
 // replacement.
 func microvmNetRuleset() string {
-	panic("unported: mj-worker/src/microvm/net.rs ruleset")
+	return strings.NewReplacer("{TABLE}", microvmTable, "{TAP_PREFIX}", microvmTapPrefix).Replace(`add table ip6 {TABLE}
+delete table ip6 {TABLE}
+table ip6 {TABLE} {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iifname "{TAP_PREFIX}*" drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "{TAP_PREFIX}*" drop
+    }
+}
+add table ip {TABLE}
+delete table ip {TABLE}
+table ip {TABLE} {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iifname "{TAP_PREFIX}*" ct state established,related accept
+        iifname "{TAP_PREFIX}*" icmp type echo-request accept
+        iifname "{TAP_PREFIX}*" drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "{TAP_PREFIX}*" ip daddr 169.254.169.254 reject
+        iifname "{TAP_PREFIX}*" oifname "{TAP_PREFIX}*" drop
+    }
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        iifname "{TAP_PREFIX}*" oifname != "{TAP_PREFIX}*" masquerade
+    }
+}
+`)
 }
 
 // MicrovmApplyHostPolicy enables forwarding and installs the firewall
 // table. Idempotent; called before every launch so a reboot needs no
 // separate setup.
 func MicrovmApplyHostPolicy() error {
-	panic("unported: mj-worker/src/microvm/net.rs apply_host_policy")
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0o666); err != nil {
+		return fmt.Errorf("enable IPv4 forwarding (/proc/sys/net/ipv4/ip_forward): %w", microvmIOError(err))
+	}
+	nft, err := MicrovmFindTool("nft")
+	if err != nil {
+		return err
+	}
+	output, err := core.RunWithInput(exec.Command(nft, "-f", "-"), []byte(microvmNetRuleset()))
+	if err != nil {
+		return fmt.Errorf("run nft: %w", err)
+	}
+	if !output.Status.Success() {
+		return fmt.Errorf("install the microvm firewall table with nft: %s", MicrovmTail(microvmLossy(output.Stderr), 10))
+	}
+	return nil
 }
 
 // MicrovmCheckNoRouteOverlap refuses to launch when the VM address block
@@ -127,5 +212,32 @@ func MicrovmCheckNoRouteOverlap() error {
 // microvmFindRouteOverlap is the first route in `/proc/net/route` text that
 // overlaps the VM address block.
 func microvmFindRouteOverlap(routes string) (string, bool) {
-	panic("unported: mj-worker/src/microvm/net.rs find_route_overlap")
+	lines := microvmLines(routes)
+	if len(lines) > 0 {
+		lines = lines[1:]
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 8 || strings.HasPrefix(fields[0], microvmTapPrefix) {
+			continue
+		}
+		destination, err1 := strconv.ParseUint(fields[1], 16, 32)
+		mask, err2 := strconv.ParseUint(fields[7], 16, 32)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		// The kernel prints the in-memory (network order) value as a
+		// host-order hex number.
+		destination32 := bits.ReverseBytes32(uint32(destination))
+		mask32 := bits.ReverseBytes32(uint32(mask))
+		if mask32 == 0 {
+			continue // the default route reaches everything; it is not a conflict
+		}
+		shared := mask32 &^ (1<<(32-microvmBlockPrefix) - 1)
+		if destination32&shared == microvmBlockBase&shared {
+			address := netip.AddrFrom4([4]byte{byte(destination32 >> 24), byte(destination32 >> 16), byte(destination32 >> 8), byte(destination32)})
+			return fmt.Sprintf("%s/%d on %s", address, bits.OnesCount32(mask32), fields[0]), true
+		}
+	}
+	return "", false
 }

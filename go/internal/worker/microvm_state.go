@@ -12,9 +12,16 @@ package worker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
+	"golang.org/x/sys/unix"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -86,7 +93,17 @@ func (l MicrovmLayout) Locks() string { return filepath.Join(l.root, "locks") }
 
 // Ensure creates the directory tree. Safe to repeat.
 func (l MicrovmLayout) Ensure() error {
-	panic("unported: mj-worker/src/microvm/state.rs Layout::ensure")
+	for _, directory := range []string{l.root, l.Images(), l.VMs(), l.Volumes(), l.Boot(), l.Locks()} {
+		if err := os.MkdirAll(directory, 0o777); err != nil {
+			return fmt.Errorf("create %s: %w", directory, microvmIOError(err))
+		}
+	}
+	// Flattened images hold setuid binaries and guest data: nobody but root
+	// may traverse the state tree, whatever the umask was.
+	if err := os.Chmod(l.root, 0o700); err != nil {
+		return fmt.Errorf("restrict %s: %w", l.root, microvmIOError(err))
+	}
+	return nil
 }
 
 // LockGlobal takes the engine-wide lock: slot allocation, admission, image
@@ -114,24 +131,74 @@ func (l MicrovmLayout) LockVolume(name string) (*core.FileLock, error) {
 
 // LockImage takes the lock for one image id.
 func (l MicrovmLayout) LockImage(id string) (*core.FileLock, error) {
-	panic("unported: mj-worker/src/microvm/state.rs Layout::lock_image")
+	valid := len(id) == 64
+	for i := 0; valid && i < len(id); i++ {
+		valid = microvmIsASCIIHexDigit(id[i])
+	}
+	if !valid {
+		return nil, fmt.Errorf("invalid image id %s", microvmDebugString(id))
+	}
+	return l.lockFile(fmt.Sprintf("image-%s.lock", id))
+}
+
+func microvmIsASCIIHexDigit(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+// microvmFlock is flock(2) that retries an interrupted wait.
+func microvmFlock(file *os.File, how int) error {
+	for {
+		err := unix.Flock(int(file.Fd()), how)
+		if err != unix.EINTR {
+			return err
+		}
+	}
 }
 
 // LockBootShared reserves a boot-assets directory: held (shared) from
 // before a launch names the assets until Firecracker has opened them, so a
 // prune by another engine build cannot remove them in between.
 func (l MicrovmLayout) LockBootShared(tag string) (*core.FileLock, error) {
-	panic("unported: mj-worker/src/microvm/state.rs Layout::lock_boot_shared")
+	file, err := l.openLockFile(fmt.Sprintf("boot-%s.lock", tag))
+	if err != nil {
+		return nil, err
+	}
+	if err := microvmFlock(file, unix.LOCK_SH); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock boot assets %s: %w", tag, microvmIOError(err))
+	}
+	return core.NewFileLock(file), nil
 }
 
 // TryLockBootExclusive takes the exclusive lock on boot assets, or returns
 // nil while a launch holds them.
 func (l MicrovmLayout) TryLockBootExclusive(tag string) (*core.FileLock, error) {
-	panic("unported: mj-worker/src/microvm/state.rs Layout::try_lock_boot_exclusive")
+	file, err := l.openLockFile(fmt.Sprintf("boot-%s.lock", tag))
+	if err != nil {
+		return nil, err
+	}
+	switch err := microvmFlock(file, unix.LOCK_EX|unix.LOCK_NB); {
+	case err == nil:
+		return core.NewFileLock(file), nil
+	case errors.Is(err, unix.EWOULDBLOCK):
+		_ = file.Close()
+		return nil, nil
+	default:
+		_ = file.Close()
+		return nil, fmt.Errorf("lock boot assets %s: %w", tag, microvmIOError(err))
+	}
 }
 
 func (l MicrovmLayout) openLockFile(fileName string) (*os.File, error) {
-	panic("unported: mj-worker/src/microvm/state.rs Layout::open_lock_file")
+	if err := os.MkdirAll(l.Locks(), 0o777); err != nil {
+		return nil, fmt.Errorf("create %s: %w", l.Locks(), microvmIOError(err))
+	}
+	path := filepath.Join(l.Locks(), fileName)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o666)
+	if err != nil {
+		return nil, fmt.Errorf("open lock %s: %w", path, microvmIOError(err))
+	}
+	return file, nil
 }
 
 // lockFile locks the named file. A resource's lock file is deleted with the
@@ -141,7 +208,27 @@ func (l MicrovmLayout) openLockFile(fileName string) (*os.File, error) {
 // the path, and start over if not. Each retry follows a delete by another
 // process, so the loop cannot spin.
 func (l MicrovmLayout) lockFile(fileName string) (*core.FileLock, error) {
-	panic("unported: mj-worker/src/microvm/state.rs Layout::lock_file")
+	path := filepath.Join(l.Locks(), fileName)
+	for {
+		file, err := l.openLockFile(fileName)
+		if err != nil {
+			return nil, err
+		}
+		if err := microvmFlock(file, unix.LOCK_EX); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("lock %s: %w", path, microvmIOError(err))
+		}
+		linked, err := microvmLockFileIsLinked(file, path)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if linked {
+			return core.NewFileLock(file), nil
+		}
+		// Closing the descriptor releases its lock on the unlinked file.
+		_ = file.Close()
+	}
 }
 
 // ForgetVMLock deletes a VM's lock file with the VM. The caller holds the
@@ -176,21 +263,60 @@ func (l MicrovmLayout) forgetLock(fileName string, held *core.FileLock) error {
 // microvmLockFileIsLinked reports whether file is still the file at path
 // (same device and inode).
 func microvmLockFileIsLinked(file *os.File, path string) (bool, error) {
-	panic("unported: mj-worker/src/microvm/state.rs lock_file_is_linked")
+	held, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat lock %s: %w", path, microvmIOError(err))
+	}
+	linked, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat lock %s: %w", path, microvmIOError(err))
+	}
+	heldStat, ok1 := held.Sys().(*syscall.Stat_t)
+	linkedStat, ok2 := linked.Sys().(*syscall.Stat_t)
+	if !ok1 || !ok2 {
+		return false, fmt.Errorf("stat lock %s: no device and inode", path)
+	}
+	return linkedStat.Dev == heldStat.Dev && linkedStat.Ino == heldStat.Ino, nil
+}
+
+func microvmIsASCIIAlphanumeric(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 // MicrovmValidateName checks a container or volume name. Names reach file
 // paths, unit names and kernel command lines, so they are restricted to a
 // safe alphabet.
 func MicrovmValidateName(kind, name string) error {
-	panic("unported: mj-worker/src/microvm/state.rs validate_name")
+	valid := name != "" && len(name) <= 63 && microvmIsASCIIAlphanumeric(name[0])
+	for i := 0; valid && i < len(name); i++ {
+		b := name[i]
+		valid = microvmIsASCIIAlphanumeric(b) || b == '_' || b == '.' || b == '-'
+	}
+	if !valid {
+		return fmt.Errorf("invalid %s name %s: use 1 to 63 letters, digits, '_', '.' or '-', starting with a letter or digit", kind, microvmDebugString(name))
+	}
+	return nil
 }
 
 // MicrovmValidateLabel checks a label. Labels are metadata a person or the
 // controller attaches; keys are restricted the way container engines
 // restrict them.
 func MicrovmValidateLabel(key, value string) error {
-	panic("unported: mj-worker/src/microvm/state.rs validate_label")
+	valid := key != "" && len(key) <= 128
+	for i := 0; valid && i < len(key); i++ {
+		b := key[i]
+		valid = microvmIsASCIIAlphanumeric(b) || b == '_' || b == '.' || b == '-' || b == '/'
+	}
+	if !valid {
+		return fmt.Errorf("invalid label key %s", microvmDebugString(key))
+	}
+	if strings.ContainsAny(value, "\n\x00") {
+		return fmt.Errorf("label %s has an invalid value", key)
+	}
+	return nil
 }
 
 // MicrovmVmVolume is a volume mounted into a VM.
@@ -249,7 +375,7 @@ func (s MicrovmVmState) MarshalJSON() ([]byte, error) {
 	p.Labels = microvmNonNilMap(p.Labels)
 	p.Env, p.Entrypoint, p.Cmd = microvmNonNil(p.Env), microvmNonNil(p.Entrypoint), microvmNonNil(p.Cmd)
 	p.Volumes = microvmNonNil(p.Volumes)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // UnmarshalJSON requires every member but `jailed`, as serde does.
@@ -275,30 +401,139 @@ func (s MicrovmVmState) Write(layout MicrovmLayout) error {
 
 // MicrovmVmStateRead is the state of name, or nil when there is no such VM.
 func MicrovmVmStateRead(layout MicrovmLayout, name string) (*MicrovmVmState, error) {
-	panic("unported: mj-worker/src/microvm/state.rs VmState::read")
+	path := MicrovmVmStatePath(layout, name)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, microvmIOError(err))
+	}
+	state, err := MicrovmVmStateParse(data)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return &state, nil
 }
 
 // MicrovmVmStateParse decodes a `state.json`, refusing a format newer than
 // this build knows.
 func MicrovmVmStateParse(data []byte) (MicrovmVmState, error) {
-	panic("unported: mj-worker/src/microvm/state.rs VmState::parse")
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
+		return MicrovmVmState{}, fmt.Errorf("decode state.json: %w", err)
+	}
+	if err := MicrovmRefuseNewerFormat("VM state", value, MicrovmStateFormat); err != nil {
+		return MicrovmVmState{}, err
+	}
+	var state MicrovmVmState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return MicrovmVmState{}, fmt.Errorf("decode state.json: %w", err)
+	}
+	return state, nil
+}
+
+// microvmListNames is the names in directory that do not start with a dot
+// (dot entries are removal and creation scratch space), sorted; none when
+// the directory does not exist.
+func microvmListNames(directory string) ([]string, error) {
+	entries, err := os.ReadDir(directory)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", directory, microvmIOError(err))
+	}
+	var names []string
+	for _, entry := range entries {
+		if name := entry.Name(); !strings.HasPrefix(name, ".") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // MicrovmVmStateList is every VM with a state file, in name order.
 func MicrovmVmStateList(layout MicrovmLayout) ([]MicrovmVmState, error) {
-	panic("unported: mj-worker/src/microvm/state.rs VmState::list")
+	names, err := microvmListNames(layout.VMs())
+	if err != nil {
+		return nil, err
+	}
+	var states []MicrovmVmState
+	for _, name := range names {
+		state, err := MicrovmVmStateRead(layout, name)
+		if err != nil {
+			return nil, err
+		}
+		if state != nil {
+			states = append(states, *state)
+		}
+	}
+	return states, nil
 }
 
 // MicrovmRefuseNewerFormat fails with a clear message when a file was
 // written by a newer engine. value is the file decoded as JSON.
 func MicrovmRefuseNewerFormat(what string, value any, supported uint32) error {
-	panic("unported: mj-worker/src/microvm/state.rs refuse_newer_format")
+	var format uint64
+	found := false
+	if object, ok := value.(jsonvalue.Object); ok {
+		switch number := microvmObjectGet(object, "format").(type) {
+		case int64:
+			format, found = uint64(number), number >= 0
+		case uint64:
+			format, found = number, true
+		}
+	}
+	if !found {
+		return errors.New("the file has no format number")
+	}
+	if format > uint64(supported) {
+		return fmt.Errorf("%s format %d was written by a newer mj-worker than this one (it understands up to format %d); install the newer mj-worker on this host", what, format, supported)
+	}
+	return nil
+}
+
+// microvmObjectGet is serde_json's Value::get on an object: the member, or
+// nil when it is absent.
+func microvmObjectGet(object jsonvalue.Object, key string) any {
+	value, _ := object.Get(key)
+	return value
 }
 
 // MicrovmWriteJSONAtomic writes value to path through a temporary file in
 // the same directory, as serde_json's pretty writer does, with a newline.
 func MicrovmWriteJSONAtomic(path string, value any) error {
-	panic("unported: mj-worker/src/microvm/state.rs write_json_atomic")
+	if path == "" || path == "/" {
+		return fmt.Errorf("%s has no parent directory", path)
+	}
+	directory := filepath.Dir(path)
+	temporary := filepath.Join(directory, "."+filepath.Base(path)+".tmp")
+	file, err := os.Create(temporary)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", temporary, microvmIOError(err))
+	}
+	defer file.Close()
+	encoded, err := microvmPrettyJSON(value)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", temporary, err)
+	}
+	if _, err := file.WriteString(encoded); err != nil {
+		return fmt.Errorf("write %s: %w", temporary, microvmIOError(err))
+	}
+	if _, err := file.WriteString("\n"); err != nil {
+		return microvmIOError(err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", temporary, microvmIOError(err))
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return fmt.Errorf("publish %s: %w", path, microvmIOError(err))
+	}
+	// The rename is only durable once the directory is: a caller may delete
+	// what this file replaces, or answer a controller that acts on it.
+	return microvmSyncDirectory(directory)
 }
 
 // MicrovmVolumeMetadata is a volume's metadata.
@@ -314,7 +549,7 @@ func (m MicrovmVolumeMetadata) MarshalJSON() ([]byte, error) {
 	type plain MicrovmVolumeMetadata
 	p := plain(m)
 	p.Labels = microvmNonNilMap(p.Labels)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // UnmarshalJSON requires every member, as serde does.
@@ -331,10 +566,39 @@ func MicrovmVolumeMetadataPath(layout MicrovmLayout, name string) string {
 	return filepath.Join(layout.Volume(name), "labels.json")
 }
 
+// microvmDecodeVersioned decodes a metadata file read from path the way
+// every reader of one does: decode, refuse a newer format, decode into
+// target.
+func microvmDecodeVersioned(data []byte, path string, what string, supported uint32, target any) error {
+	value, err := jsonvalue.Parse(data)
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	if err := MicrovmRefuseNewerFormat(what, value, supported); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	return nil
+}
+
 // MicrovmVolumeMetadataRead is the metadata of volume name, or nil when
 // there is no such volume.
 func MicrovmVolumeMetadataRead(layout MicrovmLayout, name string) (*MicrovmVolumeMetadata, error) {
-	panic("unported: mj-worker/src/microvm/state.rs VolumeMetadata::read")
+	path := MicrovmVolumeMetadataPath(layout, name)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, microvmIOError(err))
+	}
+	var metadata MicrovmVolumeMetadata
+	if err := microvmDecodeVersioned(data, path, "volume metadata", MicrovmMetadataFormat, &metadata); err != nil {
+		return nil, err
+	}
+	return &metadata, nil
 }
 
 // Write writes the metadata file.
@@ -344,7 +608,21 @@ func (m MicrovmVolumeMetadata) Write(layout MicrovmLayout) error {
 
 // MicrovmVolumeMetadataList is every volume with metadata, in name order.
 func MicrovmVolumeMetadataList(layout MicrovmLayout) ([]MicrovmVolumeMetadata, error) {
-	panic("unported: mj-worker/src/microvm/state.rs VolumeMetadata::list")
+	names, err := microvmListNames(layout.Volumes())
+	if err != nil {
+		return nil, err
+	}
+	var volumes []MicrovmVolumeMetadata
+	for _, name := range names {
+		metadata, err := MicrovmVolumeMetadataRead(layout, name)
+		if err != nil {
+			return nil, err
+		}
+		if metadata != nil {
+			volumes = append(volumes, *metadata)
+		}
+	}
+	return volumes, nil
 }
 
 // MicrovmImageConfig is the OCI image configuration kept next to a
@@ -369,7 +647,7 @@ func (c MicrovmImageConfig) MarshalJSON() ([]byte, error) {
 	p := plain(c)
 	p.Env, p.Entrypoint, p.Cmd = microvmNonNil(p.Env), microvmNonNil(p.Entrypoint), microvmNonNil(p.Cmd)
 	p.Labels = microvmNonNilMap(p.Labels)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // UnmarshalJSON requires the members serde requires.
@@ -383,7 +661,16 @@ func (c *MicrovmImageConfig) UnmarshalJSON(data []byte) error {
 
 // MicrovmImageConfigRead is ImageConfig::read.
 func MicrovmImageConfigRead(layout MicrovmLayout, id string) (MicrovmImageConfig, error) {
-	panic("unported: mj-worker/src/microvm/state.rs ImageConfig::read")
+	path := filepath.Join(layout.Image(id), "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return MicrovmImageConfig{}, fmt.Errorf("read %s: %w", path, microvmIOError(err))
+	}
+	var config MicrovmImageConfig
+	if err := microvmDecodeVersioned(data, path, "image metadata", MicrovmMetadataFormat, &config); err != nil {
+		return MicrovmImageConfig{}, err
+	}
+	return config, nil
 }
 
 // MicrovmImageRefs maps reference names to image ids.
@@ -397,13 +684,28 @@ func (r MicrovmImageRefs) MarshalJSON() ([]byte, error) {
 	type plain MicrovmImageRefs
 	p := plain(r)
 	p.Refs = microvmNonNilMap(p.Refs)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // MicrovmImageRefsRead is ImageRefs::read: an absent file is an empty table
 // of the current format.
 func MicrovmImageRefsRead(layout MicrovmLayout) (MicrovmImageRefs, error) {
-	panic("unported: mj-worker/src/microvm/state.rs ImageRefs::read")
+	path := layout.ImageRefs()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return MicrovmImageRefs{Format: MicrovmMetadataFormat, Refs: map[string]string{}}, nil
+	}
+	if err != nil {
+		return MicrovmImageRefs{}, fmt.Errorf("read %s: %w", path, microvmIOError(err))
+	}
+	var refs MicrovmImageRefs
+	if err := microvmDecodeVersioned(data, path, "image reference", MicrovmMetadataFormat, &refs); err != nil {
+		return MicrovmImageRefs{}, err
+	}
+	if refs.Refs == nil {
+		refs.Refs = map[string]string{}
+	}
+	return refs, nil
 }
 
 // Write writes the reference table.

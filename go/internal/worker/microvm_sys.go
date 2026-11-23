@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -39,19 +41,36 @@ var microvmToolDirectories = []string{
 // MicrovmFindTool locates an installed tool. The engine runs under `sudo`,
 // whose PATH is not the caller's.
 func MicrovmFindTool(name string) (string, error) {
-	panic("unported: mj-worker/src/microvm/sys.rs find_tool")
+	for _, directory := range microvmToolDirectories {
+		candidate := filepath.Join(directory, name)
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s is not installed on this host (searched %s)", name, strings.Join(microvmToolDirectories, ", "))
 }
 
 // MicrovmRunUnchecked runs program and captures its output, whatever its
 // exit status.
 func MicrovmRunUnchecked(program string, args []string) (core.ProcessOutput, error) {
-	panic("unported: mj-worker/src/microvm/sys.rs run_unchecked")
+	output, err := core.RunWithInput(exec.Command(program, args...), nil)
+	if err != nil {
+		return core.ProcessOutput{}, fmt.Errorf("run %s: %w", program, err)
+	}
+	return output, nil
 }
 
 // MicrovmRunChecked runs program, failing with its error output unless it
 // exits zero.
 func MicrovmRunChecked(program string, args []string) (core.ProcessOutput, error) {
-	panic("unported: mj-worker/src/microvm/sys.rs run_checked")
+	output, err := MicrovmRunUnchecked(program, args)
+	if err != nil {
+		return core.ProcessOutput{}, err
+	}
+	if !output.Status.Success() {
+		return core.ProcessOutput{}, fmt.Errorf("%s failed (%s): %s", program, microvmExitStatus(output.Status), MicrovmTail(microvmLossy(output.Stderr), 20))
+	}
+	return output, nil
 }
 
 // MicrovmRunTool runs a tool found by name.
