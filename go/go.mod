@@ -27,6 +27,7 @@ require (
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0
 	lukechampine.com/blake3 v1.5.1
+	modernc.org/libc v1.80.1
 	modernc.org/sqlite v1.62.0
 )
 
@@ -58,7 +59,6 @@ require (
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
 	github.com/xo/terminfo v1.0.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
