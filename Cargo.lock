@@ -982,6 +982,7 @@ dependencies = [
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
+ "brokk-sessionwiki",
  "chrono",
  "futures",
  "rayon",
@@ -990,6 +991,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1505,9 +1507,9 @@ dependencies = [
 
 [[package]]
 name = "brokk-sessionwiki"
-version = "0.34.27"
+version = "0.34.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b45392edba21c82a3f86755cced8180f93fb623bdce8cbe2509169da234ed4e7"
+checksum = "96de98538edbdb9e2359f6e9cd57cc5ab648431d5be2cc7fa76e8f253c4c9a34"
 dependencies = [
  "anyhow",
  "chrono",

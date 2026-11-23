@@ -638,6 +638,7 @@ impl<'a, R: TerminalRecord> TranscriptIndex<'a, R> {
                 text: sessionwiki::tool_summary::render_summary(&summary),
                 ts: DateTime::from_timestamp_millis(created_at_ms),
                 tool: Some(ToolEvent::Summary(summary)),
+                is_thought: false,
             },
         ));
     }
@@ -693,6 +694,7 @@ fn message(role: Role, text: String, created_at_ms: i64) -> Option<Message> {
         text,
         ts: DateTime::from_timestamp_millis(created_at_ms),
         tool: None,
+        is_thought: false,
     })
 }
 
@@ -836,6 +838,9 @@ impl Adapter for MjolnirAdapter {
             tool: TOOL,
             path: PathBuf::from(key),
             project,
+            raw_cwd: None,
+            operational_edited_paths: Vec::new(),
+            compacted_prefix: false,
             started: record.and_then(|record| parse_time(&record.created_at)),
             ended: record.and_then(|record| parse_time(&record.updated_at)),
             title,
@@ -857,6 +862,10 @@ impl Adapter for MjolnirAdapter {
 struct SharedMjolnirAdapter(Arc<MjolnirAdapter>);
 
 impl Adapter for SharedMjolnirAdapter {
+    fn native_id(&self, key: &str) -> Option<String> {
+        self.0.native_id(key)
+    }
+
     fn name(&self) -> &'static str {
         self.0.name()
     }
@@ -1350,7 +1359,7 @@ fn write_session_tags(
 /// unsupported harnesses (aider, gemini, cline, ...) are dropped, so they can
 /// neither trigger a home-directory walk nor add unrelated search results.
 ///
-/// Kimi Code, Grok Build, Muse and DSH use SessionWiki's public adapters
+/// Kimi Code, Grok Build, Muse, DSH and Antigravity CLI use SessionWiki's public adapters
 /// directly, one per enabled profile home. DSH histories are searchable even
 /// though Mjolnir does not yet import them for native resume.
 ///
@@ -1407,8 +1416,11 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
                 adapters.push(Box::new(sessionwiki::adapters::Dsh::in_home(home)));
             }
             HarnessKind::OpenCode => {}
-            // SessionWiki has no adapter for Antigravity's session records yet.
-            HarnessKind::Antigravity => {}
+            HarnessKind::Antigravity => {
+                adapters.push(Box::new(sessionwiki::adapters::Antigravity::cli_in_home(
+                    home,
+                )));
+            }
         }
     }
     adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
@@ -2025,6 +2037,9 @@ fn copy_session(session: &Session) -> Session {
         tool: session.tool,
         path: session.path.clone(),
         project: session.project.clone(),
+        raw_cwd: session.raw_cwd.clone(),
+        operational_edited_paths: session.operational_edited_paths.clone(),
+        compacted_prefix: session.compacted_prefix,
         started: session.started,
         ended: session.ended,
         title: session.title.clone(),
@@ -2037,6 +2052,7 @@ fn copy_session(session: &Session) -> Session {
                 text: message.text.clone(),
                 ts: message.ts,
                 tool: message.tool.clone(),
+                is_thought: message.is_thought,
             })
             .collect(),
         touched: session.touched.clone(),
@@ -3020,16 +3036,21 @@ pub fn wiki_continuation(
     }
     let harness = harness_tools::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
-    let native_session_id = match harness {
-        HarnessKind::Codex => sessionwiki::index::native_id_of(&path.to_string_lossy()),
-        _ => crate::import::native_session_id_from_path(harness, path),
-    }
-    .with_context(|| {
-        format!(
-            "no {tool} session id in the indexed path {}",
-            path.display()
-        )
-    })?;
+    anyhow::ensure!(
+        crate::import::native_sessions_enumerable(harness),
+        "Mjolnir cannot import {tool} sessions"
+    );
+    anyhow::ensure!(
+        harness != HarnessKind::Codex || !path.to_string_lossy().contains('\u{1f}'),
+        "Mjolnir can only import Codex sessions with a rollout log; this row is from the Codex history database"
+    );
+    let native_session_id = crate::import::native_session_id_from_path(harness, path)
+        .with_context(|| {
+            format!(
+                "no {tool} session id in the indexed path {}",
+                path.display()
+            )
+        })?;
     Ok(WikiContinuation::Import {
         harness,
         native_session_id,
@@ -3148,21 +3169,52 @@ mod tests {
         /// A Codex rollout's file name is a timestamp and the thread UUID, so
         /// the stem alone is not the id `mj import codex --session` takes.
         #[test]
-        fn a_codex_row_is_imported_with_the_uuid_from_its_rollout_name() {
-            for path in [
-                "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T09-15-00-7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl",
-                "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T09-15-00-7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl.zst",
-                "/home/user/.codex/thread_history_1.sqlite\u{1f}7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44",
-            ] {
+        fn a_codex_row_preserves_literal_source_and_archived_rollout_ids() {
+            let directory = tempfile::tempdir().unwrap();
+            let id = "7F3A1C20-0B11-4A55-9E0D-2C8A5D6F1B44";
+            let path = directory
+                .path()
+                .join(format!("rollout-2026-09-18T09-15-00-{id}.jsonl"));
+            let from_id = |id: &str| WikiContinuation::Import {
+                harness: HarnessKind::Codex,
+                native_session_id: id.to_owned(),
+            };
+            for path in [&path, &path.with_extension("jsonl.zst")] {
                 assert_eq!(
-                    wiki_continuation("abc123", "codex", Path::new(path), false).unwrap(),
-                    WikiContinuation::Import {
-                        harness: HarnessKind::Codex,
-                        native_session_id: "7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44".to_owned(),
-                    },
-                    "{path}"
+                    wiki_continuation("abc123", "codex", path, false).unwrap(),
+                    from_id(id)
                 );
             }
+            std::fs::write(
+                &path,
+                r#"{"type":"session_meta","payload":{"id":"Literal-ID","session_id":"parent"}}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                wiki_continuation("abc123", "codex", &path, false).unwrap(),
+                from_id("Literal-ID")
+            );
+        }
+
+        #[test]
+        fn searchable_native_rows_without_an_importable_source_cannot_continue() {
+            for tool in ["antigravity", "dsh", "opencode"] {
+                let error = wiki_continuation("abc123", tool, Path::new("/home/session"), false)
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains(&format!("cannot import {tool}")),
+                    "{error}"
+                );
+            }
+            let path = Path::new(
+                "/home/user/.codex/thread_history_1.sqlite\u{1f}7F3A1C20-0B11-4A55-9E0D-2C8A5D6F1B44",
+            );
+            let error = wiki_continuation("abc123", "codex", path, false).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("only import Codex sessions with a rollout log")
+            );
         }
     }
 
@@ -4193,6 +4245,9 @@ mod tests {
             tool: "mjolnir",
             path: PathBuf::from("/sessions/0123456789abcdef0123456789abcdef"),
             project: "/home/dev/project".into(),
+            raw_cwd: None,
+            operational_edited_paths: Vec::new(),
+            compacted_prefix: false,
             started: DateTime::from_timestamp_millis(1_700_000_000_000),
             ended: None,
             title: "the archived session".into(),
@@ -4204,6 +4259,7 @@ mod tests {
                     text: text.to_owned(),
                     ts: None,
                     tool: None,
+                    is_thought: false,
                 })
                 .collect(),
             touched: Vec::new(),
@@ -5552,6 +5608,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "antigravity",
                 "claude-code",
                 "codex",
                 "codex",

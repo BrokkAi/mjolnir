@@ -42,22 +42,13 @@ pub fn import_native_session(
     let title = match session_title_override.as_deref() {
         Some(title) if !title.trim().is_empty() => title.to_owned(),
         Some(_) => bail!("import title must not be empty"),
-        None => harness_session_title(&transcript.events).unwrap_or_else(|| {
+        None => {
             format!(
                 "Imported {} session {native_session_id}",
                 harness.display_name()
             )
-        }),
+        }
     };
-    let targets = session_edit_targets(transcript, harness_home)?;
-    let raw_project = raw_project_import(config, &targets);
-    let recorded_root = import_project_root(transcript, &targets);
-    let remap = daemon_project_root
-        .filter(|path| *path != recorded_root.as_path())
-        .map(|destination| ImportProjectRemap::new(&recorded_root, destination, &targets.git_roots))
-        .transpose()?;
-    let mut repositories =
-        collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let mut native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
     // Own the selected native bytes through archive publication. A harness may
@@ -66,11 +57,14 @@ pub fn import_native_session(
     let native_snapshot = tempfile::Builder::new()
         .prefix("native-import-")
         .tempdir_in(archive_directory)?;
+    let mut muse_capture = None;
     for (index, artifact) in native_artifacts.iter_mut().enumerate() {
         if let Some(control) = control {
             control.check_cancelled()?;
         }
         let path = native_snapshot.path().join(index.to_string());
+        let selected_muse_stream = harness == HarnessKind::Muse
+            && matches!(&artifact.data, mj_checkpoint::archive::NativeArtifactData::File(original) if original == source_path);
         {
             let mut source = CancellableRead {
                 inner: artifact.reader()?,
@@ -78,21 +72,32 @@ pub fn import_native_session(
             };
             let mut target = fs::File::create(&path)?;
             std::io::copy(&mut source, &mut target)?;
+            if selected_muse_stream {
+                target.set_modified(fs::metadata(source_path)?.modified()?)?;
+                muse_capture = Some(path.clone());
+            }
         }
         artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
     }
-    if harness == HarnessKind::Muse {
-        // The preview may precede a user's confirmation by minutes. Never
-        // pair its old transcript with a newer native conversation.
+    let captured_transcript = if harness == HarnessKind::Muse {
         if let Some(control) = control {
             control.check_cancelled()?;
         }
-        let current = read_native_transcript(harness, source_path)?;
+        let captured_path =
+            muse_capture.context("selected Muse log is missing from the capture")?;
+        let current = super::adapter_transcript::read_muse_transcript(&captured_path, source_path)
+            .context("validate captured Muse session")?;
+        // The preview can precede confirmation by minutes. Reject changes
+        // that could invalidate its bundle, safety, or conversation.
         ensure!(
-            current.cwd == transcript.cwd
-                && current.edited_paths == transcript.edited_paths
-                && serde_json::to_value(&current.events)?
-                    == serde_json::to_value(&transcript.events)?,
+            current.cwd.as_os_str() == transcript.cwd.as_os_str()
+                && current
+                    .edited_paths
+                    .iter()
+                    .map(|path| path.as_os_str())
+                    .eq(transcript.edited_paths.iter().map(|path| path.as_os_str()))
+                && current.items == transcript.items
+                && current.last_activity_at_ms == transcript.last_activity_at_ms,
             "native session changed after it was selected; select it again"
         );
         ensure!(
@@ -107,10 +112,25 @@ pub fn import_native_session(
             )?,
             "native session changed while being imported; stop its harness and retry"
         );
-    }
+        Some(current)
+    } else {
+        None
+    };
+    let transcript = captured_transcript.as_ref().unwrap_or(transcript);
+    let targets = session_edit_targets(transcript, harness_home)?;
+    let raw_project = raw_project_import(config, &targets);
+    let recorded_root = import_project_root(transcript, &targets);
+    let remap = daemon_project_root
+        .filter(|path| *path != recorded_root.as_path())
+        .map(|destination| ImportProjectRemap::new(&recorded_root, destination, &targets.git_roots))
+        .transpose()?;
+    let mut repositories =
+        collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let session_id = new_session_id()?;
-    let canonical_session =
-        canonical_import_session(session_id.as_str(), &transcript.events, source_path)?;
+    let canonical_session = mj_transcript::projection::canonical_session_from_materialized_owned(
+        transcript.materialize(&session_id),
+    )?;
+    let event_frontier = canonical_session.event_frontier;
     let timestamp = timestamp();
     let profile_id = import_profile_id(config, profile_id, harness, harness_home)?;
     let target_id = default_import_target_id(config);
@@ -172,7 +192,7 @@ pub fn import_native_session(
         archive_path: archive_path.clone(),
         sha256: verified.archive_sha256,
         created_at: timestamp.clone(),
-        event_frontier: transcript.events.last().map_or(0, |event| event.seq),
+        event_frontier,
     };
     state.sessions.insert(
         session_id.clone(),
@@ -430,29 +450,6 @@ pub(super) fn collect_local_repositories(
         .collect()
 }
 
-pub(super) fn canonical_import_session(
-    session_id: &str,
-    events: &[SequencedEvent],
-    source_path: &Path,
-) -> Result<mj_checkpoint::archive::CanonicalSessionSnapshot> {
-    let mut events = events.to_vec();
-    finalize_import_event_times(&mut events, source_path)?;
-    let mut materialized =
-        mj_transcript::projection::imported_materialized_session(session_id, &events);
-    materialized.session_title = harness_session_title(&events);
-    if let Some(last_activity_at_ms) = events.iter().filter_map(|event| event.recorded_at_ms).max()
-    {
-        materialized.last_activity_at_ms = Some(
-            materialized
-                .last_activity_at_ms
-                .map_or(last_activity_at_ms, |current| {
-                    current.max(last_activity_at_ms)
-                }),
-        );
-    }
-    canonical_session_from_materialized(&materialized)
-}
-
 pub(super) fn default_profile(config: &Config, harness: HarnessKind, home: &Path) -> String {
     let source = fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     config
@@ -551,7 +548,7 @@ pub(super) fn git_optional_text<const N: usize>(
 }
 
 pub(super) fn timestamp() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {

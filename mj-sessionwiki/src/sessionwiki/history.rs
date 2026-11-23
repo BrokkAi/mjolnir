@@ -470,6 +470,9 @@ mod tests {
             tool: "mjolnir",
             path: "/s".into(),
             project: "p".into(),
+            raw_cwd: None,
+            operational_edited_paths: Vec::new(),
+            compacted_prefix: false,
             title: "t".into(),
             started: None,
             ended: None,
@@ -481,6 +484,7 @@ mod tests {
                 text: "é🙂abcdef".into(),
                 ts: None,
                 tool: None,
+                is_thought: false,
             }],
         };
         let first = read_page(&session, 0, 0, None, 20, 3);

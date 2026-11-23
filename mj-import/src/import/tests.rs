@@ -1,4 +1,6 @@
 use super::*;
+use TranscriptRole::{Agent, System, Thought, User};
+use mj_core::transcript::{TranscriptBody, TranscriptRole};
 
 use super::test_fixtures::{grok_session, native_cwd, native_fixture};
 
@@ -81,7 +83,8 @@ fn session_targets_include_edited_roots_and_keep_cwd_primary() {
     let transcript = ClaudeTranscript {
         cwd: app.clone(),
         edited_paths: vec![sibling.join("src/lib.rs")],
-        events: Vec::new(),
+        items: Vec::new(),
+        last_activity_at_ms: None,
     };
 
     let targets = session_edit_targets(&transcript, &directory.path().join("profile")).unwrap();
@@ -110,7 +113,8 @@ fn session_targets_omit_repositories_under_temporary_directories() {
     let transcript = ClaudeTranscript {
         cwd: app.clone(),
         edited_paths: vec![sibling.join("src/lib.rs"), throwaway.join("notes.md")],
-        events: Vec::new(),
+        items: Vec::new(),
+        last_activity_at_ms: None,
     };
 
     let targets = session_edit_targets_with_scratch_prefixes(
@@ -142,7 +146,8 @@ fn session_targets_keep_a_cwd_repository_under_a_temporary_directory() {
     let transcript = ClaudeTranscript {
         cwd: throwaway.clone(),
         edited_paths: vec![throwaway.join("notes.md")],
-        events: Vec::new(),
+        items: Vec::new(),
+        last_activity_at_ms: None,
     };
 
     let targets = session_edit_targets_with_scratch_prefixes(
@@ -159,26 +164,56 @@ fn session_targets_keep_a_cwd_repository_under_a_temporary_directory() {
 #[test]
 fn codex_extracts_only_completed_file_changes() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("rollout.jsonl");
-    fs::write(
-            &path,
-            native_fixture(concat!(
-                r#"{"type":"session_meta","payload":{"cwd":"/work/app","history_mode":"paginated"}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"text":"edit"}]}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","status":"completed","changes":{"/work/a.txt":{"type":"add"}}}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","status":"failed","changes":{"/work/b.txt":{"type":"add"}}}}}"#,
-                "\n",
-            )),
-        )
-        .unwrap();
-    let transcript = read_codex_transcript(&path).unwrap();
+    let app = directory.path().join("app");
+    let dependency = directory.path().join("dependency");
+    initialize_repository(&app, "app");
+    initialize_repository(&dependency, "dependency");
+    let home = directory.path().join("codex");
+    let id = "019FEB6C-5FFC-7C12-AD99-BDEAEB6BE79D";
+    let path = home
+        .join("sessions/2026/08/14")
+        .join(format!("rollout-{id}.jsonl"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let cwd = format!("{}/./", app.display());
+    let edited = dependency.join("write.txt");
+    let failed = directory.path().join("unrelated/failed.txt");
+    let records = [
+        json!({"type":"session_meta","payload":{"id":id,"cwd":cwd,"history_mode":"paginated"}}),
+        json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"text":"edit"}]}}}),
+        json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","status":"completed","changes":{(edited.to_str().unwrap()):{"type":"add"}}}}}),
+        json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","status":"failed","changes":{(failed.to_str().unwrap()):{"type":"add"}}}}}),
+        json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"edited"}]}}}),
+    ];
+    fs::write(&path, records.map(|record| record.to_string()).join("\n")).unwrap();
+
+    let located = locate_native_session(
+        HarnessKind::Codex,
+        &home,
+        &ClaudeSessionSelection::NativeSessionId(id.into()),
+    )
+    .unwrap();
+    assert_eq!(located.native_session_id, id);
     assert_eq!(
-        transcript.edited_paths,
-        [PathBuf::from(native_cwd("/work/a.txt"))]
+        native_session_id_from_path(HarnessKind::Codex, &located.source_path).as_deref(),
+        Some(id)
     );
+    let transcript = read_native_transcript(HarnessKind::Codex, &located.source_path).unwrap();
+    assert_eq!(transcript.cwd.as_os_str(), Path::new(&cwd).as_os_str());
+    assert_eq!(transcript.edited_paths, [edited]);
+    assert_eq!(dialogue(&transcript), [(User, "edit"), (Agent, "edited")]);
+
+    // This fixture lives in temp storage but represents two durable checkouts.
+    let targets =
+        super::edit_targets::session_edit_targets_with_scratch_prefixes(&transcript, &home, &[])
+            .unwrap();
+    assert_eq!(
+        targets.git_roots,
+        [
+            app.canonicalize().unwrap(),
+            dependency.canonicalize().unwrap()
+        ]
+    );
+    assert!(targets.non_git_dirs.is_empty());
 }
 
 #[test]
@@ -227,10 +262,18 @@ fn kimi_extracts_successful_edits_from_all_agents() {
             ),
         )
         .unwrap();
-    assert_eq!(
-        kimi_edited_paths(directory.path()).unwrap(),
-        [PathBuf::from("one.txt")]
-    );
+    let main = directory.path().join("agents/main/wire.jsonl");
+    let child = directory.path().join("agents/nested/child/events.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::rename(&main, &child).unwrap();
+    fs::write(&main, r#"{"type":"turn.prompt","origin":{"kind":"user"},"input":[{"type":"text","text":"edit"}]}"#).unwrap();
+    fs::write(
+        directory.path().join("state.json"),
+        native_fixture(r#"{"workDir":"/work/app"}"#),
+    )
+    .unwrap();
+    let transcript = read_kimi_transcript(directory.path()).unwrap();
+    assert_eq!(transcript.edited_paths, [PathBuf::from("one.txt")]);
 }
 
 #[test]
@@ -454,7 +497,8 @@ fn edit_targets_filter_profile_state_and_report_non_git_directories() {
     let transcript = ClaudeTranscript {
         cwd: app.clone(),
         edited_paths: vec![profile.join("memory.md"), outside.join("draft.md")],
-        events: Vec::new(),
+        items: Vec::new(),
+        last_activity_at_ms: None,
     };
 
     let targets = session_edit_targets(&transcript, &profile).unwrap();
@@ -483,7 +527,8 @@ fn edit_targets_compare_profile_paths_after_resolving_symlinks() {
             alias.join("profile/memory.md"),
             alias.join("notes/draft.md"),
         ],
-        events: Vec::new(),
+        items: Vec::new(),
+        last_activity_at_ms: None,
     };
 
     let targets = session_edit_targets(&transcript, &alias.join("profile")).unwrap();
@@ -545,33 +590,15 @@ fn projects_jsonl_projects_user_and_assistant_text_in_source_order() {
     let transcript = read_claude_transcript(&path).unwrap();
     assert_eq!(transcript.cwd, PathBuf::from(native_cwd("/work/app")));
     assert_eq!(
-        transcript
-            .events
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6]
+        dialogue(&transcript),
+        [
+            (User, "first prompt"),
+            (Agent, "first reply"),
+            (User, "second prompt"),
+            (Agent, "second"),
+            (Agent, "reply")
+        ]
     );
-    assert!(matches!(
-        &transcript.events[0].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
-    ));
-    assert_eq!(
-        agent_text(&transcript.events[1].event).as_deref(),
-        Some("first reply")
-    );
-    assert!(matches!(
-        &transcript.events[2].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "second prompt"
-    ));
-    assert_eq!(
-        agent_text(&transcript.events[4].event).as_deref(),
-        Some("reply")
-    );
-    assert!(matches!(
-        transcript.events[5].event,
-        WorkerEvent::TurnCompleted
-    ));
 }
 
 #[test]
@@ -769,14 +796,7 @@ fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
     .unwrap();
 
     let transcript = read_codex_transcript(&path).unwrap();
-    assert!(
-        matches!(
-            &transcript.events[0].event,
-            WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
-        ),
-        "{:?}",
-        transcript.events[0].event
-    );
+    assert_eq!(dialogue(&transcript), [(User, "first prompt")]);
 }
 
 // Hard-won: #1514: choosing a daemon root changed managed imports into attached checkouts.
@@ -836,6 +856,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
         records
             .into_iter()
             .map(|record| record.to_string())
+            .chain(["{\"type\":".into()])
             .collect::<Vec<_>>()
             .join("\n"),
     )
@@ -851,30 +872,11 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     let expected_activity = DateTime::parse_from_rfc3339("2026-08-14T12:00:03.750Z")
         .unwrap()
         .timestamp_millis();
-    assert_eq!(
-        transcript
-            .events
-            .iter()
-            .map(|event| event.recorded_at_ms)
-            .collect::<Vec<_>>(),
-        [
-            Some(expected_user_time),
-            Some(expected_agent_time),
-            Some(expected_activity)
-        ]
-    );
-    let metadata = fs::metadata(&rollout).unwrap();
-    let source = LocatedCodexSession {
-        natively_archived: false,
-        native_session_id: native_session_id.into(),
-        jsonl_path: rollout,
-        modified_at: metadata.modified().unwrap(),
-        title: "Imported Codex session".into(),
-        cwd: app,
-        git_branch: "main".into(),
-        size_bytes: metadata.len(),
-        history_mode: CodexHistoryMode::Paginated,
-    };
+    let source = locate_codex_session(
+        &codex_home,
+        &CodexSessionSelection::NativeSessionId(native_session_id.to_owned()),
+    )
+    .unwrap();
     let mut config = Config::default();
     config.bundles.insert(
         "app".into(),
@@ -949,7 +951,11 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
         record.checkout(),
         mj_core::state::Checkout::ManagedWorkspace
     ));
-    assert_eq!(verified.canonical_session.event_frontier, 3);
+    assert_eq!(verified.canonical_session.event_frontier, 2);
+    assert_eq!(
+        record.checkpoint.as_ref().unwrap().event_frontier,
+        verified.canonical_session.event_frontier
+    );
     assert_eq!(
         verified.canonical_session.session.last_activity_at_ms,
         Some(expected_activity)
@@ -1132,11 +1138,13 @@ fn codex_paginated_import_ignores_compaction_artifacts() {
         )
         .unwrap();
     let transcript = read_codex_transcript(&path).unwrap();
-    assert!(matches!(
-        &transcript.events[0].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "prompt after compaction"
-    ));
-    assert_eq!(transcript.events.len(), 2);
+    assert_eq!(
+        dialogue(&transcript),
+        [
+            (System, COMPACTED_NOTICE),
+            (User, "prompt after compaction")
+        ]
+    );
 }
 
 #[test]
@@ -1162,25 +1170,21 @@ fn codex_import_rejects_legacy_history_with_migration_guidance() {
 }
 
 #[test]
-fn claude_import_rejects_a_compaction_summary_without_raw_history() {
+fn claude_import_shows_notice_for_compaction_without_raw_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
     fs::write(
         &path,
-        concat!(
+        native_fixture(concat!(
             r#"{"type":"system","subtype":"compact_boundary","cwd":"/work/app"}"#,
             "\n",
             r#"{"type":"user","isCompactSummary":true,"message":{"content":"summary"}}"#,
             "\n",
-        ),
+        )),
     )
     .unwrap();
-    assert!(
-        read_claude_transcript(&path)
-            .unwrap_err()
-            .to_string()
-            .contains("before recoverable raw history")
-    );
+    let transcript = read_claude_transcript(&path).unwrap();
+    assert_eq!(dialogue(&transcript), [(System, COMPACTED_NOTICE)]);
 }
 
 #[test]
@@ -1710,35 +1714,20 @@ fn kimi_wire_projects_user_prompt_and_text_without_thought() {
 
     let transcript = read_kimi_transcript(directory.path()).unwrap();
     assert_eq!(transcript.cwd, PathBuf::from(native_cwd("/work/app")));
-    assert!(matches!(
-        &transcript.events[0].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
-    ));
     assert_eq!(
-        agent_text(&transcript.events[1].event).as_deref(),
-        Some("first reply")
+        dialogue(&transcript),
+        [
+            (User, "first prompt"),
+            (Agent, "first reply"),
+            (User, "follow up"),
+            (Agent, "second reply")
+        ]
     );
-    assert!(matches!(
-        transcript.events[2].event,
-        WorkerEvent::TurnCompleted
-    ));
-    assert!(matches!(
-        &transcript.events[3].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "follow up"
-    ));
-    assert_eq!(
-        agent_text(&transcript.events[4].event).as_deref(),
-        Some("second reply")
-    );
-    assert!(matches!(
-        transcript.events[5].event,
-        WorkerEvent::TurnCompleted
-    ));
     assert!(
         transcript
-            .events
+            .items
             .iter()
-            .all(|event| event.recorded_at_ms == Some(expected_fallback))
+            .all(|item| item.created_at_ms == expected_fallback)
     );
 }
 
@@ -1773,40 +1762,21 @@ fn grok_chat_history_projects_prompts_thoughts_and_replies() {
     let transcript = read_grok_transcript(&session).unwrap();
 
     assert_eq!(transcript.cwd, PathBuf::from(native_cwd("/work/app")));
-    assert!(matches!(
-        &transcript.events[0].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
-    ));
     assert_eq!(
-        agent_text(&transcript.events[1].event).as_deref(),
-        Some("thinking it over")
+        dialogue(&transcript),
+        [
+            (User, "first prompt"),
+            (Thought, "thinking it over"),
+            (Agent, "first reply"),
+            (User, "follow up"),
+            (Agent, "second reply")
+        ]
     );
-    assert_eq!(
-        agent_text(&transcript.events[2].event).as_deref(),
-        Some("first reply")
-    );
-    assert!(matches!(
-        transcript.events[3].event,
-        WorkerEvent::TurnCompleted
-    ));
-    assert!(matches!(
-        &transcript.events[4].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "follow up"
-    ));
-    assert_eq!(
-        agent_text(&transcript.events[5].event).as_deref(),
-        Some("second reply")
-    );
-    assert!(matches!(
-        transcript.events[6].event,
-        WorkerEvent::TurnCompleted
-    ));
-    assert_eq!(transcript.events.len(), 7);
     assert!(
         transcript
-            .events
+            .items
             .iter()
-            .all(|event| event.recorded_at_ms == Some(expected_fallback))
+            .all(|item| item.created_at_ms == expected_fallback)
     );
 }
 
@@ -1825,24 +1795,14 @@ fn grok_reasoning_and_message_chunks_keep_their_own_update_kinds() {
 
     let transcript = read_grok_transcript(&session).unwrap();
 
-    let update = |index: usize| match &transcript.events[index].event {
-        WorkerEvent::Adapter { payload, .. } => payload
-            .pointer("/update/sessionUpdate")
-            .and_then(Value::as_str)
-            .unwrap()
-            .to_owned(),
-        other => panic!("expected an adapter event, got {other:?}"),
-    };
-    assert_eq!(update(1), "agent_thought_chunk");
     assert_eq!(
-        agent_text(&transcript.events[1].event).as_deref(),
-        Some("a\nb")
+        dialogue(&transcript),
+        [(User, "go"), (Thought, "a\nb"), (Agent, "done")]
     );
-    assert_eq!(update(2), "agent_message_chunk");
 }
 
 #[test]
-fn grok_compaction_before_recoverable_history_is_refused() {
+fn grok_compaction_before_recoverable_history_shows_notice() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
         r#"{"type":"user","content":[{"type":"text","text":"summary of earlier work"}],"synthetic_reason":"compaction_meta"}"#,
@@ -1852,11 +1812,10 @@ fn grok_compaction_before_recoverable_history_is_refused() {
     );
     let session = grok_session(directory.path(), &native_cwd("/work/app"), history);
 
-    let error = read_grok_transcript(&session).unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains("compaction artifact before recoverable raw history"),
-        "{error:#}"
+    let transcript = read_grok_transcript(&session).unwrap();
+    assert_eq!(
+        dialogue(&transcript),
+        [(System, COMPACTED_NOTICE), (User, "carry on")]
     );
 }
 
@@ -2016,14 +1975,29 @@ fn kimi_listing_matches_native_index_visibility_and_title() {
     assert_eq!(listed[0].cwd, PathBuf::from(native_cwd("/work/native")));
 }
 
-fn agent_text(event: &WorkerEvent) -> Option<String> {
-    let WorkerEvent::Adapter { payload, .. } = event else {
-        return None;
-    };
-    payload
-        .pointer("/update/content/text")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+const COMPACTED_NOTICE: &str = "Earlier turns were compacted by the native harness.";
+
+fn dialogue(transcript: &ClaudeTranscript) -> Vec<(TranscriptRole, &str)> {
+    transcript
+        .items
+        .iter()
+        .map(|item| {
+            let text = match &item.body {
+                TranscriptBody::User { content } => content[0]["text"].as_str().unwrap(),
+                TranscriptBody::Agent {
+                    chunks,
+                    streaming: false,
+                }
+                | TranscriptBody::Thought {
+                    chunks,
+                    streaming: false,
+                } => chunks[0]["content"]["text"].as_str().unwrap(),
+                TranscriptBody::System { text } => text,
+                other => panic!("unexpected import item {other:?}"),
+            };
+            (item.body.role(), text)
+        })
+        .collect()
 }
 
 #[test]

@@ -22,7 +22,6 @@ struct MuseSummary {
     native_session_id: String,
     cwd: PathBuf,
     title: String,
-    edited_paths: Vec<PathBuf>,
     active: bool,
 }
 
@@ -76,11 +75,6 @@ pub(super) fn locate(
         "Muse session {:?} has an active or incomplete turn; wait for its native terminal event before importing",
         summary.native_session_id
     );
-    // Projection performs the stricter importability checks (including a
-    // recoverable user prompt and absolute workspace root) before selection
-    // reaches archive publication.
-    read_transcript(&candidate.session_path)
-        .with_context(|| format!("validate Muse session {}", candidate.session_path.display()))?;
     Ok(LocatedNativeSession {
         native_session_id: candidate.native_session_id.clone(),
         source_path: candidate.session_path.clone(),
@@ -172,125 +166,23 @@ pub(super) fn scan(
     Ok(())
 }
 
-/// Project a Muse session's visible conversation into Hel's canonical event
-/// transcript.  Tool details and retained permission records remain in the
-/// copied native artifacts.
-pub(super) fn read_transcript(path: &Path) -> Result<ClaudeTranscript> {
-    let data = read_muse_session_file(path)?;
-    let records =
-        read_records(&data).with_context(|| format!("parse Muse session {}", path.display()))?;
-    let summary = muse_summary_from_records(path, &records)?;
+/// Validate the selected stream's identity and lifecycle before importing it.
+pub(super) fn validate_transcript(path: &Path, original_key: &Path) -> Result<PathBuf> {
+    let summary = muse_summary(path)?;
+    ensure!(
+        original_key
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(&summary.native_session_id),
+        "Muse session stream id does not match its directory"
+    );
     ensure!(
         !summary.active,
         "Muse session {:?} has an active or incomplete turn; import requires a terminal lifecycle record",
         summary.native_session_id
     );
-
-    let mut events = Vec::new();
-    let mut seen_intents = BTreeSet::new();
-    let mut seen_messages = BTreeSet::new();
-    let mut saw_prompt = false;
-
-    for record in &records {
-        let value = &record.value;
-        let payload_type = value.get("payload_type").and_then(Value::as_str);
-        let recorded_at_ms = muse_recorded_at_ms(value);
-        match payload_type {
-            Some("runtime.user_intent.accepted") => {
-                let intent_id = value
-                    .pointer("/payload/intent_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let deduplication_key = if intent_id.is_empty() {
-                    format!(
-                        "text:{}:{}",
-                        muse_intent_text(value).unwrap_or_default(),
-                        value
-                            .get("sequence")
-                            .and_then(Value::as_u64)
-                            .unwrap_or_default()
-                    )
-                } else {
-                    intent_id.to_owned()
-                };
-                if !seen_intents.insert(deduplication_key) {
-                    continue;
-                }
-                let Some(text) = muse_intent_text(value) else {
-                    continue;
-                };
-                let text = strip_hidden_prompt_context(&text);
-                if text.trim().is_empty() {
-                    continue;
-                }
-                finish_imported_turn(&mut events, None);
-                let request_id = format!("import-{}", events.len() + 1);
-                push_event(
-                    &mut events,
-                    recorded_at_ms,
-                    WorkerEvent::PromptAccepted {
-                        request_id,
-                        text: text.to_owned(),
-                        attachments: Vec::new(),
-                    },
-                );
-                saw_prompt = true;
-            }
-            Some("runtime.session") => {
-                let payload = value.get("payload").unwrap_or(&Value::Null);
-                if payload.get("kind").and_then(Value::as_str) != Some("run") {
-                    continue;
-                }
-                let event = payload.get("event").unwrap_or(&Value::Null);
-                match event.get("kind").and_then(Value::as_str) {
-                    Some("assistant_message_committed") => {
-                        let Some(text) = event.get("text").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        if text.is_empty() {
-                            continue;
-                        }
-                        if let Some(message_id) = event.get("message_id").and_then(Value::as_str)
-                            && !seen_messages.insert(message_id.to_owned())
-                        {
-                            continue;
-                        }
-                        push_event(
-                            &mut events,
-                            recorded_at_ms,
-                            WorkerEvent::Adapter {
-                                kind: "session_update".into(),
-                                payload: json!({
-                                    "type": "session_update",
-                                    "update": {
-                                        "sessionUpdate": "agent_message_chunk",
-                                        "content": {"type": "text", "text": text},
-                                    },
-                                }),
-                            },
-                        );
-                    }
-                    Some("terminal") => {
-                        finish_imported_turn(&mut events, recorded_at_ms);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    ensure!(
-        saw_prompt,
-        "Muse session contains no importable user intent"
-    );
-    finish_imported_turn(&mut events, None);
-    finalize_import_event_times(&mut events, path)?;
-    Ok(ClaudeTranscript {
-        cwd: summary.cwd,
-        edited_paths: summary.edited_paths,
-        events,
-    })
+    Ok(summary.cwd)
 }
 
 fn muse_candidates(sessions_root: &Path) -> Result<Vec<MuseCandidate>> {
@@ -513,7 +405,6 @@ fn muse_summary_from_records(path: &Path, records: &[MuseRecord]) -> Result<Muse
         native_session_id,
         cwd,
         title,
-        edited_paths: muse_edited_paths(records),
         active: !active_runs.is_empty() || !pending_intents.is_empty(),
     })
 }
@@ -564,114 +455,6 @@ fn muse_intent_text(record: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
-}
-
-fn muse_recorded_at_ms(record: &Value) -> Option<i64> {
-    record
-        .get("recorded_at")
-        .and_then(Value::as_i64)
-        .map(|micros| micros / 1_000)
-        .or_else(|| native_recorded_at_ms(record))
-}
-
-fn muse_edited_paths(records: &[MuseRecord]) -> Vec<PathBuf> {
-    let mut paths = BTreeSet::new();
-    for record in records {
-        let Some(event) = record.value.pointer("/payload/event") else {
-            continue;
-        };
-        let event_kind = event
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if event_kind == "assistant_tool_calls_committed" {
-            for call in event
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let Some(name) = call.get("name").and_then(Value::as_str) else {
-                    continue;
-                };
-                if !is_write_operation(name) {
-                    continue;
-                }
-                if let Some(arguments) = call.get("args").and_then(Value::as_str)
-                    && let Ok(arguments) = serde_json::from_str::<Value>(arguments)
-                {
-                    collect_path_values(&arguments, &mut paths);
-                } else if let Some(arguments) = call.get("args") {
-                    collect_path_values(arguments, &mut paths);
-                }
-            }
-            continue;
-        }
-        if !event_kind.contains("tool_call") {
-            continue;
-        }
-        let operation = event
-            .get("name")
-            .or_else(|| event.get("tool_name"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !is_write_operation(operation) {
-            continue;
-        }
-        for key in ["arguments", "args", "input"] {
-            let Some(arguments) = event.get(key) else {
-                continue;
-            };
-            if let Some(arguments) = arguments.as_str()
-                && let Ok(arguments) = serde_json::from_str::<Value>(arguments)
-            {
-                collect_path_values(&arguments, &mut paths);
-            } else {
-                collect_path_values(arguments, &mut paths);
-            }
-        }
-    }
-    paths.into_iter().collect()
-}
-
-fn collect_path_values(value: &Value, paths: &mut BTreeSet<PathBuf>) {
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                if is_path_key(key)
-                    && let Some(path) = value.as_str().filter(|path| !path.trim().is_empty())
-                {
-                    paths.insert(PathBuf::from(path));
-                }
-                collect_path_values(value, paths);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_path_values(value, paths);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_write_operation(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    (value.contains("write")
-        || value.contains("edit")
-        || value.contains("patch")
-        || value.contains("replace")
-        || value.contains("rename")
-        || value.contains("delete")
-        || value.contains("move"))
-        && !value.contains("read")
-}
-
-fn is_path_key(key: &str) -> bool {
-    matches!(
-        key,
-        "path" | "file_path" | "filePath" | "target_path" | "targetPath" | "filename"
-    )
 }
 
 pub(super) fn recent_directories(
