@@ -403,10 +403,7 @@ fn initial_fifo_completes_a_crashed_prefix_and_keeps_mail_after_the_brief() {
         .command
         .prompt_blocks_for_command(&recovery[0].command_id)
         .unwrap();
-    assert_eq!(
-        &blocks[1..],
-        commands[3].command.prompt_blocks().unwrap().as_ref()
-    );
+    assert_eq!(blocks.len(), 1);
     assert!(
         matches!(&blocks[0], ContentBlock::Text(note) if note.text.starts_with("[HARNESS NOTE: interrupted turn recovery]"))
     );

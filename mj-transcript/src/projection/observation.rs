@@ -337,12 +337,9 @@ pub(super) fn project_observation(
                         )])
                     });
                 if mj_core::continuation::is_restart_continuation(command_id) && !slash {
-                    entry.content.insert(
-                        0,
-                        serde_json::to_value(ContentBlock::from(
-                            mj_core::continuation::RESTART_RECOVERY_NOTE.to_owned(),
-                        ))?,
-                    );
+                    entry.content = vec![serde_json::to_value(ContentBlock::from(
+                        mj_core::continuation::RESTART_RECOVERY_NOTE.to_owned(),
+                    ))?];
                 }
                 let entry_accepted_ordinal = entry.accepted_ordinal;
                 mutation.queued_prompts = Some(queue);

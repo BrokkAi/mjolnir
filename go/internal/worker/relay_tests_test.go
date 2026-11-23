@@ -796,8 +796,7 @@ func TestInitialFifoCompletesACrashedPrefixAndKeepsMailAfterTheBrief(t *testing.
 	if !ok {
 		t.Fatal("the recovery carries no prompt")
 	}
-	brief, _ := core.RelayCommandPromptBlocks(commands[3].Command)
-	rtEqual(t, blocks[1:], brief)
+	rtEqual(t, len(blocks), 1)
 	if blocks[0].Text == nil || !strings.HasPrefix(blocks[0].Text.Text, "[HARNESS NOTE: interrupted turn recovery]") {
 		t.Fatalf("unexpected recovery note %#v", blocks[0])
 	}
