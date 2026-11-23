@@ -4484,7 +4484,7 @@ fn a_subagent_question_marks_its_parent_for_attention() {
             .map(|entry| entry.session_id.as_str())
             .collect::<Vec<_>>(),
         [parent.as_str()],
-        "the queue lists top-level rows, so it leads to the parent"
+        "the muted child publishes through its unmuted parent"
     );
     let lines = drawn(&mut dashboard, 120, 40);
     let row = lines

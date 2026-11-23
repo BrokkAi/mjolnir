@@ -246,6 +246,13 @@ pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, Push
     };
     let mut entries: BTreeMap<String, PushEntry<&str>> = BTreeMap::new();
     for (session, card) in cards {
+        if runtime
+            .records
+            .get(session)
+            .is_some_and(|record| record.notifications_ignored)
+        {
+            continue;
+        }
         let holder = card.item_destination(session, card.entries.len());
         for (item, entry) in card.entries.iter().enumerate() {
             let Some(identity) = card.item_identity(session, item) else {
@@ -268,10 +275,6 @@ pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, Push
             });
         }
         if let Some(form) = &card.form
-            && !runtime
-                .records
-                .get(holder)
-                .is_some_and(|record| record.notifications_ignored)
             // A form with an unknown raise time has no identity: it is not pushable here.
             && let Some(identity) = card.item_identity(session, card.entries.len())
         {

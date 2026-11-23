@@ -1363,13 +1363,14 @@ function inboxCard(entry) {
 /// read from, so they cannot disagree.
 function inboxEntries() {
   const rows = [...viewerState.rows.values()].filter(row => {
+    if (row.notifications_ignored === true) return false;
     const stack = row.notification_card;
     if (stack) return !notificationDismissed(row);
     // Older daemons omit notification_card. New daemons publish null for
     // sessions with no card, while failures still come from attention.
     return row.verdict?.needs_person
       && (!Object.hasOwn(row, 'notification_card') || inboxSessionFailed(row))
-      && !isSubagentSession(row) && hasNotification(row);
+      && hasNotification(row);
   });
   const band = row => {
     const badge = inboxBadge(row);

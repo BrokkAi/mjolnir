@@ -199,10 +199,9 @@ pub(crate) struct NewArgs {
     /// Withhold GitHub credentials from this session and its children.
     #[arg(long)]
     no_github_credentials: bool,
-    /// Deliver notifications for this session. Without this flag a session
-    /// started from the command line ignores notifications.
+    /// Ignore notifications for this session.
     #[arg(long)]
-    with_notifications: bool,
+    ignore_notifications: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -1330,7 +1329,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
         no_github_credentials: args.no_github_credentials,
-        notifications_ignored: !args.with_notifications,
+        notifications_ignored: args.ignore_notifications,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -4372,6 +4371,20 @@ mod tests {
             parse(&["--no-github-events", "--no-project-memory"]),
             (true, true, false)
         );
+    }
+
+    #[test]
+    fn new_delivers_notifications_unless_ignored() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--bundle", "product"];
+            argv.extend_from_slice(extra);
+            let Some(Command::New(args)) = Cli::try_parse_from(argv).unwrap().command else {
+                panic!("expected the new command");
+            };
+            args.ignore_notifications
+        };
+        assert!(!parse(&[]));
+        assert!(parse(&["--ignore-notifications"]));
     }
 
     #[test]

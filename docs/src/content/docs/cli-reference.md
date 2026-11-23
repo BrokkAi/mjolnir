@@ -305,7 +305,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--oracle enabled|disabled]
        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
        [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
-       [--with-notifications]
+       [--ignore-notifications]
        [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -381,8 +381,8 @@ mj new --workspace eval --bundle product --target builder \
   what the dashboard's next new-session form preselects. Only interactive
   launches (the dashboard, `mj go`, `mj simple`, and the web or phone form)
   do.
-- `mj new` suppresses session notifications by default. Pass
-  `--with-notifications` to include notifications for that session.
+- `mj new` delivers session notifications by default. Pass
+  `--ignore-notifications` to suppress notifications for that session.
 - `mj new --model <name>` chooses the enabled, usable profile offering that
   exact model with the strongest quota headroom relative to its reset times,
   then starts the session on it. It conflicts with

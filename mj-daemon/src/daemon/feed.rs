@@ -772,11 +772,12 @@ mod tests {
         assert_eq!(events[0].destination, "child");
         assert_eq!(events[0].text, "Choose a branch");
         let high = replica.projection.metadata.alert_high_sequence;
-        // Publication, not the terminal, excludes managed children and muted rows.
+        // Publication excludes muted cards. An unmuted managed child can publish.
         let mut hidden = RuntimeProjection::default();
         hidden.metadata.config = super::super::tests::runtime_test_config().into();
         let mut record =
             super::super::tests::runtime_test_session("hidden", "workspace", SessionState::Running);
+        record.notifications_ignored = true;
         hidden.records.insert("hidden".into(), record.clone());
         let mut worker = mj_core::relay::RelaySnapshot::new("hidden".into()).operational_state();
         worker.relay_protocol_version = Some(mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL);
@@ -819,7 +820,8 @@ mod tests {
         .await
         .unwrap();
         let previous = hidden.clone();
-        hidden.subagents.clear();
+        record.notifications_ignored = false;
+        hidden.records.insert("hidden".into(), record.clone());
         super::super::attention::update(&previous, &mut hidden, None);
         assert!(
             hidden
@@ -828,7 +830,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains_key("hidden"),
-            "the same item is visible when it belongs to a top-level session"
+            "the same item is visible once the managed child is unmuted"
         );
         let previous = hidden.clone();
         record.notifications_ignored = true;

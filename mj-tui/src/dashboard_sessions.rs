@@ -55,6 +55,7 @@ pub(crate) struct PendingNavigation {
 pub(crate) struct AttentionNavigation {
     pub(super) session_id: String,
     workspace_id: Option<String>,
+    queue_session_id: String,
 }
 
 /// The daemon's severity with local unread receipts applied. Only
@@ -869,7 +870,7 @@ impl DashboardState {
             .unwrap_or(0)
     }
 
-    /// Every top-level session in every workspace that needs a person, most
+    /// Every unmuted session in every workspace that needs a person, most
     /// urgent first, then the current workspace, then newest activity.
     pub fn attention_queue(&self) -> Vec<AttentionEntry> {
         self.attention_queue_for_workspace(self.active_workspace_id())
@@ -880,7 +881,7 @@ impl DashboardState {
             .state
             .sessions
             .values()
-            .filter(|session| !self.state.is_subagent_session(&session.id))
+            .filter(|session| !session.notifications_ignored)
             .filter_map(|session| {
                 let level = self.attention_notice_level(&session.id);
                 level.needs_person().then(|| {
@@ -912,6 +913,7 @@ impl DashboardState {
     ) -> Option<(AttentionLevel, usize)> {
         sessions
             .into_iter()
+            .filter(|session| !session.notifications_ignored)
             .filter_map(|session| {
                 let level = self.attention_notice_level(&session.id);
                 level.needs_person().then_some(level)
@@ -929,9 +931,12 @@ impl DashboardState {
         &self,
         workspace_id: &str,
     ) -> Option<(AttentionLevel, usize)> {
-        self.attention_summary(self.state.sessions.values().filter(|session| {
-            session.workspace_id == workspace_id && !self.state.is_subagent_session(&session.id)
-        }))
+        self.attention_summary(
+            self.state
+                .sessions
+                .values()
+                .filter(|session| session.workspace_id == workspace_id),
+        )
     }
 
     /// The badge for the visible sessions of one project, for a folded
@@ -969,10 +974,10 @@ impl DashboardState {
     /// from the top otherwise. Consecutive steps retain their starting
     /// workspace preference so switching tabs cannot strand notifications.
     pub(crate) fn step_attention(&mut self, delta: isize) -> DashboardAction {
-        let mut workspace_id = self
-            .attention_navigation
-            .as_ref()
-            .filter(|navigation| self.selected_session_id() == Some(navigation.session_id.as_str()))
+        let navigation = self.attention_navigation.as_ref().filter(|navigation| {
+            self.selected_session_id() == Some(navigation.session_id.as_str())
+        });
+        let mut workspace_id = navigation
             .map(|navigation| navigation.workspace_id.clone())
             .unwrap_or_else(|| self.active_workspace_id().map(str::to_owned));
         let mut queue = self.attention_queue_for_workspace(workspace_id.as_deref());
@@ -981,8 +986,9 @@ impl DashboardState {
             self.set_notice("Nothing is waiting for you.");
             return DashboardAction::None;
         }
-        let position = self
-            .selected_session_id()
+        let position = navigation
+            .map(|navigation| navigation.queue_session_id.as_str())
+            .or_else(|| self.selected_session_id())
             .and_then(|selected| queue.iter().position(|entry| entry.session_id == selected));
         // Resolving the selected notification ends this traversal.
         if position.is_none() && workspace_id.as_deref() != self.active_workspace_id() {
@@ -999,14 +1005,27 @@ impl DashboardState {
         };
         // A parent waiting only on a child leads to the child's form, in the
         // Sub-agents or Reviewers workspace where that child is listed.
-        let (session_id, action) = if let Some(child) = self.waiting_child_of(&target.session_id) {
+        let child = (target.level == AttentionLevel::Waiting)
+            .then(|| match &self.notification_cards {
+                Some(cards) => cards.get(&target.session_id).and_then(|card| {
+                    card.holder
+                        .as_ref()
+                        .filter(|holder| *holder != &target.session_id)
+                        .cloned()
+                }),
+                None => self.waiting_child_of(&target.session_id),
+            })
+            .flatten();
+        let queue_session_id = target.session_id.clone();
+        let (session_id, action) = if let Some(child) = child {
             let action = self.focus_session_from_cpu_report(&child);
             (child, action)
-        } else if self
-            .state
-            .sessions
-            .get(&target.session_id)
-            .is_some_and(|session| !session.state.is_active())
+        } else if !self.state.is_subagent_session(&target.session_id)
+            && self
+                .state
+                .sessions
+                .get(&target.session_id)
+                .is_some_and(|session| !session.state.is_active())
         {
             // The row's conversation area says what to do with it; the
             // notice names the session and what failed.
@@ -1022,12 +1041,13 @@ impl DashboardState {
             let action = self.move_to_session(&target.workspace_id, &target.session_id, false);
             (target.session_id, action)
         } else {
-            let action = self.focus_session_anywhere(&target.workspace_id, &target.session_id);
+            let action = self.focus_session_from_cpu_report(&target.session_id);
             (target.session_id, action)
         };
         self.attention_navigation = Some(AttentionNavigation {
             session_id,
             workspace_id,
+            queue_session_id,
         });
         action
     }
@@ -1053,7 +1073,8 @@ impl DashboardState {
         open: bool,
     ) -> DashboardAction {
         if self.child_workspace.is_some() {
-            self.close_subagent_workspace();
+            self.switch_child_scope(None);
+            self.sessions_scroll.set(0);
         }
         if self.active_workspace_id.as_deref() != Some(workspace_id) {
             let view = self
