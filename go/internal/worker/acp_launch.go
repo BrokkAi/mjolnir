@@ -393,7 +393,7 @@ func sessionRequestMeta(spec *LaunchSpec, includeHistoryTools bool) schema.Meta 
 			}
 		}
 		if socket := spec.SubagentMCPSocket; socket != nil {
-			for _, tool := range socket.Role.ToolNames() {
+			for _, tool := range socket.Role.ToolNames(true, false) {
 				allowed = append(allowed, fmt.Sprintf("mcp__%s__%s", core.SubagentMCPServer, tool))
 			}
 			if socket.ReviewTools {
@@ -520,7 +520,7 @@ func ownedACPMCPTools(spec *LaunchSpec) []ownedMcpServerTools {
 	}
 	if server := subagentACPMCP(spec); server != nil && server.Stdio != nil && spec.SubagentMCPSocket != nil {
 		owned = append(owned, ownedMcpServerTools{
-			server: server.Stdio.Name, tools: slices.Clone(spec.SubagentMCPSocket.Role.ToolNames()),
+			server: server.Stdio.Name, tools: slices.Clone(spec.SubagentMCPSocket.Role.ToolNames(true, false)),
 		})
 	}
 	if server := reviewACPMCP(spec); server != nil && server.Stdio != nil {

@@ -731,7 +731,7 @@ func TestAChildGetsHandbackAndCommonToolsWithoutDelegation(t *testing.T) {
 // before running it (R11-1).
 // Hard-won: 91244ea1: Claude sub-agent handback stalled on an unapproved MCP tool.
 func TestEachRoleListsExactlyTheToolsItsHarnessIsAllowed(t *testing.T) {
-	expected := slices.DeleteFunc(slices.Clone(core.SubagentMcpRoleParent.ToolNames()), func(name string) bool {
+	expected := slices.DeleteFunc(slices.Clone(core.SubagentMcpRoleParent.ToolNames(true, false)), func(name string) bool {
 		return name == "ask_oracle"
 	})
 	if names := subagentToolNames(subagentToolDefinitions()); !slices.Equal(names, expected) {
@@ -739,10 +739,10 @@ func TestEachRoleListsExactlyTheToolsItsHarnessIsAllowed(t *testing.T) {
 	}
 	oracle := DefaultParentTools()
 	oracle.Oracle = true
-	if names := subagentToolNames(toolDefinitionsWithOptions(nil, oracle)); !slices.Equal(names, core.SubagentMcpRoleParent.ToolNames()) {
+	if names := subagentToolNames(toolDefinitionsWithOptions(nil, oracle)); !slices.Equal(names, core.SubagentMcpRoleParent.ToolNames(true, false)) {
 		t.Fatal(names)
 	}
-	if names := subagentToolNames(childToolDefinitions()); !slices.Equal(names, core.SubagentMcpRoleChild.ToolNames()) {
+	if names := subagentToolNames(childToolDefinitions()); !slices.Equal(names, core.SubagentMcpRoleChild.ToolNames(true, false)) {
 		t.Fatal(names)
 	}
 }

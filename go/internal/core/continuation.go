@@ -104,6 +104,14 @@ func IsRestartContinuation(commandID string) bool {
 	return ok && strings.HasPrefix(suffix, "restart-")
 }
 
+// CarriesMailboxWake reports whether commandID is a mailbox wake, or the
+// restart continuation that carries one. A wake restored from a checkpoint
+// runs as a plain prompt, so its ID is what still says what it is.
+func CarriesMailboxWake(commandID string) bool {
+	producer, ok := GeneratedPromptOf(CarriedCommand(commandID))
+	return ok && producer == GeneratedPromptMailboxWake
+}
+
 const UserBytes = 32 * 1024
 const AssistantBytes = 16 * 1024
 const MaxBodyBytes = 64 * 1024

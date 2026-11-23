@@ -14,6 +14,7 @@ package core
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -203,12 +204,43 @@ const (
 	RelayCommandRetentionProtocol uint32 = 73
 	// 74 reserves the next quiescent boundary for cancellable adoption cuts.
 	RelayLiveBaselineProtocol uint32 = 74
-	// 75 reports the mail the relay holds at a ready checkpoint cut. (Rust
-	// 4273087e6, after this file's base; ported for mj-worker's relay.)
+	// 75 reports the mail the relay holds at a ready checkpoint cut.
 	RelayCheckpointMailboxProtocol uint32 = 75
 	// 76 names the tool call in permission forms, which older readers reject.
 	RelayPermissionToolCallProtocol uint32 = 76
-	RelayProtocolVersion            uint32 = RelayPermissionToolCallProtocol
+	// 77 adds ReviewerRequestResolveRepositories, which names the repository
+	// roots a path selects without capturing anything. A session's worker at
+	// this version or newer also takes part in concurrent reviews: the review
+	// host lets a session open several reviews of disjoint repositories only
+	// when it can resolve a path to a root with no side effect.
+	RelayConcurrentReviewProtocol uint32 = 77
+	// 78 supports CheckpointRepositoryCapture OriginDeltaRaw for raw Git
+	// checkouts.
+	RelayRawOriginDeltaProtocol uint32 = 78
+	// 79 supports CheckpointRepositoryCapture OriginDeltaCutoff for
+	// history-cutoff sessions.
+	RelayCutoffOriginDeltaProtocol uint32 = 79
+	// 80 reports the worker's native-session-use evidence at a ready
+	// checkpoint cut.
+	RelayNativeUseEvidenceProtocol uint32 = 80
+	// 81 supports same-target in-place moves: store_id-bound durable
+	// dispatch holds, SubmitFront, and harness-only launch-configuration
+	// restarts.
+	RelayInPlaceMoveProtocol uint32 = 81
+	// 82 adds connection-only guardian review requests.
+	RelayGuardianReviewProtocol uint32 = 82
+	// 83 includes optional repository instructions in guardian review
+	// requests.
+	RelayGuardianProjectInstructionsProtocol uint32 = 83
+	// 84 adds worker-local Antigravity Stop-hook observations
+	// (RelayRequestAntigravityStop).
+	RelayAntigravityStopHookProtocol uint32 = 84
+	// 85 carried ReadCheckpointQueuedPrompt in 6f084d479, withdrawn before
+	// any release: a checkpoint reads a queued wake with ReadQueuedCommand
+	// instead. The version stays at 85 so it never goes back down, but no
+	// request is gated on it; the next capability takes 86, never 85.
+	RelayRetiredCheckpointQueuedPromptProtocol uint32 = 85
+	RelayProtocolVersion                       uint32 = RelayRetiredCheckpointQueuedPromptProtocol
 	// Connection-only worker CPU measurements.
 	RelayCpuUsageProtocol uint32 = 29
 
@@ -260,7 +292,8 @@ var RelayEventDigestDomainV2 = []byte("hel-relay-event-v2\x00")
 // Revision 26 is breaking: an older writer drops set_aside_through, so a dismissed ask would count again.
 // Revision 27 is breaking: older writers cannot preserve notification entries or replay their commands.
 // Revision 28 is breaking: older writers lose command pins and native-use evidence.
-const RelayStateVersion uint32 = 28
+// Revision 29 is breaking: older writers drop an active in-place move dispatch hold.
+const RelayStateVersion uint32 = 29
 
 // RelayStateFile is the relay snapshot inside a worker root. Teardown and
 // restore name it from here rather than repeating the literal.
@@ -297,10 +330,29 @@ const WorkerStartupStepLoginEnvironment = "login-environment"
 // stopped.
 const WorkerExitFile = "worker-exit.json"
 
-// WorkerHarnessStartupFailure is an ACP failure before this worker first
+// WorkerHarnessStartupFailure is a startup failure before this worker first
 // recorded a configured session.
 type WorkerHarnessStartupFailure struct {
-	Message string `json:"message"`
+	Message string                           `json:"message"`
+	Kind    *WorkerHarnessStartupFailureKind `json:"kind,omitempty"`
+}
+
+type WorkerHarnessStartupFailureKind string
+
+const WorkerHarnessStartupFailureKindWorkingDirectoryUnavailable WorkerHarnessStartupFailureKind = "working_directory_unavailable"
+
+// UnmarshalJSON accepts only the snake_case variants, as serde's derived
+// Deserialize does.
+func (k *WorkerHarnessStartupFailureKind) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	if kind := WorkerHarnessStartupFailureKind(text); kind == WorkerHarnessStartupFailureKindWorkingDirectoryUnavailable {
+		*k = kind
+		return nil
+	}
+	return transcriptUnknownVariant(text, string(WorkerHarnessStartupFailureKindWorkingDirectoryUnavailable))
 }
 
 func (f WorkerHarnessStartupFailure) Error() string { return f.Message }
@@ -466,9 +518,12 @@ type RestoredRelaySeed struct {
 	// The archived worker's mail, already selected by the restore spec's
 	// queue policy: pending events are absent when the controller admits
 	// them after readiness, and claimed prompt mail is absent when the queue
-	// is dropped. Seeds from older releases omit it. (Rust commit 39722ace5,
-	// after this file's base; ported for mj-worker's relay.)
+	// is dropped. Seeds from older releases omit it.
 	Mailbox *CanonicalMailbox `json:"mailbox,omitempty"`
+	// Worker-owned proof of whether the archived native session was used.
+	// Preserves Unknown vs Used vs Unused across suspend/resume. Seeds from
+	// older releases omit it.
+	NativeUseEvidence *NativeSessionUseEvidence `json:"native_use_evidence,omitempty"`
 }
 
 // UnmarshalJSON refuses unknown fields, as serde's deny_unknown_fields does.
@@ -516,6 +571,11 @@ func (s *RestoredRelaySeed) Validate() error {
 			return err
 		}
 	}
+	if s.NativeUseEvidence != nil {
+		if err := ValidateNativeUseEvidence(s.NativeUseEvidence, s.EventFrontier); err != nil {
+			return err
+		}
+	}
 	if err := ValidateRelayDigest(s.EventFrontierDigest, "restored relay event frontier digest"); err != nil {
 		return err
 	}
@@ -538,6 +598,19 @@ func ClearNativeSessionIdentity(root string) error {
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
 	return SyncDirectory(root)
+}
+
+// NewCommandID generates a command identifier with a caller supplied
+// namespace: prefix, a dash, and 32 random hex digits.
+func NewCommandID(prefix string) (string, error) {
+	if strings.TrimSpace(prefix) == "" {
+		return "", errors.New("command ID prefix is required")
+	}
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate command ID: %w", err)
+	}
+	return prefix + "-" + LowerHex(random), nil
 }
 
 // --- serde enum encoding shared by the relay modules ---

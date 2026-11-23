@@ -85,8 +85,18 @@ const ArchiveSchemaVersionNotificationStack uint32 = 12
 // ArchiveSchemaVersionMailbox: mail the worker accepted and had not
 // delivered at the cut. Older readers reject the canonical field, so an
 // archive that carries it declares this schema whatever else it carries.
-// (Rust commit 39722ace5, after this file's base.)
 const ArchiveSchemaVersionMailbox uint32 = 13
+
+// ArchiveSchemaVersionOriginDelta: an origin-relative Git pack and workspace
+// snapshot metadata. It can carry mail as well, so it comes after the
+// mailbox schema.
+const ArchiveSchemaVersionOriginDelta uint32 = 14
+
+// ArchiveSchemaVersionNativeUse: worker-owned proof of whether the archived
+// native session was used. Older readers reject the canonical field, so an
+// archive that carries it declares this schema whatever else it carries
+// (including origin-delta and mailbox).
+const ArchiveSchemaVersionNativeUse uint32 = 15
 
 // MjolnirRefNamespace holds Mjolnir's private Git refs: review baselines,
 // review points and reviewed trees. They are bookkeeping, never pushed, and
@@ -150,6 +160,317 @@ func (m *TargetManifest) UnmarshalJSON(data []byte) error {
 	return transcriptStrictDecode(data, (*plain)(m), true)
 }
 
+// SnapshotHeadKind is the variant of a SnapshotHead, named as serde names
+// the Rust enum's variants.
+type SnapshotHeadKind string
+
+const (
+	SnapshotHeadBranch   SnapshotHeadKind = "Branch"
+	SnapshotHeadDetached SnapshotHeadKind = "Detached"
+)
+
+// SnapshotHead is a captured HEAD: a branch and the commit it names, or a
+// detached commit. One struct with its variant, since both variants carry
+// the commit. It serializes externally tagged, as serde writes the Rust
+// enum: {"Branch":{"name":...,"commit":...}} or {"Detached":"<commit>"}.
+type SnapshotHead struct {
+	Kind SnapshotHeadKind
+	// Name is the branch; empty for a detached HEAD.
+	Name string
+	// Commit is the commit HEAD names, for either variant (Rust's
+	// SnapshotHead::commit).
+	Commit string
+}
+
+type snapshotHeadBranch struct {
+	Name   string `json:"name"`
+	Commit string `json:"commit"`
+}
+
+func (h SnapshotHead) MarshalJSON() ([]byte, error) {
+	switch h.Kind {
+	case SnapshotHeadBranch:
+		return transcriptMarshal(map[string]snapshotHeadBranch{"Branch": {Name: h.Name, Commit: h.Commit}})
+	case SnapshotHeadDetached:
+		return transcriptMarshal(map[string]string{"Detached": h.Commit})
+	}
+	return nil, fmt.Errorf("unknown snapshot head variant %q", h.Kind)
+}
+
+// UnmarshalJSON reads the externally tagged form: an object with exactly
+// one member, named by the variant.
+func (h *SnapshotHead) UnmarshalJSON(data []byte) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	if len(object) != 1 {
+		return fmt.Errorf("invalid length %d, expected map containing 1 entry", len(object))
+	}
+	for name, content := range object {
+		switch SnapshotHeadKind(name) {
+		case SnapshotHeadBranch:
+			var branch snapshotHeadBranch
+			if err := transcriptStrictDecode(content, &branch, false); err != nil {
+				return err
+			}
+			*h = SnapshotHead{Kind: SnapshotHeadBranch, Name: branch.Name, Commit: branch.Commit}
+		case SnapshotHeadDetached:
+			var commit string
+			if err := json.Unmarshal(content, &commit); err != nil {
+				return err
+			}
+			*h = SnapshotHead{Kind: SnapshotHeadDetached, Commit: commit}
+		default:
+			return transcriptUnknownVariant(name, "Branch", "Detached")
+		}
+	}
+	return nil
+}
+
+// SnapshotStashEntry is one stash entry of a workspace snapshot. Unknown
+// fields are refused.
+type SnapshotStashEntry struct {
+	Commit  string `json:"commit"`
+	Message string `json:"message"`
+}
+
+func (e *SnapshotStashEntry) UnmarshalJSON(data []byte) error {
+	type plain SnapshotStashEntry
+	return transcriptStrictDecode(data, (*plain)(e), true)
+}
+
+// snapshotPathSerialize writes a snapshot path as ArchivePathText does
+// (serde with = "snapshot_path_serde").
+func snapshotPathSerialize(path string) (string, error) {
+	return ArchivePathText(path)
+}
+
+// snapshotPathDeserialize accepts only text that ArchivePathText would
+// write for the same path.
+func snapshotPathDeserialize(text string) (string, error) {
+	normalized, err := ArchivePathText(text)
+	if err != nil {
+		return "", err
+	}
+	if normalized != text {
+		return "", errors.New("snapshot path is not slash-separated")
+	}
+	return text, nil
+}
+
+// SnapshotSubmodule is an initialized submodule and the commit its checkout
+// held. Unknown fields are refused.
+type SnapshotSubmodule struct {
+	Path   string `json:"path"`
+	Commit string `json:"commit"`
+}
+
+func (s SnapshotSubmodule) MarshalJSON() ([]byte, error) {
+	type plain SnapshotSubmodule
+	path, err := snapshotPathSerialize(s.Path)
+	if err != nil {
+		return nil, err
+	}
+	v := plain(s)
+	v.Path = path
+	return transcriptMarshal(v)
+}
+
+func (s *SnapshotSubmodule) UnmarshalJSON(data []byte) error {
+	type plain SnapshotSubmodule
+	var v plain
+	if err := transcriptStrictDecode(data, &v, true); err != nil {
+		return err
+	}
+	path, err := snapshotPathDeserialize(v.Path)
+	if err != nil {
+		return err
+	}
+	v.Path = path
+	*s = SnapshotSubmodule(v)
+	return nil
+}
+
+// SnapshotGitlink is a gitlink entry of a checkout's index. Unknown fields
+// are refused.
+type SnapshotGitlink struct {
+	Path   string `json:"path"`
+	Commit string `json:"commit"`
+}
+
+func (g SnapshotGitlink) MarshalJSON() ([]byte, error) {
+	type plain SnapshotGitlink
+	path, err := snapshotPathSerialize(g.Path)
+	if err != nil {
+		return nil, err
+	}
+	v := plain(g)
+	v.Path = path
+	return transcriptMarshal(v)
+}
+
+func (g *SnapshotGitlink) UnmarshalJSON(data []byte) error {
+	type plain SnapshotGitlink
+	var v plain
+	if err := transcriptStrictDecode(data, &v, true); err != nil {
+		return err
+	}
+	path, err := snapshotPathDeserialize(v.Path)
+	if err != nil {
+		return err
+	}
+	v.Path = path
+	*g = SnapshotGitlink(v)
+	return nil
+}
+
+// SnapshotWorktree is a linked worktree of a workspace snapshot. Unknown
+// fields are refused.
+type SnapshotWorktree struct {
+	HasUncommittedState   bool                `json:"has_uncommitted_state"`
+	RelativePath          string              `json:"relative_path"`
+	Head                  SnapshotHead        `json:"head"`
+	WorkingState          *string             `json:"working_state"`
+	WorkingStateSkipped   bool                `json:"working_state_skipped"`
+	InitializedSubmodules []SnapshotSubmodule `json:"initialized_submodules"`
+	// IndexGitlinks is only this checkout's index; module indexes do not
+	// travel.
+	IndexGitlinks []SnapshotGitlink `json:"index_gitlinks"`
+}
+
+func (w SnapshotWorktree) MarshalJSON() ([]byte, error) {
+	type plain SnapshotWorktree
+	path, err := snapshotPathSerialize(w.RelativePath)
+	if err != nil {
+		return nil, err
+	}
+	v := plain(w)
+	v.RelativePath = path
+	v.InitializedSubmodules = relayNonNil(v.InitializedSubmodules)
+	v.IndexGitlinks = relayNonNil(v.IndexGitlinks)
+	return transcriptMarshal(v)
+}
+
+func (w *SnapshotWorktree) UnmarshalJSON(data []byte) error {
+	type plain SnapshotWorktree
+	var v plain
+	if err := transcriptStrictDecode(data, &v, true); err != nil {
+		return err
+	}
+	path, err := snapshotPathDeserialize(v.RelativePath)
+	if err != nil {
+		return err
+	}
+	v.RelativePath = path
+	*w = SnapshotWorktree(v)
+	return nil
+}
+
+// BranchTracking is a branch's configured upstream.
+type BranchTracking struct {
+	Remote *string  `json:"remote"`
+	Merge  []string `json:"merge"`
+}
+
+func (t BranchTracking) MarshalJSON() ([]byte, error) {
+	type plain BranchTracking
+	v := plain(t)
+	v.Merge = relayNonNil(v.Merge)
+	return transcriptMarshal(v)
+}
+
+func (t *BranchTracking) UnmarshalJSON(data []byte) error {
+	type plain BranchTracking
+	return transcriptStrictDecode(data, (*plain)(t), false)
+}
+
+// WorkspaceSnapshotMetadata describes an origin-relative workspace
+// snapshot. Unknown fields are refused.
+type WorkspaceSnapshotMetadata struct {
+	// OriginURL is the configured origin URL, redacted. Nil is an
+	// in-place-only raw snapshot.
+	OriginURL           *string                   `json:"origin_url"`
+	ObjectFormat        string                    `json:"object_format"`
+	Notices             []string                  `json:"notices"`
+	Head                SnapshotHead              `json:"head"`
+	Refs                map[string]string         `json:"refs"`
+	BranchTracking      map[string]BranchTracking `json:"branch_tracking"`
+	Stash               []SnapshotStashEntry      `json:"stash"`
+	WorkingState        *string                   `json:"working_state"`
+	WorkingStateSkipped bool                      `json:"working_state_skipped"`
+	HasUncommittedState bool                      `json:"has_uncommitted_state"`
+	Worktrees           []SnapshotWorktree        `json:"worktrees"`
+	// InitializedSubmodules and IndexGitlinks: only this checkout's index;
+	// module indexes do not travel.
+	InitializedSubmodules []SnapshotSubmodule `json:"initialized_submodules"`
+	IndexGitlinks         []SnapshotGitlink   `json:"index_gitlinks"`
+	RemoteRefsStale       bool                `json:"remote_refs_stale"`
+	// Prerequisites are boundary commits and saved tips omitted from the
+	// origin-relative pack.
+	Prerequisites []string `json:"prerequisites"`
+	// HistoryCutoff is true when captured relative to explicit
+	// history-cutoff commits rather than an origin remote.
+	HistoryCutoff bool `json:"history_cutoff,omitempty"`
+}
+
+// MarshalJSON writes empty lists and maps as [] and {}, as serde does.
+func (m WorkspaceSnapshotMetadata) MarshalJSON() ([]byte, error) {
+	type plain WorkspaceSnapshotMetadata
+	v := plain(m)
+	v.Notices = relayNonNil(v.Notices)
+	if v.Refs == nil {
+		v.Refs = map[string]string{}
+	}
+	if v.BranchTracking == nil {
+		v.BranchTracking = map[string]BranchTracking{}
+	}
+	v.Stash = relayNonNil(v.Stash)
+	v.Worktrees = relayNonNil(v.Worktrees)
+	v.InitializedSubmodules = relayNonNil(v.InitializedSubmodules)
+	v.IndexGitlinks = relayNonNil(v.IndexGitlinks)
+	v.Prerequisites = relayNonNil(v.Prerequisites)
+	return transcriptMarshal(v)
+}
+
+func (m *WorkspaceSnapshotMetadata) UnmarshalJSON(data []byte) error {
+	type plain WorkspaceSnapshotMetadata
+	return transcriptStrictDecode(data, (*plain)(m), true)
+}
+
+// ArchivePathText is a relative path as /-separated archive text. It
+// refuses an empty or absolute path, any component other than a plain name,
+// and a component that is not UTF-8.
+func ArchivePathText(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("archive path is empty")
+	}
+	if filepath.IsAbs(path) {
+		return "", fmt.Errorf("archive path '%s' is absolute", path)
+	}
+	// Rust's Path::components: a volume prefix or root is unsafe, as is a
+	// leading "." or any ".."; a "." after the first component and empty
+	// parts between separators are dropped.
+	if filepath.VolumeName(path) != "" || os.IsPathSeparator(path[0]) {
+		return "", fmt.Errorf("unsafe archive path '%s'", path)
+	}
+	parts := strings.FieldsFunc(path, func(r rune) bool { return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r)) })
+	names := make([]string, 0, len(parts))
+	for i, part := range parts {
+		if part == "." && i > 0 {
+			continue
+		}
+		if part == "." || part == ".." {
+			return "", fmt.Errorf("unsafe archive path '%s'", path)
+		}
+		if !utf8.ValidString(part) {
+			return "", fmt.Errorf("archive path '%s' is not UTF-8", path)
+		}
+		names = append(names, part)
+	}
+	return strings.Join(names, "/"), nil
+}
+
 type RepositoryMetadata struct {
 	ID                  string `json:"id"`
 	RelativeDestination string `json:"relative_destination"`
@@ -202,6 +523,9 @@ type RepositoryMetadata struct {
 	// index entries that any command left. Absent when there is none, so
 	// every other archive is written exactly as before this field existed.
 	GitOperation *SavedGitOperation `json:"git_operation,omitempty"`
+	// OriginDelta describes an origin-relative workspace snapshot, when the
+	// repository was captured as one.
+	OriginDelta *WorkspaceSnapshotMetadata `json:"origin_delta,omitempty"`
 }
 
 func (m *RepositoryMetadata) UnmarshalJSON(data []byte) error {
@@ -390,11 +714,13 @@ func (e *SavedUnmergedEntry) UnmarshalJSON(data []byte) error {
 }
 
 type RepositoryManifest struct {
-	Metadata            RepositoryMetadata `json:"-"`
-	CommittedBundlePath string             `json:"committed_bundle_path"`
-	StagedPatchPath     string             `json:"staged_patch_path"`
-	UnstagedPatchPath   string             `json:"unstaged_patch_path"`
-	UntrackedTarPath    string             `json:"untracked_tar_path"`
+	Metadata RepositoryMetadata `json:"-"`
+	// The payload paths are absent when empty, as an origin-delta capture
+	// leaves them.
+	CommittedBundlePath string `json:"committed_bundle_path,omitempty"`
+	StagedPatchPath     string `json:"staged_patch_path,omitempty"`
+	UnstagedPatchPath   string `json:"unstaged_patch_path,omitempty"`
+	UntrackedTarPath    string `json:"untracked_tar_path,omitempty"`
 	// ConflictedWorktreeTarPath holds the working-tree files of the unmerged
 	// paths. Present exactly when Metadata.GitOperation is.
 	ConflictedWorktreeTarPath *string `json:"conflicted_worktree_tar_path,omitempty"`
@@ -404,7 +730,8 @@ type RepositoryManifest struct {
 	// LinkedWorktrees are linked worktrees inside the checkout, parents
 	// before children. An older reader would ignore this field, which is why
 	// an archive that has any declares ArchiveSchemaVersionLinkedWorktrees.
-	LinkedWorktrees []LinkedWorktreeManifest `json:"linked_worktrees,omitempty"`
+	LinkedWorktrees     []LinkedWorktreeManifest `json:"linked_worktrees,omitempty"`
+	OriginDeltaPackPath *string                  `json:"origin_delta_pack_path,omitempty"`
 }
 
 // MarshalJSON flattens Metadata ahead of the payload paths.
@@ -476,9 +803,12 @@ type CanonicalSessionSnapshot struct {
 	QueuedPrompts       []CanonicalQueuedPrompt   `json:"queued_prompts"`
 	// Mailbox is the worker's mail at the cut, copied from its relay. Absent
 	// when it had none, and in archives from workers that could not report
-	// it. (Rust commit 39722ace5, after this file's base; ported for
-	// mj-worker's checkpoint tests.)
+	// it.
 	Mailbox *CanonicalMailbox `json:"mailbox,omitempty"`
+	// NativeUseEvidence is worker-owned proof of whether the archived native
+	// session was used. Absent in legacy archives (schema <= 14) and from
+	// workers older than relay protocol 80.
+	NativeUseEvidence *NativeSessionUseEvidence `json:"native_use_evidence,omitempty"`
 }
 
 func (s *CanonicalSessionSnapshot) UnmarshalJSON(data []byte) error {
@@ -513,6 +843,7 @@ func (s *CanonicalSessionSnapshot) ContentMatches(other *CanonicalSessionSnapsho
 		transcriptValuesEqual(s.Transcript, other.Transcript) &&
 		transcriptValuesEqual(s.QueuedPrompts, other.QueuedPrompts) &&
 		transcriptValuesEqual(s.Mailbox, other.Mailbox) &&
+		transcriptValuesEqual(s.NativeUseEvidence, other.NativeUseEvidence) &&
 		transcriptValuesEqual(s.Session.withoutActivityWatermark(), other.Session.withoutActivityWatermark())
 }
 
@@ -686,6 +1017,10 @@ type CanonicalTranscriptBodyTool struct {
 // refers to.
 type CanonicalTranscriptBodyTerminalOutput struct {
 	Record CanonicalTerminalOutput `json:"record"`
+	// What a trimmed row still says about its output.
+	OutputLineCount *uint64 `json:"output_line_count,omitempty"`
+	FirstErrorLine  *string `json:"first_error_line,omitempty"`
+	DetailTrimmed   bool    `json:"detail_trimmed,omitempty"`
 }
 
 type CanonicalTranscriptBodyPlan struct {
@@ -939,9 +1274,6 @@ func (p *CanonicalQueuedPrompt) UnmarshalJSON(data []byte) error {
 // checkpoint cut. The daemon marked each event accepted when the worker took
 // it and will not send it again, so restore must reinstate this for the mail
 // to arrive at all. Unknown fields are refused.
-//
-// Ported from Rust commit 39722ace5 (after this file's base), for
-// mj-worker's relay.
 type CanonicalMailbox struct {
 	// PendingEvents are accepted events not yet handed to the agent, in
 	// delivery order. Events a hook had taken without confirming come first,
@@ -1008,6 +1340,7 @@ const (
 	PayloadRoleCanonicalSession                       PayloadRoleKind = "canonical_session"
 	PayloadRoleNativeArtifact                         PayloadRoleKind = "native_artifact"
 	PayloadRoleGitBundle                              PayloadRoleKind = "git_bundle"
+	PayloadRoleGitOriginDeltaPack                     PayloadRoleKind = "git_origin_delta_pack"
 	PayloadRoleGitStagedPatch                         PayloadRoleKind = "git_staged_patch"
 	PayloadRoleGitUnstagedPatch                       PayloadRoleKind = "git_unstaged_patch"
 	PayloadRoleGitUntrackedTar                        PayloadRoleKind = "git_untracked_tar"
@@ -1077,7 +1410,7 @@ func (r *PayloadRole) UnmarshalJSON(data []byte) error {
 		}
 		err = transcriptStrictDecode(data, &v, true, "kind")
 		*r = PayloadRole{Kind: kind, RelativePath: v.RelativePath}
-	case PayloadRoleGitBundle, PayloadRoleGitStagedPatch, PayloadRoleGitUnstagedPatch,
+	case PayloadRoleGitBundle, PayloadRoleGitOriginDeltaPack, PayloadRoleGitStagedPatch, PayloadRoleGitUnstagedPatch,
 		PayloadRoleGitUntrackedTar, PayloadRoleGitConflictedWorktreeTar, PayloadRoleGitOperationStateTar:
 		var v struct {
 			RepositoryID string `json:"repository_id"`
@@ -1094,7 +1427,7 @@ func (r *PayloadRole) UnmarshalJSON(data []byte) error {
 		err = transcriptStrictDecode(data, &v, true, "kind")
 		*r = PayloadRole{Kind: kind, RepositoryID: v.RepositoryID, Worktree: v.Worktree}
 	default:
-		return transcriptUnknownVariant(tag, "canonical_session", "native_artifact", "git_bundle",
+		return transcriptUnknownVariant(tag, "canonical_session", "native_artifact", "git_bundle", "git_origin_delta_pack",
 			"git_staged_patch", "git_unstaged_patch", "git_untracked_tar", "git_conflicted_worktree_tar",
 			"git_operation_state_tar", "git_linked_worktree_staged_patch",
 			"git_linked_worktree_unstaged_patch", "git_linked_worktree_untracked_tar",
@@ -1234,6 +1567,22 @@ func (a *NativeArtifact) Reader() (io.ReadCloser, error) {
 	return nil, errors.New("native artifact has no data")
 }
 
+// ValidateNativeUseEvidence checks native-session-use evidence against the
+// event frontier it is archived or seeded with.
+func ValidateNativeUseEvidence(evidence *NativeSessionUseEvidence, eventFrontier uint64) error {
+	if evidence.Version != 1 {
+		return fmt.Errorf("unsupported native-session-use evidence version %d", evidence.Version)
+	}
+	if strings.TrimSpace(evidence.NativeSessionID) == "" {
+		return errors.New("native-session-use evidence has an empty native session ID")
+	}
+	if ordinal := evidence.OpenedOrdinal; ordinal != nil && *ordinal > eventFrontier {
+		return fmt.Errorf("native-session-use evidence opened_ordinal %d is beyond event frontier %d",
+			*ordinal, eventFrontier)
+	}
+	return nil
+}
+
 func validateCanonicalSession(snapshot *CanonicalSessionSnapshot) error {
 	if snapshot.NotificationStack != nil {
 		if err := snapshot.NotificationStack.validateAt(snapshot.EventFrontier); err != nil {
@@ -1242,6 +1591,11 @@ func validateCanonicalSession(snapshot *CanonicalSessionSnapshot) error {
 	}
 	if snapshot.AssessmentState != nil {
 		if _, err := CheckpointDecode(transcriptParse(snapshot.AssessmentState)); err != nil {
+			return err
+		}
+	}
+	if snapshot.NativeUseEvidence != nil {
+		if err := ValidateNativeUseEvidence(snapshot.NativeUseEvidence, snapshot.EventFrontier); err != nil {
 			return err
 		}
 	}

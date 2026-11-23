@@ -6,11 +6,9 @@ package client
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -658,17 +656,8 @@ func (c SessionControl) WaitForSession(ctx context.Context, sessionID string, ti
 func (c SessionControl) GoString() string { return "SessionControl(..)" }
 
 // NewCommandID is a fresh command id: prefix, a dash, and 32 random hex
-// digits.
-func NewCommandID(prefix string) (string, error) {
-	if strings.TrimSpace(prefix) == "" {
-		return "", errors.New("command ID prefix is required")
-	}
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate command ID: %w", err)
-	}
-	return prefix + "-" + core.LowerHex(random), nil
-}
+// digits. Rust re-exports mj_core::relay::new_command_id here.
+func NewCommandID(prefix string) (string, error) { return core.NewCommandID(prefix) }
 
 // ReplacementSessionTestFixture is a stopped session and a manager that
 // resolves its live replacement.

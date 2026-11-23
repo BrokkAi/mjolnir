@@ -458,7 +458,7 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 						allowed, present := acpTestsPointer(request, "/_meta/claudeCode/options/allowedTools")
 						if guardian {
 							expected := []string{"Bash(gh:*)", "mcp__mj-memory__*"}
-							for _, tool := range role.ToolNames() {
+							for _, tool := range role.ToolNames(true, false) {
 								expected = append(expected, "mcp__mj-agents__"+tool)
 							}
 							if offersReview {
@@ -476,7 +476,7 @@ func TestGuardianPreapprovesTrustedGhAndOwnedMcpOnEverySessionOpen(t *testing.T)
 				}
 				if harness == core.HarnessKindDsh {
 					approvals := ownedMcpApprovalsForLaunch(&spec)
-					offers := func(tool string) bool { return slices.Contains(role.ToolNames(), tool) }
+					offers := func(tool string) bool { return slices.Contains(role.ToolNames(true, false), tool) }
 					for _, check := range []struct {
 						title string
 						owned bool

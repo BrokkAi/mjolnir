@@ -9,6 +9,7 @@
 // https://docs.x.ai/developers/models/grok-4.7
 // https://docs.x.ai/developers/pricing
 // https://platform.kimi.ai/docs/pricing/chat
+// https://ai.google.dev/gemini-api/docs/pricing
 // Default 5-minute writes; excludes tools, speed/region/context premiums.
 
 package core
@@ -106,9 +107,22 @@ func Rates(model string) ([4]uint64, bool) {
 		return [4]uint64{300, 1200, 6, 300}, true
 	case "deepseek-v4-pro":
 		return [4]uint64{1320, 3960, 44, 1320}, true
-	case "grok-4.7", "grok-4.6":
+	// Checked 2026-11-21: https://ai.google.dev/gemini-api/docs/pricing
+	// Carbon, Argon and 3.8 Flash use standard post-introductory base rates
+	// (introductory discounts end 2026-11-30 / 2026-12-31).
+	case "gemini-4-carbon", "gemini-4-argon":
+		return [4]uint64{4000, 20000, 200, 0}, true
+	case "gemini-4-neon":
+		return [4]uint64{3000, 15000, 150, 0}, true
+	case "gemini-4-hydrogen":
+		return [4]uint64{1500, 7500, 75, 0}, true
+	case "gemini-3.8-flash":
+		return [4]uint64{1500, 7500, 150, 0}, true
+	case "grok-4.7", "grok-4.7-build", "grok-4.6", "grok-4.6-build":
 		return [4]uint64{2000, 6000, 500, 2000}, true
-	case "grok-4.5":
+	case "grok-4.7-build-fast":
+		return [4]uint64{4000, 12000, 1000, 4000}, true
+	case "grok-4.5", "grok-4.5-build":
 		return [4]uint64{2000, 6000, 300, 2000}, true
 	case "grok-4.3",
 		"grok-4.20-multi-agent-0309",
@@ -171,7 +185,7 @@ func Estimate(model *string, totals map[string]UsageCounterTotal) (*uint64, erro
 		}
 		ordinary = input - caches
 	case ioCarry == 0 && cacheCarry == 0 && withCaches == total:
-		// Claude's input is the uncached count; caches are separate tallies.
+		// Claude and Antigravity report uncached input; caches are separate tallies.
 		ordinary = input
 	default:
 		return nil, nil

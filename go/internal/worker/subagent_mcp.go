@@ -551,7 +551,7 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 	}
 	role = core.SubagentMcpRole(role.ID())
 	legacyAlias := call.Name == "send_input" && (role == core.SubagentMcpRoleParent || role == core.SubagentMcpRoleMessageOnly)
-	if (call.Name == "ask_oracle" && !options.Oracle) || (!slices.Contains(role.ToolNames(), call.Name) && !legacyAlias) {
+	if (call.Name == "ask_oracle" && !options.Oracle) || (!slices.Contains(role.ToolNames(true, false), call.Name) && !legacyAlias) {
 		return nil, false, fmt.Errorf("unknown sub-agent tool %s for %s", strconv.Quote(call.Name), role.ID())
 	}
 	arguments := call.arguments()

@@ -194,7 +194,7 @@ func configureClaudeSubagentMCP(root string, sessionID string, home string, role
 			return err
 		}
 		var rules []string
-		for _, tool := range role.ToolNames() {
+		for _, tool := range role.ToolNames(true, false) {
 			rules = append(rules, fmt.Sprintf("mcp__%s__%s", core.SubagentMCPServer, tool))
 		}
 		if reviewTools {
