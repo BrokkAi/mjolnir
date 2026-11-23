@@ -194,6 +194,7 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
         SubagentPolicy::Mjolnir {
             straightforward,
             subtle,
+            ..
         } => {
             let label = |name: &str, choice: Option<&mj_core::config::SubagentChoice>| {
                 choice.map(|choice| {
@@ -1754,6 +1755,7 @@ mod tests {
             memory_bytes: 8 << 30,
         });
         session.subagents = Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         });

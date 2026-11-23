@@ -139,6 +139,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
+        environment_owners: Default::default(),
         version: STATE_VERSION,
         sessions: [(
             "session-1".into(),
@@ -847,6 +848,7 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
         state.subagents.insert(
             id.into(),
             mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind,
                 reviewer_launch: None,
                 child_session_id: id.into(),

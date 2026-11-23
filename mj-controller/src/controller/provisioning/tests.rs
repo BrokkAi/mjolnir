@@ -199,6 +199,9 @@ fn move_provisioning_uses_the_captured_manifest_without_a_session_checkpoint() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session.id.clone(), session.id.clone())]
+                .into_iter()
+                .collect(),
             sessions: [(session.id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -672,53 +675,16 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     }
 
     let _writer = crate::database::install_isolated_test_writer();
-    let config = ssh_docker_registration_config();
-    config.save().unwrap();
-    let mut controller = Controller {
-        config,
-        state: State::default(),
-    };
-    let child_id = controller
-        .register_session_with_resources(
-            "codex",
-            "project",
-            "docker",
-            "borrow the parent container",
-            SessionLaunchOptions {
-                oracle: None,
-                supervisors: None,
-                oracle_choice: None,
-                remember_launch_choices: true,
-                skip_remembering_subagent_policy: false,
-                remember_container_size: true,
-                review: None,
-                no_project_memory: false,
-                no_github_events: false,
-                no_github_credentials: false,
-                notifications_ignored: false,
-                at: None,
-                branch: None,
-                base: None,
-                no_later_history: false,
-                subagents: None,
-                create_managed_worktree: None,
-                initial_prompt: None,
-                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-                additional_mounts: Vec::new(),
-                resource_allocation: None,
-                project_directory: None,
-                session_title_override: None,
-            },
-        )
-        .unwrap();
-
+    let (mut controller, child_id) = startup_cleanup_fixture(false);
     // The shape `register_subagent` produced before borrowing was
     // recorded: the parent's container with no owner, which no child can
     // verify.
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
+    record.state = SessionState::Provisioning;
+    record.target_template_id = "docker".into();
     record.target = Some(Box::new(mj_core::state::TargetLocator::SshDocker {
         host: "builder".into(),
-        container_id: targets::resource_name("0123456789abcdef0123456789abcdef").unwrap(),
+        container_id: targets::resource_name(PROVISIONED_SESSION).unwrap(),
         borrowed_from: None,
     }));
     crate::database::save_lifecycle_session(record).unwrap();
@@ -727,14 +693,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     let error =
         futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
             &child_id,
-            controller.run_create(
-                &child_id,
-                &executor,
-                CreateKind::Subagent,
-                false,
-                || Ok(()),
-                &|| false,
-            ),
+            controller.run_create(&child_id, &executor, false, false, || Ok(()), &|| false),
         ))
         .unwrap_err();
     assert!(
@@ -781,7 +740,7 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, child_id) = startup_cleanup_fixture();
+    let (mut controller, child_id) = startup_cleanup_fixture(false);
     let stop = RecordingExecutor::failing("stop Mjolnir worker daemon");
     assert!(
         crate::controller::test_support::worker_test_scope(&child_id, || controller
@@ -896,7 +855,7 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, child_id) = startup_cleanup_fixture();
+    let (mut controller, child_id) = startup_cleanup_fixture(false);
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
     record.state = SessionState::Provisioning;
     crate::database::save_lifecycle_session(record).unwrap();
@@ -908,7 +867,7 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
             controller.run_create(
                 &child_id,
                 &CancelledLaunch,
-                CreateKind::Subagent,
+                false,
                 false,
                 || Ok(()),
                 &|| true,
@@ -930,7 +889,7 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
             controller.run_create(
                 &child_id,
                 &CancelledLaunch,
-                CreateKind::Subagent,
+                false,
                 false,
                 || Ok(()),
                 &|| false,
@@ -959,7 +918,52 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         .unwrap();
 }
 
-fn startup_cleanup_fixture() -> (Controller, String) {
+#[cfg(unix)]
+#[test]
+fn failed_owned_child_startup_retires_its_environment_and_keeps_the_relation() {
+    const NAME: &str = "failed_owned_child_startup_retires_its_environment_and_keeps_the_relation";
+    const MARKER: &str = "MJ_TEST_OWNED_CHILD_CLEANUP";
+    if std::env::var_os(MARKER).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(MARKER, "1")
+            .isolated_store(dir.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, child_id) = startup_cleanup_fixture(true);
+    let stop = RecordingExecutor::succeeding();
+    crate::controller::test_support::worker_test_scope(&child_id, || {
+        controller.cleanup_failed_startup_controlled(&child_id, &stop)
+    })
+    .unwrap();
+    let durable = Controller::load().unwrap();
+    let child = &durable.state.sessions[&child_id];
+    assert_eq!(child.state, SessionState::Error);
+    assert!(child.archived && child.target.is_none());
+    assert!(
+        child
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("fixture launch failed")
+    );
+    assert_eq!(
+        durable.state.subagents[&child_id].parent_session_id,
+        PROVISIONED_SESSION
+    );
+    assert_eq!(
+        crate::database::session_environment(&child_id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        crate::database::EnvironmentPhase::Reclaimed
+    );
+    assert!(durable.state.sessions[PROVISIONED_SESSION].target.is_some());
+}
+
+fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
     let mut config = ssh_docker_registration_config();
     config
         .targets
@@ -980,9 +984,10 @@ fn startup_cleanup_fixture() -> (Controller, String) {
     child.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join(child_id),
     }));
-    crate::database::save_subagent_session(
+    crate::database::register_subagent_with_startup(
         &child,
         &mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child_id.into(),
@@ -1000,6 +1005,10 @@ fn startup_cleanup_fixture() -> (Controller, String) {
             handback_tool: true,
             supervisor: false,
         },
+        Vec::new(),
+        None,
+        None,
+        owns_environment,
     )
     .unwrap();
     (
@@ -2458,9 +2467,7 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
             .run_create(
                 &record.id,
                 &executor,
-                CreateKind::TopLevel {
-                    remember_launch_choices: false,
-                },
+                false,
                 false,
                 || panic!("failed setup cannot commit"),
                 &|| false,

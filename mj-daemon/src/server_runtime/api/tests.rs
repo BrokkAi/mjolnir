@@ -1075,6 +1075,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         checkout: None,
         publication: None,
         subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         }),
@@ -1980,6 +1981,7 @@ async fn a_child_hands_back_one_report_per_turn() {
     mj_controller::database::save_subagent_session(
         &child,
         &mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "child-1".into(),
@@ -3465,6 +3467,7 @@ fn store_parent_and_child(child_id: &str) {
     mj_controller::database::save_subagent_session(
         &parent_record(child_id, "helper"),
         &mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child_id.into(),
@@ -4722,6 +4725,7 @@ async fn send_message_resolves_only_authorized_hex_session_prefixes() {
         mj_controller::database::save_subagent_session(
             &record,
             &mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 child_session_id: id.into(),
@@ -8355,6 +8359,7 @@ impl ExportRuntime for OracleExports {
             }
             let id = format!("oracle-{}", self.requests.lock().unwrap().len() + 1);
             let relation = mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: request.kind,
                 reviewer_launch: None,
                 child_session_id: id.clone(),
@@ -9102,6 +9107,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
         mj_controller::database::register_subagent_with_startup(
             &record,
             &mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: match category {
                     "oracle" => mj_core::subagent::SubagentKind::Oracle,
                     "reviewer" => mj_core::subagent::SubagentKind::Reviewer,
@@ -9118,6 +9124,7 @@ async fn list_agents_uses_current_session_details_and_counts_only_live_direct_ch
             Vec::new(),
             None,
             Some(category),
+            false,
         )
         .unwrap();
     }

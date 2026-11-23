@@ -236,10 +236,24 @@ impl Controller {
         if crate::database::load_subagent(session_id)?.is_none() {
             return Ok(());
         }
-        let Some(directory) = crate::database::load_subagent_report(session_id)?.report_dir else {
-            return Ok(());
-        };
-        prepare_report_dir(executor, backend, session_id, &directory, None)?;
+        if self.state.owns_environment(session_id) == Some(true) {
+            let checkout = self.state.checkout(session_id)?;
+            let (root, exclude_in) =
+                subagent_report_root(&self.state.sessions[session_id], backend, &checkout);
+            let directory = format!("{}/{session_id}", root.trim_end_matches('/'));
+            let absolute = prepare_report_dir(
+                executor,
+                backend,
+                session_id,
+                &directory,
+                exclude_in.as_deref(),
+            )?;
+            crate::database::record_subagent_report_dir(session_id, &absolute)?;
+        } else if let Some(directory) =
+            crate::database::load_subagent_report(session_id)?.report_dir
+        {
+            prepare_report_dir(executor, backend, session_id, &directory, None)?;
+        }
         Ok(())
     }
 
@@ -462,6 +476,7 @@ impl Controller {
             None => assignment,
         };
         let relation = SubagentRecord {
+            resume_with_parent: false,
             kind: request.kind,
             reviewer_launch: request.reviewer_launch,
             child_session_id: child_id.clone(),
@@ -489,9 +504,15 @@ impl Controller {
             startup,
             report_dir.as_deref(),
             Some(request.category.as_str()),
+            false,
         )?;
         if let Some(registration) = registration {
             registration.publish()?;
+        }
+        if let Some(owner) = crate::database::session_environment_owner(&child_id)? {
+            self.state
+                .environment_owners
+                .insert(child_id.clone(), owner);
         }
         self.state.sessions.insert(child_id, session);
         self.state
@@ -1122,6 +1143,7 @@ mod tests {
             session.subagents = choice.map(|enabled| {
                 if enabled {
                     mj_core::subagent::SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: None,
                     }
@@ -1183,6 +1205,7 @@ mod tests {
             crate::database::save_subagent_session(
                 &child,
                 &SubagentRecord {
+                    resume_with_parent: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
                     reviewer_launch: None,
                     child_session_id: id.into(),
@@ -1285,6 +1308,7 @@ mod tests {
             crate::database::save_subagent_session(
                 &child,
                 &SubagentRecord {
+                    resume_with_parent: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
                     reviewer_launch: None,
                     child_session_id: id.into(),
@@ -1387,6 +1411,7 @@ mod tests {
             s.state = SessionState::Running;
             s.target_template_id = "localhost".into();
             s.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             });

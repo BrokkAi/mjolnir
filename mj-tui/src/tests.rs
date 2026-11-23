@@ -268,6 +268,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),
@@ -945,6 +946,7 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: [(child.id.clone(), relation)].into_iter().collect(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions: [
                 (parent.id.clone(), parent.clone()),
@@ -1074,6 +1076,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
             subagents: [(first_child.id.clone(), first_relation.clone())]
                 .into_iter()
                 .collect(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions: [
                 (parent.id.clone(), parent.clone()),
@@ -1125,6 +1128,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         ]
         .into_iter()
         .collect(),
+        environment_owners: Default::default(),
         version: STATE_VERSION,
         sessions: [
             (parent.id.clone(), parent.clone()),
@@ -1321,10 +1325,31 @@ fn all_idle_subagent_scope_has_no_hidden_child_selected() {
         Some(SessionStateFilter::NotIdle)
     );
     dashboard.focus_sessions();
-    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
     assert!(dashboard.sessions_filter.is_none());
     assert_eq!(dashboard.ordered_sessions().len(), 1);
     assert_eq!(dashboard.selected_session_id(), None);
+
+    // An explicit search query in a non-empty child scope still clears on the
+    // first Esc, and the following Esc returns to the parent workspace.
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for letter in "child".chars() {
+        dashboard.handle_key(key(KeyCode::Char(letter)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(dashboard.ordered_sessions().len(), 1);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::ExitSubagentWorkspace
+    );
 }
 
 #[test]
@@ -1583,6 +1608,7 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),
@@ -1787,6 +1813,7 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),
@@ -1822,6 +1849,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions: [(other.id.clone(), other)].into_iter().collect(),
             mount_history: Default::default(),
@@ -2255,6 +2283,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),

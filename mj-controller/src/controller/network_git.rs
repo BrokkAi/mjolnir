@@ -1918,6 +1918,12 @@ mod tests {
             let mut state = mj_core::state::State::default();
             state.sessions.insert(EXACT_SESSION.into(), session);
             state.sessions.insert(child.id.clone(), child);
+            state
+                .environment_owners
+                .insert(EXACT_SESSION.into(), EXACT_SESSION.into());
+            state
+                .environment_owners
+                .insert("child-session".into(), EXACT_SESSION.into());
             state.subagents.insert(
                 "child-session".into(),
                 mj_core::subagent::SubagentMetadata {

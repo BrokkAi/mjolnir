@@ -971,25 +971,18 @@ fn a_daemon_that_dies_during_the_handoff_wait_is_replaced() {
 }
 
 // Hard-won: #1457: a container daemon's store guard is in its volume, so a free host guard and an unanswered ping made a live, busy container daemon look gone.
+#[cfg(unix)]
 #[test]
 fn a_container_daemon_that_does_not_answer_is_not_replaced() {
+    use mj_client::daemon::{CONTAINER_OWNER_SCHEMA, ContainerDaemonRecord};
     use std::time::{Duration, Instant};
     let storage = upgrade_storage();
     current_store(&storage);
     // A busy container daemon: its endpoint takes connections and answers none.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    {
-        let connections = connections.clone();
-        std::thread::spawn(move || {
-            let mut held = Vec::new();
-            for stream in listener.incoming().flatten() {
-                connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                held.push(stream);
-            }
-        });
-    }
+    listener.set_nonblocking(true).unwrap();
+    let mut connections = Vec::new();
     // A container daemon's record: PID 0, an older build, and no host store
     // guard, which lives in the container's volume.
     let stale = mj_client::daemon::DaemonMetadata {
@@ -1004,9 +997,43 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
     };
     let metadata_path = storage.path().join("data/daemon.json");
     fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let record = ContainerDaemonRecord {
+        schema: CONTAINER_OWNER_SCHEMA,
+        protocol_version: Some(stale.protocol_version),
+        runtime: mj_core::config::DaemonRuntime::Podman,
+        container_id: "busy-container-id".into(),
+        container_name: "busy-container".into(),
+        address: stale.address,
+        token: stale.token.clone(),
+        started_at: stale.started_at.clone(),
+    };
+    fs::write(
+        storage.path().join("data/daemon-container.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+
+    let tools = storage.path().join("bin");
+    fs::create_dir(&tools).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "podman",
+        r#"
+case "$*" in
+  'ps --all --no-trunc --filter id=busy-container-id --format {{.ID}}') echo busy-container-id ;;
+  'inspect --format={{.State.Running}} busy-container-id') echo true ;;
+  'top busy-container-id args') printf 'COMMAND\nsleep infinity\n/opt/mjolnir/mj daemon-run\n' ;;
+  *) exit 64 ;;
+esac
+"#,
+    );
+    let path = std::iter::once(tools)
+        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))
+        .collect::<Vec<_>>();
     let log = storage.path().join("client.log");
     let mut command = upgrade_command(&storage);
     command
+        .env("PATH", std::env::join_paths(path).unwrap())
         .stdin(std::process::Stdio::null())
         .stdout(fs::File::create(&log).unwrap())
         .stderr(fs::File::create(&log).unwrap());
@@ -1019,7 +1046,14 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
         let kept: mj_client::daemon::DaemonMetadata =
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
         assert_eq!(kept.token, stale.token, "the record was replaced");
-        if connections.load(std::sync::atomic::Ordering::SeqCst) >= 6 {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => connections.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("accept the fixture client's connection: {error}"),
+            }
+        }
+        if connections.len() >= 6 {
             break;
         }
         assert!(
@@ -2104,4 +2138,50 @@ if owner == 'login':
         });
     });
     daemon.wait().unwrap();
+}
+
+#[test]
+fn force_stop_clears_only_the_unreachable_legacy_container_record() {
+    use mj_client::daemon::{DaemonMetadata, DaemonPlacement, PROTOCOL_VERSION};
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let metadata = DaemonMetadata {
+        protocol_version: PROTOCOL_VERSION,
+        pid: 0,
+        address: listener.local_addr().unwrap(),
+        token: "legacy-container-fixture".into(),
+        started_at: "2026-11-23T00:00:00Z".into(),
+        build_version: env!("CARGO_PKG_VERSION").into(),
+        instance_id: String::new(),
+        placement: DaemonPlacement::Host,
+    };
+    drop(listener);
+    let path = data.join("daemon.json");
+    fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage).args(["daemon", "stop"]),
+        &[],
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("mj daemon stop --force"), "{stderr}");
+    assert!(path.is_file());
+
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage).args(["daemon", "stop", "--force"]),
+        &[],
+    )
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Cleared the stale container daemon record"),
+        "{stderr}"
+    );
+    assert!(!path.exists());
+    assert!(!data.join("daemon-container.json").exists());
 }

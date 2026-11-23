@@ -736,6 +736,7 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
         controller.state.subagents.insert(
             id.into(),
             mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: None,
                 child_session_id: id.into(),
@@ -1236,6 +1237,7 @@ fn golden_phone_session_snapshot() {
     controller.state.subagents.insert(
         "child-1".into(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "child-1".into(),
@@ -1956,6 +1958,10 @@ async fn phone_projects_resolve_origins_and_discard_results_after_location_chang
         let mut record = phone_session(id, 0);
         record.project_directory = Some(directory);
         record.target_template_id = "local".into();
+        controller
+            .state
+            .environment_owners
+            .insert(id.into(), id.into());
         controller.state.sessions.insert(id.into(), record);
     }
     let mut sources = PhoneProjectSources::default();
@@ -2065,6 +2071,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     controller.state.subagents.insert(
         child.id.clone(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child.id.clone(),
@@ -2084,6 +2091,14 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
         }
         .into(),
     );
+    controller
+        .state
+        .environment_owners
+        .insert(parent.id.clone(), parent.id.clone());
+    controller
+        .state
+        .environment_owners
+        .insert(child.id.clone(), parent.id.clone());
     controller.state.sessions.insert(parent.id.clone(), parent);
     controller.state.sessions.insert(child.id.clone(), child);
 
@@ -2164,6 +2179,10 @@ async fn phone_projects_log_a_repeated_failure_once() {
     let mut record = phone_session("gone", 0);
     record.project_directory = Some(root.path().join("removed"));
     record.target_template_id = "local".into();
+    controller
+        .state
+        .environment_owners
+        .insert(record.id.clone(), record.id.clone());
     controller.state.sessions.insert(record.id.clone(), record);
 
     let mut sources = PhoneProjectSources::default();
@@ -3052,6 +3071,7 @@ fn child_worker_turn_and_attention_publish_together_and_update_the_parent() {
     controller.state.subagents.insert(
         "child".into(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "child".into(),

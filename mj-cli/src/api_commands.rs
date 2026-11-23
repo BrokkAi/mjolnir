@@ -1212,6 +1212,7 @@ pub(crate) fn subagent_policy(
             );
         }
         return Ok(Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: straightforward.map(|model| {
                 Box::new(mj_core::config::SubagentChoice {
                     model: model.to_owned(),
@@ -1229,6 +1230,7 @@ pub(crate) fn subagent_policy(
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
         Some("mjolnir") => Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         }),
@@ -2628,6 +2630,11 @@ pub(crate) fn format_suspend_dry_run(
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "dry run for session {}", preflight.session_id);
+    if let Some(warning) = mj_core::suspend_consent::owning_children_suspend_warning(
+        preflight.owning_children_to_suspend,
+    ) {
+        let _ = writeln!(out, "{warning}");
+    }
     if let Some(est) = &preflight.dry_run {
         match (est.git_delta_bytes, &est.git_delta_unavailable_reason) {
             (Some(bytes), _) => {
@@ -4712,6 +4719,7 @@ mod tests {
             assert_eq!(
                 parse(&["--subagents", "mjolnir"]).unwrap(),
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None
                 })
@@ -4733,6 +4741,7 @@ mod tests {
                 assert_eq!(
                     parse(&args).unwrap(),
                     Some(SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: Some(Box::new(mj_core::config::SubagentChoice {
                             model: "gpt-6-luna".into(),

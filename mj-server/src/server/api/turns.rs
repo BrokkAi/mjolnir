@@ -475,10 +475,10 @@ pub(super) async fn suspend(
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
 ) -> Result<(StatusCode, Json<SuspendSessionResponse>), ApiFailure> {
-    let active_children = {
+    let (active_children, owning_children_to_suspend) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        session
+        let active_children = session
             .subagent_session_ids
             .iter()
             .filter(|id| {
@@ -488,7 +488,8 @@ pub(super) async fn suspend(
                     .any(|child| child.id == id.as_str() && child.lifecycle.is_dashboard_visible())
             })
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (active_children, session.owning_children_to_suspend)
     };
     let backend = backend(&state)?.clone();
     // Counted before the suspend is sent, which is what stops the children.
@@ -523,13 +524,20 @@ pub(super) async fn suspend(
         },
     )
     .await?;
+    let warnings = [
+        mj_core::subagent::suspend_warning(not_handed_back),
+        mj_core::suspend_consent::owning_children_suspend_warning(owning_children_to_suspend),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     Ok((
         status,
         Json(SuspendSessionResponse {
             session_id,
             stopped_subagents: active_children.len(),
             subagents_not_handed_back: not_handed_back,
-            warning: mj_core::subagent::suspend_warning(not_handed_back),
+            warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
         }),
     ))
 }

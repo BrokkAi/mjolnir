@@ -50,6 +50,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("session_mounts", "session", "session_id"),
         ("session_mount_access", "session", "session_id"),
         ("session_checkpoints", "session", "session_id"),
+        ("environment_bindings", "environment_owner", "session_id"),
         ("subagent_sessions", "relation", "child_session_id"),
         ("subagent_preference", "preference", "profile_id"),
         ("oracle_preference", "oracle_preference", "profile_id"),
@@ -442,6 +443,17 @@ pub(super) fn finish_operation(
                     );
                 }
             }
+            "environment_owner" => {
+                let owner = environments::session_environment_owner_with(&transaction, key)?;
+                if state.environment_owners.get(key) != owner.as_ref() {
+                    if let Some(owner) = owner {
+                        state.environment_owners.insert(key.clone(), owner);
+                    } else {
+                        state.environment_owners.remove(key);
+                    }
+                    changed = true;
+                }
+            }
             "relation" => {
                 relations.insert(key.clone());
                 let mut statement = transaction.prepare(
@@ -678,6 +690,89 @@ pub(super) fn finish_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_changes_publish_independently_of_session_and_relation_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        for id in ["owner-a", "owner-b", "member"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let owner = start_database_writer_at(&path, false).unwrap();
+        let snapshot = || owner.writer.committed_state().unwrap();
+        let before = snapshot();
+        let member_record = before.state.sessions.get_shared("member").unwrap();
+        let owner_a = before
+            .state
+            .environment_owners
+            .get_shared("owner-a")
+            .unwrap();
+
+        owner
+            .writer
+            .execute("remove binding", |connection| {
+                connection.execute(
+                    "DELETE FROM environment_bindings WHERE session_id='member'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let unbound = snapshot();
+        assert_eq!(unbound.state.owns_environment("member"), None);
+        owner.writer.execute("insert binding", |connection| {
+            connection.execute(
+                "INSERT INTO environment_bindings(session_id, environment_id)
+                 SELECT 'member', environment_id FROM environment_bindings WHERE session_id='owner-a'",
+                [],
+            )?;
+            Ok(())
+        }).unwrap();
+        let with_a = snapshot();
+        assert_eq!(with_a.state.environment_owner_id("member"), Some("owner-a"));
+        let rebind = |connection: &Connection| {
+            connection.execute(
+                "UPDATE environment_bindings SET environment_id=(
+                     SELECT environment_id FROM environment_bindings WHERE session_id='owner-b'
+                 ) WHERE session_id='member'",
+                [],
+            )?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let rolled_back: Result<()> =
+            owner
+                .writer
+                .execute("roll back binding", move |connection| {
+                    let transaction = connection.transaction()?;
+                    rebind(&transaction)?;
+                    bail!("fixture rollback");
+                });
+        assert!(rolled_back.is_err());
+        assert!(Arc::ptr_eq(&snapshot(), &with_a));
+        owner
+            .writer
+            .execute("update binding", move |connection| rebind(connection))
+            .unwrap();
+        let with_b = snapshot();
+        assert_eq!(with_b.state.environment_owner_id("member"), Some("owner-b"));
+        assert!(Arc::ptr_eq(
+            &member_record,
+            &with_b.state.sessions.get_shared("member").unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &owner_a,
+            &with_b
+                .state
+                .environment_owners
+                .get_shared("owner-a")
+                .unwrap()
+        ));
+        assert_eq!(
+            with_b.state.environment_owners,
+            load_state_from(&path).unwrap().environment_owners
+        );
+        owner.shutdown().unwrap();
+    }
 
     #[test]
     fn compact_turn_publications_are_committed_and_session_specific() {

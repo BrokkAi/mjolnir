@@ -6632,30 +6632,35 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     child.title = "child session".into();
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
-    let relation = mj_core::subagent::SubagentRecord {
-        kind: mj_core::subagent::SubagentKind::Worker,
-        reviewer_launch: None,
-        child_session_id: child.id.clone(),
-        parent_session_id: parent.id.clone(),
-        task_name: "probe".into(),
-        profile_id: "codex".into(),
-        model: None,
-        effort: None,
-        working_directory: PathBuf::new(),
-        initial_prompt: "say ready".into(),
-        request_key: "probe-1".into(),
-        created_at: "2026-09-18T00:00:00Z".into(),
-        noticed_turn: None,
-        reported_finish: None,
-        handback_tool: false,
-        supervisor: false,
-    };
+    let relation = test_subagent(&parent.id, &child.id);
     save_state_to(path, &state).unwrap();
     register_test_subagent(path, &child, &relation).unwrap();
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation.into());
     save_state_to(path, &state).unwrap();
     (parent, child)
+}
+
+pub(super) fn test_subagent(parent_id: &str, child_id: &str) -> SubagentRecord {
+    SubagentRecord {
+        resume_with_parent: false,
+        kind: mj_core::subagent::SubagentKind::Worker,
+        reviewer_launch: None,
+        child_session_id: child_id.into(),
+        parent_session_id: parent_id.into(),
+        task_name: "probe".into(),
+        profile_id: "codex".into(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: "say ready".into(),
+        request_key: child_id.into(),
+        created_at: "2026-09-18T00:00:00Z".into(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+        supervisor: false,
+    }
 }
 
 #[test]
@@ -8259,10 +8264,12 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
 
 #[test]
 fn supervisors_preference_survives_reopen_and_profile_rename() {
+    use mj_core::subagent::SubagentPolicy;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("supervisors.sqlite3");
     let mut record = session("sup-parent", "project");
-    record.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+    record.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -8277,6 +8284,18 @@ fn supervisors_preference_survives_reopen_and_profile_rename() {
     );
     let state = load_state_from(&path).unwrap();
     assert!(state.sessions[&record.id].supervisors);
+    let assert_policy = |state: &State, enabled| {
+        for policy in [
+            state.sessions[&record.id].subagents.as_ref().unwrap(),
+            &state.last_subagent_policies[&record.last_profile],
+        ] {
+            assert!(matches!(
+                policy,
+                SubagentPolicy::Mjolnir { orchestrators, .. } if *orchestrators == enabled
+            ));
+        }
+    };
+    assert_policy(&state, true);
     assert_eq!(
         state.last_supervisor_choices.get(&record.last_profile),
         Some(&true)
@@ -8289,6 +8308,24 @@ fn supervisors_preference_survives_reopen_and_profile_rename() {
             .last_supervisor_choices
             .contains_key(&record.last_profile)
     );
+    let mut record = renamed.sessions[&record.id].clone();
+    record.supervisors = false;
+    save_new_session_to(&path, &record, None, true, false).unwrap();
+    let disabled = load_state_from(&path).unwrap();
+    assert!(matches!(
+        disabled.sessions[&record.id].subagents,
+        Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
+            ..
+        })
+    ));
+    assert!(matches!(
+        disabled.last_subagent_policies[&record.last_profile],
+        SubagentPolicy::Mjolnir {
+            orchestrators: false,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -8305,6 +8342,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         .unwrap();
     let mut parent = session("fixed-parent", "project");
     let fixed = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "gpt-6-luna".into(),
             effort: Some("max".into()),
@@ -8450,6 +8488,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         Some(&fixed)
     );
     let plain = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -8484,6 +8523,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             r#"{"mode":"all_models"}"#,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8491,6 +8531,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             r#"{"mode":"single_model","model":"old","effort":"high"}"#,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8498,6 +8539,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             r#"{"mode":"single_model","model":"old","effort":"adaptive"}"#,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8505,6 +8547,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         (
             "true",
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -8538,6 +8581,7 @@ fn profile_rename_moves_remembered_choice_atomically_and_idempotently() {
     let mut old = session("old-profile-session", "project");
     old.last_profile = "old-profile".into();
     old.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });

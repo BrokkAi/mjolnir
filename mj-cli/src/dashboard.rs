@@ -2156,6 +2156,7 @@ impl LoadedDashboard {
         let state = mj_core::state::State {
             sessions: bootstrap.projection.records.clone(),
             subagents: bootstrap.projection.subagents.clone(),
+            environment_owners: bootstrap.projection.environment_owners.clone(),
             operator_presence: bootstrap.projection.metadata.operator_presence,
             last_subagent_policies: bootstrap.projection.metadata.last_subagent_policies.clone(),
             mount_history: metadata.mount_history,

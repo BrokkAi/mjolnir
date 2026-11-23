@@ -1130,6 +1130,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session.subagents = choice.map(|enabled| {
             if enabled {
                 mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }
@@ -1153,6 +1154,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
     codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3068,6 +3070,8 @@ fn a_session_without_project_memory_launches_without_memory() {
                     session_id: &session_id,
                     container: None,
                     parent_worktree: None,
+                    owner: None,
+                    working_directories: &[],
                 },
                 &mj_core::state::TargetRuntimeSettings::from(
                     &mj_core::config::TargetTemplate::LocalBare,
@@ -3160,6 +3164,8 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
                 session_id: &session_id,
                 container: None,
                 parent_worktree: None,
+                owner: None,
+                working_directories: &[],
             },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
@@ -4088,6 +4094,8 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
             session_id,
             container: Some(&workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
         &mj_core::config::Config::default(),
@@ -4376,6 +4384,8 @@ fn launches_on_every_target(
             session_id: parent_id,
             container: None,
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
         &mj_core::config::Config::default(),
@@ -4399,6 +4409,8 @@ fn launches_on_every_target(
             session_id: parent_id,
             container: Some(&parent_workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &with_target_keys(&container),
         &mj_core::config::Config::default(),
@@ -4422,6 +4434,8 @@ fn launches_on_every_target(
             session_id: parent_id,
             container: Some(&parent_workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &with_target_keys(&container),
         &mj_core::config::Config::default(),
@@ -4538,6 +4552,8 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
             session_id: parent_id,
             container: Some(&workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&docker),
         &mj_core::config::Config::default(),
@@ -4824,6 +4840,8 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
             session_id: parent_id,
             container: Some(&parent_workspace),
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&template),
         &mj_core::config::Config::default(),
@@ -4877,6 +4895,8 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
             session_id: &session.id,
             container: None,
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
         &mj_core::config::Config::default(),
@@ -4978,6 +4998,8 @@ fn raw_local_muse_launches_with_guardian_approvals() {
             session_id: &session.id,
             container: None,
             parent_worktree: None,
+            owner: None,
+            working_directories: &[],
         },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
         &mj_core::config::Config::default(),
@@ -5985,6 +6007,8 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
                 session_id: &session_id,
                 container: None,
                 parent_worktree: None,
+                owner: None,
+                working_directories: &[],
             },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
@@ -6444,11 +6468,13 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         for policy in [
             SubagentPolicy::Native,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
             SubagentPolicy::None,
             SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             },
@@ -6660,6 +6686,7 @@ fn golden_session_instructions_are_appended_once_to_each_fresh_native_stage() {
                 harness,
                 stage.path(),
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },

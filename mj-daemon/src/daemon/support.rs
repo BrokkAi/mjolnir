@@ -324,10 +324,10 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         Ok(())
     }
 
-    fn before_move_source_stop(
+    fn stop_borrowed_workers_before_quiesce(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(self.state.stop_subagents_for_suspend(&self.session_id))
+        Box::pin(self.state.stop_borrowed_workers(&self.session_id))
     }
 
     fn reserve_move_destination(&self) {

@@ -45,6 +45,14 @@ impl PollableWorkerInputs {
         {
             return false;
         }
+        let state = &owner.controller.state;
+        let environment_owner = self.records.environment_owner_id(session_id);
+        if environment_owner != state.environment_owner_id(session_id)
+            || environment_owner
+                .is_some_and(|id| self.records.sessions.get(id) != state.sessions.get(id))
+        {
+            return false;
+        }
         let mut id = session_id;
         let mut visited = BTreeSet::new();
         while visited.insert(id) {
@@ -540,6 +548,12 @@ impl RuntimeStateOwner {
                 .changes(&self.controller.state.subagents)
                 .next()
                 .is_none()
+            && publication
+                .records
+                .environment_owners
+                .changes(&self.controller.state.environment_owners)
+                .next()
+                .is_none()
             && publication.moves.changes(source_moves).next().is_none()
         {
             return publication.inputs.clone();
@@ -566,6 +580,15 @@ impl RuntimeStateOwner {
                     .subagents
                     .insert(current.to_owned(), relation.clone());
                 current = &relation.parent_session_id;
+            }
+        }
+        let state = &self.controller.state;
+        for id in records.sessions.keys().cloned().collect::<Vec<_>>() {
+            if let Some(owner_id) = state.environment_owner_id(&id) {
+                records
+                    .environment_owners
+                    .copy_entry(&state.environment_owners, &id, true);
+                records.sessions.copy_entry(&state.sessions, owner_id, true);
             }
         }
         let inputs = Arc::new(PollableWorkerInputs {
@@ -796,6 +819,7 @@ mod tests {
         state.subagents.insert(
             "child".into(),
             mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: None,
                 child_session_id: "child".into(),
