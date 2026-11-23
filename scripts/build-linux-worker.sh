@@ -22,8 +22,21 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-toolchain=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["toolchain"]["channel"])' \
-  "$repo_root/rust-toolchain.toml")
+toolchain=$(python3 -c '
+import re, sys
+section = None
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for raw in handle:
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+        elif section == "toolchain":
+            match = re.match(r"^channel\s*=\s*(?:\"([^\"]+)\"|\x27([^\x27]+)\x27)$", line)
+            if match:
+                print(match.group(1) or match.group(2))
+                sys.exit(0)
+sys.exit("rust-toolchain.toml is missing [toolchain] channel")
+' "$repo_root/rust-toolchain.toml")
 image="docker.io/library/rust:$toolchain-trixie"
 arch=$("$engine" run --rm --entrypoint uname "$image" -m)
 case "$arch" in
