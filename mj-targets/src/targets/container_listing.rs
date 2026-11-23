@@ -71,8 +71,8 @@ pub enum TargetAvailability {
     Unreachable,
 }
 
-/// Check the exact retained Apple container ID. Resume may start it once
-/// presence is confirmed; read-only probes only list retained containers.
+/// Check the exact retained Apple container ID. Restart and Resume can start
+/// a confirmed retained container. Read-only probes only list containers.
 pub fn apple_container_availability(
     endpoint: ContainerEndpoint<'_>,
     executor: &impl CommandExecutor,
@@ -115,26 +115,21 @@ pub fn apple_container_availability(
     };
     let retained = list(
         &["list", "--all", "--quiet"],
-        "check retained Apple container before Restart",
+        "check retained Apple container",
     )?;
     if !start || retained != Reachable {
         return Ok(retained);
     }
 
     // The default list includes only running containers.
-    let running = || {
-        list(
-            &["list", "--quiet"],
-            "list running retained Apple containers for Resume",
-        )
-    };
+    let running = || list(&["list", "--quiet"], "list running Apple containers");
     let current = running()?;
     if current != Missing {
         return Ok(current);
     }
     if execute(
         &["start", endpoint.container_id],
-        "start retained Apple container for Resume",
+        "start retained Apple container",
     )?
     .is_none()
     {

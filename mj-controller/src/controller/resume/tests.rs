@@ -2752,6 +2752,11 @@ fn only_the_archived_unused_session_may_be_replaced_on_resume() {
 // Hard-won: c77d71fc3 review: an intact stopped Apple container was never started by Resume.
 #[test]
 fn resume_starts_retained_apple_containers_before_probing_their_worker() {
+    use crate::controller::environment::{
+        ResumeEnvironment, TargetAvailability, classify_resume_environment,
+        resume_checkout_available, target_availability,
+    };
+
     const CHILD: &str = "MJ_RESUME_APPLE_START_TEST";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -2795,10 +2800,8 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
             self.commands.lock().unwrap().push(command.purpose.clone());
             let mut running = self.running.lock().unwrap();
             let (status, stdout) = match command.purpose.as_str() {
-                "check retained Apple container before Restart" => {
-                    (0, format!("{}\n", self.container))
-                }
-                "list running retained Apple containers for Resume" => (
+                "check retained Apple container" => (0, format!("{}\n", self.container)),
+                "list running Apple containers" => (
                     0,
                     if *running {
                         format!("{}\n", self.container)
@@ -2806,7 +2809,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                         String::new()
                     },
                 ),
-                "start retained Apple container for Resume" => {
+                "start retained Apple container" => {
                     if self.fail_start {
                         (1, String::new())
                     } else {
@@ -2815,7 +2818,8 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                     }
                 }
                 "probe retained environment directory" => (0, "present\n".into()),
-                "probe Mjolnir worker root" => (0, "recoverable\n".into()),
+                "probe Mjolnir worker root" if *running => (0, "recoverable\n".into()),
+                "probe Mjolnir worker root" => (1, String::new()),
                 "probe Mjolnir worker daemon liveness" => {
                     assert!(*running, "worker probe ran inside a stopped container");
                     (0, "dead\n".into())
@@ -2888,26 +2892,45 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                 fail_start,
                 commands: Mutex::default(),
             };
-            use crate::controller::environment::{TargetAvailability, target_availability};
+            let checkout = resume_checkout_available(&controller, id, &engine);
+            if running {
+                assert!(checkout.unwrap());
+            } else {
+                assert_eq!(
+                    checkout.unwrap_err().to_string(),
+                    "cannot inspect pending checkout recovery"
+                );
+            }
+            let commands = std::mem::take(&mut *engine.commands.lock().unwrap());
+            assert_eq!(commands[0], "check retained Apple container");
+            assert!(
+                !commands
+                    .iter()
+                    .any(|name| name == "start retained Apple container")
+            );
+            assert_eq!(*engine.running.lock().unwrap(), running);
 
-            assert_eq!(
-                target_availability(&controller, id, &engine).unwrap(),
-                TargetAvailability::Reachable
-            );
-            assert_eq!(
-                std::mem::take(&mut *engine.commands.lock().unwrap()),
-                ["check retained Apple container before Restart"]
-            );
-            let condition = crate::controller::environment::classify_resume_environment(
-                &controller,
-                id,
-                &engine,
-            );
+            let restart = target_availability(&controller, id, &engine);
             if fail_start {
-                assert!(matches!(
-                    condition,
-                    crate::controller::environment::ResumeEnvironment::Unknown(_)
-                ));
+                assert!(restart.is_err());
+            } else {
+                assert_eq!(restart.unwrap(), TargetAvailability::Reachable);
+            }
+            let commands = std::mem::take(&mut *engine.commands.lock().unwrap());
+            assert_eq!(commands[0], "check retained Apple container");
+            assert_eq!(
+                commands
+                    .iter()
+                    .any(|name| name == "start retained Apple container"),
+                !running
+            );
+            assert_eq!(*engine.running.lock().unwrap(), !fail_start);
+
+            // Exercise Resume independently from the Restart probe.
+            *engine.running.lock().unwrap() = running;
+            let condition = classify_resume_environment(&controller, id, &engine);
+            if fail_start {
+                assert!(matches!(condition, ResumeEnvironment::Unknown(_)));
                 assert!(
                     !engine
                         .commands
@@ -2917,10 +2940,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                         .any(|name| name.contains("worker daemon liveness"))
                 );
             } else {
-                assert!(matches!(
-                    condition,
-                    crate::controller::environment::ResumeEnvironment::WorkerMissing
-                ));
+                assert!(matches!(condition, ResumeEnvironment::WorkerMissing));
             }
             assert_eq!(
                 engine
@@ -2928,7 +2948,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|name| name == "start retained Apple container for Resume"),
+                    .any(|name| name == "start retained Apple container"),
                 !running
             );
         }

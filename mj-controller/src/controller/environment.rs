@@ -700,7 +700,7 @@ pub fn target_availability(
     session_id: &str,
     executor: &impl CommandExecutor,
 ) -> Result<TargetAvailability> {
-    target_availability_with_start(controller, session_id, executor, false)
+    target_availability_with_start(controller, session_id, executor, true)
 }
 
 fn target_availability_with_start(
@@ -979,7 +979,7 @@ pub(super) fn classify_resume_environment(
 ) -> ResumeEnvironment {
     let probe = || -> Result<ResumeEnvironment> {
         let (backend, root) = controller.worker_placement(session_id)?;
-        match target_availability_with_start(controller, session_id, executor, true)? {
+        match target_availability(controller, session_id, executor)? {
             TargetAvailability::Missing => {
                 return Ok(
                     if retained_container_checkout_available(
