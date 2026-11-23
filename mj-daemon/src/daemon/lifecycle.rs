@@ -663,8 +663,9 @@ impl RuntimeState {
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
                 let acceptance =
                     acceptance.unwrap_or_else(|| tokio::sync::watch::channel(Some(Ok(()))).1);
-                let stream_started =
-                    (kind == LifecycleKind::Unpark).then(|| Arc::new(tokio::sync::Notify::new()));
+                let stall_progress_changed =
+                    matches!(kind, LifecycleKind::Create | LifecycleKind::Unpark)
+                        .then(|| Arc::new(tokio::sync::Notify::new()));
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
@@ -679,7 +680,7 @@ impl RuntimeState {
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
                         progress: LifecycleProgress {
-                            stream_started: stream_started.clone(),
+                            stall_progress_changed: stall_progress_changed.clone(),
                             ..LifecycleProgress::new()
                         },
                         resume_workspace_id,
@@ -757,6 +758,12 @@ impl RuntimeState {
                         }
                         Err(error) => Err(LifecycleFailure::of(&error)),
                         Ok(admission) => {
+                            if kind == LifecycleKind::Create
+                                && let Some(active) =
+                                    state.owner().lifecycle.get_mut(&operation_session_id)
+                            {
+                                active.progress.last_stage_change = tokio::time::Instant::now();
+                            }
                             foreground_hold = Some(admission.clone());
                             let session_admission = SessionAdmission::Foreground(admission);
                             let mut executing = mj_core::runtime::spawn_off_async_workers(
@@ -824,13 +831,13 @@ impl RuntimeState {
                                         .await
                                 },
                             );
-                            let (completed, stall) = if let Some(started) = stream_started {
+                            let (completed, stall) = if let Some(started) = stall_progress_changed {
                                 // The same task supervises the command and its
                                 // stall check. The caller may drop its waiter.
                                 tokio::select! {
                                     biased;
                                     completed = &mut executing => (completed, None),
-                                    stall = state.cancel_unpark_when_stream_stalls(&operation_session_id, &started) => {
+                                    stall = state.watch_lifecycle_stall(&operation_session_id, kind, &started) => {
                                         // Cancellation owns process teardown;
                                         // retain admission until the work unwinds.
                                         (executing.await, stall)

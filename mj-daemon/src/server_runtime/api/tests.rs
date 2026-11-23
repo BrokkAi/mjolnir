@@ -7994,6 +7994,67 @@ async fn reviewer_children_are_private_to_the_review_host() {
     );
 }
 
+#[tokio::test]
+async fn send_message_cannot_queue_input_for_a_review_child_during_startup() {
+    if !isolated_parked_test("send_message_cannot_queue_input_for_a_review_child_during_startup") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    store_parent_and_child("review-child");
+    let mut state = mj_controller::database::load_state().unwrap();
+    state.subagents.get_mut("review-child").unwrap().kind =
+        mj_core::subagent::SubagentKind::Reviewer;
+    state.sessions.get_mut("review-child").unwrap().state = SessionState::Provisioning;
+    mj_controller::database::save_state(&state).unwrap();
+    mj_controller::database::save_session(&parent_record("peer-1", "peer")).unwrap();
+    let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
+    manager
+        .control
+        .restore_starting("review-child".into())
+        .await
+        .unwrap();
+    let backend = Arc::new(ApiBackend::new(
+        manager.control.client(),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    ));
+    for sender in ["parent-1", "peer-1"] {
+        let result = backend
+            .execute_subagent_tool(
+                sender.into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: format!("{sender}-send"),
+                    created_at_ms: 1,
+                    action: mj_core::subagent::SubagentToolAction::SendMessage {
+                        child_session_id: "review-child".into(),
+                        message: "unexpected input".into(),
+                    },
+                },
+            )
+            .await;
+        assert!(result.is_error, "{}", result.message);
+        assert!(
+            result
+                .message
+                .contains("target session review-child does not exist or was destroyed"),
+            "{}",
+            result.message
+        );
+    }
+    assert!(
+        mj_controller::database::next_startup_delivery("review-child")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        mj_controller::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    manager.shutdown.shutdown().await.unwrap();
+}
+
 // Hard-won: #1442: delegation announced a provider failure while its worker had a retry armed.
 #[tokio::test]
 async fn child_provider_retry_keeps_listings_notifications_and_parking_pending() {

@@ -581,7 +581,7 @@ struct LifecycleProgress {
     last_stage_change: tokio::time::Instant,
     next_stream: u64,
     streams: BTreeMap<u64, ActiveStream>,
-    stream_started: Option<Arc<tokio::sync::Notify>>,
+    stall_progress_changed: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct ActiveStream {
@@ -595,7 +595,7 @@ impl LifecycleProgress {
             last_stage_change: tokio::time::Instant::now(),
             next_stream: 0,
             streams: BTreeMap::new(),
-            stream_started: None,
+            stall_progress_changed: None,
         }
     }
 }

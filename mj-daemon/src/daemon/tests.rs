@@ -4272,22 +4272,22 @@ async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
     for _ in 0..24 {
         executor.stage_started(ProvisionStage::Syncing);
         tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        check_progress(&state, LIFECYCLE_STALL_BOUND)
-            .expect("a Create that is making progress is not stalled");
+        assert_create_progress(&state, LIFECYCLE_STALL_BOUND);
         executor.stage_finished(ProvisionStage::Syncing);
         tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        check_progress(&state, LIFECYCLE_STALL_BOUND)
-            .expect("a Create that is making progress is not stalled");
+        assert_create_progress(&state, LIFECYCLE_STALL_BOUND);
     }
 }
 
-/// The stall check as the reviewer start runs it while a Create is running.
-fn check_progress(state: &Arc<RuntimeState>, bound: Duration) -> Result<()> {
-    state.check_create_progress(
-        "session-1",
-        bound,
-        &mut create::PostCreateWait::new("test wait"),
-    )
+fn check_progress(state: &Arc<RuntimeState>, bound: Duration) -> views::LifecycleStallProgress {
+    state.cancel_stalled_lifecycle("session-1", LifecycleKind::Create, bound)
+}
+
+fn assert_create_progress(state: &Arc<RuntimeState>, bound: Duration) {
+    assert!(matches!(
+        check_progress(state, bound),
+        views::LifecycleStallProgress::Running(_)
+    ));
 }
 
 /// A running Create with no work of its own, for the stall tests.
@@ -4317,7 +4317,7 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
         state.clone(),
         "session-1".into(),
     );
-    let bound = LIFECYCLE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND / 2;
     for queue in [
         ProvisionStage::WaitingForImagePull,
         ProvisionStage::WaitingForStartSlot,
@@ -4326,17 +4326,19 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     ] {
         executor.stage_started(queue.clone());
         tokio::time::sleep(bound * 3).await;
-        check_progress(&state, bound)
-            .unwrap_or_else(|error| panic!("a Create queued in {queue:?} is not stalled: {error}"));
+        assert_create_progress(&state, bound);
         executor.stage_finished(queue);
     }
     // Admitted: the clock starts again from admission, and the next stage can
     // stall like any other.
     executor.stage_started(ProvisionStage::Starting);
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
-    check_progress(&state, bound).unwrap();
+    assert_create_progress(&state, bound);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(check_progress(&state, bound).is_err());
+    assert!(matches!(
+        check_progress(&state, bound),
+        views::LifecycleStallProgress::Stalled { .. }
+    ));
 }
 
 // Hard-won: #1583: a reviewer Create cancelled a profile stream that was still moving bytes.
@@ -4359,7 +4361,7 @@ async fn a_create_watches_each_stream_for_byte_progress() {
     };
     let send_profile = "send profile content";
     let upload_worker = "stage replacement Mjolnir worker";
-    let bound = LIFECYCLE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND / 2;
     let half = bound / 2;
 
     // The stream has to queue for SSH first. Its idle clock begins only after
@@ -4370,7 +4372,7 @@ async fn a_create_watches_each_stream_for_byte_progress() {
         CommandActivity::StageStarted(ProvisionStage::WaitingForSshConnection),
     );
     tokio::time::advance(bound * 2).await;
-    check_progress(&state, bound).unwrap();
+    assert_create_progress(&state, bound);
     report(
         profile,
         send_profile,
@@ -4384,7 +4386,7 @@ async fn a_create_watches_each_stream_for_byte_progress() {
             send_profile,
             CommandActivity::StdinBytes(32 * 1024),
         );
-        check_progress(&state, bound).expect("the profile is still transferring");
+        assert_create_progress(&state, bound);
     }
 
     // A second stream stops moving bytes. Profile bytes and a queue on
@@ -4407,19 +4409,21 @@ async fn a_create_watches_each_stream_for_byte_progress() {
         send_profile,
         CommandActivity::StdinBytes(32 * 1024),
     );
-    check_progress(&state, bound).unwrap();
+    assert_create_progress(&state, bound);
     report(
         profile,
         send_profile,
         CommandActivity::StageStarted(ProvisionStage::WaitingForWorkerStore),
     );
     tokio::time::advance(half).await;
-    let error = check_progress(&state, bound).unwrap_err().to_string();
-    assert!(
-        error.contains("stage replacement Mjolnir worker moved no bytes for 600 s"),
-        "{error}"
-    );
-    assert!(error.contains("its Create was cancelled"), "{error}");
+    assert!(matches!(
+        check_progress(&state, bound),
+        views::LifecycleStallProgress::Stalled {
+            stream: Some(stream),
+            phase: views::StalledLifecycle::Cancelled,
+            ..
+        } if stream == upload_worker
+    ));
 }
 
 // Hard-won: #1571: removing the transfer deadline left an unattended wake unable to end when its stream stopped.
@@ -4564,7 +4568,7 @@ async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
         state.clone(),
         "session-1".into(),
     );
-    let bound = LIFECYCLE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND / 2;
     let preparing = ProvisionStage::PreparingHarness {
         harness: mj_core::config::HarnessKind::Codex,
         step: "Downloading".into(),
@@ -4572,13 +4576,16 @@ async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
     };
     executor.stage_started(preparing.clone());
     tokio::time::sleep(bound * 3).await;
-    check_progress(&state, bound).expect("harness preparation is not a stall");
+    assert_create_progress(&state, bound);
     executor.stage_finished(preparing);
     // The clock starts again when preparation ends.
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
-    check_progress(&state, bound).unwrap();
+    assert_create_progress(&state, bound);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(check_progress(&state, bound).is_err());
+    assert!(matches!(
+        check_progress(&state, bound),
+        views::LifecycleStallProgress::Stalled { .. }
+    ));
 }
 
 // Hard-won: 9c928ddc2: a stalled Create only failed the reviewer start and kept running with its lifecycle admission held, which blocks daemon handoff.
@@ -4608,15 +4615,9 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     executor.stage_started(ProvisionStage::Syncing);
     let bound = LIFECYCLE_STALL_BOUND;
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
-    check_progress(&state, bound).unwrap();
+    assert_create_progress(&state, bound);
     assert!(!cancel_seen.load(Ordering::Acquire));
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let error = check_progress(&state, bound).unwrap_err().to_string();
-    assert!(error.contains("its Create was cancelled"), "{error}");
-    // Asked again while the cancel is still under way, the message says so
-    // and does not claim the Create had committed.
-    let again = check_progress(&state, bound).unwrap_err().to_string();
-    assert!(again.contains("already being cancelled"), "{again}");
     // The cancel reached the Create's own flag, and the Create ended, which
     // is what drops its admission.
     let outcome = tokio::time::timeout(
@@ -4625,86 +4626,9 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     )
     .await
     .expect("the cancelled Create ends");
-    assert!(outcome.is_err());
+    let error = outcome.unwrap_err().to_string();
+    assert!(error.contains("stalled in: Sync"), "{error}");
     assert!(cancel_seen.load(Ordering::Acquire));
-}
-
-// Hard-won: 9c928ddc2: readiness waits after the Create finished had no bound, so a harness that never reported its capabilities waited for ever.
-#[tokio::test(start_paused = true)]
-async fn a_readiness_wait_with_no_create_running_fails_at_the_startup_timeout() {
-    let state = test_runtime_state();
-    let timeout = mj_controller::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
-    let mut waiting = create::PostCreateWait::new("report its capabilities");
-    // The wait began while a Create ran: that time is the Create's, and its
-    // own stall check bounds it.
-    let finish = Arc::new(tokio::sync::Notify::new());
-    let watch = state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-            let finish = finish.clone();
-            |_state, _session_id, _cancelled, _session_admission| async move {
-                finish.notified().await;
-                Ok(DaemonLifecycleResult::Done)
-            }
-        })
-        .await
-        .unwrap();
-    tokio::task::yield_now().await;
-    tokio::time::sleep(timeout * 4).await;
-    state
-        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND * 100, &mut waiting)
-        .unwrap();
-    // The Create ends; the wait now has the full bound from that moment.
-    finish.notify_one();
-    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
-    state
-        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND, &mut waiting)
-        .unwrap();
-    tokio::time::sleep(timeout - Duration::from_secs(1)).await;
-    state
-        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND, &mut waiting)
-        .unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let error = state
-        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND, &mut waiting)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("did not report its capabilities within 300 s"),
-        "{error}"
-    );
-}
-
-// Hard-won: #1438: a 120 s total deadline cancelled slow Creates mid-provision, and removing it outright left a command that hangs on a live connection with nothing to end its start.
-#[tokio::test(start_paused = true)]
-async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
-    let state = test_runtime_state();
-    state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-            |_state, _session_id, _cancelled, _session_admission| async move {
-                std::future::pending::<()>().await;
-                #[allow(unreachable_code)]
-                Ok(DaemonLifecycleResult::Done)
-            }
-        })
-        .await
-        .unwrap();
-    tokio::task::yield_now().await;
-    let executor = DaemonStageReportingExecutor::new(
-        RefusingExecutor("a stage notification"),
-        state.clone(),
-        "session-1".into(),
-    );
-    executor.stage_started(ProvisionStage::Syncing);
-    let bound = LIFECYCLE_STALL_BOUND;
-    tokio::time::sleep(bound - Duration::from_secs(1)).await;
-    check_progress(&state, bound).unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let error = check_progress(&state, bound).unwrap_err().to_string();
-    assert!(
-        error.contains("stalled in: Sync")
-            && error.contains("no stage started or finished for 601 s"),
-        "{error}"
-    );
 }
 
 /// A background image download belongs to the daemon, not to a session, so
@@ -7313,6 +7237,215 @@ async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resu
         .unwrap()
         .unwrap();
     assert_eq!(record.state, SessionState::Error);
+}
+
+#[tokio::test]
+async fn a_reviewer_create_failure_settles_its_open_review() {
+    use mj_core::review::driver::TurnReviewSeed;
+    use mj_review::driver::TurnReviewDriver;
+
+    const NAME: &str = "a_reviewer_create_failure_settles_its_open_review";
+    const CHILD: &str = "MJ_TEST_REVIEWER_CREATE_FAILURE";
+    let Ok(failure) = std::env::var(CHILD) else {
+        for failure in ["create", "configure"] {
+            let directory = tempfile::tempdir().unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(CHILD, failure)
+            .env("MJ_INSTANCE", "slice-b-reviewer-failure")
+            .isolated_store(directory.path())
+            .run();
+        }
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let create_failed = failure == "create";
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let workspace = mj_controller::database::create_workspace("Reviewer create failure").unwrap();
+    let parent = runtime_test_session("review-parent", &workspace.id, SessionState::Running);
+    let child = runtime_test_session(
+        "review-child",
+        &workspace.id,
+        if create_failed {
+            SessionState::Provisioning
+        } else {
+            SessionState::Disconnected
+        },
+    );
+    let mut relation = runtime_test_subagent(&child.id, &parent.id);
+    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+    relation.model = Some("chosen-model".into());
+    mj_controller::database::save_session(&parent).unwrap();
+    // A missing target makes Create fail before launching a worker.
+    mj_controller::database::register_subagent_with_startup(
+        &child,
+        &relation,
+        vec![],
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let review_id = "review-create-failed";
+    let (mut driver, _) = TurnReviewDriver::start(
+        TurnReviewSeed {
+            task: "review the changes".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        review_id.into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: directory.path().into(),
+        current_tree: "newtree".into(),
+        patch: "+change".into(),
+        changed_lines: 1,
+        ..Default::default()
+    }]);
+    mj_controller::database::save_turn_review_state(
+        &parent.id,
+        &mj_controller::database::TurnReviewState {
+            open_reviews: vec![mj_core::storage::OpenReview {
+                active: Some(review_id.into()),
+                active_group: Some(mj_core::storage::ActiveReviewGroup {
+                    brief_writer: None,
+                    driver: driver.snapshot(),
+                    reviewers: vec![Default::default()],
+                    registrations: vec![mj_core::storage::ReviewerRegistration {
+                        role: "reviewer-1".into(),
+                        request_key: relation.request_key.clone(),
+                        child_session_id: Some(child.id.clone()),
+                    }],
+                }),
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while state.review_host().view(&parent.id).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the open review is restored");
+    if create_failed {
+        state
+            .start_create_lifecycle(
+                child.id.clone(),
+                LifecycleControl::default(),
+                create::CreateInputs {
+                    child: Some(relation),
+                    publication: None,
+                    remember_launch_choices: false,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    } else {
+        use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommand};
+        use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
+
+        mj_controller::controller::recover_registered_subagent_startup(&relation, false).unwrap();
+        let configure = mj_controller::database::next_startup_delivery(&child.id)
+            .unwrap()
+            .unwrap();
+        let mut worker = mj_worker::relay::DurableRelay::open_for_harness(
+            directory.path(),
+            &child.id,
+            "test",
+            mj_core::config::HarnessKind::Codex,
+            &[
+                mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: configure.command_id.clone(),
+                    command: RelayCommand::SetConfig {
+                        key: "model".into(),
+                        value: "chosen-model".into(),
+                    },
+                    optional: false,
+                },
+                mj_core::worker_launch::InitialWorkerCommand {
+                    command_id: mj_controller::database::startup_step_id(
+                        configure.group_id.as_deref().unwrap(),
+                        "prompt",
+                    ),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::Text(TextContent::new(
+                            relation.initial_prompt,
+                        ))],
+                    },
+                    optional: false,
+                },
+            ],
+        )
+        .unwrap();
+        worker.claim_pending_commands(true).unwrap();
+        worker
+            .record_command_rejected(
+                &configure.command_id,
+                mj_core::event_outcome::OutcomeReason::CommandFailed,
+                "provider refused the selected model",
+            )
+            .unwrap_err();
+        let events = worker.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+        let child_id = child.id.clone();
+        mj_controller::database::apply_projection_page(&child.id, move |page| {
+            let mut current = mj_core::state::MaterializedSession::empty(&child_id);
+            for event in events {
+                let mutation = project_relay_event(&current, &event)?.mutation;
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )?;
+                apply_committed_projection_event(&mut current, &event, mutation)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        state.start_persisted_startup_delivery(configure, &CancellationToken::new());
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(review) =
+                mj_controller::database::finished_review(&parent.id, Some(review_id)).unwrap()
+            {
+                assert_eq!(
+                    review.resolution,
+                    mj_core::storage::FinishedReviewResolution::Failed
+                );
+                assert_eq!(review.roles.len(), 1);
+                assert!(review.roles[0].handback.is_none());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{failure} failure must reach the review host and settle its role"));
+    let record = mj_controller::database::load_session_record(&child.id)
+        .unwrap()
+        .unwrap();
+    if create_failed {
+        assert_eq!(record.state, SessionState::Error);
+        assert!(record.last_error.is_some());
+    } else {
+        let steps = mj_controller::database::load_latest_startup_group(&child.id).unwrap();
+        assert!(
+            steps
+                .iter()
+                .all(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
+        );
+        state.cancel_and_join_startup_prompts().await.unwrap();
+    }
+    state.review_host().shutdown().await.unwrap();
 }
 
 /// A create wait reads durable state alone: with an intent row and no
