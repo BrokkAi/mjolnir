@@ -100,6 +100,22 @@ mod tests {
         assert_eq!(cancel_turn.minimum_protocol(), 7);
         assert!(!cancel_turn.supported_at(6));
         assert!(cancel_turn.supported_at(RELAY_PROTOCOL_VERSION));
+        let exact = RelayRequest::Submit {
+            command_id: "cancel-exact".into(),
+            command: RelayCommand::CancelTurnTarget {
+                target: mj_core::relay::TurnInterruptTarget::Autonomous { start_ordinal: 1 },
+            },
+        };
+        assert!(!exact.supported_at(85));
+        assert!(exact.supported_at(86));
+        assert_eq!(
+            RelayCommand::CancelTurnFor {
+                active_prompt_id: "active".into()
+            }
+            .minimum_protocol(),
+            17
+        );
+
         let stop_background = RelayRequest::StopBackgroundTask {
             background_task_id: "terminal:task-1".into(),
         };

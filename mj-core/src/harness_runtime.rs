@@ -118,7 +118,7 @@ pub fn managed_harness_manifest_matches(
 }
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
-pub const CODEX_ACP_VERSION: &str = "1.15.0";
+pub const CODEX_ACP_VERSION: &str = "1.15.1";
 pub const CODEX_CLI_VERSION: &str = "0.170.0";
 pub const CLAUDE_ACP_VERSION: &str = "0.108.0";
 pub const CLAUDE_CLI_VERSION: &str = "2.1.326";
@@ -478,8 +478,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
         },
         HarnessKind::Codex => HarnessPin {
             // pkg2: require a runnable CLI even when npm reports success.
-            install_id: "brokkai-codex-acp-1.15.0_codex-0.170.0_pkg2",
-            display_version: "@brokkai/codex-acp 1.15.0 + codex 0.170.0",
+            install_id: "brokkai-codex-acp-1.15.1_codex-0.170.0_pkg2",
+            display_version: "@brokkai/codex-acp 1.15.1 + codex 0.170.0",
             entrypoint: "node_modules/.bin/codex-acp",
             cli_entrypoint: CODEX_CLI_ENTRYPOINT,
         },

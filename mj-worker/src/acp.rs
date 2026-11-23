@@ -333,6 +333,10 @@ pub enum CommandRequest {
         request_id: String,
         active_prompt_id: String,
     },
+    CancelUnpromptedTurn {
+        request_id: String,
+        target: mj_core::relay::TurnInterruptTarget,
+    },
     Steer {
         request_id: String,
         active_prompt_id: String,

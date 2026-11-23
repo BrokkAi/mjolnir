@@ -19,8 +19,21 @@ fn update_command_text(command: &Command) -> String {
 
 #[test]
 fn golden_install_method_detection_uses_cargo_and_package_manager_formats() {
+    for suffix in ["", ".exe"] {
+        let rendered = render_install_method_detection(suffix);
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "install-method-detection",
+            &rendered,
+        );
+    }
+}
+
+fn render_install_method_detection(suffix: &str) -> String {
     let root = tempfile::tempdir().expect("install roots");
     let version = env!("CARGO_PKG_VERSION");
+    let mj = format!("mj{suffix}");
+    let voice_worker = format!("mj-voice-worker{suffix}");
     let source =
         format!("brokk-mjolnir {version} (registry+https://github.com/rust-lang/crates.io-index)");
     let voice_source = format!(
@@ -35,14 +48,14 @@ fn golden_install_method_detection_uses_cargo_and_package_manager_formats() {
         serde_json::json!({
             "v1": 1,
             "installs": {
-                (source.clone()): {"version": version, "bins": ["mj"], "features": []},
-                (voice_source.clone()): {"version": version, "bins": ["mj-voice-worker"], "features": []}
+                (source.clone()): {"version": version, "bins": [&mj], "features": []},
+                (voice_source.clone()): {"version": version, "bins": [&voice_worker], "features": []}
             }
         })
         .to_string(),
     )
     .expect("Cargo JSON install record");
-    let cargo_json_exe = fake_update_executable(&cargo_json.join("bin/mj"));
+    let cargo_json_exe = fake_update_executable(&cargo_json.join("bin").join(&mj));
 
     // Cargo's compatibility v1 TOML install record, including a stale version
     // that must not be mistaken for the executable at the current version.
@@ -51,11 +64,11 @@ fn golden_install_method_detection_uses_cargo_and_package_manager_formats() {
     std::fs::write(
         cargo_toml.join(".crates.toml"),
         format!(
-            "[v1]\n\"{source}\" = [\"mj\"]\n\"{voice_source}\" = [\"mj-voice-worker\"]\n\"brokk-mjolnir 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj\"]\n"
+            "[v1]\n\"{source}\" = [\"{mj}\"]\n\"{voice_source}\" = [\"{voice_worker}\"]\n\"brokk-mjolnir 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"{mj}\"]\n"
         ),
     )
     .expect("Cargo TOML install record");
-    let cargo_toml_exe = fake_update_executable(&cargo_toml.join("bin/mj"));
+    let cargo_toml_exe = fake_update_executable(&cargo_toml.join("bin").join(&mj));
 
     let homebrew_exe =
         fake_update_executable(&root.path().join("homebrew/Cellar/mjolnir/2.4.0/bin/mj"));
@@ -120,11 +133,7 @@ fn golden_install_method_detection_uses_cargo_and_package_manager_formats() {
         "brew upgrade: {}",
         update_command_text(&brew_upgrade_command())
     ));
-    mj_core::golden::assert_golden(
-        env!("CARGO_MANIFEST_DIR"),
-        "install-method-detection",
-        &rendered,
-    );
+    rendered
 }
 
 #[test]
@@ -332,7 +341,6 @@ rm "$MJ_UPDATE_RESTART_FIXTURE/retired/bin/mj"
     assert!(String::from_utf8_lossy(&output.stdout).contains("UPDATED_MJ_RESTARTED"));
 }
 
-#[cfg(unix)]
 fn release_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut archive = tar::Builder::new(gz);
@@ -352,9 +360,11 @@ fn release_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         .expect("gzip archive")
 }
 
-#[cfg(unix)]
 #[test]
 fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     let root = tempfile::tempdir().expect("install directory");
     let executable = root.path().join("custom-mj-name");
     std::fs::write(&executable, b"old controller").expect("old controller");
@@ -392,10 +402,10 @@ fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files(
         executable.canonicalize().expect("resolved controller")
     );
     assert_eq!(std::fs::read(&executable).unwrap(), new_binary);
-    use std::os::unix::fs::PermissionsExt;
     for (name, _) in &entries[1..] {
         let helper = root.path().join(Path::new(name).file_name().unwrap());
         assert_eq!(std::fs::read(&helper).unwrap(), new_binary);
+        #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(&helper).unwrap().permissions().mode() & 0o777,
             0o755
@@ -407,31 +417,45 @@ fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files(
     );
     assert_eq!(
         std::fs::read_dir(root.path()).unwrap().count(),
-        entries.len() + 2
+        entries.len() + 3
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn malformed_release_leaves_installed_binaries_unchanged() {
     let root = tempfile::tempdir().expect("install directory");
-    let executable = root.path().join("mj");
+    let executable = root.path().join(WINDOWS_BIN_NAME);
     let worker = root.path().join("mj-worker");
-    for archive in [
-        release_tar(&[("mj", b"new controller"), ("mj-worker", b"")]),
-        release_tar(&[("mj", b"new controller"), ("mj", b"duplicate")]),
-        release_tar(&[("mj-worker", b"new worker")]),
+    for (archive_name, controller, archive) in [
+        (
+            "release.tar.gz",
+            BIN_NAME,
+            release_tar as fn(&[(&str, &[u8])]) -> Vec<u8>,
+        ),
+        ("release.zip", WINDOWS_BIN_NAME, release_zip),
     ] {
-        std::fs::write(&executable, b"old controller").unwrap();
-        std::fs::write(&worker, b"old worker").unwrap();
-        assert!(install_release_archive(&executable, "release.tar.gz", &archive).is_err());
-        assert_eq!(std::fs::read(&executable).unwrap(), b"old controller");
-        assert_eq!(std::fs::read(&worker).unwrap(), b"old worker");
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+        let duplicate = format!("other/{controller}");
+        for entries in [
+            &[
+                (controller, b"new controller".as_slice()),
+                ("mj-worker", b""),
+            ][..],
+            &[
+                (controller, b"new controller".as_slice()),
+                (&duplicate, b"duplicate"),
+            ],
+            &[("mj-worker", b"new worker".as_slice())],
+        ] {
+            std::fs::write(&executable, b"old controller").unwrap();
+            std::fs::write(&worker, b"old worker").unwrap();
+            assert!(install_release_archive(&executable, archive_name, &archive(entries)).is_err());
+            assert_eq!(std::fs::read(&executable).unwrap(), b"old controller");
+            assert_eq!(std::fs::read(&worker).unwrap(), b"old worker");
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
+        }
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn release_upgrade_allows_retired_companions() {
     let root = tempfile::tempdir().expect("install directory");
@@ -442,25 +466,194 @@ fn release_upgrade_allows_retired_companions() {
     assert_eq!(std::fs::read(&executable).unwrap(), b"new controller");
 }
 
-#[test]
-fn zip_release_stages_application_binaries_without_extracting_documents() {
+fn release_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
-    for name in ["release/mj.exe", "release/mj-worker.exe", "release/LICENSE"] {
+    for &(name, contents) in entries {
         archive.start_file(name, options).expect("zip entry");
-        archive.write_all(b"binary contents").expect("zip contents");
+        archive.write_all(contents).expect("zip contents");
     }
-    let bytes = archive.finish().expect("zip archive").into_inner();
-    let root = tempfile::tempdir().expect("staging directory");
-    let binaries = stage_release_archive("release.zip", &bytes, root.path()).expect("stage zip");
-    assert_eq!(binaries.len(), 2);
-    for name in ["mj.exe", "mj-worker.exe"] {
-        assert_eq!(
-            std::fs::read(root.path().join(name)).unwrap(),
-            b"binary contents"
-        );
+    archive.finish().expect("zip archive").into_inner()
+}
+
+#[test]
+fn zip_release_replaces_application_binaries_and_sweeps_only_replaced_files() {
+    let root = tempfile::tempdir().expect("install directory");
+    let executable = fake_update_executable(&root.path().join(WINDOWS_BIN_NAME));
+    let x64 = fake_update_executable(&root.path().join("mj-worker-x86_64-unknown-linux-musl"));
+    let arm64 = root.path().join("mj-worker-aarch64-unknown-linux-musl");
+    let stale = fake_update_executable(&root.path().join(".mj-replaced-mj.exe-stale"));
+    let directory = root.path().join(".mj-replaced-directory");
+    std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
+    let link = {
+        let link = root.path().join(".mj-replaced-link");
+        std::os::unix::fs::symlink(&stale, &link).unwrap();
+        link
+    };
+    let entries = [
+        ("release/mj.exe", b"new controller".as_slice()),
+        (
+            "release/mj-worker-x86_64-unknown-linux-musl",
+            b"new x64 worker".as_slice(),
+        ),
+        (
+            "release/mj-worker-aarch64-unknown-linux-musl",
+            b"new ARM64 worker".as_slice(),
+        ),
+        ("release/LICENSE", b"release license".as_slice()),
+    ];
+    let installed = install_release_archive(&executable, "release.zip", &release_zip(&entries))
+        .expect("install zip");
+    assert_eq!(installed, executable.canonicalize().unwrap());
+    for (path, (_, expected)) in [executable, x64, arm64].into_iter().zip(entries) {
+        assert_eq!(std::fs::read(path).unwrap(), expected);
     }
     assert!(!root.path().join("LICENSE").exists());
+    assert!(!stale.exists());
+    assert!(directory.is_dir());
+    #[cfg(unix)]
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn release_upgrade_waits_for_installation_lock_before_sweeping_or_replacing_files() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+
+    let root = tempfile::tempdir().expect("install directory");
+    let executable = fake_update_executable(&root.path().join(WINDOWS_BIN_NAME));
+    let worker = fake_update_executable(&root.path().join("mj-worker-x86_64-unknown-linux-musl"));
+    let aside = fake_update_executable(&root.path().join(".mj-replaced-mj-worker-old"));
+    let lock_path = root.path().join(".mj-self-update.lock");
+    let owner = std::fs::File::create(&lock_path).expect("create update lock");
+    owner.lock().expect("hold update lock");
+    let archive = release_zip(&[
+        ("mj.exe", b"new controller"),
+        ("mj-worker-x86_64-unknown-linux-musl", b"new worker"),
+    ]);
+    let (started_tx, started_rx) = channel();
+    let (finished_tx, finished_rx) = channel();
+    let (premature, old_executable, old_worker, old_aside) = std::thread::scope(|scope| {
+        let target = &executable;
+        let archive = &archive;
+        let waiting = scope.spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx
+                .send(install_release_archive(target, "release.zip", archive))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        let premature = finished_rx.recv_timeout(Duration::from_millis(100));
+        let before_unlock = (
+            premature,
+            std::fs::read(&executable),
+            std::fs::read(&worker),
+            std::fs::read(&aside),
+        );
+        drop(owner);
+        waiting.join().unwrap();
+        before_unlock
+    });
+
+    assert!(matches!(premature, Err(RecvTimeoutError::Timeout)));
+    assert_eq!(old_executable.unwrap(), b"test executable");
+    assert_eq!(old_worker.unwrap(), b"test executable");
+    assert_eq!(old_aside.unwrap(), b"test executable");
+    finished_rx.recv().unwrap().expect("install after unlock");
+    assert_eq!(std::fs::read(&executable).unwrap(), b"new controller");
+    assert_eq!(std::fs::read(&worker).unwrap(), b"new worker");
+    assert!(!aside.exists());
+    assert!(lock_path.is_file());
+}
+
+#[test]
+fn rename_aside_restores_the_old_file_after_failed_promotion() {
+    let root = tempfile::tempdir().expect("install directory");
+    let executable = root.path().join(WINDOWS_BIN_NAME);
+    let staged = root.path().join("missing-stage");
+    std::fs::write(&executable, b"old executable").unwrap();
+
+    let error = replace_installed_file_rename_aside(&staged, &executable)
+        .expect_err("missing staged binary should fail");
+    assert_eq!(error.to_string(), "promote staged binary");
+    assert_eq!(std::fs::read(&executable).unwrap(), b"old executable");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+
+    std::fs::write(&staged, b"new executable").unwrap();
+    replace_installed_file_rename_aside(&staged, &executable).expect("retry promotion");
+    assert_eq!(std::fs::read(&executable).unwrap(), b"new executable");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn zip_release_replaces_a_running_windows_executable() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FIXTURE_ENV: &str = "MJ_UPDATE_WINDOWS_RUNNING_FIXTURE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        std::future::pending::<()>().await;
+        return;
+    }
+
+    let root = tempfile::tempdir().expect("install directory");
+    let executable = root.path().join(WINDOWS_BIN_NAME);
+    let fixture = std::env::current_exe().expect("test executable");
+    std::fs::copy(&fixture, &executable).expect("copy test executable");
+    let executable = executable.canonicalize().expect("resolve executable");
+    let mut command = tokio::process::Command::new(&executable);
+    command.args([
+        "--exact",
+        "controller::update::tests::zip_release_replaces_a_running_windows_executable",
+    ]);
+    command.env(FIXTURE_ENV, "1").kill_on_drop(true);
+    let mut child = mj_core::subprocess::spawn_async_child(&mut command)
+        .expect("start installed executable using its canonical path");
+
+    let archive = release_zip(&[("release/mj.exe", b"replacement executable")]);
+    {
+        let staging = tempfile::tempdir_in(root.path()).expect("staging directory");
+        stage_release_archive("release.zip", &archive, staging.path()).expect("stage zip");
+        let staged = staging.path().join(WINDOWS_BIN_NAME);
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&staged)
+            .expect("hold staged binary open without delete sharing");
+        let error = replace_installed_file(&staged, &executable)
+            .expect_err("locked staged binary should prevent promotion");
+        assert_eq!(error.to_string(), "promote staged binary");
+    }
+    assert_eq!(
+        std::fs::metadata(&executable).unwrap().len(),
+        std::fs::metadata(&fixture).unwrap().len()
+    );
+
+    // Hold a leftover without delete sharing so this also exercises the
+    // sweep's failure handling on systems that can unlink a mapped image.
+    let stale = fake_update_executable(&root.path().join(".mj-replaced-mj.exe-locked"));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&stale)
+        .expect("hold leftover open without delete sharing");
+    install_release_archive(&executable, "release.zip", &archive).expect("replace running image");
+    assert_eq!(
+        std::fs::read(&executable).unwrap(),
+        b"replacement executable"
+    );
+    assert!(stale.is_file(), "the sweep leaves files it cannot delete");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the old executable is still running"
+    );
+    child
+        .kill()
+        .await
+        .expect("stop and reap installed executable");
+    drop(lock);
+    sweep_replaced_files(root.path());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 }
 
 /// Serves canned bodies per path prefix from a loopback port and returns
