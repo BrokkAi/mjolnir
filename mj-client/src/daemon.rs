@@ -3,6 +3,7 @@ mod chunk_bytes;
 pub mod connector;
 pub mod login_terminal;
 pub mod ssh;
+mod ssh_http_proxy;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;

@@ -142,17 +142,10 @@ impl ApiClient {
         if let Some((base_url, token)) = client.direct_api_endpoint(identity)? {
             let http = http_client(None, None)?;
             probe_api(&http, &base_url).await?;
-            let lease = client.ssh_lease();
-            if lease.is_some() {
-                anyhow::ensure!(
-                    mj_client::http::prove_http_endpoint(&http, &base_url, &token).await?,
-                    "The SSH HTTP forward could not prove the daemon's identity"
-                );
-            }
             let mut api = Self::with_http(base_url, token, http);
             api.daemon_on_client_filesystem = client.shares_client_filesystem(identity);
             api.daemon_instance = Some(identity.instance_id.clone());
-            api._ssh_lease = lease;
+            api._ssh_lease = client.ssh_lease();
             return Ok(api);
         }
 

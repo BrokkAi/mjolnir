@@ -2882,12 +2882,19 @@ esac
             ) {
                 return;
             }
-            for (state, idle) in [("legacy-workers", false), ("legacy-idle", true)] {
+            for (state, pending, recreate) in [
+                ("legacy-workers", false, false),
+                ("legacy-idle", true, false),
+                ("legacy-idle", false, true),
+            ] {
                 engine_state(state);
                 fs::write(data_dir().join("engine.calls"), "").unwrap();
                 let spec = configure_container().await;
-                let (listener, _) = fake_daemon(0).await;
+                let (listener, metadata) = fake_daemon(0).await;
                 set_endpoint(&listener);
+                if pending {
+                    write_container_owner(&owner(&metadata, CONTAINER_ID, &spec.name)).unwrap();
+                }
                 let identity = DaemonIdentity {
                     instance_id: state.into(),
                     build_version: this_build().published(),
@@ -2911,13 +2918,16 @@ esac
                 let metadata = read_metadata_any().unwrap();
                 let owner = read_container_owner().unwrap().unwrap();
                 assert!(owner.matches(&metadata));
+                if pending {
+                    assert_eq!(owner.token, "lifecycle-test");
+                }
                 let calls = calls();
-                assert!(calls.contains("top test-container-id pid"));
-                assert_eq!(calls.contains("rm --force test-container-id"), idle);
+                assert_eq!(calls.contains("top test-container-id pid"), !pending);
+                assert_eq!(calls.contains("rm --force test-container-id"), recreate);
                 assert!(!calls.contains("stop test-container-id"));
                 assert_eq!(
                     owner.container_id,
-                    if idle {
+                    if recreate {
                         "recreated-container-id"
                     } else {
                         CONTAINER_ID
@@ -2925,10 +2935,10 @@ esac
                 );
                 assert_eq!(
                     calls.contains("--env=MJ_DAEMON_API_LISTEN=0.0.0.0:8788"),
-                    idle
+                    recreate
                 );
-                assert_eq!(calls.contains("--env=MJ_DAEMON_API_TOKEN"), idle);
-                if idle {
+                assert_eq!(calls.contains("--env=MJ_DAEMON_API_TOKEN"), recreate);
+                if recreate {
                     let endpoint = read_api_endpoint().unwrap().unwrap();
                     assert_eq!(endpoint.instance_id, state);
                     assert_eq!(owner.api_address, Some(endpoint.address));

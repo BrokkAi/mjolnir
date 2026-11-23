@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::{HttpProof, MAX_PROOF_RESPONSE_BYTES, proof_nonce, verify_http_api_proof};
 
-use super::DaemonEndpoint;
+use super::{DaemonEndpoint, ssh_http_proxy::SshHttpProxy};
 use crate::build_identity::{BuildIdentity, this_build};
 
 /// Whether discovery may start the remote daemon.
@@ -158,8 +158,9 @@ pub async fn discover(
 /// it never stops the remote daemon.
 pub struct SshLease {
     pub local_addr: std::net::SocketAddr,
-    pub local_api_addr: Option<std::net::SocketAddr>,
-    pub endpoint: DaemonEndpoint,
+    local_api_addr: Option<std::net::SocketAddr>,
+    endpoint: DaemonEndpoint,
+    http_proxy: Option<SshHttpProxy>,
     child: mj_core::subprocess::SupervisedChild,
     #[cfg(windows)]
     client_log: Option<tempfile::TempPath>,
@@ -167,13 +168,11 @@ pub struct SshLease {
 
 impl SshLease {
     pub fn api_endpoint(&self) -> Option<(String, String)> {
-        let address = self.local_api_addr?;
-        let token = self
-            .endpoint
-            .api_token
-            .as_ref()
-            .filter(|token| !token.is_empty())?;
-        Some((format!("http://{address}"), token.clone()))
+        self.http_proxy.as_ref().map(SshHttpProxy::endpoint)
+    }
+
+    pub(super) fn remote_config_path(&self) -> Option<&std::path::Path> {
+        self.endpoint.config_path.as_deref()
     }
 
     /// Credentials for the forwarded connection, never persisted to disk.
@@ -192,6 +191,9 @@ impl SshLease {
     }
 
     pub async fn terminate(&mut self) -> Result<()> {
+        if let Some(proxy) = self.http_proxy.take() {
+            proxy.stop().await;
+        }
         self.child.terminate().await?;
         Ok(())
     }
@@ -313,6 +315,7 @@ async fn open_with_ports(
             local_addr,
             local_api_addr,
             endpoint: endpoint.clone(),
+            http_proxy: None,
             child,
             #[cfg(windows)]
             client_log,
@@ -366,7 +369,14 @@ async fn open_with_ports(
         tokio::select! {
             outcome = ready => {
                 match outcome? {
-                    None => return Ok(lease),
+                    None => {
+                        if let Some((address, token)) =
+                            lease.local_api_addr.zip(lease.endpoint.api_token.take())
+                        {
+                            lease.http_proxy = Some(SshHttpProxy::start(address, token).await?);
+                        }
+                        return Ok(lease);
+                    }
                     // The daemon was replaced after discovery: the new endpoint
                     // is the state change that restarts the tunnel.
                     Some(fresh) => {
@@ -483,20 +493,12 @@ mod tests {
         const TOKEN: &str = "proof-test-secret";
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let base_url = format!("http://{address}");
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = reqwest::Client::builder().no_proxy().build().unwrap();
-
         let server = async {
             for (status, valid_mac) in [
                 ("401 Unauthorized", false),
                 ("200 OK", false),
                 ("200 OK", true),
-            ]
-            .into_iter()
-            .cycle()
-            .take(6)
-            {
+            ] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = BufReader::new(stream);
                 let mut line = String::new();
@@ -533,14 +535,6 @@ mod tests {
             for expected in [false, false, true] {
                 assert_eq!(
                     super::prove_http_listener(address, TOKEN).await.unwrap(),
-                    expected
-                );
-            }
-            for expected in [false, false, true] {
-                assert_eq!(
-                    crate::http::prove_http_endpoint(&http, &base_url, TOKEN)
-                        .await
-                        .unwrap(),
                     expected
                 );
             }

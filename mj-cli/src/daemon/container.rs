@@ -101,11 +101,15 @@ pub(super) async fn launch(
     let mut container_id = launch_container_id(spec).await?;
     let mut api_port = published_port_optional(program, &spec.name, CONTAINER_API_PORT).await?;
     if api_port.is_none() {
-        if processes_in(program, &container_id)
-            .await?
-            .is_some_and(|count| count > 1)
+        let pending_prior = prior_unpublished.is_some_and(|prior| {
+            prior.runtime == spec.runtime() && prior.container_id == container_id
+        });
+        if pending_prior
+            || processes_in(program, &container_id)
+                .await?
+                .is_some_and(|count| count > 1)
         {
-            tracing::info!(container = %spec.name, "kept existing container ports to preserve active workers");
+            tracing::info!(container = %spec.name, pending_prior, "kept existing container ports to preserve active workers or a pending daemon launch");
         } else {
             let removed = engine(program, ["rm", "--force", &container_id], QUERY_TIMEOUT).await?;
             if !removed.status.success() {

@@ -1,6 +1,6 @@
 //! Typed access to the daemon's direct HTTP API.
 use crate::daemon::{DaemonClient, ssh::SshLease};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use hmac::{Hmac, KeyInit, Mac};
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -48,32 +48,6 @@ pub fn verify_http_api_proof(token: &str, nonce: &str, mac_hex: &str) -> bool {
             .expect("checked ASCII hexadecimal");
     }
     proof_mac(token, nonce).verify_slice(&bytes).is_ok()
-}
-
-/// Challenge a forward using a client without default authorization headers.
-pub async fn prove_http_endpoint(
-    http: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-) -> Result<bool> {
-    let nonce = proof_nonce()?;
-    let url = format!(
-        "{}/api/v1/prove?nonce={nonce}",
-        base_url.trim_end_matches('/')
-    );
-    let mut response = http.get(url).send().await?;
-    if response.status() != StatusCode::OK {
-        return Ok(false);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if body.len() + chunk.len() > MAX_PROOF_RESPONSE_BYTES {
-            return Ok(false);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(serde_json::from_slice::<HttpProof>(&body)
-        .is_ok_and(|proof| verify_http_api_proof(token, &nonce, &proof.mac)))
 }
 
 pub struct HttpDaemonClient {
@@ -166,14 +140,7 @@ impl HttpDaemonClient {
         let mut http = Self::new(base_url, token)?;
         http.shares_client_filesystem = client.shares_client_filesystem(&identity);
         http.instance_id = Some(identity.instance_id);
-        let lease = client.ssh_lease();
-        if lease.is_some() {
-            ensure!(
-                prove_http_endpoint(&http.http, &http.base_url, &http.token).await?,
-                "The SSH HTTP forward could not prove the daemon's identity"
-            );
-        }
-        http._ssh_lease = lease;
+        http._ssh_lease = client.ssh_lease();
         Ok(http)
     }
 
