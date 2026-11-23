@@ -7144,6 +7144,7 @@ pub(crate) async fn start_test_dashboard_http_api_on(
     .unwrap();
     options.shutdown = shutdown.clone();
     options.set_loopback_token(token.into());
+    options.set_api_token("public-test-token".into());
     options.set_subagent_backend(Arc::new(crate::server_runtime::api::ApiBackend::new(
         state.session_manager.client(),
         Arc::new(|_| None),
@@ -12392,89 +12393,6 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
 }
 
 #[tokio::test]
-async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection_usable() {
-    use mj_client::runtime_feed::{RuntimeCursor, RuntimeFrame, RuntimeProjection};
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let mut projection = RuntimeProjection::default();
-    projection
-        .metadata
-        .workspace_names
-        .insert("large".into(), "x".repeat(MAX_FRAME_BYTES + 1024));
-    let expected = projection.clone();
-    let sender = mj_core::runtime::spawn(async move {
-        let mut stream = TcpStream::connect(address).await.unwrap();
-        for (request_id, result) in [
-            (
-                7,
-                Ok(DaemonReply::RuntimeChanges(Box::new(
-                    RuntimeFrame::Snapshot {
-                        cursor: RuntimeCursor {
-                            alert_sequence: 0,
-                            incarnation: "test".into(),
-                            sequence: 1,
-                            subagent_parents: Default::default(),
-                        },
-                        projection: Box::new(projection),
-                    },
-                ))),
-            ),
-            (8, Ok(DaemonReply::Pong)),
-        ] {
-            super::serve::write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
-                    request_id,
-                    result,
-                },
-            )
-            .await
-            .unwrap();
-        }
-    });
-    let (mut stream, _) = listener.accept().await.unwrap();
-    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
-    assert_eq!(response.request_id, 7);
-    let Ok(DaemonReply::RuntimeChanges(frame)) = response.result else {
-        panic!("expected complete publication")
-    };
-    let RuntimeFrame::Snapshot { projection, .. } = *frame else {
-        panic!("expected snapshot")
-    };
-    assert_eq!(*projection, expected);
-    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
-    assert_eq!(response.request_id, 8);
-    assert!(matches!(response.result, Ok(DaemonReply::Pong)));
-    sender.await.unwrap();
-}
-
-#[tokio::test]
-async fn interrupted_runtime_fragments_never_publish_partial_state() {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let sender = mj_core::runtime::spawn(async move {
-        let mut stream = TcpStream::connect(address).await.unwrap();
-        write_frame(
-            &mut stream,
-            &ResponseEnvelope {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: 7,
-                result: Ok(DaemonReply::ReplyChunk {
-                    bytes: b"{\"Snapshot\":".to_vec(),
-                    finished: false,
-                }),
-            },
-        )
-        .await
-        .unwrap();
-    });
-    let (mut stream, _) = listener.accept().await.unwrap();
-    assert!(mj_client::daemon::read_response(&mut stream).await.is_err());
-    sender.await.unwrap();
-}
-
-#[tokio::test]
 async fn retry_admission_reserves_only_the_matching_move_destination() {
     let Some(_writer) =
         startup_prompt_test_store("retry_admission_reserves_only_the_matching_move_destination")
@@ -16764,12 +16682,10 @@ async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
     assert!(state.owner().lifecycle.is_empty());
 }
 
-#[cfg(unix)]
-// Hard-won: d5c0c25: adoption closed the server socket although the client retained it for reuse.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adoption_refusal_keeps_the_daemon_connection_reusable() {
+#[tokio::test]
+async fn http_adoption_delivers_final_failure_for_a_tracked_session() {
     let Some(_writer) =
-        startup_prompt_test_store("adoption_refusal_keeps_the_daemon_connection_reusable")
+        startup_prompt_test_store("http_adoption_delivers_final_failure_for_a_tracked_session")
     else {
         return;
     };
@@ -16779,26 +16695,10 @@ async fn adoption_refusal_keeps_the_daemon_connection_reusable() {
         SessionState::Running,
     );
     mj_controller::database::save_session(&session).unwrap();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let metadata = test_metadata(listener.local_addr().unwrap());
-    let server_metadata = metadata.clone();
-    let server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(
-            stream,
-            server_metadata,
-            test_runtime_state(),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    });
-    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
-        .await
-        .unwrap();
-    let error = client
+    let (http, shutdown, server) = start_test_dashboard_http_api(test_runtime_state()).await;
+    let error = http
         .adopt_recovery(
-            mj_client::daemon::RecoveryAdoptionRequest {
+            RecoveryAdoptionRequest {
                 session_id: session.id,
                 target_id: "unused".into(),
                 profile: None,
@@ -16810,12 +16710,8 @@ async fn adoption_refusal_keeps_the_daemon_connection_reusable() {
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("already tracked"));
-    client
-        .request(DaemonAction::Ping)
-        .await
-        .expect("same connection remains usable after adoption's final reply");
-    drop(client);
-    server.await.unwrap();
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[cfg(unix)]
@@ -16866,38 +16762,25 @@ async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
         },
     );
     config.save().unwrap();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let metadata = test_metadata(listener.local_addr().unwrap());
-    let server_metadata = metadata.clone();
-    let server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(
-            stream,
-            server_metadata,
-            test_runtime_state(),
-            CancellationToken::new(),
-        )
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (_, shutdown, server) =
+        start_test_dashboard_http_api_on(test_runtime_state(), listener).await;
+    let mut response = reqwest::Client::new()
+        .post(format!("http://{address}/api/v1/recovery/adopt"))
+        .bearer_auth("direct-test-token")
+        .json(&RecoveryAdoptionRequest {
+            session_id: "missing-orphan".into(),
+            target_id: "blocked".into(),
+            profile: None,
+            bundle: None,
+            all_instances: false,
+        })
+        .send()
         .await
+        .unwrap()
+        .error_for_status()
         .unwrap();
-    });
-    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
-    write_frame(
-        &mut stream,
-        &RequestEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: 1,
-            token: metadata.token,
-            action: DaemonAction::AdoptRecovery(mj_client::daemon::RecoveryAdoptionRequest {
-                session_id: "missing-orphan".into(),
-                target_id: "blocked".into(),
-                profile: None,
-                bundle: None,
-                all_instances: false,
-            }),
-        },
-    )
-    .await
-    .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !root.join("scan-started").exists() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -16917,18 +16800,17 @@ async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
         .unwrap();
     if std::env::var("MJ_ADOPTION_SCAN_MODE").unwrap() == "handoff" {
         mj_controller::upgrade::gate().begin_draining();
-        let response: ResponseEnvelope =
-            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(response.result.is_err());
+        let line = tokio::time::timeout(Duration::from_secs(5), response.chunk())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<mj_client::http::AdoptionEvent>(&line).unwrap(),
+            mj_client::http::AdoptionEvent::Failed { .. }
+        ));
     }
-    drop(stream);
-    tokio::time::timeout(Duration::from_secs(5), server)
-        .await
-        .expect("cancelled discovery must stop and reap its subprocess")
-        .unwrap();
+    drop(response);
     tokio::time::timeout(Duration::from_secs(5), async {
         while TestProxyGroupGuard::group_exists(group).unwrap() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -16941,78 +16823,8 @@ async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
             .unwrap()
             .is_none()
     );
-}
-
-#[cfg(unix)]
-// Hard-won: d9dcf7c: a backpressured adoption frame stopped polling daemon drain.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adoption_backpressured_response_releases_admission_on_handoff() {
-    use std::os::fd::AsRawFd;
-    const NAME: &str = "adoption_backpressured_response_releases_admission_on_handoff";
-    let Some(_writer) = startup_prompt_test_store(NAME) else {
-        return;
-    };
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let client = tokio::net::TcpSocket::new_v4().unwrap();
-    // These fixture capacities force the peer to stop accepting a frame much
-    // larger than a pipe buffer. They do not constrain production sockets.
-    client.set_recv_buffer_size(4096).unwrap();
-    let client = client
-        .connect(listener.local_addr().unwrap())
-        .await
-        .unwrap();
-    let (mut stream, _) = listener.accept().await.unwrap();
-    let capacity: libc::c_int = 4096;
-    // SAFETY: a live socket descriptor and an initialized integer of the
-    // documented SO_SNDBUF size; setsockopt copies it before returning.
-    assert_eq!(
-        unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                (&capacity as *const libc::c_int).cast(),
-                std::mem::size_of_val(&capacity) as libc::socklen_t,
-            )
-        },
-        0
-    );
-    let admission = mj_controller::upgrade::activity_unless_draining("adoption install").unwrap();
-    let server = mj_core::runtime::spawn(async move {
-        let result = super::serve::write_adoption_response(
-            &mut stream,
-            ResponseEnvelope {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: 1,
-                result: Ok(DaemonReply::AdoptionWaiting {
-                    blockers: vec!["x".repeat(256 * 1024)],
-                    destroy_command: None,
-                }),
-            },
-            &CancellationToken::new(),
-        )
-        .await;
-        drop(admission);
-        result
-    });
-    tokio::time::timeout(Duration::from_secs(5), client.readable())
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::task::yield_now().await;
-    assert!(
-        !server.is_finished(),
-        "the peer is not consuming the blocked progress frame"
-    );
-    mj_controller::upgrade::gate().begin_draining();
-    let error = tokio::time::timeout(Duration::from_secs(5), server)
-        .await
-        .expect("socket backpressure must not retain adoption admission")
-        .unwrap()
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("handoff"));
-    assert!(mj_controller::upgrade::active_labels().is_empty());
-    drop(client);
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 // Hard-won: 1f0ee89: a retry's orphan-destroy command could not reach its tracked worker.
@@ -17071,11 +16883,13 @@ fn adoption_waits_leave_the_blocking_pool_available() {
         for _ in 0..3 {
             let cancelled = release.clone();
             let (entered, started) = tokio::sync::oneshot::channel();
-            waits.push(super::serve::spawn_adoption_operation(async move {
-                entered.send(()).unwrap();
-                cancelled.cancelled().await;
-                Ok(())
-            }));
+            waits.push(super::terminal_streams::spawn_adoption_operation(
+                async move {
+                    entered.send(()).unwrap();
+                    cancelled.cancelled().await;
+                    Ok(())
+                },
+            ));
             // Make every operation enter its wait before asking for the next.
             // Cancellation below also releases waits if the regression returns.
             if tokio::time::timeout(Duration::from_secs(5), started)
@@ -18514,4 +18328,117 @@ async fn terminal_recovery_destroy_holds_bounded_admission_after_disconnect() {
     .expect("the detached destroy must finish and release admission");
     assert!(!gate.destroys_hold_the_stop());
     assert!(gate.try_close());
+}
+
+#[tokio::test]
+async fn http_runtime_changes_serves_large_frames_and_waits_without_upgrade_admission() {
+    use mj_client::runtime_feed::RuntimeFrame;
+    let Some(_writer) = startup_prompt_test_store(
+        "http_runtime_changes_serves_large_frames_and_waits_without_upgrade_admission",
+    ) else {
+        return;
+    };
+    let state = test_runtime_state();
+    let text = "x".repeat(MAX_FRAME_BYTES + 1024);
+    let mut config = Config::default();
+    config.bundles.insert(
+        "large".into(),
+        mj_core::config::ProjectBundle {
+            primary_repo: text.clone(),
+            repositories: Vec::new(),
+        },
+    );
+    state.owner().install_config(config);
+    let (http, shutdown, server) = start_test_dashboard_http_api(state.clone()).await;
+    let RuntimeFrame::Snapshot { cursor, projection } =
+        http.runtime_changes(None, false).await.unwrap()
+    else {
+        panic!("initial runtime response must be a snapshot");
+    };
+    assert_eq!(
+        projection.metadata.installed_config().bundles["large"].primary_repo,
+        text
+    );
+    let RuntimeFrame::Delta { from, cursor, .. } = http
+        .runtime_changes(Some(cursor.clone()), false)
+        .await
+        .unwrap()
+    else {
+        panic!("a current cursor must get a delta");
+    };
+    assert_eq!(from, cursor);
+    let mut expired = cursor.clone();
+    expired.incarnation = "expired-daemon".into();
+    assert!(matches!(
+        http.runtime_changes(Some(expired), false).await.unwrap(),
+        RuntimeFrame::Snapshot { .. }
+    ));
+
+    let gate = mj_controller::upgrade::gate();
+    gate.begin_draining();
+    let wait = http.runtime_changes(Some(cursor), true);
+    tokio::pin!(wait);
+    tokio::select! {
+        result = &mut wait => panic!("long poll must remain pending during drain: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+    }
+    assert!(
+        gate.try_close(),
+        "the long poll must not hold admission: {:?}",
+        gate.blockers()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    shutdown.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(5), wait)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.is::<DaemonTransportLost>(), "{error:#}");
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn streaming_operations_require_terminal_auth_and_invalid_login_refuses_before_streaming() {
+    let state = test_runtime_state();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (http, shutdown, server) = start_test_dashboard_http_api_on(state, listener).await;
+    let client = reqwest::Client::new();
+    let adoption = serde_json::json!({
+        "session_id": "orphan", "target_id": "bare", "all_instances": false,
+    });
+    for (path, body) in [
+        (
+            "runtime/changes",
+            serde_json::json!({"wait": false, "subagent_parents": []}),
+        ),
+        ("recovery/adopt", adoption),
+        (
+            "login-terminal",
+            serde_json::json!({"profile_id": "missing", "cols": 80, "rows": 24}),
+        ),
+        (
+            "login-terminal/missing/input",
+            serde_json::json!({"Resize": {"cols": 80, "rows": 24}}),
+        ),
+    ] {
+        let response = client
+            .post(format!("http://{address}/api/v1/{path}"))
+            .bearer_auth("public-test-token")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "{path}");
+    }
+    let Err(error) = http.open_login_terminal("missing".into(), 80, 24).await else {
+        panic!("an unknown profile must be rejected before response headers");
+    };
+    let error = error.downcast::<mj_client::http::HttpApiError>().unwrap();
+    assert_eq!(error.status, 400);
+    assert!(error.message.contains("missing"));
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }

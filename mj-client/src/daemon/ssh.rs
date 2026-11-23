@@ -459,7 +459,7 @@ pub(super) async fn prove_stream(stream: &mut tokio::net::TcpStream, token: &str
         },
     )
     .await?;
-    let response = super::read_response(stream).await?;
+    let response = super::read_frame::<super::ResponseEnvelope>(stream).await?;
     Ok(
         matches!(response.result, Ok(super::DaemonReply::IdentityProof { mac })
         if super::identity_proof(token, &nonce).verify_slice(&mac).is_ok()),

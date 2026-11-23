@@ -6,7 +6,6 @@ use crate::http::{
 };
 pub mod connector;
 pub mod login_terminal;
-mod reply_fragment;
 pub mod ssh;
 mod ssh_http_proxy;
 use crate::executable::describe_running_daemon_and_client_builds;
@@ -939,11 +938,6 @@ pub enum DaemonAction {
     ProveIdentity {
         nonce: String,
     },
-    LoginTerminal {
-        profile_id: String,
-        cols: u16,
-        rows: u16,
-    },
     Ping,
     /// Frozen upgrade handshake, available from daemon protocol 33 onward.
     /// Busy replies leave every operation and control channel running.
@@ -962,12 +956,6 @@ pub enum DaemonAction {
     /// subset: a client asks only a daemon of its own protocol.
     Identity,
     Status,
-    AdoptRecovery(RecoveryAdoptionRequest),
-    RuntimeChanges {
-        cursor: Option<crate::runtime_feed::RuntimeCursor>,
-        wait: bool,
-        subagent_parents: std::collections::BTreeSet<String>,
-    },
     Stop,
 }
 
@@ -1054,18 +1042,9 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
-    AdoptionInstalled {
-        session_id: String,
-    },
-    AdoptionWaiting {
-        blockers: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        destroy_command: Option<String>,
-    },
     IdentityProof {
         mac: Vec<u8>,
     },
-    LoginTerminalReady,
     Pong,
     UpgradePending,
     /// Labels for the work holding an automatic handoff open, empty when
@@ -1073,23 +1052,7 @@ pub enum DaemonReply {
     UpgradeBlockers(Vec<String>),
     Identity(DaemonIdentity),
     Status(DaemonStatus),
-    RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
-    /// Transport fragments of one chunked reply (see
-    /// [`DaemonReply::is_chunked`]); never exposed to consumers.
-    ReplyChunk {
-        #[serde(with = "reply_fragment")]
-        bytes: Vec<u8>,
-        finished: bool,
-    },
     Done,
-}
-
-impl DaemonReply {
-    /// Replies that can outgrow one frame. The daemon sends them as
-    /// [`DaemonReply::ReplyChunk`] fragments and the client reassembles them.
-    pub fn is_chunked(&self) -> bool {
-        matches!(self, Self::RuntimeChanges(_))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1511,46 +1474,7 @@ pub async fn read_frame<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&body).context("decode daemon frame")
 }
 
-/// Read one reply, reassembling a chunked one before exposing it. All
-/// fragments belong to the same response; disconnects discard partial state.
-pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
-    let mut response: ResponseEnvelope = read_frame(stream).await?;
-    if !matches!(response.result, Ok(DaemonReply::ReplyChunk { .. })) {
-        return Ok(response);
-    }
-    let protocol_version = response.protocol_version;
-    let request_id = response.request_id;
-    let mut body = Vec::new();
-    loop {
-        ensure!(
-            response.protocol_version == protocol_version && response.request_id == request_id,
-            "daemon crossed reply fragment identities"
-        );
-        let Ok(DaemonReply::ReplyChunk { bytes, finished }) = response.result else {
-            bail!("daemon interrupted a chunked reply");
-        };
-        ensure!(!bytes.is_empty(), "empty reply fragment");
-        body.extend(bytes);
-        if finished {
-            break;
-        }
-        response = read_frame(stream).await?;
-    }
-    let reply: DaemonReply =
-        mj_core::runtime::spawn_blocking(move || serde_json::from_slice(&body))
-            .await
-            .context("reply decoder task failed")??;
-    ensure!(
-        reply.is_chunked(),
-        "daemon chunked a reply that is never chunked"
-    );
-    Ok(ResponseEnvelope {
-        protocol_version,
-        request_id,
-        result: Ok(reply),
-    })
-}
-
+/// Client for daemon management and HTTP endpoint discovery.
 pub struct DaemonClient {
     ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
     connector: Option<std::sync::Arc<connector::DaemonConnector>>,
@@ -1744,7 +1668,7 @@ impl DaemonClient {
         mut stream: TcpStream,
         request_id: u64,
     ) -> Result<ResponseEnvelope> {
-        let response = read_response(&mut stream).await.map_err(transport_lost)?;
+        let response: ResponseEnvelope = read_frame(&mut stream).await.map_err(transport_lost)?;
         ensure!(
             response.protocol_version == self.metadata.protocol_version,
             "daemon changed protocol"
@@ -1940,58 +1864,9 @@ impl DaemonClient {
     pub async fn adopt_recovery(
         &mut self,
         adoption: RecoveryAdoptionRequest,
-        mut progress: impl FnMut(RecoveryAdoptionProgress),
+        progress: impl FnMut(RecoveryAdoptionProgress),
     ) -> Result<()> {
-        let mut stream = self.take_stream()?;
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-        write_frame(
-            &mut stream,
-            &RequestEnvelope {
-                protocol_version: self.metadata.protocol_version,
-                request_id,
-                token: self.metadata.token.clone(),
-                action: DaemonAction::AdoptRecovery(adoption),
-            },
-        )
-        .await
-        .map_err(transport_lost)?;
-        loop {
-            let response = read_response(&mut stream).await.map_err(transport_lost)
-                .context("adoption connection ended before completion; check mj sessions, then rerun recover adopt if needed")?;
-            ensure!(
-                response.protocol_version == self.metadata.protocol_version,
-                "daemon changed protocol"
-            );
-            ensure!(
-                response.request_id == request_id,
-                "daemon crossed request IDs: expected {request_id}, received {}",
-                response.request_id
-            );
-            match response.result {
-                Ok(DaemonReply::AdoptionWaiting {
-                    blockers,
-                    destroy_command,
-                }) => {
-                    progress(RecoveryAdoptionProgress::Waiting {
-                        blockers,
-                        destroy_command,
-                    });
-                    continue;
-                }
-                Ok(DaemonReply::AdoptionInstalled { session_id }) => {
-                    progress(RecoveryAdoptionProgress::Installed { session_id });
-                    continue;
-                }
-                _ => {}
-            }
-            self.stream = Some(stream);
-            return match response.result {
-                Ok(DaemonReply::Done) => Ok(()),
-                Ok(reply) => bail!("unexpected recovery-adoption reply {reply:?}"),
-                Err(error) => bail!("{error}"),
-            };
-        }
+        self.http().await?.adopt_recovery(adoption, progress).await
     }
 
     pub async fn destroy_recovery(
@@ -2059,17 +1934,10 @@ impl DaemonClient {
         wait: bool,
         subagent_parents: std::collections::BTreeSet<String>,
     ) -> Result<crate::runtime_feed::RuntimeFrame> {
-        match self
-            .request(DaemonAction::RuntimeChanges {
-                cursor,
-                wait,
-                subagent_parents,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::RuntimeChanges(frame) => Ok(*frame),
-            reply => bail!("unexpected runtime changes reply {reply:?}"),
-        }
+            .runtime_changes_for_subagent_parents(cursor, wait, subagent_parents)
+            .await
     }
 
     pub async fn submit_session_command(
@@ -2476,8 +2344,8 @@ pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
 const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
-/// Terminal request-response operations use HTTP.
-pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 5;
+/// Terminal operations, including streaming and interactive requests, use HTTP.
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 6;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2707,9 +2575,8 @@ mod tests {
     // Hard-won: #1566: a cancelled request left its reply for the next request on a reused daemon connection.
     #[tokio::test]
     async fn cancelled_request_cannot_reuse_a_complete_or_partial_response() {
-        // Cancel before the reply, within its length header, within its body,
-        // and between fragments of a chunked response.
-        for prefix in [0, 2, 8, usize::MAX] {
+        // Cancel before the reply, within its length header, and within its body.
+        for prefix in [0, 2, 8] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let metadata = cancellation_metadata(listener.local_addr().unwrap());
             let (received, waiting) = tokio::sync::oneshot::channel();
@@ -2737,25 +2604,7 @@ mod tests {
                 let body = serde_json::to_vec(&response).unwrap();
                 let mut frame = (body.len() as u32).to_be_bytes().to_vec();
                 frame.extend(body);
-                let prefix = if prefix == usize::MAX {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: Ok(DaemonReply::ReplyChunk {
-                                bytes: vec![b'{'],
-                                finished: false,
-                            }),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    0
-                } else {
-                    stream.write_all(&frame[..prefix]).await.unwrap();
-                    prefix
-                };
+                stream.write_all(&frame[..prefix]).await.unwrap();
                 received.send(()).unwrap();
                 released.await.unwrap();
                 // Cancellation may already have closed the socket. Either result
@@ -2778,96 +2627,6 @@ mod tests {
             let error = client.request(DaemonAction::Ping).await.unwrap_err();
             assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
             assert!(error.downcast_ref::<DaemonTransportLost>().is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn adoption_progress_keeps_response_identity_and_cancel_closes_its_connection() {
-        for cancel in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let metadata = cancellation_metadata(listener.local_addr().unwrap());
-            let (release, released) = tokio::sync::oneshot::channel();
-            let server = mj_core::runtime::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(request.action, DaemonAction::AdoptRecovery(_)));
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        request_id: request.request_id,
-                        protocol_version: request.protocol_version,
-                        result: Ok(DaemonReply::AdoptionWaiting {
-                            blockers: vec!["current turn".into()],
-                            destroy_command: Some("mj recover destroy".into()),
-                        }),
-                    },
-                )
-                .await
-                .unwrap();
-                if cancel {
-                    let mut byte = [0u8; 1];
-                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
-                } else {
-                    released.await.unwrap();
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            request_id: request.request_id,
-                            protocol_version: request.protocol_version,
-                            result: Ok(DaemonReply::AdoptionInstalled {
-                                session_id: "orphan".into(),
-                            }),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            request_id: request.request_id,
-                            protocol_version: request.protocol_version,
-                            result: Ok(DaemonReply::Done),
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
-            });
-            let mut client = DaemonClient::connect(metadata).await.unwrap();
-            let mut installed_notice = None;
-            let (observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
-            {
-                let work = client.adopt_recovery(
-                    RecoveryAdoptionRequest {
-                        session_id: "orphan".into(),
-                        target_id: "podman".into(),
-                        profile: None,
-                        bundle: None,
-                        all_instances: false,
-                    },
-                    |event| match event {
-                        RecoveryAdoptionProgress::Waiting {
-                            blockers,
-                            destroy_command,
-                        } => observed.send((blockers, destroy_command)).unwrap(),
-                        RecoveryAdoptionProgress::Installed { session_id } => {
-                            installed_notice = Some(session_id);
-                        }
-                    },
-                );
-                tokio::pin!(work);
-                tokio::select! {
-                    result = &mut work => panic!("adoption ended before its boundary: {result:?}"),
-                    message = observations.recv() => assert_eq!(message.unwrap(), (vec!["current turn".to_owned()], Some("mj recover destroy".to_owned()))),
-                }
-                if !cancel {
-                    release.send(()).unwrap();
-                    work.await.unwrap();
-                }
-            }
-            assert_eq!(installed_notice.as_deref(), (!cancel).then_some("orphan"));
-            assert_eq!(client.stream.is_none(), cancel);
-            server.await.unwrap();
         }
     }
 

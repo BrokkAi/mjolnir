@@ -20,8 +20,9 @@ use mj_core::state::{
 };
 use mj_core::storage::{DetachedSessionDraft, RetiredDetachedDraft};
 
+#[cfg(test)]
 use mj_controller::controller::Controller;
-use mj_controller::controller::ResumeRepositorySourcePreflight;
+use mj_core::state::ResumeRepositorySourcePreflight;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary, RemoteRepositoryPreview, SessionOperationKind,
@@ -409,7 +410,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     ProjectDiscovery {
         context: String,
-        result: std::result::Result<mj_controller::project_picker::ProjectDiscovery, String>,
+        result: std::result::Result<mj_core::project_picker::ProjectDiscovery, String>,
     },
     PathCompletions {
         context: String,
@@ -603,25 +604,24 @@ pub(crate) struct PendingRuntimeUpdate {
 }
 
 impl DashboardIoUpdate {
-    pub(crate) fn awaiting_runtime(&self, controller: &Controller) -> bool {
+    pub(crate) fn awaiting_runtime(&self, config: &Config, state: &State) -> bool {
         match self {
             Self::CreatedBundle { result } => result.as_ref().as_ref().is_ok_and(|created| {
-                controller.config.bundles.get(&created.bundle_id) != Some(&created.bundle)
+                config.bundles.get(&created.bundle_id) != Some(&created.bundle)
             }),
             Self::RemovedBundle { bundle_id, result } => {
-                result.is_ok() && controller.config.bundles.contains_key(bundle_id)
+                result.is_ok() && config.bundles.contains_key(bundle_id)
             }
             // An imported session is stopped, and the feed carries only live
             // sessions; only the project it may have added arrives there.
             Self::ImportedSessionApplied { result } => {
                 result.as_ref().as_ref().is_ok_and(|applied| {
-                    controller.config.bundles.get(&applied.session.bundle_id)
-                        != Some(&applied.bundle)
+                    config.bundles.get(&applied.session.bundle_id) != Some(&applied.bundle)
                 })
             }
             Self::CreateSession(update) => matches!(update.as_ref(),
                 DashboardCreateSessionUpdate::Registered(registered)
-                    if !controller.state.sessions.contains_key(&registered.session.id)),
+                    if !state.sessions.contains_key(&registered.session.id)),
             _ => false,
         }
     }
@@ -669,7 +669,7 @@ impl DashboardContext {
         {
             return;
         }
-        if update.awaiting_runtime(&self.controller) {
+        if update.awaiting_runtime(&self.controller.config, &self.controller.state) {
             self.dashboard
                 .set_notice("Saved; waiting for the runtime view…");
             self.pending_runtime_updates.push(PendingRuntimeUpdate {
@@ -2270,7 +2270,7 @@ mod tests {
             config: Config::default(),
             state: State::default(),
         };
-        assert!(completion.awaiting_runtime(&controller));
+        assert!(completion.awaiting_runtime(&controller.config, &controller.state));
         controller.config.theme = mj_core::config::UiTheme::Light.into();
         controller.config.bundles.insert(
             "created".into(),
@@ -2279,7 +2279,7 @@ mod tests {
                 repositories: vec![],
             },
         );
-        assert!(!completion.awaiting_runtime(&controller));
+        assert!(!completion.awaiting_runtime(&controller.config, &controller.state));
         assert_eq!(
             controller.config.theme,
             mj_core::config::UiTheme::Light.into()
@@ -2291,7 +2291,7 @@ mod tests {
             .unwrap()
             .primary_repo = "replaced".into();
         assert!(
-            completion.awaiting_runtime(&controller),
+            completion.awaiting_runtime(&controller.config, &controller.state),
             "the same id cannot authorize a different saved project"
         );
     }
@@ -2315,11 +2315,11 @@ mod tests {
             config: Config::default(),
             state: State::default(),
         };
-        assert!(completion.awaiting_runtime(&controller));
+        assert!(completion.awaiting_runtime(&controller.config, &controller.state));
         let mut newer = session.clone();
         newer.session_title_override = Some("newer runtime title".into());
         controller.state.sessions.insert(newer.id.clone(), newer);
-        assert!(completion.awaiting_runtime(&controller));
+        assert!(completion.awaiting_runtime(&controller.config, &controller.state));
         controller.config.bundles.insert(
             session.bundle_id,
             ProjectBundle {
@@ -2327,7 +2327,7 @@ mod tests {
                 repositories: vec![],
             },
         );
-        assert!(!completion.awaiting_runtime(&controller));
+        assert!(!completion.awaiting_runtime(&controller.config, &controller.state));
         assert_eq!(
             controller.state.sessions["imported"].listed_title(),
             "newer runtime title"

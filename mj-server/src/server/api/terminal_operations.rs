@@ -1,4 +1,5 @@
 use super::dashboard::dashboard_backend;
+mod streams;
 use super::*;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, FromRequest, Request};
@@ -21,12 +22,14 @@ use mj_core::move_workspace::RetainedMoveSource;
 use mj_core::state::{MoveOutcome, MoveSessionRequest};
 use mj_core::suspend_consent::{SuspendConsent, SuspendPreflight};
 use std::collections::BTreeMap;
+pub use streams::{TerminalBytes, TerminalStream, TerminalStreams};
 
 pub(super) fn terminal_operation_routes(state: ServerState) -> Router<ServerState> {
     Router::new()
         .merge(machines::routes())
         .merge(setup::routes())
         .merge(repositories::routes())
+        .merge(streams::routes())
         .route("/sessions/{id}/interrupt-all", post(interrupt_all))
         .route("/sessions/{id}/commands", post(submit_session_command))
         .route("/sessions/{id}/startup-prompts", post(queue_startup_prompt))
@@ -103,7 +106,7 @@ async fn terminal_auth(
 }
 
 pub trait TerminalOperations:
-    MachinesOperations + SetupOperations + RepositoriesOperations
+    MachinesOperations + SetupOperations + RepositoriesOperations + TerminalStreams
 {
     fn terminal_transcription_available(
         self: Arc<Self>,

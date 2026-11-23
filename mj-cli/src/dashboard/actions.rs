@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
-use mj_controller::controller::ResumeRepositorySourceReceipt;
+use mj_core::state::ResumeRepositorySourceReceipt;
 use mj_tui::WebViewerAccess;
 use mj_tui::{DashboardAction, SessionOperationKind};
 

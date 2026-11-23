@@ -2210,7 +2210,8 @@ fn daemon_login_terminal_writes_daemon_profile_and_disconnect_kills_harness_grou
 #[cfg(unix)]
 fn daemon_login_cleanup(ending: u8) {
     use mj_client::daemon::login_terminal::{TerminalInput, TerminalOutput};
-    use mj_client::daemon::{DaemonClient, DaemonMetadata, read_frame, write_frame};
+    use mj_client::daemon::{DaemonMetadata, api_endpoint_path_in, read_api_endpoint_from};
+    use mj_client::http::{HttpApiError, HttpDaemonClient};
     use mj_core::config::{Config, HarnessKind, HarnessProfile};
     use std::time::{Duration, Instant};
     let storage = upgrade_storage();
@@ -2312,11 +2313,13 @@ if owner == 'login':
         .stderr(fs::File::create(storage.path().join("login-daemon.log")).unwrap());
     let mut daemon = command.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
-    let metadata = loop {
-        if let Ok(bytes) = fs::read(storage.path().join("data/daemon.json"))
+    let data = storage.path().join("data");
+    let (metadata, endpoint) = loop {
+        if let Ok(bytes) = fs::read(data.join("daemon.json"))
             && let Ok(metadata) = serde_json::from_slice::<DaemonMetadata>(&bytes)
+            && let Ok(Some(endpoint)) = read_api_endpoint_from(&api_endpoint_path_in(&data))
         {
-            break metadata;
+            break (metadata, endpoint);
         }
         assert!(
             daemon.try_wait().unwrap().is_none(),
@@ -2330,6 +2333,7 @@ if owner == 'login':
     };
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         tokio::time::timeout(Duration::from_secs(30), async {
+            let client = HttpDaemonClient::new(format!("http://{}", endpoint.address), endpoint.token).unwrap();
             // Hard-won: 9952f0845: preparation helpers in their own groups survived a closed login pane
             // The real managed Node probe owns this helper's separate group.
             // Its socket is a readiness barrier and a post-cancellation write
@@ -2337,9 +2341,8 @@ if owner == 'login':
             let preparation = tokio::net::TcpListener::from_std(preparation).unwrap();
             {
                 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-                let client = DaemonClient::connect(metadata.clone()).await.unwrap();
                 let terminal = client
-                    .login_terminal("preparation".into(), 80, 24)
+                    .open_login_terminal("preparation".into(), 80, 24)
                     .await
                     .unwrap();
                 eprintln!("login ending={ending}: waiting for helper readiness");
@@ -2402,14 +2405,13 @@ if owner == 'login':
                 if disconnect {
                     fs::write(home.join("cancel"), "").unwrap();
                 }
-                let client = DaemonClient::connect(metadata.clone()).await.unwrap();
                 let mut terminal = client
-                    .login_terminal("fixture".into(), 80, 24)
+                    .open_login_terminal("fixture".into(), 80, 24)
                     .await
                     .unwrap();
                 let mut transcript = Vec::new();
                 loop {
-                    match read_frame::<TerminalOutput>(&mut terminal.stream)
+                    match terminal.next_output()
                         .await
                         .unwrap()
                     {
@@ -2431,17 +2433,14 @@ if owner == 'login':
                     if mode == 1 {
                         // Fill the PTY input while the harness is not reading;
                         // disconnect must still reach the process-group owner.
-                        write_frame(
-                            &mut terminal.stream,
-                            &TerminalInput::Bytes(vec![b'x'; 131072]),
-                        )
+                        terminal.send_input(TerminalInput::Bytes(vec![b'x'; 131072]))
                         .await
                         .unwrap();
                     }
                     if mode == 2 {
                         prepare_upgrade(&metadata).await;
                         loop {
-                            match read_frame::<TerminalOutput>(&mut terminal.stream).await {
+                            match terminal.next_output().await {
                                 Ok(TerminalOutput::Failed(message)) => {
                                     assert!(message.contains("retry Login"));
                                     break;
@@ -2450,21 +2449,14 @@ if owner == 'login':
                                 // The daemon aborts disposable connection tasks on
                                 // handoff. The pane renders EOF as a retry notice.
                                 Err(error) => {
-                                    let error = error
-                                        .root_cause()
-                                        .downcast_ref::<std::io::Error>()
-                                        .expect("handoff connection I/O error");
-                                    assert!(matches!(
-                                        error.kind(),
-                                        std::io::ErrorKind::UnexpectedEof
-                                            | std::io::ErrorKind::ConnectionReset
-                                    ));
+                                    assert!(error.is::<mj_client::daemon::DaemonTransportLost>(), "{error:#}");
                                     break;
                                 }
                                 other => panic!("handoff did not end terminal: {other:?}"),
                             }
                         }
                     }
+                    let input = terminal.input();
                     drop(terminal);
                     loop {
                         #[cfg(target_os = "linux")]
@@ -2477,25 +2469,23 @@ if owner == 'login':
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                    if mode == 1 {
+                        let error = input.send_input(TerminalInput::Bytes(vec![b'x'])).await.unwrap_err();
+                        assert_eq!(error.downcast::<HttpApiError>().unwrap().status, 404);
+                    }
                 } else {
                     assert!(transcript.len() > 131072);
-                    write_frame(
-                        &mut terminal.stream,
-                        &TerminalInput::Resize {
+                    terminal.send_input(TerminalInput::Resize {
                             cols: 100,
                             rows: 40,
-                        },
-                    )
+                        })
                     .await
                     .unwrap();
-                    write_frame(
-                        &mut terminal.stream,
-                        &TerminalInput::Bytes(b"daemon-code\n".to_vec()),
-                    )
+                    terminal.send_input(TerminalInput::Bytes(b"daemon-code\n".to_vec()))
                     .await
                     .unwrap();
                     loop {
-                        match read_frame::<TerminalOutput>(&mut terminal.stream)
+                        match terminal.next_output()
                             .await
                             .unwrap()
                         {

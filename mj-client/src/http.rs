@@ -18,8 +18,10 @@ mod projects;
 mod sessions;
 mod terminal;
 mod terminal_operations;
+mod terminal_streams;
 pub use terminal::{ContainerSettingsRequest, ContainerSettingsResponse};
 pub use terminal_operations::*;
+pub use terminal_streams::*;
 mod workspaces;
 
 pub use workspaces::{
@@ -306,8 +308,8 @@ impl HttpDaemonClient {
         Ok(endpoint.clone())
     }
 
-    async fn send_once(&self, request: Request) -> Result<Response> {
-        let response = self.http.execute(request).await?;
+    async fn send_once(http: &reqwest::Client, request: Request) -> Result<Response> {
+        let response = http.execute(request).await?;
         if !response.status().is_success() {
             return Err(HttpApiError::from_response(response).await?.into());
         }
@@ -325,13 +327,16 @@ impl HttpDaemonClient {
         let mut request = configure(self.http.request(method, endpoint.url(path))).build()?;
         endpoint.authorize(&mut request)?;
         if !reconnect || !self.allow_reconnect {
-            return Ok((self.send_once(request).await?, endpoint.ssh_lease));
+            return Ok((
+                Self::send_once(&self.http, request).await?,
+                endpoint.ssh_lease,
+            ));
         }
         loop {
             let attempt = request
                 .try_clone()
                 .context("HTTP request body cannot be replayed")?;
-            match self.send_once(attempt).await {
+            match Self::send_once(&self.http, attempt).await {
                 Err(error)
                     if error
                         .downcast_ref::<HttpApiError>()
@@ -606,6 +611,153 @@ mod tests {
             })
         }));
         (client, reconnects)
+    }
+
+    #[tokio::test]
+    async fn runtime_changes_reads_reset_and_exposes_shutdown_without_replay() {
+        use crate::runtime_feed::RuntimeFrame;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&listener, None);
+        let server = async {
+            for (status, body) in [
+                (
+                    "200 OK",
+                    serde_json::to_string(&RuntimeFrame::ResetRequired).unwrap(),
+                ),
+                (UNAVAILABLE, HANDOFF.to_owned()),
+            ] {
+                let (request, path, _, json) = read_request(&listener).await;
+                assert_eq!(path, "POST /api/v1/runtime/changes HTTP/1.1");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&json).unwrap(),
+                    json!({"cursor": null, "wait": true, "subagent_parents": ["parent"]})
+                );
+                respond(request, status, &body).await;
+            }
+        };
+        let (_, ()) = tokio::join!(server, async {
+            let changes = || {
+                client.runtime_changes_for_subagent_parents(
+                    None,
+                    true,
+                    ["parent".to_owned()].into(),
+                )
+            };
+            assert!(matches!(
+                changes().await.unwrap(),
+                RuntimeFrame::ResetRequired
+            ));
+            assert!(changes().await.unwrap_err().is::<DaemonTransportLost>());
+        });
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn adoption_dispatches_split_ndjson_progress_before_the_final_result() {
+        use crate::daemon::{RecoveryAdoptionProgress, RecoveryAdoptionRequest};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&listener, None);
+        let (observed, mut progress) = tokio::sync::mpsc::unbounded_channel();
+        let server = async {
+            let (mut request, path, _, _) = read_request(&listener).await;
+            assert_eq!(path, "POST /api/v1/recovery/adopt HTTP/1.1");
+            request.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"event\":\"wait").await.unwrap();
+            request.write_all(b"ing\",\"blockers\":[\"active turn\"],\"destroy_command\":\"mj recover destroy\"}\n").await.unwrap();
+            match progress.recv().await.unwrap() {
+                RecoveryAdoptionProgress::Waiting {
+                    blockers,
+                    destroy_command,
+                } => {
+                    assert_eq!(blockers, ["active turn"]);
+                    assert_eq!(destroy_command.as_deref(), Some("mj recover destroy"));
+                }
+                other => panic!("unexpected progress {other:?}"),
+            }
+            request
+                .write_all(b"{\"event\":\"installed\",\"session_id\":\"orphan\"}\n")
+                .await
+                .unwrap();
+            assert!(
+                matches!(progress.recv().await.unwrap(), RecoveryAdoptionProgress::Installed { session_id } if session_id == "orphan")
+            );
+            request.write_all(b"{\"event\":\"done\"}\n").await.unwrap();
+        };
+        let request = RecoveryAdoptionRequest {
+            session_id: "orphan".into(),
+            target_id: "bare".into(),
+            profile: None,
+            bundle: None,
+            all_instances: false,
+        };
+        let (_, outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                server,
+                client.adopt_recovery(request, |event| observed.send(event).unwrap())
+            )
+        })
+        .await
+        .unwrap();
+        outcome.unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn login_input_stays_on_the_endpoint_that_opened_the_output() {
+        use crate::daemon::login_terminal::{TerminalInput, TerminalOutput};
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let next = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, Some(&next));
+        let server = async {
+            let (mut output, path, _, body) = read_request(&initial).await;
+            assert_eq!(path, "POST /api/v1/login-terminal HTTP/1.1");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"profile_id":"codex","cols":80,"rows":24})
+            );
+            output.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nx-mjolnir-terminal-id: abc123\r\nConnection: close\r\n\r\n{\"Bytes\":[65]}\n").await.unwrap();
+            let (input, path, headers, body) = read_request(&initial).await;
+            assert_eq!(path, "POST /api/v1/login-terminal/abc123/input HTTP/1.1");
+            assert_eq!(headers[AUTHORIZATION], "Bearer endpoint-secret");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"Resize":{"cols":120,"rows":40}})
+            );
+            respond(input, "204 No Content", "").await;
+            output
+                .write_all(b"{\"Exited\":{\"code\":7}}\n")
+                .await
+                .unwrap();
+        };
+        let exchange = async {
+            let mut terminal = client
+                .open_login_terminal("codex".into(), 80, 24)
+                .await
+                .unwrap();
+            *client.endpoint.write().await = EndpointState::new(
+                format!("http://{}", next.local_addr().unwrap()),
+                "other-secret".into(),
+            );
+            assert!(
+                matches!(terminal.next_output().await.unwrap(), TerminalOutput::Bytes(bytes) if bytes == b"A")
+            );
+            terminal
+                .send_input(TerminalInput::Resize {
+                    cols: 120,
+                    rows: 40,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                terminal.next_output().await.unwrap(),
+                TerminalOutput::Exited { code: 7 }
+            ));
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, exchange);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
