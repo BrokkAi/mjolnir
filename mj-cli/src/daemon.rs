@@ -3237,7 +3237,7 @@ esac
     }
 
     // Hard-won: #1568: readiness dropped a slow Ping before it could return Pong.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn startup_announces_while_a_ping_is_still_pending() {
         use std::cell::Cell;
 
@@ -3252,14 +3252,19 @@ esac
             |waited| announced.set(Some(waited)),
         );
         let peer = async {
+            // Keep the clock unpaused during real loopback TCP connect and frame
+            // exchange so Tokio's paused auto-advance cannot fire Connect's 1s
+            // timeout while the kernel completes the handshake.
             let (mut stream, _) = listener.accept().await.unwrap();
             let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
             assert!(matches!(ping.action, DaemonAction::Ping));
+            tokio::time::pause();
             tokio::time::sleep(START_NOTICE_DELAY + Duration::from_secs(1)).await;
             let announced_at = announced
                 .get()
                 .expect("startup notice while Ping is pending");
             assert!((START_NOTICE_DELAY..START_NOTICE_DELAY + RETRY_DELAY).contains(&announced_at));
+            tokio::time::resume();
             answer(&mut stream, ping, Ok(DaemonReply::Pong)).await;
         };
         let (outcome, ()) = tokio::join!(readiness, peer);

@@ -3168,13 +3168,12 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
         }
     }
 
-    let directory = tempfile::tempdir().unwrap();
     let session_id = "cancelled-without-checkpoint";
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
+        worker_root: PathBuf::from(format!("/workers/{session_id}")),
     }));
     let mut config = Config::default();
     config
@@ -3206,6 +3205,10 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     if !in_isolated_store("suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir") {
         return;
@@ -3310,6 +3313,10 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_id() {
     if !in_isolated_store(
         "suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_id",
@@ -3475,7 +3482,7 @@ fn suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpo
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
+        worker_root: PathBuf::from(format!("/workers/{session_id}")),
     }));
     session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path,
@@ -3512,6 +3519,10 @@ fn suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpo
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
     if !in_isolated_store("suspend_without_checkpoint_runs_before_close_before_parent_teardown") {
         return;
@@ -3634,7 +3645,7 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
+        worker_root: PathBuf::from(format!("/workers/{session_id}")),
     }));
     session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path,
@@ -3691,6 +3702,10 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     if !in_isolated_store("suspend_preflight_and_capture_align_session_keep_dir_shown_consent") {
         return;

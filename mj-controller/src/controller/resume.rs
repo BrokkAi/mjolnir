@@ -33,7 +33,7 @@ use mj_core::remote_git::is_github_https_url;
 use super::backend::{backend_locator, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
 use super::provisioning::{
-    ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
+    ProvisioningFailureDisposition, RepositorySeed, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
 };
 use super::readiness::{
@@ -2736,7 +2736,7 @@ impl Controller {
                         executor,
                         github_token.as_deref(),
                         ProvisioningFailureDisposition::Preserve,
-                        move_manifest,
+                        RepositorySeed::Restore(move_manifest),
                     )
                     .await?;
                     None
@@ -3494,7 +3494,7 @@ fn provision_with_cross_harness_handoff(
                     &provision_executor,
                     github_token,
                     ProvisioningFailureDisposition::Preserve,
-                    move_manifest,
+                    RepositorySeed::Restore(move_manifest),
                 ),
             )
         },

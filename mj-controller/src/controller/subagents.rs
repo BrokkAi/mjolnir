@@ -757,10 +757,8 @@ fn sibling_path(path: &Path, parent_id: &str, child_id: &str) -> Result<PathBuf>
         path.ends_with(parent_id),
         "parent target path does not end in its session id"
     );
-    Ok(path
-        .parent()
-        .context("parent target path has no parent")?
-        .join(child_id))
+    let parent = path.parent().context("parent target path has no parent")?;
+    Ok(mj_core::target_path::join(parent, Path::new(child_id)))
 }
 
 fn borrowed_locator(
@@ -1418,7 +1416,7 @@ mod tests {
             s.supervisors = supervisors;
             s.project_directory = Some(workdir.path().to_path_buf());
             s.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-                worker_root: workdir.path().join(id),
+                worker_root: PathBuf::from(format!("/workers/{id}")),
             }));
             crate::database::save_session(&s).unwrap();
         };

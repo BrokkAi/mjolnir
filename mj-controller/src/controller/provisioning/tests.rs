@@ -216,7 +216,7 @@ fn move_provisioning_uses_the_captured_manifest_without_a_session_checkpoint() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Preserve,
-                Some(&manifest),
+                RepositorySeed::Restore(Some(&manifest)),
             ),
         ))
         .unwrap_err();
@@ -540,7 +540,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
-                None,
+                RepositorySeed::ConfiguredBundle,
             ),
         ))
         .unwrap_err();
@@ -630,7 +630,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
-                None,
+                RepositorySeed::ConfiguredBundle,
             ),
         ))
         .unwrap_err();
@@ -1108,7 +1108,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 &executor,
                 None,
                 ProvisioningFailureDisposition::Discard,
-                None,
+                RepositorySeed::ConfiguredBundle,
             ),
         ))
         .unwrap_err();
