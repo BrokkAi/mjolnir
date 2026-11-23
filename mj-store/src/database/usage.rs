@@ -678,7 +678,7 @@ fn category_burn_observations(
                 }
             }
             if has_cost {
-                usd_samples.push(session_ticks as f64 / 1_000_000_000.0);
+                usd_samples.push(session_ticks as f64 / mj_core::usage::USD_TICKS_PER_DOLLAR as f64);
             }
         }
         if usd_samples.len() >= min_samples && duration_hours.len() >= min_samples {
@@ -1298,6 +1298,57 @@ mod tests {
                     created_at_epoch_seconds: base_ts + 20,
                 }
             ]
+        );
+        Ok(())
+    }
+
+    // Hard-won: master 1ab4934ad: category_burn_observations divided 1e10 USD ticks by 1e9, inflating local mean_api_usd 10x.
+    #[test]
+    fn category_burn_observations_scales_usd_ticks_by_ten_billion() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("store.sqlite3");
+        let conn = open(&path)?;
+        let ws: String =
+            conn.query_row("SELECT workspace_id FROM workspaces LIMIT 1", [], |r| {
+                r.get(0)
+            })?;
+        conn.execute(
+            "INSERT INTO session_contexts(session_id, bundle_id, workspace_id, created_at, profile_id)
+             VALUES ('s1', 'b1', ?1, '2026-11-23T00:00:00Z', 'codex3')",
+            params![ws],
+        )?;
+        conn.execute(
+            "INSERT INTO sessions(session_id, title, harness_kind, last_profile, target_template_id, state, updated_at)
+             VALUES ('s1', 't', 'codex', 'codex3', 'local', 'stopped', '2026-11-23T00:10:00Z')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO session_turn_selections(session_id, command_id, model, effort, profile, category)
+             VALUES ('s1', 'cmd-1', 'gpt-6.2-sol', 'medium', 'codex3', 'subtle')",
+            [],
+        )?;
+        // gpt-6.2-sol input rate is $2 / 1M tokens -> 500,000 input tokens = $1.00 (10^10 ticks).
+        let body = serde_json::json!({
+            "command_id": "cmd-1",
+            "completed_ordinal": 1,
+            "completed_at_ms": 600_000,
+            "outcome": {"kind": "completed", "stop_reason": "EndTurn"},
+            "usage": {"scope": "turn", "total_tokens": 500_000, "input_tokens": 500_000, "output_tokens": 0}
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body)
+             VALUES ('s1', 'cmd-1', 1, 0, ?1)",
+            params![body],
+        )?;
+        drop(conn);
+
+        let observed = load_category_burn_observations_from(&path, 1, 100)?;
+        let subtle = observed.get("subtle").expect("subtle observation");
+        assert!(
+            (subtle.mean_api_usd - 1.0).abs() < 1e-6,
+            "expected $1.00 for 10^10 USD ticks, got {}",
+            subtle.mean_api_usd
         );
         Ok(())
     }

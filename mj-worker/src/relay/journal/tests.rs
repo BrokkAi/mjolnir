@@ -2271,7 +2271,15 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
             .prompt_blocks_for_command(&claimed[0].command_id)
             .unwrap()
             .into_owned();
-        assert_eq!(&recovery_blocks[1..], original_blocks.as_slice());
+        assert_eq!(
+            claimed[0].command.prompt_blocks().unwrap().as_ref(),
+            original_blocks.as_slice()
+        );
+        assert_eq!(
+            recovery_blocks.len(),
+            1,
+            "recovery must not replay the request"
+        );
         let ContentBlock::Text(note) = &recovery_blocks[0] else {
             panic!("missing recovery note");
         };
@@ -2302,7 +2310,7 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
                 .unwrap()
                 .as_ref(),
             recovery_blocks.as_slice(),
-            "a second restart must not nest the note or lose the original request"
+            "a second restart must send only the recovery note"
         );
         relay
             .record_command_completed(
@@ -2612,8 +2620,11 @@ fn restart_continuation_moves_a_maximum_request_when_the_durable_queue_is_near_f
             .prompt_blocks_for_command(&recovered[0].command_id)
             .unwrap();
         assert_eq!(relay.snapshot.queued_prompts.len(), queued);
-        assert_eq!(&blocks[1..], original.prompt_blocks().unwrap().as_ref());
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            recovered[0].command.prompt_blocks().unwrap().as_ref(),
+            original.prompt_blocks().unwrap().as_ref()
+        );
+        assert_eq!(blocks.len(), 1);
     }
 }
 
@@ -2668,11 +2679,16 @@ fn restart_continuation_preserves_mailbox_wake_content_without_redelivering_its_
         let recovered = relay.claim_pending_commands(true).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
-            &recovered[0]
+            recovered[0].command.prompt_blocks().unwrap().as_ref(),
+            original_blocks.as_slice()
+        );
+        assert_eq!(
+            recovered[0]
                 .command
                 .prompt_blocks_for_command(&recovered[0].command_id)
-                .unwrap()[1..],
-            original_blocks.as_slice()
+                .unwrap()
+                .len(),
+            1
         );
         assert_eq!(recovered[0].command, original_command);
         if attempt == 1 {

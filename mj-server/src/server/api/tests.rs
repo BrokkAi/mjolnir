@@ -4167,6 +4167,66 @@ async fn a_forced_close_ignores_active_subagents() {
 }
 
 #[tokio::test]
+async fn destroy_accepts_a_retired_harness_session_but_refuses_an_unknown_id() {
+    let (app, mut actions, snapshots, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.retired_session_ids = BTreeSet::from(["retired-session".into()]).into();
+        });
+
+    let retired = ControllerAction::Destroy {
+        session_id: "retired-session".into(),
+    };
+    let unknown = ControllerAction::Destroy {
+        session_id: "unknown-session".into(),
+    };
+    {
+        let snapshot = snapshots.borrow();
+        assert!(snapshot.sessions.get("retired-session").is_none());
+        validate_action(&retired, &snapshot).unwrap();
+        assert_eq!(
+            validate_action(&unknown, &snapshot).unwrap_err().status,
+            StatusCode::NOT_FOUND
+        );
+        assert!(
+            serde_json::to_value(&*snapshot)
+                .unwrap()
+                .get("retired_session_ids")
+                .is_none()
+        );
+    }
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/unknown-session/destroy"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actions.try_recv().is_err());
+
+    let response = mj_core::runtime::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/retired-session/destroy"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(request.action, retired);
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+}
+
+#[tokio::test]
 async fn a_forced_close_rejects_removed_delete_branch_field() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app

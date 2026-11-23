@@ -119,6 +119,20 @@ pub fn materialized_session(session_id: &str) -> MaterializedSession {
     }
 }
 
+pub fn retire_test_harness(session_id: &str) -> Result<()> {
+    let id = session_id.to_owned();
+    submit_database_write("install retired harness fixture", move |connection| {
+        ensure!(
+            connection.execute(
+                "UPDATE sessions SET harness_kind='legacy-test-harness' WHERE session_id=?1",
+                [&id],
+            )? == 1,
+            "missing session fixture {id}"
+        );
+        Ok(())
+    })
+}
+
 pub fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,

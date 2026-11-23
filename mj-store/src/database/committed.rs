@@ -51,6 +51,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("session_mount_access", "session", "session_id"),
         ("session_checkpoints", "session", "session_id"),
         ("environment_bindings", "environment_owner", "session_id"),
+        ("environments", "environment", "owner_session_id"),
         ("subagent_sessions", "relation", "child_session_id"),
         ("subagent_preference", "preference", "profile_id"),
         ("oracle_preference", "oracle_preference", "profile_id"),
@@ -137,6 +138,7 @@ pub(super) fn begin_operation(path: &Path) {
 pub struct CommittedState {
     pub sequence: u64,
     pub state: State,
+    pub retired_container_allocations: RetiredContainerAllocations,
     pub moves: SnapshotMap<String, mj_core::state::MoveOperation>,
     pub native_agents: SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>,
     /// Each session's latest startup group, keyed by session. A session with
@@ -282,6 +284,9 @@ impl CommittedState {
                 .insert(child, NativeAgentSummary::of(&view));
         }
         Ok(Self {
+            retired_container_allocations: retired_harnesses::load_container_allocations(
+                &transaction,
+            )?,
             sequence: 0,
             state,
             moves,
@@ -322,6 +327,13 @@ pub(super) fn finish_operation(
     let mut changed_history = State::default();
     let mut changed = false;
     let mut relations = BTreeSet::new();
+    let mut retired_container_allocations = previous.retired_container_allocations.clone();
+    let environment_owners = changes
+        .keys
+        .iter()
+        .filter(|(kind, _)| matches!(kind.as_str(), "session" | "environment"))
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
     for (kind, key) in &changes.keys {
         match kind.as_str() {
             "turn" => {
@@ -441,6 +453,7 @@ pub(super) fn finish_operation(
                     );
                 }
             }
+            "environment" => {}
             "environment_owner" => {
                 let owner = environments::session_environment_owner_with(&transaction, key)?;
                 if state.environment_owners.get(key) != owner.as_ref() {
@@ -655,9 +668,25 @@ pub(super) fn finish_operation(
     for id in affected {
         wait_revisions.insert_shared(id.clone(), previous.sequence + 1);
     }
+    for id in environment_owners {
+        let allocations = if state.sessions.contains_key(id) {
+            None
+        } else {
+            retired_harnesses::container_allocations_with(&transaction, id)?
+        };
+        if retired_container_allocations.get(id) != allocations.as_ref() {
+            if let Some(allocations) = allocations {
+                retired_container_allocations.insert(id.clone(), allocations);
+            } else {
+                retired_container_allocations.remove(id);
+            }
+            changed = true;
+        }
+    }
     transaction.commit()?;
     Ok(changed.then(|| CommittedState {
         sequence: previous.sequence + 1,
+        retired_container_allocations,
         state,
         moves,
         native_agents,

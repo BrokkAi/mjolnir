@@ -1593,7 +1593,7 @@ func TestInterruptedPromptBeforeRestartProducesOneUnreadInterruption(t *testing.
 					t.Fatalf("content = %s", body.Content)
 				}
 			} else {
-				if len(body.Content) != 2 || text(0) != core.RestartRecoveryNote || text(1) != variant.original {
+				if len(body.Content) != 1 || text(0) != core.RestartRecoveryNote {
 					t.Fatalf("content = %s", body.Content)
 				}
 			}

@@ -243,7 +243,7 @@ pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[S
 }
 
 impl RelayCommand {
-    /// Effective prompt, including the worker-authored restart note.
+    /// Effective prompt. Ordinary restart continuations send only the recovery note.
     pub fn prompt_blocks_for_command(
         &self,
         command_id: &str,
@@ -252,12 +252,9 @@ impl RelayCommand {
         if crate::continuation::is_restart_continuation(command_id)
             && !crate::acp::prompt_is_slash_command(&prompt)
         {
-            let mut prompt = prompt.into_owned();
-            prompt.insert(
-                0,
-                ContentBlock::from(crate::continuation::RESTART_RECOVERY_NOTE.to_owned()),
-            );
-            Some(std::borrow::Cow::Owned(prompt))
+            Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                crate::continuation::RESTART_RECOVERY_NOTE.to_owned(),
+            )]))
         } else {
             Some(prompt)
         }

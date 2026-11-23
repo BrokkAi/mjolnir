@@ -2278,8 +2278,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
                     content[0]["text"],
                     mj_core::continuation::RESTART_RECOVERY_NOTE
                 );
-                assert_eq!(content[1]["text"], original);
-                assert_eq!(content.len(), 2);
+                assert_eq!(content.len(), 1);
             }
         }
     }

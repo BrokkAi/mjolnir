@@ -8,6 +8,7 @@ use mj_core::state::SessionRecord;
 #[test]
 fn child_progress_uses_the_published_turn_and_report_together() {
     let mut committed = mj_controller::database::CommittedState {
+        retired_container_allocations: Default::default(),
         sequence: 0,
         state: Default::default(),
         moves: Default::default(),
