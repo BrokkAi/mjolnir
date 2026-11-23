@@ -1252,7 +1252,7 @@ impl Config {
 // configuration readers reject the new fields instead of dropping them.
 /// Historical per-session EC2 records remain readable, but new work uses a
 /// persistent SSH machine with a container runtime.
-pub const LEGACY_EC2_TARGET_NOTICE: &str = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone>`.";
+pub const LEGACY_EC2_TARGET_NOTICE: &str = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone> --cpus <count> --memory-gib <GiB>`.";
 
 pub const CONFIG_VERSION: u32 = 24;
 /// The page that documents config.toml, schema version included.

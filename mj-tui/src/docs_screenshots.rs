@@ -264,6 +264,8 @@ fn documentation_dashboard() -> DashboardState {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(27),
             memory_used_bytes: 19 * 1024 * 1024 * 1024,

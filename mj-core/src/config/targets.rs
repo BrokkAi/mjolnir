@@ -11,21 +11,36 @@ use super::{
     Environment, ExecutionPolicy, PermissionMode, validate_id, validate_relative_destination,
 };
 
-pub fn container_memory_limit(text: &str) -> anyhow::Result<i64> {
+pub fn container_memory_limit(text: &str) -> Result<i64> {
+    Ok(i64::try_from(parse_container_memory(text)?)?)
+}
+
+/// Read an engine memory limit in bytes, using binary units for Podman suffixes.
+pub fn parse_container_memory(text: &str) -> Result<u64> {
     let text = text.trim();
     let value = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    let unit = match text[value.len()..].to_ascii_lowercase().as_str() {
-        "" | "b" => "B",
-        "k" | "kb" | "kib" => "KiB",
-        "m" | "mb" | "mib" => "MiB",
-        "g" | "gb" | "gib" => "GiB",
-        "t" | "tb" | "tib" => "TiB",
-        _ => anyhow::bail!("invalid container memory limit {text:?}"),
+    let (shift, unit) = match text[value.len()..].to_ascii_lowercase().as_str() {
+        "" | "b" => (0, "B"),
+        "k" | "kb" | "ki" | "kib" => (10, "KiB"),
+        "m" | "mb" | "mi" | "mib" => (20, "MiB"),
+        "g" | "gb" | "gi" | "gib" => (30, "GiB"),
+        "t" | "tb" | "ti" | "tib" => (40, "TiB"),
+        _ => bail!("invalid container memory limit {text:?}"),
     };
+    if let Ok(amount) = value.trim().parse::<u64>() {
+        return amount
+            .checked_mul(1u64 << shift)
+            .with_context(|| format!("container memory limit {text:?} is too large"));
+    }
+    // Keep support for fractional quantities in container upgrade settings.
     let bytes = format!("{value}{unit}")
-        .parse::<bytesize::ByteSize>()
+        .parse::<ByteSize>()
         .map_err(anyhow::Error::msg)?;
-    Ok(i64::try_from(bytes.as_u64())?)
+    anyhow::ensure!(
+        bytes.as_u64() < u64::MAX,
+        "container memory limit {text:?} is too large"
+    );
+    Ok(bytes.as_u64())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,6 +504,15 @@ pub struct ContainerTemplate {
         deserialize_with = "deserialize_target_build_cache"
     )]
     pub build_cache: Option<TargetBuildCache>,
+}
+
+impl ContainerTemplate {
+    pub fn default_host_container_size(&self) -> Option<crate::state::HostContainerSize> {
+        let cpus = self.cpus.as_deref()?.trim().parse().ok()?;
+        let memory_bytes = parse_container_memory(self.memory.as_deref()?).ok()?;
+        (cpus > 0 && memory_bytes > 0)
+            .then_some(crate::state::HostContainerSize { cpus, memory_bytes })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

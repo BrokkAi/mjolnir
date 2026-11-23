@@ -8860,3 +8860,320 @@ async fn a_first_question_that_loses_the_registration_asks_the_winning_oracle() 
         }
     );
 }
+
+struct ListingExports(RuntimeProjection);
+
+impl ExportRuntime for ListingExports {
+    fn session_record(&self, id: &str) -> Option<SessionRecord> {
+        self.0.records.get(id).cloned()
+    }
+
+    fn delegation_listing_projection(&self) -> Result<Option<RuntimeProjection>> {
+        Ok(Some(self.0.clone()))
+    }
+
+    fn checkpoint_now(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+        NoExports.checkpoint_now(id)
+    }
+}
+
+async fn run_listing(
+    projection: RuntimeProjection,
+    action: mj_core::subagent::SubagentToolAction,
+) -> mj_core::subagent::SubagentToolResult {
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "parent-1".into(),
+            accepted_ordinal: 30,
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(active_parent_view("")),
+        })),
+        running_states(),
+        Arc::new(ListingExports(projection)),
+    ));
+    backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                request_id: "list".into(),
+                created_at_ms: 0,
+                originating_command_id: None,
+                action,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn list_targets_joins_enabled_targets_to_the_daemon_host_and_admission_budgets() {
+    use mj_client::runtime_feed::{RuntimeContainerCapacity, RuntimeHostCapacity};
+    use mj_core::state::{HostContainerCapacity, HostContainerSize};
+    use mj_core::subagent::SubagentToolAction;
+    use mj_core::targets::{CapacityWindowSummary, HostCapacityRow, HostMemoryUsage};
+
+    let size = |cpus, gib: u64| HostContainerSize {
+        cpus,
+        memory_bytes: gib << 30,
+    };
+    let mut projection = RuntimeProjection::default();
+    let mut config = mj_core::config::Config::default();
+    config.targets.insert(
+        "nitro".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind":"ssh-nitro","host":"ec2-host","user":"ec2-user","cpus":"16","memory":"32g"
+        }))
+        .unwrap(),
+    );
+    config.machines.insert(
+        "builder".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind":"ssh","host":"ec2-host","user":"ec2-user"
+        }))
+        .unwrap(),
+    );
+    config
+        .targets
+        .insert("bare".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.targets.insert(
+        "disabled".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    config.disabled_targets.insert("disabled".into());
+    projection.metadata.config = config.into();
+    let mut parent = parent_record("parent-1", "parent");
+    parent.target_template_id = "nitro".into();
+    projection.records.insert(parent.id.clone(), parent.clone());
+    let denied = run_listing(projection.clone(), SubagentToolAction::ListTargets).await;
+    assert!(denied.is_error && denied.message.contains("requires supervisors enabled"));
+
+    parent.supervisors = true;
+    projection.records.insert(parent.id.clone(), parent);
+    let mut parked = parent_record("parked", "helper");
+    parked.target_template_id = "nitro".into();
+    parked.state = SessionState::Parked;
+    projection.records.insert(parked.id.clone(), parked);
+    projection.metadata.host_capacities = vec![RuntimeHostCapacity {
+        reading: HostCapacityRow {
+            id: "host".into(),
+            host: "builder".into(),
+            target_ids: vec!["nitro".into()],
+            kind: mj_core::targets::DeploymentCapacityKind::Host,
+            fleet_instances: None,
+            has_reading: true,
+            cpu_percent: Some(38),
+            ec2_instance_type: Some("c8id.16xlarge".into()),
+            physical_memory: Some(HostMemoryUsage {
+                used_bytes: 40 << 30,
+                total_bytes: 128 << 30,
+            }),
+            memory_used_bytes: 32 << 30,
+            memory_total_bytes: 96 << 30,
+            logical_cores: 64,
+            filesystems: vec![],
+            sampled_at_epoch_seconds: Some(mj_core::clock::epoch_seconds() - 14),
+            probe_error: Some("probe timed out".into()),
+            on_demand: false,
+        },
+        refreshing: false,
+        disk_total_bytes: None,
+        last_1h: Some(CapacityWindowSummary {
+            window_seconds: 301,
+            sample_count: 11,
+            cpu_percent_avg: Some(31.5),
+            cpu_percent_max: Some(74),
+            memory_used_bytes_avg: 39 << 30,
+            memory_used_bytes_max: 51 << 30,
+        }),
+    }]
+    .into();
+    projection.metadata.container_capacities = BTreeMap::from([(
+        "host".into(),
+        RuntimeContainerCapacity {
+            target_ids: vec!["nitro".into()],
+            capacity: HostContainerCapacity {
+                total: size(64, 96),
+                reserved: size(0, 0),
+                committed: size(16, 32),
+                remaining: size(48, 64),
+                complete: true,
+            },
+        },
+    )])
+    .into();
+    let response = run_listing(projection, SubagentToolAction::ListTargets).await;
+    assert!(!response.is_error, "{}", response.message);
+    let value: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    let targets = value["targets"].as_array().unwrap();
+    let target = targets
+        .iter()
+        .find(|target| target["target_id"] == "nitro")
+        .unwrap();
+    let bare = targets
+        .iter()
+        .find(|target| target["target_id"] == "bare")
+        .unwrap();
+    assert!(
+        !targets
+            .iter()
+            .any(|target| target["target_id"] == "disabled")
+    );
+    assert_eq!(bare["is_current_target"], false);
+    assert!(bare["default_container_size"].is_null());
+    let age = target["usage"]["recent"]["sampled_age_seconds"]
+        .as_u64()
+        .unwrap();
+    assert!(age >= 14);
+    assert_eq!(
+        *target,
+        serde_json::json!({
+            "target_id":"nitro", "kind":"ssh-nitro","permissions":"yolo","is_current_target":true,
+            "host":{"machine_id":"builder","ec2_instance_type":"c8id.16xlarge","total_cpus":64,"total_memory_gib":128.0},
+            "default_container_size":{"cpus":16,"memory_gib":32.0},
+            "active_sessions":2,
+            "capacity":{"committed_cpus":16,"remaining_cpus":48,"committed_memory_gib":32.0,"remaining_memory_gib":64.0},
+            "usage":{
+                "recent":{"sampled_age_seconds":age,"cpu_percent":38,"memory_used_gib":40.0,"memory_total_gib":128.0},
+                "last_1h":{"window_seconds":301,"sample_count":11,"cpu_percent_avg":31.5,"cpu_percent_max":74,
+                    "memory_used_gib_avg":39.0,"memory_used_gib_max":51.0},
+                "probe_error":"probe timed out",
+            },
+        })
+    );
+}
+
+#[tokio::test]
+async fn list_agents_uses_current_session_details_and_counts_only_live_direct_children() {
+    if !isolated_parked_test(
+        "list_agents_uses_current_session_details_and_counts_only_live_direct_children",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let original = mj_controller::database::load_subagent("child-1")
+        .unwrap()
+        .unwrap();
+    let mut child = parent_record("child-1", "new-profile");
+    child.target_template_id = "ec2-builder".into();
+    mj_controller::database::save_session(&child).unwrap();
+    for (id, parent, state, category, supervisor) in [
+        (
+            "child-2",
+            "parent-1",
+            SessionState::Running,
+            "subtle",
+            false,
+        ),
+        (
+            "child-3",
+            "parent-1",
+            SessionState::Running,
+            "supervisor",
+            true,
+        ),
+        ("oracle", "parent-1", SessionState::Stopped, "oracle", false),
+        (
+            "reviewer",
+            "parent-1",
+            SessionState::Stopped,
+            "reviewer",
+            false,
+        ),
+        (
+            "grandchild-1",
+            "child-3",
+            SessionState::Running,
+            "straightforward",
+            false,
+        ),
+        (
+            "grandchild-2",
+            "child-3",
+            SessionState::Parked,
+            "straightforward",
+            false,
+        ),
+    ] {
+        let mut record = parent_record(id, "profile");
+        record.state = state;
+        mj_controller::database::register_subagent_with_startup(
+            &record,
+            &mj_core::subagent::SubagentRecord {
+                kind: match category {
+                    "oracle" => mj_core::subagent::SubagentKind::Oracle,
+                    "reviewer" => mj_core::subagent::SubagentKind::Reviewer,
+                    _ => mj_core::subagent::SubagentKind::Worker,
+                },
+                child_session_id: id.into(),
+                parent_session_id: parent.into(),
+                request_key: id.into(),
+                model: Some("spawn-model".into()),
+                effort: Some("low".into()),
+                supervisor,
+                ..original.clone()
+            },
+            Vec::new(),
+            None,
+            Some(category),
+        )
+        .unwrap();
+    }
+    let connection = rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
+    connection.execute_batch(
+        "UPDATE subagent_sessions SET record_json = json_set(record_json, '$.model', 'spawn-model', '$.effort', 'low')
+         WHERE child_session_id = 'child-1';
+         INSERT INTO session_turn_selections(session_id,command_id,profile,model,effort)
+         VALUES ('child-1','earlier','helper','first-model','medium'),
+                ('child-1','latest','new-profile','turn-model','high');"
+    ).unwrap();
+    let state = mj_controller::database::load_state().unwrap();
+    let mut config = mj_core::config::Config::default();
+    config.bundles.insert("hel".into(), serde_json::from_value(serde_json::json!({
+       "primary_repo":"hel","repositories":[{"id":"hel","github":"BrokkAi/mjolnir","destination":"hel"}],
+    })).unwrap());
+    let mut projection = RuntimeProjection {
+        records: state.sessions,
+        subagents: state.subagents,
+        ..Default::default()
+    };
+    projection.metadata.config = config.into();
+    projection.sessions.insert(
+        "child-1".into(),
+        mj_client::daemon::RuntimeSessionView::from_managed(
+            "child-1".into(),
+            ready_view("current-model"),
+        ),
+    );
+    let response = run_listing(
+        projection,
+        mj_core::subagent::SubagentToolAction::ListAgents,
+    )
+    .await;
+    assert!(!response.is_error, "{}", response.message);
+    let value: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    let agents = value["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 5);
+    let current = &agents[0];
+    assert_eq!(current["child_session_id"], "child-1");
+    assert_eq!(current["task_name"], "audit deps");
+    assert_eq!(current["role"], "straightforward");
+    assert_eq!(current["target"], "ec2-builder");
+    assert_eq!(
+        current["repos"],
+        serde_json::json!(["https://github.com/BrokkAi/mjolnir"])
+    );
+    assert_eq!(current["profile_id"], "new-profile");
+    assert_eq!(current["model"], "current-model");
+    assert_eq!(current["effort"], "high");
+    assert_eq!(current["active_children"], 0);
+    assert_eq!(agents[1]["role"], "subtle");
+    assert_eq!(agents[1]["model"], "spawn-model");
+    assert_eq!(agents[1]["effort"], "low");
+    assert_eq!(agents[2]["role"], "orchestrator");
+    assert_eq!(agents[2]["active_children"], 1);
+    assert_eq!(agents[3]["role"], "oracle");
+    assert_eq!(agents[4]["role"], "reviewer");
+}

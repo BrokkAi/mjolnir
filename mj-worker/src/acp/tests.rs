@@ -828,6 +828,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     for (title, owned) in [
                         ("mcp  mj-agents  spawn", offers("spawn")),
                         ("mcp  mj-agents  list agents", offers("list_agents")),
+                        ("mcp  mj-agents  list targets", offers("list_targets")),
                         ("mcp  mj-review  request review", offers_review),
                         ("mcp  mj-review  override review", offers_review),
                         ("mcp  mj-review  set baseline", offers_review),

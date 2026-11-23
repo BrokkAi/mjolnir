@@ -503,6 +503,7 @@ pub enum SubagentToolAction {
         files: Vec<FileSourceRanges>,
     },
     ListAgents,
+    ListTargets,
     SendInput {
         child_session_id: String,
         message: String,
@@ -600,6 +601,7 @@ enum SubagentToolActionWire {
         files: Vec<FileSourceRanges>,
     },
     ListAgents,
+    ListTargets,
     SendInput {
         child_session_id: String,
         message: String,
@@ -728,6 +730,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 files,
             },
             SubagentToolActionWire::ListAgents => Self::ListAgents,
+            SubagentToolActionWire::ListTargets => Self::ListTargets,
             SubagentToolActionWire::SendInput {
                 child_session_id,
                 message,
@@ -1143,14 +1146,15 @@ impl SubagentMcpRole {
         }
     }
 
-    /// The tools this role's server lists, in the order it lists them. A
-    /// harness that asks before an MCP tool is allowed exactly these.
+    /// Tools this role can offer, for harness approval rules. Some tools
+    /// also require a capability in the session's launch settings.
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
             Self::Parent => &[
                 "spawn",
                 "list_agents",
+                "list_targets",
                 "send_message",
                 "close",
                 "fetch",

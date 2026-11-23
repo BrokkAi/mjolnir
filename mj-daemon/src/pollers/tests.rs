@@ -1504,6 +1504,8 @@ fn golden_aws_capacity_aggregates_real_probe_rows_and_rejects_overflow() {
     );
 
     let usage = |memory_total_bytes, logical_cores, disk_total_bytes| DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
@@ -1900,6 +1902,8 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
         // Dropping finish_tx on a test failure also releases this thread.
         finish_rx.recv().context("test sample was cancelled")?;
         Ok(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(10),
             memory_used_bytes: 1,

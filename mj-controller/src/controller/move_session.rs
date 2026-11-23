@@ -5018,16 +5018,20 @@ fn move_requested_allocation<'a>(
 }
 
 /// The size a Move gives a destination that has none of its own: the host's
-/// remembered container size, else the baseline `mj new` starts from. Host
-/// totals are not part of the controller's state, so the size is not clamped
-/// here; capacity admission refuses a size the host cannot hold.
+/// remembered size, configured target size or baseline. Capacity admission
+/// checks the result against current host totals.
 fn move_default_allocation(
     state: &mj_core::state::State,
     target: &mj_core::config::TargetTemplate,
 ) -> Option<mj_core::state::SessionResourceAllocation> {
     let host = mj_core::config::container_size_host(target)?;
-    let size =
-        mj_core::state::default_container_size(state.container_sizes.get(host).copied(), None);
+    let size = mj_core::state::resolve_default_container_size(
+        target
+            .container()
+            .and_then(|c| c.default_host_container_size()),
+        state.container_sizes.get(host).copied(),
+        None,
+    );
     Some(mj_core::state::SessionResourceAllocation::Container {
         cpus: size.cpus,
         memory_bytes: size.memory_bytes,

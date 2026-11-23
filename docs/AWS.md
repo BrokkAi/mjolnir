@@ -9,11 +9,13 @@ until `mj ec2 destroy` terminates it.
 Use the AWS CLI credentials already configured on your controller, plus OpenSSH:
 
 ```console
-mj ec2 create <instance-type> --zone us-east-1a --name builder
+mj ec2 create <instance-type> --zone us-east-1a --name builder --cpus 4 --memory-gib 8
 mj ec2 list
 mj new --workspace work --profile codex --target builder --bundle project
 mj ec2 destroy builder
 ```
+
+The required `--cpus` and `--memory-gib` flags set the default size for each session container.
 
 `create` launches the current official Ubuntu 24.04 image for the instance's
 CPU architecture, installs rootless Podman, and waits for EC2 status checks and
@@ -46,7 +48,7 @@ AWS validates the requested size/performance combination against its
 For example:
 
 ```console
-mj ec2 create <instance-type> --zone us-east-1a --name builder \
+mj ec2 create <instance-type> --zone us-east-1a --name builder --cpus 4 --memory-gib 8 \
   --disk-gib 512 --disk-mbps 500 --disk-iops 12000
 ```
 

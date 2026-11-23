@@ -8,7 +8,19 @@
 use serde::{Deserialize, Serialize};
 
 use super::storage::{StorageCondition, TargetStorageView, capacity_storage_hosts, views_for};
-use super::{DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage};
+use super::{
+    DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, HostMemoryUsage,
+};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapacityWindowSummary {
+    pub window_seconds: u64,
+    pub sample_count: u32,
+    pub cpu_percent_avg: Option<f64>,
+    pub cpu_percent_max: Option<u8>,
+    pub memory_used_bytes_avg: u64,
+    pub memory_used_bytes_max: u64,
+}
 use crate::text::{counted, format_resource_bytes, refresh_age};
 
 /// A reading older than this stopped tracking the host: the poller samples
@@ -133,6 +145,10 @@ pub struct HostCapacityRow {
     /// No reading has arrived, or only an empty fleet answered.
     pub has_reading: bool,
     pub cpu_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ec2_instance_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_memory: Option<HostMemoryUsage>,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
     pub logical_cores: u64,
@@ -170,6 +186,8 @@ impl HostCapacityRow {
             fleet_instances: state.fleet_instances(target),
             has_reading: usage.is_some(),
             cpu_percent: usage.and_then(|usage| usage.cpu_percent),
+            ec2_instance_type: usage.and_then(|usage| usage.ec2_instance_type.clone()),
+            physical_memory: usage.and_then(|usage| usage.physical_memory),
             memory_used_bytes: usage.map_or(0, |usage| usage.memory_used_bytes),
             memory_total_bytes: usage.map_or(0, |usage| usage.memory_total_bytes),
             logical_cores: usage.map_or(0, |usage| usage.logical_cores),
@@ -178,6 +196,14 @@ impl HostCapacityRow {
             probe_error: state.probe_error.clone(),
             on_demand: state.on_demand,
         }
+    }
+
+    pub fn host_memory(&self) -> Option<HostMemoryUsage> {
+        self.has_reading
+            .then_some(self.physical_memory.unwrap_or(HostMemoryUsage {
+                used_bytes: self.memory_used_bytes,
+                total_bytes: self.memory_total_bytes,
+            }))
     }
 
     /// Whether `name` selects this row: its host, or a target it contains.

@@ -102,10 +102,8 @@ pub(super) async fn get_session(
     Ok(Json(session))
 }
 
-/// The size a session created on `target_id` gets: the target's default,
-/// which is the size the viewer's create form selects, with the caller's
-/// overrides. Without it an API-created container ran with no CPU or memory
-/// limit. Targets without a container size take neither override.
+/// Use the same resolved default as the viewer's create form, with any
+/// explicit CPU or memory overrides supplied by the caller.
 fn new_session_allocation(
     state: &ServerState,
     target_id: &str,

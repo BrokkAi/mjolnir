@@ -6037,6 +6037,8 @@ mod tests {
                 condition,
             };
         let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            ec2_instance_type: None,
+            physical_memory: None,
             id: id.into(),
             host: id.into(),
             target_ids: targets.iter().map(|id| (*id).to_owned()).collect(),

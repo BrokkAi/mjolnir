@@ -992,6 +992,8 @@ fn now_seconds() -> u64 {
 
 fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
     mj_core::targets::DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: Some(cpu_percent),
         memory_used_bytes: 1,
@@ -1998,6 +2000,8 @@ fn now_epoch_seconds() -> u64 {
 
 fn host_capacity_usage() -> DeploymentCapacityUsage {
     DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: Some(37),
         memory_used_bytes: 3,
@@ -2015,6 +2019,8 @@ fn capacity_pane_never_presents_missing_readings_as_zero_resource_use() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
@@ -4146,6 +4152,8 @@ fn golden_dashboard_resource_panels() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(37),
             memory_used_bytes: 3,

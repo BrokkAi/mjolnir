@@ -37,6 +37,7 @@ impl DashboardState {
             targets
                 .into_iter()
                 .map(|target| RuntimeHostCapacity {
+                    last_1h: None,
                     reading: HostCapacityRow::new(&target, &Default::default(), &[]),
                     refreshing: false,
                     disk_total_bytes: None,

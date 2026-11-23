@@ -414,12 +414,14 @@ pub struct RuntimeContainerCapacity {
 }
 
 /// One host or fleet and whether the daemon owes it a manual refresh.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeHostCapacity {
     pub reading: mj_core::targets::HostCapacityRow,
     pub refreshing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_1h: Option<mj_core::targets::CapacityWindowSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

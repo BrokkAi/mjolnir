@@ -251,6 +251,8 @@ pub fn aggregate_aws_capacity(
     usages: &[DeploymentCapacityUsage],
 ) -> Result<DeploymentCapacityUsage> {
     let mut total = DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
@@ -288,6 +290,8 @@ pub(super) fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     Ok(DeploymentCapacityUsage {
+        ec2_instance_type: local_ec2_instance_type(),
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: Some(system.global_cpu_usage().round().clamp(0.0, 100.0) as u8),
         memory_used_bytes: system
@@ -302,6 +306,20 @@ pub(super) fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
         disk_total_bytes: None,
         storage: Vec::new(),
     })
+}
+
+fn local_ec2_instance_type() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let dmi = std::path::Path::new("/sys/devices/virtual/dmi/id");
+        let vendor = std::fs::read_to_string(dmi.join("sys_vendor")).ok()?;
+        if vendor.trim() == "Amazon EC2" {
+            let product = std::fs::read_to_string(dmi.join("product_name")).ok()?;
+            let product = product.trim();
+            return (!product.is_empty()).then(|| product.to_owned());
+        }
+    }
+    None
 }
 
 /// The storage owner's name for the machine a probe ran on.
