@@ -2888,6 +2888,16 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                 fail_start,
                 commands: Mutex::default(),
             };
+            use crate::controller::environment::{TargetAvailability, target_availability};
+
+            assert_eq!(
+                target_availability(&controller, id, &engine).unwrap(),
+                TargetAvailability::Reachable
+            );
+            assert_eq!(
+                std::mem::take(&mut *engine.commands.lock().unwrap()),
+                ["check retained Apple container before Restart"]
+            );
             let condition = crate::controller::environment::classify_resume_environment(
                 &controller,
                 id,

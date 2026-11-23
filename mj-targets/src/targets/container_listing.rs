@@ -63,3 +63,87 @@ fn label_value(labels: &serde_json::Value, key: &str) -> Option<String> {
         _ => None,
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetAvailability {
+    Reachable,
+    Missing,
+    Unreachable,
+}
+
+/// Check the exact retained Apple container ID. Resume may start it once
+/// presence is confirmed; read-only probes only list retained containers.
+pub fn apple_container_availability(
+    endpoint: ContainerEndpoint<'_>,
+    executor: &impl CommandExecutor,
+    start: bool,
+) -> Result<TargetAvailability> {
+    use TargetAvailability::{Missing, Reachable, Unreachable};
+
+    let execute = |args: &[&str], purpose| -> Result<Option<Vec<u8>>> {
+        let command = endpoint.host_command(
+            SshTrafficClass::Control,
+            CommandSpec::new("container", args.iter().copied()).purpose(purpose),
+        );
+        let output = executor
+            .execute(&command)
+            .with_context(|| command.purpose.clone())?;
+        if output.status == 255 && endpoint.ssh.is_some() {
+            return Ok(None);
+        }
+        ensure!(
+            output.status == 0,
+            "{} failed with status {}: {}",
+            command.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(Some(output.stdout))
+    };
+    let list = |args: &[&str], purpose| -> Result<TargetAvailability> {
+        let Some(stdout) = execute(args, purpose)? else {
+            return Ok(Unreachable);
+        };
+        let listed = std::str::from_utf8(&stdout).context("decode Apple container list")?;
+        Ok(
+            if listed.lines().any(|id| id.trim() == endpoint.container_id) {
+                Reachable
+            } else {
+                Missing
+            },
+        )
+    };
+    let retained = list(
+        &["list", "--all", "--quiet"],
+        "check retained Apple container before Restart",
+    )?;
+    if !start || retained != Reachable {
+        return Ok(retained);
+    }
+
+    // The default list includes only running containers.
+    let running = || {
+        list(
+            &["list", "--quiet"],
+            "list running retained Apple containers for Resume",
+        )
+    };
+    let current = running()?;
+    if current != Missing {
+        return Ok(current);
+    }
+    if execute(
+        &["start", endpoint.container_id],
+        "start retained Apple container for Resume",
+    )?
+    .is_none()
+    {
+        return Ok(Unreachable);
+    }
+    let started = running()?;
+    ensure!(
+        started != Missing,
+        "retained Apple container did not become running"
+    );
+    Ok(started)
+}
