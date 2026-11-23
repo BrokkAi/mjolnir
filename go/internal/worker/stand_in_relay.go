@@ -9,11 +9,10 @@
 // define those tests, under the names in core's test hooks, so either can
 // start the relay. The environment each relay reads is defined there.
 //
-// Built only with the testhooks tag (Rust's test-hooks feature), as core's
-// test_hooks_on.go is. JSON fixtures are jsonvalue values, so a rewritten
-// fixture keeps the member order serde_json (with preserve_order) keeps.
-
-//go:build testhooks
+// Always built, as Rust builds it (#[doc(hidden)]): only a test binary that
+// sets the stand-in environment reaches it. JSON fixtures are jsonvalue
+// values, so a rewritten fixture keeps the member order serde_json (with
+// preserve_order) keeps.
 
 package worker
 
@@ -45,6 +44,17 @@ const standInUnix = runtime.GOOS != "windows"
 // the first session request to this process's exit. A package variable
 // keeps the file reachable, so no finalizer closes it and drops the lock.
 var standInJournalOwner *os.File
+
+// standInWithExtension is Rust's Path::with_extension: path with its file
+// name's extension replaced by (or extended with) extension.
+func standInWithExtension(path, extension string) string {
+	name := filepath.Base(path)
+	stem := name
+	if dot := strings.LastIndexByte(name, '.'); dot > 0 {
+		stem = name[:dot]
+	}
+	return filepath.Join(filepath.Dir(path), stem+"."+extension)
+}
 
 func standInExists(path string) bool {
 	_, err := os.Stat(path)
@@ -162,6 +172,15 @@ func ServeLatchRelay() {
 				}
 			}
 		}
+		if _, record := os.LookupEnv("MJ_TEST_RECORD_IN_PLACE_MOVE_REQUESTS"); record {
+			switch request.Request.(type) {
+			case core.RelayRequestHoldInPlaceMoveDispatch, core.RelayRequestRestartHarnessInPlace,
+				core.RelayRequestDiscardHeldMoveCommands, core.RelayRequestSubmitFront,
+				core.RelayRequestReleaseInPlaceMoveDispatch:
+				standInAppendLine(filepath.Join(root, "in-place-move-requests.log"),
+					core.RelayRequestMethodName(request.Request), "log an in-place move request")
+			}
+		}
 		var payload core.RelayResponsePayload
 		switch hello := request.Request.(type) {
 		case core.RelayRequestHello:
@@ -216,7 +235,8 @@ func ServeLatchRelay() {
 			}
 		}
 		if os.Getenv("MJ_TEST_QUOTA_BARRIER_RACE") == "1" {
-			if standInSubmits[core.RelayCommandBeginCheckpoint](request.Request) {
+			_, holding := request.Request.(core.RelayRequestHoldInPlaceMoveDispatch)
+			if standInSubmits[core.RelayCommandBeginCheckpoint](request.Request) || holding {
 				_, err := relay.RecordObservation(core.RelayObservationHarnessTurnStarted{StartedAtMs: core.EpochMillis()})
 				standInMust(err, "record a harness turn")
 			}
@@ -272,6 +292,7 @@ func ServeLatchRelay() {
 		var response core.RelayResponseEnvelope
 		_, reserving := request.Request.(core.RelayRequestReserveIdle)
 		_, operatorAway := request.Request.(core.RelayRequestSetOperatorAway)
+		restart, restarting := request.Request.(core.RelayRequestRestartHarnessInPlace)
 		switch {
 		case reserving && standInExists(filepath.Join(root, "upgrade-held-reviewer")):
 			response = core.RelayResponseEnvelope{
@@ -286,6 +307,34 @@ func ServeLatchRelay() {
 				RequestID:       request.RequestID,
 				ProtocolVersion: request.ProtocolVersion,
 				Body:            core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadStatus{State: relay.OperationalState()}},
+			}
+		case restarting:
+			var body core.RelayResponseBody
+			restarted := core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadHarnessRestartedInPlace{}}
+			if standInExists(filepath.Join(root, "reject-in-place-restart")) {
+				body = core.RelayError(core.RelayErrorCodeInvalidState,
+					"cannot restart harness in place while a turn or effectful command is in progress", true, nil)
+			} else {
+				decision, refusal := relay.admitInPlaceHarnessRestart(restart.OperationID, restart.ExpectedStoreID)
+				switch {
+				case refusal != nil:
+					body = core.RelayResponseBodyError{Error: *refusal}
+				case decision == InPlaceHarnessRestartAlreadyRestarted:
+					body = restarted
+				default:
+					_ = restart.LaunchConfig.Write(filepath.Join(root, "launch.json"))
+					if err := relay.markInPlaceHarnessRestarted(restart.OperationID, restart.ExpectedStoreID); err != nil {
+						body = core.RelayError(core.RelayErrorCodeInternal,
+							fmt.Sprintf("complete in-place harness restart: %v", err), false, nil)
+					} else {
+						body = restarted
+					}
+				}
+			}
+			response = core.RelayResponseEnvelope{
+				RequestID:       request.RequestID,
+				ProtocolVersion: min(maxProtocol, core.RelayProtocolVersion),
+				Body:            body,
 			}
 		default:
 			if queued := subagentConnectionResponse(request); queued != nil {
@@ -447,12 +496,12 @@ func holdNamedRelayCommand(request core.RelayRequest) {
 	case standInSubmits[core.RelayCommandClose](request):
 		matches = command == "close"
 	}
-	reached := moveWithExtension(path, "reached")
+	reached := standInWithExtension(path, "reached")
 	if !matches || standInExists(reached) {
 		return
 	}
 	standInMust(os.WriteFile(reached, []byte("held"), 0o666), "record the held relay command")
-	release := moveWithExtension(path, "release")
+	release := standInWithExtension(path, "release")
 	deadline := time.Now().Add(30 * time.Second)
 	for !standInExists(release) {
 		if !time.Now().Before(deadline) {
@@ -602,7 +651,7 @@ func subagentConnectionResponse(request *core.RelayRequestEnvelope) *core.RelayR
 		finishedObject.Set(r.Result.RequestID, value)
 		queue.Set("results", finishedObject)
 		writeTestSubagentQueue(*queuePath, queue, "persist the fixture queue")
-		standInAppendLine(moveWithExtension(*queuePath, "deliveries"), r.Result.RequestID, "record the delivery")
+		standInAppendLine(standInWithExtension(*queuePath, "deliveries"), r.Result.RequestID, "record the delivery")
 		payload = core.RelayResponsePayloadSubagentRequestCompleted{}
 	case core.RelayRequestSetSubagentAdmission:
 		payload = core.RelayResponsePayloadSubagentAdmissionChanged{Open: r.Open}
@@ -691,7 +740,7 @@ func ServeLeasedRelay() {
 	output := os.Stdout
 	subagentKnownIDs := map[string]struct{}{}
 	// The queue files this connection last reported to a change wait.
-	var reportedQueue *[2][]byte
+	var reportedQueue *[3][]byte
 	at := func(name string) string { return filepath.Join(root, name) }
 	for {
 		request, err := core.ReadRelayFrame(input)
@@ -745,9 +794,9 @@ func ServeLeasedRelay() {
 			// session's own connection may open the relay journal. So this
 			// wait reports the relay as the controller named it and holds,
 			// like the real worker, until the queue files it rereads change.
-			queueFiles := func() [2][]byte {
-				var files [2][]byte
-				for index, name := range []string{"subagent-request.json", "subagent-result.json"} {
+			queueFiles := func() [3][]byte {
+				var files [3][]byte
+				for index, name := range []string{"subagent-request.json", "subagent-result.json", "guardian-request.json"} {
 					if body, err := os.ReadFile(at(name)); err == nil {
 						files[index] = append([]byte{}, body...)
 					}
@@ -755,18 +804,17 @@ func ServeLeasedRelay() {
 				return files
 			}
 			deadline := time.Now().Add(2 * time.Second)
-			var queueChanged bool
+			var queueChanged, guardianQueueChanged bool
 			for {
 				if standInExists(at("worker-unreachable")) {
 					return
 				}
 				queue := queueFiles()
-				if reportedQueue == nil || !standInSameQueue(*reportedQueue, queue) {
-					reportedQueue = &queue
-					queueChanged = true
-					break
-				}
-				if !time.Now().Before(deadline) {
+				subagent := reportedQueue == nil || !standInSameQueue(reportedQueue[:2], queue[:2])
+				guardian := queue[2] != nil && (reportedQueue == nil || !standInSameQueue(reportedQueue[2:], queue[2:]))
+				reportedQueue = &queue
+				if subagent || guardian || !time.Now().Before(deadline) {
+					queueChanged, guardianQueueChanged = subagent, guardian
 					break
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -782,6 +830,7 @@ func ServeLeasedRelay() {
 					LatestOrdinal:        wait.AfterOrdinal,
 					StateDigest:          digest,
 					SubagentQueueChanged: queueChanged,
+					GuardianQueueChanged: guardianQueueChanged,
 				}},
 			}, "answer a change wait")
 			continue
@@ -857,6 +906,29 @@ func ServeLeasedRelay() {
 				standInMust(os.Remove(path), "remove the sub-agent request")
 			}
 			history = core.RelayResponsePayloadSubagentRequestCompleted{}
+		case core.RelayRequestGuardianRequests:
+			requests := []core.GuardianReviewRequest{}
+			body, err := os.ReadFile(at("guardian-request.json"))
+			switch {
+			case err == nil:
+				var pending core.GuardianReviewRequest
+				standInMust(json.Unmarshal(body, &pending), "decode the stand-in guardian request")
+				requests = append(requests, pending)
+			case !errors.Is(err, fs.ErrNotExist):
+				panic(fmt.Sprintf("read stand-in guardian queue: %v", err))
+			}
+			history = core.RelayResponsePayloadGuardianRequests{Requests: requests}
+		case core.RelayRequestCompleteGuardianRequest:
+			if path := at("guardian-request.json"); standInExists(path) {
+				pending := standInReadJSON[core.GuardianReviewRequest](path)
+				if pending.RequestID == r.Result.RequestID {
+					body, err := json.Marshal(r.Result)
+					standInMust(err, "encode the guardian result")
+					standInMust(core.AtomicWrite(at("guardian-result.json"), body), "write the guardian result")
+					standInMust(os.Remove(path), "remove the guardian request")
+				}
+			}
+			history = core.RelayResponsePayloadGuardianRequestCompleted{}
 		case core.RelayRequestHistoryRequests:
 			requests := []core.HistoryRequest{}
 			if path := at("history-request.json"); standInExists(path) {
@@ -990,7 +1062,7 @@ func ServeLeasedRelay() {
 
 // standInSameQueue compares two readings of the queue files; a nil entry
 // is a file that could not be read.
-func standInSameQueue(a, b [2][]byte) bool {
+func standInSameQueue(a, b [][]byte) bool {
 	for index := range a {
 		if (a[index] == nil) != (b[index] == nil) || string(a[index]) != string(b[index]) {
 			return false

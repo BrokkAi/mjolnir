@@ -7,12 +7,15 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -959,6 +962,111 @@ func TestRelayRecoversAnEventFsyncedBeforeItsSnapshot(t *testing.T) {
 	}
 }
 
+// Hard-won: #1608: retrying after a short write joined the next event to the torn record.
+func TestFailedJournalAppendRestoresTheBoundaryBeforeRetry(t *testing.T) {
+	for _, fault := range []journalAppendFault{
+		{kind: journalAppendFaultPartialWrite},
+		{kind: journalAppendFaultDirectorySync},
+	} {
+		temp := t.TempDir()
+		relay := journalTestOpen(t, temp, session, "1.0.0")
+		active := filepath.Join(temp, core.RelayJournalDir, core.RelayActiveSegment)
+		observation := core.RelayObservationWarning{Message: "retryable observation"}
+		var before []byte
+		var operation string
+		var failures int
+		switch fault.kind {
+		case journalAppendFaultPartialWrite:
+			rtMust(relay.RecordObservation(observation))
+			before = rtMust(os.ReadFile(active))
+			operation, failures = "write record", 1
+		case journalAppendFaultDirectorySync:
+			// Check that an empty file left by the first rollback still
+			// needs a directory sync on the second attempt.
+			before, operation, failures = []byte{}, "sync journal directory", 2
+		}
+		frontier := relay.LatestOrdinal()
+		digest := relay.LatestDigest()
+
+		for range failures {
+			injected := fault
+			relay.journalAppendFault = &injected
+			_, err := relay.RecordObservation(observation)
+			if !errors.Is(err, syscall.ENOSPC) {
+				t.Fatalf("error %v is not a full disk", err)
+			}
+			if want := fmt.Sprintf("append relay event %d to %s: %s", frontier+1, active, operation); !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not contain %q", err, want)
+			}
+			after, readErr := os.ReadFile(active)
+			if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("active segment %q, want %q", after, before)
+			}
+			rtEqual(t, relay.LatestOrdinal(), frontier)
+			rtEqual(t, relay.LatestDigest(), digest)
+		}
+
+		rtEqual(t, rtMust(relay.RecordObservation(observation)), frontier+1)
+		rtEqual(t, rtMust(relay.RecordObservation(core.RelayObservationWarning{Message: "after retry"})), frontier+2)
+		lenAfterAppend := rtMust(os.Stat(active)).Size()
+
+		relay = journalTestOpen(t, temp, session, "1.0.0")
+		attach := attachRelay(relay, "attach-after-append-failure", 0)
+		ok, isOk := attach.Body.(core.RelayResponseBodyOk)
+		attached, isAttached := ok.Payload.(core.RelayResponsePayloadAttached)
+		if !isOk || !isAttached {
+			t.Fatalf("expected attach to succeed, got %#v", attach.Body)
+		}
+		ordinals := []uint64{}
+		for _, event := range attached.Events {
+			ordinals = append(ordinals, event.Ordinal)
+		}
+		want := []uint64{}
+		for ordinal := uint64(1); ordinal <= frontier+2; ordinal++ {
+			want = append(want, ordinal)
+		}
+		rtEqual(t, ordinals, want)
+		rtEqual(t, rtMust(os.Stat(active)).Size(), lenAfterAppend)
+	}
+}
+
+// Hard-won: #1608: an unknown journal boundary after failed rollback must fence the writer.
+func TestFailedJournalAppendRollbackFencesLaterAppends(t *testing.T) {
+	temp := t.TempDir()
+	relay := journalTestOpen(t, temp, session, "1.0.0")
+	observation := core.RelayObservationWarning{Message: "journal observation"}
+	rtMust(relay.RecordObservation(observation))
+	active := filepath.Join(temp, core.RelayJournalDir, core.RelayActiveSegment)
+	before := rtMust(os.ReadFile(active))
+	frontier := relay.LatestOrdinal()
+	relay.journalAppendFault = &journalAppendFault{kind: journalAppendFaultPartialWrite, failRollback: true}
+	_, err := relay.RecordObservation(observation)
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("error %v is not a full disk", err)
+	}
+	failure := err.Error()
+	if !strings.Contains(failure, "rollback failed") || !strings.Contains(failure, "truncate active segment: permission denied") {
+		t.Fatalf("failure = %q", failure)
+	}
+	torn := rtMust(os.ReadFile(active))
+	if !bytes.HasPrefix(torn, before) || len(torn) <= len(before) {
+		t.Fatalf("torn segment %q does not extend %q", torn, before)
+	}
+	if bytes.HasSuffix(torn, []byte("\n")) {
+		t.Fatal("the torn record ends with a newline")
+	}
+
+	_, err = relay.RecordObservation(observation)
+	if err == nil || !strings.Contains(err.Error(), "appends disabled") || !strings.Contains(err.Error(), failure) {
+		t.Fatalf("later append error = %v", err)
+	}
+	rtEqual(t, rtMust(os.ReadFile(active)), torn)
+	rtEqual(t, relay.LatestOrdinal(), frontier)
+}
+
 func TestRelayTruncatesATornActiveTailBeforeAppendingAgain(t *testing.T) {
 	temp := t.TempDir()
 	relay := journalTestOpen(t, temp, session, "1.0.0")
@@ -1061,6 +1169,11 @@ func TestRecoverModeSkipsACorruptRecordAndRecoversItsNeighbours(t *testing.T) {
 	}
 	previousDigest := core.RelayEventGenesisDigest
 	writeEvent(file, 1, &previousDigest)
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptOffset := info.Size()
 	// A corrupt interior record: terminated (has its newline) but not valid
 	// JSON, so its bytes are unrecoverable.
 	file.WriteString(`{"ordinal":2,"observation": BROKEN` + "\n")
@@ -1070,8 +1183,12 @@ func TestRecoverModeSkipsACorruptRecordAndRecoversItsNeighbours(t *testing.T) {
 
 	// Strict aborts on the corrupt record.
 	var ignored []uint64
-	if _, err := journalTestVisit(path, JournalReadModeStrict, &ignored); err == nil {
-		t.Fatal("strict reads must not silently pass a corrupt record")
+	_, err = journalTestVisit(path, JournalReadModeStrict, &ignored)
+	if err == nil {
+		t.Fatal("strict reads must not pass a corrupt record")
+	}
+	if want := fmt.Sprintf("parse relay journal %s at byte offset %d", path, corruptOffset); !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not contain %q", err, want)
 	}
 
 	// Recover skips it and delivers both intact neighbours, reporting one gap.
@@ -1189,6 +1306,12 @@ func TestRetryResumesARelayLocalCommandAfterSnapshotPersistenceFailure(t *testin
 	}
 	if state := relay.snapshot.Dispatches["retry-local"].State; state != core.RelayDispatchStateQueued {
 		t.Fatalf("dispatch state = %v", state)
+	}
+	if !slices.ContainsFunc(retainedEvents(relay), func(event core.RelayEvent) bool {
+		_, queued := event.Observation.(core.RelayObservationCommandQueued)
+		return queued && event.CommandID != nil && *event.CommandID == "retry-local"
+	}) {
+		t.Fatal("the failed attempt did not journal its acceptance")
 	}
 
 	if err := os.Remove(statePath); err != nil {

@@ -47,19 +47,27 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
 )
 
+// InPlaceHarnessRestartDecision is whether an in-place harness restart
+// still has to run for its operation.
+type InPlaceHarnessRestartDecision int
+
+const (
+	InPlaceHarnessRestartProceed InPlaceHarnessRestartDecision = iota
+	InPlaceHarnessRestartAlreadyRestarted
+)
+
 // HarnessTurnPolicy is whether this relay models turns the harness starts on
 // its own.
 //
-// Only Claude Code's adapter marks the end of such a turn today (an origin
-// key on the settling usage_update), so every other harness keeps the
-// behaviour it had before harness turns existed. See
-// .agents/docs/claude-autonomous-turns.md.
+// The harness-specific policy chooses which signals open and settle a turn.
+// See .agents/docs/claude-autonomous-turns.md.
 type HarnessTurnPolicy int
 
 const (
 	HarnessTurnPolicyDisabled HarnessTurnPolicy = iota
 	HarnessTurnPolicyClaudeAdapter
 	HarnessTurnPolicyCodexAdapter
+	HarnessTurnPolicyAntigravity
 )
 
 // SteeringDeliveryMode is how this harness receives an accepted steer.
@@ -71,19 +79,20 @@ const (
 	// carry waking events through its ordinary durable prompt queue and
 	// safe-boundary steering instead.
 	SteeringDeliveryModeAcpWithMailbox
-	SteeringDeliveryModeClaudePostToolBatch
-	SteeringDeliveryModeClaudeTurnEnd
+	SteeringDeliveryModeHookPostToolBatch
+	SteeringDeliveryModeHookTurnEnd
 )
 
 // steeringDeliveryModeForHarness is SteeringDeliveryMode::for_harness.
-func steeringDeliveryModeForHarness(harness core.HarnessKind, claudeHook bool) SteeringDeliveryMode {
+func steeringDeliveryModeForHarness(harness core.HarnessKind, boundaryHook bool) SteeringDeliveryMode {
+	hookHarness := harness == core.HarnessKindClaude || harness == core.HarnessKindAntigravity
 	switch {
 	case harness == core.HarnessKindDsh:
 		return SteeringDeliveryModeAcpWithMailbox
-	case harness == core.HarnessKindClaude && claudeHook:
-		return SteeringDeliveryModeClaudePostToolBatch
-	case harness == core.HarnessKindClaude:
-		return SteeringDeliveryModeClaudeTurnEnd
+	case hookHarness && boundaryHook:
+		return SteeringDeliveryModeHookPostToolBatch
+	case hookHarness:
+		return SteeringDeliveryModeHookTurnEnd
 	default:
 		return SteeringDeliveryModeAcp
 	}
@@ -112,6 +121,7 @@ const (
 	// BackgroundWorkPolicyKimiTasks: Kimi's native detached-agent set,
 	// together with hosted terminals.
 	BackgroundWorkPolicyKimiTasks
+	BackgroundWorkPolicyAntigravityTasks
 )
 
 // LiveBaselineResult is what a live baseline reservation receives: the cut,
@@ -175,6 +185,10 @@ type RelayCell struct {
 	mu       sync.Mutex
 	relay    *DurableRelay
 	released *relayReleaseWatch
+	// guardian holds the worker's pending guardian reviews for the daemon,
+	// across relay connections. Rust keeps it on Unix only, where the live
+	// guardian relay is served.
+	guardian *GuardianEndpoint
 }
 
 // relayReleaseWatch is the Go form of the tokio watch channel carrying the
@@ -194,7 +208,7 @@ func (w *relayReleaseWatch) bump() {
 }
 
 func NewRelayCell(relay *DurableRelay) *RelayCell {
-	return &RelayCell{relay: relay, released: &relayReleaseWatch{changed: make(chan struct{})}}
+	return &RelayCell{relay: relay, released: &relayReleaseWatch{changed: make(chan struct{})}, guardian: &GuardianEndpoint{}}
 }
 
 // Lock takes the relay for a possible change. Unlock the guard to release
@@ -343,6 +357,9 @@ type DurableRelay struct {
 	// from the journal: every bridge start records its own AgentInitialized.
 	sessionSetup   bool
 	checkpointOnly bool
+	// inPlaceHarnessRestartInFlight is the active in-place harness restart
+	// operation ID, serialized with the hold.
+	inPlaceHarnessRestartInFlight *string
 	// reviewerAdmissions: live reviewer leases share this owner's atomic
 	// checkpoint decision.
 	reviewerAdmissions    map[uint64]string
@@ -391,10 +408,15 @@ type DurableRelay struct {
 	// journalCleanupPending retries physical prefix cleanup once after
 	// reopen, or after a failed GC.
 	journalCleanupPending bool
-	pendingLiveBaselines  []PendingLiveBaseline
-	pendingNativeResumes  []PendingNativeResume
-	acpActivity           core.AcpActivityClock
-	stepClock             *core.StepClock
+	// journalAppendFailure: a failed rollback left the on-disk append
+	// boundary unknown.
+	journalAppendFailure *string
+	// journalAppendFault is a test-only injected append failure.
+	journalAppendFault   *journalAppendFault
+	pendingLiveBaselines []PendingLiveBaseline
+	pendingNativeResumes []PendingNativeResume
+	acpActivity          core.AcpActivityClock
+	stepClock            *core.StepClock
 	// harnessTurns is whether harness announcements or output with no prompt
 	// open a turn. The runtime sets this from the configured harness right
 	// after open.
@@ -412,10 +434,12 @@ type DurableRelay struct {
 	foregroundTools *core.ToolsInFlight
 	turnContext     *transcript.TurnContext
 	verdictHarness  *core.HarnessKind
+	jevDisabled     bool
 	// authenticationLoginPath is read only by the Unix worker control runtime.
 	authenticationLoginPath *string
 	loginIdentity           *ClaudeLoginIdentity
 	repliedVerdict          RepliedVerdictState
+	recoversChildQuota      bool
 	// airTasks are adapter-owned tasks, keyed by their owning session and
 	// task identity (airTaskKey).
 	airTasks map[string]*AirTaskEntry
@@ -430,6 +454,7 @@ type DurableRelay struct {
 	// adapter answers a stop with a plain agent chunk and no model cycle, so
 	// no result would settle a harness turn opened for that chunk.
 	claudePendingStops map[string]map[string]struct{}
+	antigravityWork    antigravityWorkState
 	// kimiBackgroundTasks are Kimi detached agents and processes confirmed by
 	// its native journal.
 	kimiBackgroundTasks map[string]KimiTaskEntry
@@ -439,7 +464,7 @@ type DurableRelay struct {
 	kimiProvisionalTasks map[string]KimiProvisionalTask
 	kimiObservedTaskIDs  map[string]struct{}
 	kimiObservedToolIDs  map[string]struct{}
-	// backgroundWorkKnown is whether Kimi's provider-owned background work is
+	// backgroundWorkKnown is whether provider-owned background work is
 	// synchronized. Other policies leave this nil.
 	backgroundWorkKnown *bool
 	// handbackVerdictClient is the classifier the sub-agent handback check
@@ -847,7 +872,11 @@ func restoredRelaySnapshot(root, sessionID string) (core.RelaySnapshot, error) {
 		snapshot.Config[key] = value
 	}
 	snapshot.RestoredNativeSessionUnused = restored.NativeSessionUnused
-	if restored.NativeSessionUnused {
+	if evidence := restored.NativeUseEvidence; evidence != nil {
+		snapshot.NativeSessionUsed = evidence.Usage == core.NativeSessionUseUsed
+		copied := *evidence
+		snapshot.NativeUseEvidence = &copied
+	} else if restored.NativeSessionUnused {
 		snapshot.RecordNativeUse(core.NativeSessionUseUnused)
 	} else {
 		snapshot.RecordNativeUse(core.NativeSessionUseUnknown)
@@ -1106,6 +1135,7 @@ func durableRelayOpenWithHarness(root, sessionID, relayVersion string, checkpoin
 		stepClock:              &core.StepClock{},
 		foregroundTools:        &core.ToolsInFlight{},
 		turnContext:            &transcript.TurnContext{},
+		jevDisabled:            core.DisabledByEnvironment(),
 		loginIdentity:          &ClaudeLoginIdentity{},
 		airTasks:               map[string]*AirTaskEntry{},
 		claudePendingStops:     map[string]map[string]struct{}{},
@@ -1438,10 +1468,7 @@ func (r *DurableRelay) OperationalState() core.RelayOperationalState {
 	ready := r.isAcpReady()
 	state.ACPReady = &ready
 	state.CheckpointOnly = r.checkpointOnly
-	if r.steeringSupported != nil {
-		supported := *r.steeringSupported
-		state.SteeringSupported = &supported
-	}
+	state.SteeringSupported = r.EffectiveSteeringSupported()
 	if r.mailboxDeliveryMode != nil {
 		mode := *r.mailboxDeliveryMode
 		state.MailboxDelivery = &mode
@@ -1464,8 +1491,7 @@ func (r *DurableRelay) OperationalState() core.RelayOperationalState {
 	}
 	state.ActiveAgentTerminals = terminals
 	state.NativeAgentCount = r.nativeAgentCount()
-	state.ClearContext = r.verdictHarness != nil &&
-		(*r.verdictHarness == core.HarnessKindCodex || *r.verdictHarness == core.HarnessKindClaude || *r.verdictHarness == core.HarnessKindKimi)
+	state.ClearContext = r.supportsClearContext()
 	state.BackgroundCommands = r.backgroundCommands()
 	if r.backgroundWorkKnown != nil {
 		known := *r.backgroundWorkKnown
@@ -1530,6 +1556,35 @@ func (r *DurableRelay) SetSteeringSupported(supported *bool) {
 	r.steeringSupported = supported
 }
 
+// EffectiveSteeringSupported is the steering capability combining ACP
+// support with hook-based delivery.
+func (r *DurableRelay) EffectiveSteeringSupported() *bool {
+	if r.steeringSupported == nil {
+		return nil
+	}
+	var supported bool
+	switch r.steeringDeliveryMode {
+	case SteeringDeliveryModeHookPostToolBatch:
+		supported = true
+	case SteeringDeliveryModeHookTurnEnd:
+		supported = false
+	default:
+		supported = *r.steeringSupported
+	}
+	return &supported
+}
+
+func (r *DurableRelay) supportsClearContext() bool {
+	if r.verdictHarness == nil {
+		return false
+	}
+	switch *r.verdictHarness {
+	case core.HarnessKindCodex, core.HarnessKindClaude, core.HarnessKindKimi, core.HarnessKindAntigravity:
+		return true
+	}
+	return false
+}
+
 // SetAutomaticSteering allows the relay to steer queued prompts into the
 // running turn itself.
 func (r *DurableRelay) SetAutomaticSteering(enabled bool) {
@@ -1537,11 +1592,11 @@ func (r *DurableRelay) SetAutomaticSteering(enabled bool) {
 }
 
 // SetSteeringDeliveryMode selects steering delivery for the configured
-// harness and staged profile. The safe Claude turn-end mode is selected
-// before worker admission opens; preparation upgrades it only after
-// verifying a usable hook marker.
-func (r *DurableRelay) SetSteeringDeliveryMode(harness core.HarnessKind, claudePostToolBatchHook bool) {
-	r.steeringDeliveryMode = steeringDeliveryModeForHarness(harness, claudePostToolBatchHook)
+// harness and staged profile. The safe turn-end mode is selected before
+// worker admission opens; preparation upgrades it only after verifying a
+// usable hook marker.
+func (r *DurableRelay) SetSteeringDeliveryMode(harness core.HarnessKind, boundaryHook bool) {
+	r.steeringDeliveryMode = steeringDeliveryModeForHarness(harness, boundaryHook)
 }
 
 // SetMailboxDeliveryMode sets when a Codex session's mailbox messages may
@@ -1549,6 +1604,14 @@ func (r *DurableRelay) SetSteeringDeliveryMode(harness core.HarnessKind, claudeP
 // drain and the published operational state both read this one field.
 func (r *DurableRelay) SetMailboxDeliveryMode(mode core.MailboxDeliveryMode) {
 	r.mailboxDeliveryMode = &mode
+}
+
+func (r *DurableRelay) updateMailboxDeliveryMode(mode *core.MailboxDeliveryMode) {
+	r.mailboxDeliveryMode = mode
+}
+
+func (r *DurableRelay) inPlaceMoveHoldActive() bool {
+	return r.snapshot.InPlaceMoveHold != nil
 }
 
 // turnInProgress is the relay-owned turn boundary shared by command
@@ -1571,13 +1634,6 @@ func (r *DurableRelay) ActivityFacts() core.ActivityFacts {
 	backgroundCommands := r.backgroundCommands()
 	backgroundCount := len(backgroundCommands) + r.nativeAgentCount()
 	r.turnContext.SetCounts(backgroundCount, len(r.snapshot.QueuedPrompts))
-	runningAgents := []string{}
-	for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgents)) {
-		if r.snapshot.NativeAgents[id].State == core.NativeAgentStateRunning {
-			runningAgents = append(runningAgents, id)
-		}
-	}
-	r.turnContext.SetBackgroundInventory(backgroundCommands, runningAgents)
 	var promptStartedAtMs *int64
 	if prompt := r.snapshot.ActivePrompt; prompt != nil {
 		started := prompt.StartedAtMs
@@ -1625,31 +1681,39 @@ func (r *DurableRelay) ActivityFacts() core.ActivityFacts {
 		taskSettledAtMs = &at
 	}
 	facts := core.ActivityFacts{
-		Execution:              r.snapshot.Execution,
-		PromptStartedAtMs:      promptStartedAtMs,
-		HarnessTurnStartedAtMs: harnessTurnStartedAtMs,
-		TurnStartedAtMs:        r.snapshot.ActivityTurnStartedAtMs,
-		QueuedCommands:         len(r.snapshot.QueuedPrompts),
-		ToolsInFlight:          r.foregroundTools.Snapshot(),
-		BackgroundStartedAtMs:  backgroundStartedAtMs,
-		BackgroundCommands:     backgroundCount,
-		ActiveUserShells:       len(r.snapshot.ActiveUserShells),
-		ActiveAgentTerminals:   len(r.activeAgentTerminals),
-		GoalActive:             r.snapshot.Goal.Active(),
-		GoalRunning:            r.snapshot.Goal.Running(),
-		GoalPendingResume:      r.snapshot.Goal.PendingResume != nil,
-		GoalDecision:           r.snapshot.Goal.Decision != nil,
-		GoalSynchronized:       r.snapshot.Goal.Synchronized(),
-		BackgroundWorkKnown:    backgroundWorkKnown,
-		AcpReady:               &acpReady,
-		CheckpointOnly:         r.checkpointOnly,
-		CheckpointBarrier:      r.snapshot.CheckpointBarrier != nil,
-		CapacityRetryArmed:     r.snapshot.CapacityRetry != nil && !r.snapshot.CapacityRetry.Submitted,
-		LastAcpActivityAtMs:    lastACPActivityAtMs,
-		CurrentStepStartedAtMs: r.stepClock.StartedAtMs(),
-		IdleSinceMs:            r.snapshot.IdleSinceMs,
-		TaskSettledAtMs:        taskSettledAtMs,
+		Execution:                  r.snapshot.Execution,
+		PromptStartedAtMs:          promptStartedAtMs,
+		HarnessTurnStartedAtMs:     harnessTurnStartedAtMs,
+		TurnStartedAtMs:            r.snapshot.ActivityTurnStartedAtMs,
+		QueuedCommands:             len(r.snapshot.QueuedPrompts),
+		ToolsInFlight:              r.foregroundTools.Snapshot(),
+		BackgroundStartedAtMs:      backgroundStartedAtMs,
+		BackgroundCommands:         backgroundCount,
+		AntigravityTaskStartedAtMs: core.OldestAntigravityTaskStart(backgroundCommands),
+		ActiveUserShells:           len(r.snapshot.ActiveUserShells),
+		ActiveAgentTerminals:       len(r.activeAgentTerminals),
+		GoalActive:                 r.snapshot.Goal.Active(),
+		GoalRunning:                r.snapshot.Goal.Running(),
+		GoalPendingResume:          r.snapshot.Goal.PendingResume != nil,
+		GoalDecision:               r.snapshot.Goal.Decision != nil,
+		GoalSynchronized:           r.snapshot.Goal.Synchronized(),
+		BackgroundWorkKnown:        backgroundWorkKnown,
+		AcpReady:                   &acpReady,
+		CheckpointOnly:             r.checkpointOnly,
+		CheckpointBarrier:          r.snapshot.CheckpointBarrier != nil,
+		CapacityRetryArmed:         r.snapshot.CapacityRetry != nil && !r.snapshot.CapacityRetry.Submitted,
+		LastAcpActivityAtMs:        lastACPActivityAtMs,
+		CurrentStepStartedAtMs:     r.stepClock.StartedAtMs(),
+		IdleSinceMs:                r.snapshot.IdleSinceMs,
+		TaskSettledAtMs:            taskSettledAtMs,
 	}
+	runningAgents := []string{}
+	for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgents)) {
+		if r.snapshot.NativeAgents[id].State == core.NativeAgentStateRunning {
+			runningAgents = append(runningAgents, id)
+		}
+	}
+	r.turnContext.SetBackgroundInventory(backgroundCommands, runningAgents)
 	facts.ExpectedContinuation, facts.InferredIdleSinceMs, facts.BackgroundNeeded =
 		r.repliedVerdict.inference(r.turnContext.Generation(), &facts)
 	return facts
@@ -1720,6 +1784,9 @@ func (r *DurableRelay) setManagedSubagent(managed bool) error {
 		if _, err := r.RecordObservation(core.RelayObservationManagedSubagentConfigured{Managed: managed}); err != nil {
 			return err
 		}
+	}
+	if err := r.settleLocalQuota(); err != nil {
+		return err
 	}
 	return r.suppressChildAssessment()
 }
@@ -1867,6 +1934,17 @@ func (r *DurableRelay) NativeSessionHistory() NativeSessionHistory {
 		}
 	}
 	if evidence := r.snapshot.NativeUseEvidence; evidence != nil {
+		// Before the restored worker opens its first harness session,
+		// native_session_id is still nil while the seed's archived evidence
+		// is already present. Honor RestoredNativeSessionUnused so an unused
+		// restored session can still take LoadBeforeReplace.
+		if r.snapshot.NativeSessionID == nil {
+			if evidence.Version == 1 && evidence.Usage == core.NativeSessionUseUnused &&
+				r.snapshot.RestoredNativeSessionUnused && !dispatched {
+				return NativeSessionHistoryLoadBeforeReplace
+			}
+			return NativeSessionHistoryMayHaveHistory
+		}
 		if evidence.Version != 1 ||
 			r.snapshot.NativeSessionID == nil || evidence.NativeSessionID != *r.snapshot.NativeSessionID ||
 			evidence.Usage != core.NativeSessionUseUnused ||
@@ -2195,7 +2273,7 @@ func (r *DurableRelay) announcedHarnessTurn() bool {
 // HarnessTurnStopGrace. The snapshot owns the stop: a journal event records
 // it, so it is the same on every path and after a restart.
 func (r *DurableRelay) UnansweredHarnessTurnStop() (uint64, bool) {
-	if r.harnessTurns != HarnessTurnPolicyClaudeAdapter {
+	if r.harnessTurns != HarnessTurnPolicyClaudeAdapter && r.harnessTurns != HarnessTurnPolicyAntigravity {
 		return 0, false
 	}
 	turn := r.snapshot.AutonomousHarnessTurn()
@@ -2216,7 +2294,7 @@ func (r *DurableRelay) EndUnansweredHarnessTurnStop(firstOrdinal uint64) (bool, 
 	if ordinal, ok := r.UnansweredHarnessTurnStop(); !ok || ordinal != firstOrdinal {
 		return false, nil
 	}
-	slog.Warn("Claude Code did not answer a stop of the turn it started on its own; ending the turn",
+	slog.Warn("The harness did not answer a stop of its autonomous turn; ending the turn",
 		"session_id", r.snapshot.SessionID, "first_ordinal", firstOrdinal)
 	origin := "stop_unanswered"
 	if err := r.settleHarnessTurn(&origin, "cancelled"); err != nil {

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"unicode/utf8"
 
 	acpschema "github.com/BrokkAi/acp-go/schema"
@@ -704,7 +706,7 @@ func visitRelayJournalReader(
 				gaps = append(gaps, RelayJournalGap{byteOffset: recordOffset, byteLen: len(line)})
 				continue
 			}
-			return RelayJournalScan{}, fmt.Errorf("parse relay journal %s: %w", path, err)
+			return RelayJournalScan{}, fmt.Errorf("parse relay journal %s at byte offset %d: %w", path, recordOffset, err)
 		}
 		// A record that parses but whose bytes were altered fails to recompute
 		// its own digest. In recovery that is corruption too — skip it so a
@@ -770,7 +772,24 @@ func readRestoredRelaySeed(root string) (*core.RestoredRelaySeed, error) {
 	return &seed, nil
 }
 
+// journalAppendFault is a failure a test injects into the next journal
+// append (Rust's #[cfg(test)] JournalAppendFault).
+type journalAppendFault struct {
+	kind         journalAppendFaultKind
+	failRollback bool
+}
+
+type journalAppendFaultKind int
+
+const (
+	journalAppendFaultPartialWrite journalAppendFaultKind = iota
+	journalAppendFaultDirectorySync
+)
+
 func (r *DurableRelay) appendRelayEvent(commandID *string, observation core.RelayObservation) (uint64, error) {
+	if r.journalAppendFailure != nil {
+		return 0, fmt.Errorf("relay journal appends disabled after failed rollback: %s", *r.journalAppendFailure)
+	}
 	// Every journal write passes here, so this is the one place that decides
 	// whether a ready checkpoint barrier's hold survives it. What waited is
 	// journaled first, which also keeps arrival order.
@@ -839,25 +858,8 @@ func (r *DurableRelay) appendRelayEvent(commandID *string, observation core.Rela
 	}
 	journal := filepath.Join(r.root, core.RelayJournalDir)
 	path := filepath.Join(journal, core.RelayActiveSegment)
-	createdActiveSegment := !relayPathExists(path)
-	file, err := openOwnerOnly(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY)
-	if err != nil {
-		return 0, fmt.Errorf("open %s: %w", path, err)
-	}
-	_, err = file.Write(encoded)
-	if err == nil {
-		err = file.Sync()
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
+	if err := r.commitJournalAppend(journal, path, ordinal, encoded); err != nil {
 		return 0, err
-	}
-	if createdActiveSegment {
-		if err := core.SyncDirectory(journal); err != nil {
-			return 0, err
-		}
 	}
 	if err := core.ReachTestHook("journal_append_before_snapshot_publication"); err != nil {
 		return 0, err
@@ -880,6 +882,7 @@ func (r *DurableRelay) appendRelayEvent(commandID *string, observation core.Rela
 			}
 		}
 	}
+	previousNativeSessionID := r.snapshot.NativeSessionID
 	previousAssessment := r.snapshot.Assessment
 	if staged != nil {
 		r.snapshot = *staged
@@ -889,6 +892,13 @@ func (r *DurableRelay) appendRelayEvent(commandID *string, observation core.Rela
 		// here either: this event was digested from this exact frontier,
 		// which RelayEventDigest already validated.
 		return 0, err
+	}
+	if !relayOptionalStringEqual(r.snapshot.NativeSessionID, previousNativeSessionID) {
+		r.forgetAntigravityState()
+	}
+	if started, ok := event.Observation.(core.RelayObservationCommandStarted); ok &&
+		r.snapshot.ActivePrompt != nil && r.snapshot.ActivePrompt.CommandID == started.CommandID {
+		r.antigravityPromptStarted()
 	}
 	// The staged path replaced the snapshot with a deep copy and the
 	// unstaged path leaves the assessment alone, so the old pointer still
@@ -953,11 +963,90 @@ func (r *DurableRelay) appendRelayEvent(commandID *string, observation core.Rela
 			return 0, err
 		}
 	}
+	if err := r.settleLocalQuota(); err != nil {
+		return 0, err
+	}
 	if err := r.suppressChildAssessment(); err != nil {
 		return 0, err
 	}
 	r.serviceLiveBaselines()
 	return ordinal, nil
+}
+
+// relayOptionalStringEqual is Option<String> equality.
+func relayOptionalStringEqual(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+// commitJournalAppend appends one encoded record to the active segment, or
+// restores the segment's previous length when the append fails, so a retry
+// never joins the next record to a torn one. A failed rollback leaves the
+// boundary unknown and fences every later append.
+func (r *DurableRelay) commitJournalAppend(journal, path string, ordinal uint64, encoded []byte) error {
+	appendContext := func() string { return fmt.Sprintf("append relay event %d to %s", ordinal, path) }
+	// The relay is the sole writer. Seek on a writable handle so the same
+	// handle can truncate on Windows, where append mode forbids it.
+	file, err := openOwnerOnly(path, os.O_CREATE|os.O_WRONLY)
+	if err != nil {
+		return fmt.Errorf("%s: open active segment: %w", appendContext(), err)
+	}
+	defer file.Close()
+	originalLen, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return fmt.Errorf("%s: seek to active segment end: %w", appendContext(), err)
+	}
+	fault := r.journalAppendFault
+	r.journalAppendFault = nil
+	commit := func() error {
+		if fault != nil && fault.kind == journalAppendFaultPartialWrite {
+			if _, err := file.Write(encoded[:len(encoded)/2]); err != nil {
+				return fmt.Errorf("write record prefix: %w", err)
+			}
+			return fmt.Errorf("write record: %w", syscall.ENOSPC)
+		}
+		if _, err := file.Write(encoded); err != nil {
+			return fmt.Errorf("write record: %w", err)
+		}
+		if err := file.Sync(); err != nil {
+			return fmt.Errorf("sync record: %w", err)
+		}
+		// An empty segment may be newly created or left by a failed first
+		// append. Its first successful append must sync the directory.
+		if originalLen == 0 {
+			if fault != nil && fault.kind == journalAppendFaultDirectorySync {
+				return fmt.Errorf("sync journal directory: %w", syscall.ENOSPC)
+			}
+			if err := core.SyncDirectory(journal); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if commitErr := commit(); commitErr != nil {
+		rollback := func() error {
+			if fault != nil && fault.kind == journalAppendFaultPartialWrite && fault.failRollback {
+				return fmt.Errorf("truncate active segment: %w", syscall.EACCES)
+			}
+			if err := file.Truncate(originalLen); err != nil {
+				return fmt.Errorf("truncate active segment: %w", err)
+			}
+			if err := file.Sync(); err != nil {
+				return fmt.Errorf("sync truncated segment: %w", err)
+			}
+			return nil
+		}
+		err := fmt.Errorf("%s: %w", appendContext(), commitErr)
+		if rollbackErr := rollback(); rollbackErr != nil {
+			err = fmt.Errorf("rollback failed at length %d: %s: %w", originalLen, rollbackErr, err)
+			failure := err.Error()
+			r.journalAppendFailure = &failure
+		}
+		return err
+	}
+	return nil
 }
 
 // stagesSnapshot is whether appending this observation has to stage and

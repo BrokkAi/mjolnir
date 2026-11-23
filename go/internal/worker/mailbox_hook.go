@@ -50,17 +50,36 @@ func MailboxHookRequest(socket string) error {
 	if err != nil {
 		return err
 	}
-	return mailboxHookWriteStdout(value)
+	return mailboxHookWriteOutput(os.Stdout, value)
 }
+
+// HookOutputFormat is the output format expected by the calling harness's
+// hook contract.
+type HookOutputFormat int
+
+const (
+	HookOutputFormatStandard HookOutputFormat = iota
+	HookOutputFormatAntigravity
+)
 
 // MailboxHookRun is mailbox_hook::run: consume one harness hook request,
 // write its response, then acknowledge the relay lease. Relay unavailability
 // is deliberately fail-open: an unacked lease returns to the mailbox after
 // its timeout or a worker restart.
 func MailboxHookRun(socket string, hookEvent string) error {
-	input, err := io.ReadAll(os.Stdin)
+	return MailboxHookRunWithFormat(socket, hookEvent, HookOutputFormatStandard)
+}
+
+// MailboxHookRunWithFormat consumes one harness hook request using the
+// specified hook output format.
+func MailboxHookRunWithFormat(socket string, hookEvent string, format HookOutputFormat) error {
+	return mailboxHookRun(socket, hookEvent, format, os.Stdin, os.Stdout)
+}
+
+func mailboxHookRun(socket string, hookEvent string, format HookOutputFormat, stdin io.Reader, stdout io.Writer) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil {
-		return mailboxHookWriteEmptyWithDiagnostic(fmt.Sprintf("could not consume hook input: %s", core.IOErrorDisplay(err)))
+		return mailboxHookWriteEmptyWithDiagnostic(stdout, fmt.Sprintf("could not consume hook input: %s", core.IOErrorDisplay(err)))
 	}
 	// Input that is not a hook object reads as a hook without an agent: only
 	// a read failure is a reason not to drain.
@@ -69,20 +88,55 @@ func MailboxHookRun(socket string, hookEvent string) error {
 		hookInput = mailboxHookInput{}
 	}
 	if isSubagentHookInput(&hookInput) {
-		return mailboxHookWriteStdout(jsonvalue.Object{})
+		return mailboxHookWriteOutput(stdout, jsonvalue.Object{})
 	}
 
-	text, count, leaseID, err := mailboxHookDrain(socket, hookEvent)
+	if format == HookOutputFormatAntigravity && hookEvent == "Stop" {
+		payload, err := mailboxHookSendRequest(socket, core.RelayRequestAntigravityStop{
+			ConversationID:    hookInput.ConversationID,
+			FullyIdle:         hookInput.FullyIdle,
+			TerminationReason: hookInput.TerminationReason,
+		})
+		switch {
+		case err != nil:
+			return mailboxHookWriteEmptyWithDiagnostic(stdout, fmt.Sprintf("could not observe Stop: %v", err))
+		default:
+			if _, observed := payload.(core.RelayResponsePayloadAntigravityStopObserved); observed {
+				return mailboxHookWriteOutput(stdout, jsonvalue.Object{})
+			}
+			return mailboxHookWriteEmptyWithDiagnostic(stdout, fmt.Sprintf("worker refused Stop: %s", relayResponsePayloadDebug(payload)))
+		}
+	}
+
+	var conversationID *string
+	var initialNumSteps *int64
+	if format == HookOutputFormatAntigravity {
+		conversationID, initialNumSteps = hookInput.ConversationID, hookInput.InitialNumSteps
+	}
+
+	text, count, leaseID, err := mailboxHookDrain(socket, hookEvent, conversationID, initialNumSteps)
 	switch {
 	case err != nil:
-		return mailboxHookWriteEmptyWithDiagnostic(fmt.Sprintf("could not drain mailbox: %v", err))
+		return mailboxHookWriteEmptyWithDiagnostic(stdout, fmt.Sprintf("could not drain mailbox: %v", err))
 	case text != nil && count > 0 && leaseID != nil:
-		if err := mailboxHookWriteStdout(jsonvalue.Object{
+		output := jsonvalue.Object{
 			{Key: "hookSpecificOutput", Value: jsonvalue.Object{
 				{Key: "hookEventName", Value: hookEvent},
 				{Key: "additionalContext", Value: *text},
 			}},
-		}); err != nil {
+		}
+		if format == HookOutputFormatAntigravity {
+			output = jsonvalue.Object{
+				{Key: "injectSteps", Value: []any{
+					jsonvalue.Object{
+						{Key: "systemMessage", Value: jsonvalue.Object{
+							{Key: "systemMessage", Value: *text},
+						}},
+					},
+				}},
+			}
+		}
+		if err := mailboxHookWriteOutput(stdout, output); err != nil {
 			return err
 		}
 		if err := mailboxHookAcknowledge(socket, *leaseID); err != nil {
@@ -90,16 +144,20 @@ func MailboxHookRun(socket string, hookEvent string) error {
 		}
 		return nil
 	case text == nil && count == 0 && leaseID == nil:
-		return mailboxHookWriteStdout(jsonvalue.Object{})
+		return mailboxHookWriteOutput(stdout, jsonvalue.Object{})
 	default:
-		return mailboxHookWriteEmptyWithDiagnostic("worker returned an incomplete mailbox lease")
+		return mailboxHookWriteEmptyWithDiagnostic(stdout, "worker returned an incomplete mailbox lease")
 	}
 }
 
 // mailboxHookInput is the part of a harness hook's input the mailbox hook
 // reads.
 type mailboxHookInput struct {
-	AgentID *string `json:"agent_id"`
+	AgentID           *string `json:"agent_id"`
+	ConversationID    *string `json:"conversationId"`
+	InitialNumSteps   *int64  `json:"initialNumSteps"`
+	FullyIdle         *bool   `json:"fullyIdle"`
+	TerminationReason *string `json:"terminationReason"`
 }
 
 // isSubagentHookInput reports whether the hook fired inside a sub-agent,
@@ -110,11 +168,15 @@ func isSubagentHookInput(input *mailboxHookInput) bool {
 
 // mailboxHookDrain leases the pending mailbox text for hookEvent: the text,
 // the event count and the lease id, each absent when there is nothing.
-func mailboxHookDrain(socket string, hookEvent string) (text *string, count int, leaseID *string, err error) {
+func mailboxHookDrain(socket string, hookEvent string, conversationID *string, initialNumSteps *int64) (text *string, count int, leaseID *string, err error) {
 	if hookEvent != "PostToolUse" && hookEvent != "PostToolBatch" {
 		return nil, 0, nil, errors.New("unsupported mailbox hook event")
 	}
-	payload, err := mailboxHookSendRequest(socket, core.RelayRequestDrainMailbox{HookEvent: hookEvent})
+	payload, err := mailboxHookSendRequest(socket, core.RelayRequestDrainMailbox{
+		HookEvent:       hookEvent,
+		ConversationID:  conversationID,
+		InitialNumSteps: initialNumSteps,
+	})
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -193,16 +255,16 @@ func mailboxHookSendRequest(socket string, request core.RelayRequest) (core.Rela
 	return nil, fmt.Errorf("worker refused mailbox hook request: %s", relayResponseBodyDebug(response.Body))
 }
 
-func mailboxHookWriteStdout(value any) error {
+func mailboxHookWriteOutput(stdout io.Writer, value any) error {
 	output, err := jsonvalue.Marshal(value)
 	if err != nil {
 		return err
 	}
-	_, err = os.Stdout.Write(append(output, '\n'))
+	_, err = stdout.Write(append(output, '\n'))
 	return err
 }
 
-func mailboxHookWriteEmptyWithDiagnostic(message string) error {
+func mailboxHookWriteEmptyWithDiagnostic(stdout io.Writer, message string) error {
 	core.DiagnosticStderr("Mjolnir mailbox hook: %s", message)
-	return mailboxHookWriteStdout(jsonvalue.Object{})
+	return mailboxHookWriteOutput(stdout, jsonvalue.Object{})
 }

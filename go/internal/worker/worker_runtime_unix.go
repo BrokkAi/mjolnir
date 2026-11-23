@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
@@ -41,6 +42,7 @@ import (
 
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
+	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
 )
@@ -160,9 +162,11 @@ type harnessPreparationSetup struct {
 	root                    string
 	config                  core.WorkerLaunchConfig
 	relay                   *RelayCell
+	restarting              bool
 	sessionGitConfigInclude *string
 	credentials             credentialEndpointResult
 	kimiTaskHome            *kimiHome
+	antigravityTaskHome     *kimiHome
 	resumeSession           *string
 	nativeSessionHistory    NativeSessionHistory
 	// capture is what a sub-agent's worker observes at the end of each turn.
@@ -580,7 +584,7 @@ func publishStarted(ctx context.Context, cancel context.CancelFunc, relay *Relay
 // exists, and nothing after the publication can fail, so a Started worker
 // always has a coordinator. ctx and cancel are the preparation's
 // cancellation token.
-func startBridge(ctx context.Context, cancel context.CancelFunc, setup *preparedAcpSetup, relay *RelayCell, dispatchWakes **dispatchWakeChannel, kimiTaskHome *kimiHome, capture *WorkObserver, runtime *core.Runtime, status *core.Watch[preparationSnapshot]) (*startedBridgeTasks, error) {
+func startBridge(ctx context.Context, cancel context.CancelFunc, setup *preparedAcpSetup, relay *RelayCell, dispatchWakes **dispatchWakeChannel, kimiTaskHome *kimiHome, antigravityTaskHome *kimiHome, capture *WorkObserver, runtime *core.Runtime, status *core.Watch[preparationSnapshot]) (*startedBridgeTasks, error) {
 	wakes, err := publishStarted(ctx, cancel, relay, status, dispatchWakes, preparedConnectionServices{
 		commands:  setup.commandsTx,
 		reviewer:  setup.reviewer,
@@ -616,11 +620,15 @@ func startBridge(ctx context.Context, cancel context.CancelFunc, setup *prepared
 	if kimiTaskHome != nil {
 		kimiTasks = newKimiTaskMonitor(*kimiTaskHome)
 	}
+	var antigravityTasks *AntigravityTaskMonitor
+	if antigravityTaskHome != nil {
+		antigravityTasks = newAntigravityTaskMonitor(*antigravityTaskHome)
+	}
 	eventContext, eventAbort := context.WithCancel(context.Background())
 	started.eventAbort = eventAbort
 	started.eventTask = core.Spawn(func() error {
 		return runRelayCoordinatorWithShells(eventContext, relay, setup.eventsRx, wakes, commands,
-			setup.userShells, kimiTasks, capture, newHarnessStartup())
+			setup.userShells, kimiTasks, antigravityTasks, capture, newHarnessStartup())
 	})
 	return started, nil
 }
@@ -686,8 +694,9 @@ func preparationError(snapshot *preparationSnapshot, operation string) (string, 
 // the controller names, or until core.RelayChangeWaitBound passes. The state
 // is built as an attach builds it, preparation included, so its digest is
 // the one the controller holds.
-func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watch[preparationSnapshot], subagents *SubagentEndpoint, feed *subagentFeed, afterOrdinal uint64, stateDigest *string) (core.RelayResponseBody, error) {
+func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watch[preparationSnapshot], subagents *SubagentEndpoint, feed *subagentFeed, guardianGeneration *uint64, afterOrdinal uint64, stateDigest *string) (core.RelayResponseBody, error) {
 	releases := relay.Releases()
+	guardian := relay.guardian.Changes()
 	jev := core.RateLimitChanges()
 	var generations *core.Watch[uint64]
 	if subagents != nil {
@@ -708,6 +717,7 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 		// channel of its own; stopJev withdraws it on every way out of this
 		// pass.
 		jevChanged, stopJev := jev.Subscribe()
+		guardianChanged := guardian.Changed()
 		var harnessPreparation core.HarnessPreparation
 		if preparation != nil {
 			// A finished preparation keeps its last value, which an attach
@@ -726,13 +736,18 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 			return nil, err
 		}
 		subagentQueueChanged := subagents != nil && feed.HasUnpolled(subagents)
-		changed := latestOrdinal != afterOrdinal ||
+		generation := guardian.Borrow()
+		guardianQueueChanged := generation != *guardianGeneration
+		*guardianGeneration = generation
+		changed := guardianQueueChanged ||
+			latestOrdinal != afterOrdinal ||
 			stateDigest == nil || *stateDigest != digest ||
 			subagentQueueChanged
 		observed := core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadChangeObserved{
 			LatestOrdinal:        latestOrdinal,
 			StateDigest:          digest,
 			SubagentQueueChanged: subagentQueueChanged,
+			GuardianQueueChanged: guardianQueueChanged,
 		}}
 		if changed {
 			stopJev()
@@ -750,6 +765,7 @@ func waitForChange(ctx context.Context, relay *RelayCell, preparation *core.Watc
 		case <-generationsChanged:
 		case <-preparationChanged:
 		case <-jevChanged:
+		case <-guardianChanged:
 		case <-deadline.C:
 			timedOut = true
 		case <-ctx.Done():
@@ -961,6 +977,7 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	if include, ok := config.TargetEnvironment[core.SessionGitConfigIncludePath]; ok {
 		sessionGitConfigInclude = &include
 	}
+	delete(config.TargetEnvironment, core.SessionNitroMbxEnv)
 	if key, ok := config.TargetEnvironment[core.FastinoKeyEnvironment]; ok {
 		delete(config.TargetEnvironment, core.FastinoKeyEnvironment)
 		if !fastinoKey.Set(key) {
@@ -1000,6 +1017,10 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	if config.Harness == core.HarnessKindKimi {
 		kimiTaskHome = &kimiHome{path: endpoint.Home, err: endpointErr}
 	}
+	var antigravityTaskHome *kimiHome
+	if config.Harness == core.HarnessKindAntigravity {
+		antigravityTaskHome = &kimiHome{path: endpoint.Home, err: endpointErr}
+	}
 	if err := core.CreateOwnerOnlyDirectory(root); err != nil {
 		return fmt.Errorf("create worker root %s: %w", root, err)
 	}
@@ -1028,6 +1049,36 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 			return fmt.Errorf("remove stale socket %s: %w", socket, err)
 		}
 	}
+	// Check the target directory before serving any relay requests.
+	// Otherwise a child process can fail to spawn with ENOENT for its cwd,
+	// and a caller that already attached can see only the ensuing relay
+	// disconnect.
+	if !checkpointOnly {
+		const step = "working-directory"
+		RecordStartupStep(root, step)
+		// Only a directory that is gone or is not a directory is permanent.
+		// Other errors, such as ESTALE or EIO from a network filesystem, can
+		// clear up. They exit with an ordinary error and no startup-failure
+		// marker, because every reader of that marker (unpark and recovery)
+		// takes it to mean that starting again would only repeat the
+		// failure.
+		problem, permanent := "", false
+		if info, err := os.Stat(config.Cwd); err == nil && !info.IsDir() {
+			problem, permanent = "path is not a directory", true
+		} else if err != nil {
+			problem = core.IOErrorDisplay(err)
+			permanent = errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+		}
+		if problem != "" {
+			message := fmt.Sprintf("worker working directory %s is unavailable: %s", config.Cwd, problem)
+			RecordStartupFailure(root, step, message)
+			if !permanent {
+				return errors.New(message)
+			}
+			kind := core.WorkerHarnessStartupFailureKindWorkingDirectoryUnavailable
+			return core.WorkerHarnessStartupFailure{Message: message, Kind: &kind}
+		}
+	}
 	_, relayStateErr := os.Stat(filepath.Join(root, core.RelayStateFile))
 	_, seedErr := os.Stat(filepath.Join(root, core.RestoredRelaySeedFile))
 	restarting := relayStateErr == nil || seedErr == nil
@@ -1046,6 +1097,11 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	// Only Claude Code's adapter marks the end of a turn it started on its
 	// own, so only it can model those turns without leaving a session stuck
 	// Running. See `.agents/docs/claude-autonomous-turns.md`.
+	if config.Environment[core.DisabledEnvironment] == "1" {
+		durableRelay.jevDisabled = true
+	}
+	durableRelay.recoversChildQuota = config.SubagentKind != nil && *config.SubagentKind == core.SubagentKindWorker &&
+		!durableRelay.jevDisabled
 	if err := durableRelay.setManagedSubagent(config.IsManagedSubagent()); err != nil {
 		return err
 	}
@@ -1060,20 +1116,15 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	// Worker admission opens before profile preparation finishes. Claude
 	// must already be protected from ACP steering during that window.
 	durableRelay.SetSteeringDeliveryMode(config.Harness, false)
-	switch config.Harness {
-	case core.HarnessKindClaude:
-		durableRelay.SetHarnessTurnPolicy(HarnessTurnPolicyClaudeAdapter)
-	case core.HarnessKindCodex:
-		durableRelay.SetHarnessTurnPolicy(HarnessTurnPolicyCodexAdapter)
-	default:
-		durableRelay.SetHarnessTurnPolicy(HarnessTurnPolicyDisabled)
-	}
+	durableRelay.SetHarnessTurnPolicy(harnessTurnPolicyFor(config.Harness))
 	// Both adapters publish their background command lifecycle through AIR.
 	switch config.Harness {
 	case core.HarnessKindClaude, core.HarnessKindCodex:
 		durableRelay.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
 	case core.HarnessKindKimi:
 		durableRelay.SetBackgroundWorkPolicy(BackgroundWorkPolicyKimiTasks)
+	case core.HarnessKindAntigravity:
+		durableRelay.SetBackgroundWorkPolicy(BackgroundWorkPolicyAntigravityTasks)
 	default:
 		durableRelay.SetBackgroundWorkPolicy(BackgroundWorkPolicyHostedTerminals)
 	}
@@ -1217,6 +1268,25 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 		}
 	}
 
+	suspendSignal, err := InstallSuspendSignal(root)
+	if err != nil {
+		return err
+	}
+	type suspendWait struct {
+		request core.SuspendRequest
+		err     error
+	}
+	suspendRequests := make(chan suspendWait, 1)
+	suspendContext, stopSuspendWait := context.WithCancel(context.Background())
+	defer stopSuspendWait()
+	go func() {
+		request, err := waitForSuspend(suspendContext, suspendSignal)
+		if suspendContext.Err() == nil {
+			suspendRequests <- suspendWait{request: request, err: err}
+		}
+	}()
+	suspendSessionID := config.SessionID
+
 	initialStep := "login-resolve"
 	preparationStatus := core.NewWatch(preparationSnapshot{
 		state: core.HarnessPreparationPreparing{Step: initialStep, SinceMs: time.Now().UnixMilli()},
@@ -1257,10 +1327,15 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	runtime.cpu = cpu
 	runtime.preparation = preparationStatus
 	runtime.preparationCancel = preparationCancel
+	if antigravityTaskHome != nil && antigravityTaskHome.err == nil {
+		home := antigravityTaskHome.path
+		runtime.antigravityHome = &home
+	}
 	runtime.hasSubagentTools = hasSubagentRole
+	sharedCredentials := newSharedCredentials(credentials)
 	clientContext, abortClients := context.WithCancel(context.Background())
 	clientTask := core.Spawn(func() error {
-		return acceptWorkerClients(clientContext, listener, guard, relay, dispatchWake, credentials, runtime, fatal)
+		return acceptWorkerClients(clientContext, listener, guard, relay, dispatchWake, sharedCredentials, runtime, fatal)
 	})
 	// Every return below removes control.sock before the daemon's caller
 	// sees the result: the accept loop's socket guard ends with it.
@@ -1269,14 +1344,21 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 		result, joinErr := clientTask.Join(context.Background())
 		return acceptStopped(result, joinErr)
 	}
+	finishSuspended := func(request core.SuspendRequest) error {
+		abortClients()
+		<-clientTask.Done()
+		return finishSuspend(context.Background(), root, suspendSessionID, request)
+	}
 
 	preparationSetup := harnessPreparationSetup{
 		root:                    root,
 		config:                  config,
 		relay:                   relay,
+		restarting:              restarting,
 		sessionGitConfigInclude: sessionGitConfigInclude,
 		credentials:             credentials,
 		kimiTaskHome:            kimiTaskHome,
+		antigravityTaskHome:     antigravityTaskHome,
 		resumeSession:           resumeSession,
 		nativeSessionHistory:    nativeSessionHistory,
 		capture:                 capture,
@@ -1300,6 +1382,12 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 		stopPreparation(ctx, preparationCancel, prepTask)
 		abortClients()
 		return relayFatal(report)
+	case suspended := <-suspendRequests:
+		if suspended.err != nil {
+			return suspended.err
+		}
+		stopPreparation(ctx, preparationCancel, prepTask)
+		return finishSuspended(suspended.request)
 	case <-clientTask.Done():
 		stopPreparation(ctx, preparationCancel, prepTask)
 		return clientStopped()
@@ -1325,6 +1413,12 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 		// barrier still wakes dispatch, and the handler completes the Close
 		// locally.
 		select {
+		case suspended := <-suspendRequests:
+			if suspended.err != nil {
+				abortClients()
+				return suspended.err
+			}
+			return finishSuspended(suspended.request)
 		case report := <-fatal:
 			abortClients()
 			return relayFatal(report)
@@ -1340,10 +1434,22 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	}
 	defer running.releaseLeases()
 
+	var suspendRequest *core.SuspendRequest
+	var suspendErr error
 	acpResult := func() error {
 		var acpResult error
 		var acpJoinErr error
 		select {
+		case suspended := <-suspendRequests:
+			running.acpShutdown()
+			stopFailedCoordinator(running.eventAbort, running.eventTask)
+			_, _ = running.acpTask.Join(context.Background())
+			if suspended.err != nil {
+				suspendErr = suspended.err
+				return nil
+			}
+			suspendRequest = &suspended.request
+			return nil
 		case report := <-fatal:
 			stopFailedCoordinator(running.eventAbort, running.eventTask)
 			return stopPeerAndReturn(running.acpTask, running.acpShutdown, report, "relay durable state became unwritable")
@@ -1395,6 +1501,10 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 		return failure
 	}()
 
+	if suspendErr != nil {
+		abortClients()
+		return suspendErr
+	}
 	closed := executionClosed()
 	// The install belongs to the harness: a closed relay stays attachable
 	// for checkpointing, which must not see an installer still writing
@@ -1408,6 +1518,9 @@ func RunDaemonOwned(ctx context.Context, owner *WorkerRootOwner, config core.Wor
 	}
 	if running.harnessGC != nil {
 		running.harnessGC()
+	}
+	if suspendRequest != nil {
+		return finishSuspended(*suspendRequest)
 	}
 	if !closed {
 		// Includes a harness that did not open its session: the
@@ -1453,14 +1566,20 @@ func acceptControlConnections(ctx context.Context, listener *net.UnixListener, a
 
 // acceptWorkerClients serves every relay connection on listener until
 // accepting fails.
-func acceptWorkerClients(ctx context.Context, listener *net.UnixListener, socketGuard socketGuard, relay *RelayCell, dispatchWake *dispatchWakeChannel, credentials credentialEndpointResult, runtime connectionRuntime, fatal chan<- error) error {
+func acceptWorkerClients(ctx context.Context, listener *net.UnixListener, socketGuard socketGuard, relay *RelayCell, dispatchWake *dispatchWakeChannel, credentials *sharedCredentials, runtime connectionRuntime, fatal chan<- error) error {
 	defer socketGuard.Close()
 	// Connections are detached: aborting the accept loop leaves served
-	// connections to end by themselves.
+	// connections to end by themselves. A client that stops by panicking is
+	// reported, as Rust's JoinSet reports a failed client task.
 	connections := context.WithoutCancel(ctx)
 	err := acceptControlConnections(ctx, listener, func(stream *net.UnixConn) {
 		go func() {
-			if err := serveClientWithMemory(connections, stream, relay, dispatchWake, credentials, runtime, fatal); err != nil {
+			defer func() {
+				if payload := recover(); payload != nil {
+					slog.Warn("worker proxy client task stopped", "error", fmt.Sprintf("task panicked: %v", payload))
+				}
+			}()
+			if err := serveClientWithSharedCredentials(connections, stream, relay, dispatchWake, credentials, runtime, fatal); err != nil {
 				slog.Warn("relay proxy client disconnected", "error", err)
 			}
 		}()
@@ -1850,14 +1969,16 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 	if sessionEnvironment == nil {
 		sessionEnvironment = map[string]string{}
 	}
+	recordRawLaunch := config.Environment[core.SessionRawLaunchRecordEnv] == "1"
 	maps.Copy(sessionEnvironment, config.Environment)
-	for _, name := range []string{core.SessionGitConfigIncludePath, core.SessionManagedSubagentEnv, core.SessionMessageMCPEnv, core.SessionProjectToolsRoots} {
+	for _, name := range []string{core.SessionGitConfigIncludePath, core.SessionManagedSubagentEnv, core.SessionRawLaunchRecordEnv, core.SessionMessageMCPEnv, core.SessionProjectToolsRoots} {
 		delete(sessionEnvironment, name)
 	}
 	noGithubCredentials := config.NoGithubCredentials
 	gitConfigInclude := setup.sessionGitConfigInclude
 	explicitEnvironment := maps.Clone(config.Environment)
 	delete(explicitEnvironment, core.SessionManagedSubagentEnv)
+	delete(explicitEnvironment, core.SessionRawLaunchRecordEnv)
 	delete(explicitEnvironment, core.SessionMessageMCPEnv)
 	// Credential sync installs the session's slopcop login in its harness
 	// home.
@@ -1922,8 +2043,31 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 		}
 	}
 
-	claudeMailboxHookAvailable := false
-	var codexMailboxDelivery *core.MailboxDeliveryMode
+	if recordRawLaunch && !setup.restarting {
+		budget, err := preparationStep(ctx, root, status, "raw-launch-record", localPreparationStepTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cwd, sessionID := config.Cwd, config.SessionID
+		if _, err := boundedBlockingPreparationStep(ctx, &budget, func(stepCtx context.Context) (struct{}, error) {
+			if stepCtx.Err() != nil {
+				return struct{}{}, errors.New("preparation cancelled before recording raw launch baseline")
+			}
+			if err := checkpoint.RecordLaunchIfAbsent(checkpoint.SystemGit{}, cwd, sessionID); err != nil {
+				// Capture falls back to keeping all local refs and stashes
+				// when the launch record is absent, so a read-only Git
+				// directory must not block starting the session.
+				slog.Warn("could not record raw launch baseline; continuing without baseline",
+					"session_id", sessionID, "cwd", cwd, "error", err)
+			}
+			return struct{}{}, nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	boundaryMailboxHookAvailable := false
+	var mailboxDeliveryMode *core.MailboxDeliveryMode
 	profileRegistration := false
 	switch {
 	case config.Harness == core.HarnessKindCodex:
@@ -1969,7 +2113,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 			return nil, err
 		}
 		config.Environment = configured.environment
-		codexMailboxDelivery = &configured.mode
+		mailboxDeliveryMode = &configured.mode
 		profileRegistration = configured.registered
 	case config.Harness == core.HarnessKindClaude:
 		budget, err := preparationStep(ctx, root, status, "harness-profile", localPreparationStepTimeout)
@@ -2037,8 +2181,35 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 		if err != nil {
 			return nil, err
 		}
-		claudeMailboxHookAvailable = configured.mailboxHookAvailable
+		boundaryMailboxHookAvailable = configured.mailboxHookAvailable
 		profileRegistration = configured.registered
+	case config.Harness == core.HarnessKindAntigravity:
+		budget, err := preparationStep(ctx, root, status, "harness-profile", localPreparationStepTimeout)
+		if err != nil {
+			return nil, err
+		}
+		home, err := credentialHome()
+		if err != nil {
+			return nil, err
+		}
+		sessionID := config.SessionID
+		available, err := boundedBlockingPreparationStep(ctx, &budget, func(stepCtx context.Context) (bool, error) {
+			if stepCtx.Err() != nil {
+				return false, errors.New("preparation cancelled before configuring the Antigravity profile")
+			}
+			return configureAntigravityMailboxHook(root, sessionID, home)
+		})
+		if err != nil {
+			return nil, err
+		}
+		boundaryMailboxHookAvailable = available
+		mode := core.MailboxDeliveryModeTurnBoundary
+		if available {
+			mode = core.MailboxDeliveryModeToolBoundary
+		}
+		mailboxDeliveryMode = &mode
+		// Antigravity receives its MCP servers through ACP.
+		profileRegistration = false
 	case config.Harness == core.HarnessKindOpenCode:
 		budget, err := preparationStep(ctx, root, status, "mailbox-plugin", localPreparationStepTimeout)
 		if err != nil {
@@ -2093,10 +2264,10 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 	}
 	{
 		guard := relay.Lock()
-		guard.SetSteeringDeliveryMode(config.Harness, claudeMailboxHookAvailable)
+		guard.SetSteeringDeliveryMode(config.Harness, boundaryMailboxHookAvailable)
 		// Resolved before the harness starts, so no hook can drain earlier.
-		if codexMailboxDelivery != nil {
-			guard.SetMailboxDeliveryMode(*codexMailboxDelivery)
+		if mailboxDeliveryMode != nil {
+			guard.SetMailboxDeliveryMode(*mailboxDeliveryMode)
 		}
 		guard.Unlock()
 	}
@@ -2134,6 +2305,28 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	keepBudget, err := preparationStep(ctx, root, status, "session-keep", localPreparationStepTimeout)
+	if err != nil {
+		return nil, err
+	}
+	keepCwd, keepSessionID := config.Cwd, config.SessionID
+	keepEnvironment := maps.Clone(config.Environment)
+	config.Environment, err = boundedBlockingPreparationStep(ctx, &keepBudget, func(stepCtx context.Context) (map[string]string, error) {
+		if stepCtx.Err() != nil {
+			return nil, errors.New("preparation cancelled before preparing the session keep directory")
+		}
+		if _, err := core.InstallSessionKeepDir(keepCwd, keepSessionID, keepEnvironment); err != nil {
+			// A read-only checkout, or a symlinked `.mj` path, must not
+			// block the session. The harness then has no MJ_KEEP_DIR.
+			slog.Warn("could not prepare the session keep directory; continuing without MJ_KEEP_DIR",
+				"session_id", keepSessionID, "cwd", keepCwd, "error", err)
+		}
+		return keepEnvironment, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	harnessBudget, err := preparationStep(ctx, root, status, "harness-resolve", 20*time.Minute)
@@ -2223,7 +2416,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 	}
 	// This stage only schedules prepared tasks; it performs no filesystem or
 	// process I/O and cannot block, so it needs no bound of its own.
-	started, err := startBridge(ctx, cancel, preparedACP, relay, dispatchWakes, setup.kimiTaskHome, setup.capture, core.CurrentRuntime(), status)
+	started, err := startBridge(ctx, cancel, preparedACP, relay, dispatchWakes, setup.kimiTaskHome, setup.antigravityTaskHome, setup.capture, core.CurrentRuntime(), status)
 	if err != nil {
 		if preparedACP.subagentSocketGuard != nil {
 			preparedACP.subagentSocketGuard.Release()
@@ -2280,6 +2473,7 @@ func PrepareManagedHarness(ctx context.Context, config core.WorkerLaunchConfig) 
 	if environment == nil {
 		environment = map[string]string{}
 	}
+	delete(environment, core.SessionNitroMbxEnv)
 	delete(environment, core.SessionGitConfigIncludePath)
 	maps.Copy(environment, config.Environment)
 	delete(environment, core.SessionGitConfigIncludePath)
@@ -2339,7 +2533,9 @@ type connectionRuntime struct {
 	preparation *core.Watch[preparationSnapshot]
 	// preparationCancel cancels the harness preparation; nil without one.
 	preparationCancel context.CancelFunc
-	hasSubagentTools  bool
+	// antigravityHome is the Antigravity home an Antigravity Stop samples.
+	antigravityHome  *string
+	hasSubagentTools bool
 }
 
 func defaultConnectionRuntime() connectionRuntime {
@@ -2374,6 +2570,12 @@ func (f connectionFrame) disconnected() (bool, error) {
 
 // serveClientWithMemory serves one relay connection until it closes.
 func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *RelayCell, dispatchWake *dispatchWakeChannel, credentials credentialEndpointResult, runtime connectionRuntime, fatal chan<- error) error {
+	return serveClientWithSharedCredentials(ctx, stream, relay, dispatchWake, newSharedCredentials(credentials), runtime, fatal)
+}
+
+// serveClientWithSharedCredentials serves one relay connection with the
+// worker-wide credential endpoint until it closes.
+func serveClientWithSharedCredentials(ctx context.Context, stream *net.UnixConn, relay *RelayCell, dispatchWake *dispatchWakeChannel, credentials *sharedCredentials, runtime connectionRuntime, fatal chan<- error) error {
 	defer stream.Close()
 	projectMemory := runtime.projectMemory
 	commands := runtime.commands
@@ -2383,6 +2585,7 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 	preparation := runtime.preparation
 	preparationCancel := runtime.preparationCancel
 	hasSubagentTools := runtime.hasSubagentTools
+	antigravityHome := runtime.antigravityHome
 
 	guard := relay.Lock()
 	relayRoot := guard.Root()
@@ -2420,6 +2623,7 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 	var writer io.Writer = stream
 	checkpointBarriers := map[string]struct{}{}
 	var feed subagentFeed
+	var guardianGeneration uint64
 	var transfer connectionProjectMemoryTransfer
 	var liveBaselineDownload *core.FrozenSnapshotDownload
 	servingResult := func() error {
@@ -2488,7 +2692,7 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 			}
 			switch request := envelope.Request.(type) {
 			case core.RelayRequestWaitForChange:
-				body, err := waitForChange(ctx, relay, preparation, requestSubagents, &feed, request.AfterOrdinal, request.StateDigest)
+				body, err := waitForChange(ctx, relay, preparation, requestSubagents, &feed, &guardianGeneration, request.AfterOrdinal, request.StateDigest)
 				if err != nil {
 					body = compactionError(core.RelayErrorCodeInternal, "wait for a relay change: "+err.Error())
 				}
@@ -2633,10 +2837,32 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 				_, loginInstalled := request.(core.RelayRequestInstallCredentials)
 				_, credentialState := request.(core.RelayRequestCredentialState)
 				loginObserved := loginInstalled || credentialState
+				// Take the read guard before checking the in-place move hold
+				// and keep it through credentialResponse. Because
+				// HoldInPlaceMoveDispatch sets the hold before draining via
+				// credentials.drain, every pre-hold request finishes before
+				// InPlaceMoveDispatchHeld replies, and every post-hold
+				// request observes the hold and refuses.
+				currentCredentials, releaseCredentials := credentials.read()
 				observer := relay.Observe()
+				moveHeld := observer.inPlaceMoveHoldActive()
 				loginIdentity := observer.loginIdentity
 				observer.Unlock()
-				response := credentialResponse(ctx, envelope, credentials, relayRoot, loginIdentity)
+				var response core.RelayResponseEnvelope
+				if moveHeld {
+					response = core.RelayResponseEnvelope{
+						RequestID:       envelope.RequestID,
+						ProtocolVersion: envelope.ProtocolVersion,
+						Body: core.RelayResponseBodyError{Error: core.RelayProtocolError{
+							Code:      core.RelayErrorCodeInvalidState,
+							Message:   "cannot access credentials while an in-place move dispatch hold is active",
+							Retryable: true,
+						}},
+					}
+				} else {
+					response = credentialResponse(ctx, envelope, currentCredentials, relayRoot, loginIdentity)
+				}
+				releaseCredentials()
 				_, ok := response.Body.(core.RelayResponseBodyOk)
 				if loginInstalled && ok {
 					if err := wakeDispatch(relay, dispatchWake); err != nil {
@@ -2688,6 +2914,19 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 					return nil
 				}
 				if err := writeLoggedResponse(writer, response, sessionID, operation); err != nil {
+					return err
+				}
+				continue
+			case core.RelayRequestGuardianRequests:
+				body := core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadGuardianRequests{Requests: relay.guardian.Requests()}}
+				if err := respond(body, core.RelayRequestMethodName(envelope.Request)); err != nil {
+					return err
+				}
+				continue
+			case core.RelayRequestCompleteGuardianRequest:
+				relay.guardian.Complete(request.Result)
+				body := core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadGuardianRequestCompleted{}}
+				if err := respond(body, core.RelayRequestMethodName(envelope.Request)); err != nil {
 					return err
 				}
 				continue
@@ -2836,13 +3075,24 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 					return err
 				}
 				continue
+			case core.RelayRequestRestartHarnessInPlace:
+				var response core.RelayResponseEnvelope
+				if message, unavailable := preparationError(&prepSnapshot, "in-place harness restart"); unavailable {
+					response = unavailableRequest(envelope, message)
+				} else {
+					response = restartHarnessInPlaceResponse(ctx, envelope, requestCommands, relay, credentials, relayRoot)
+				}
+				if err := writeLoggedResponse(writer, &response, sessionID, "restart_harness_in_place"); err != nil {
+					return err
+				}
+				continue
 			}
-			wakesDispatch, mailboxLeaseChanged := false, false
+			wakesDispatch, hookActivityChanged := false, false
 			switch envelope.Request.(type) {
-			case core.RelayRequestSubmit, core.RelayRequestReserveIdle:
+			case core.RelayRequestSubmit, core.RelayRequestReserveIdle, core.RelayRequestReleaseInPlaceMoveDispatch:
 				wakesDispatch = true
-			case core.RelayRequestDrainMailbox, core.RelayRequestAckMailbox:
-				mailboxLeaseChanged = true
+			case core.RelayRequestDrainMailbox, core.RelayRequestAckMailbox, core.RelayRequestAntigravityStop:
+				hookActivityChanged = true
 			}
 			change := checkpointChange(envelope.Request)
 			operation := core.RelayRequestMethodName(envelope.Request)
@@ -2853,10 +3103,25 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 			if preparation != nil {
 				attachPreparation = preparation.Borrow().state
 			}
-			response, err := handleRequest(ctx, relay, envelope, attachPreparation)
+			var response core.RelayResponseEnvelope
+			var err error
+			if _, stop := envelope.Request.(core.RelayRequestAntigravityStop); stop {
+				response = handleAntigravityStop(ctx, relay, envelope, antigravityHome)
+			} else {
+				response, err = handleRequest(ctx, relay, envelope, attachPreparation)
+			}
 			if err != nil {
 				slog.Error("relay request handling failed: "+err.Error(), "session_id", sessionID, "operation", operation)
 				return err
+			}
+			if ok, isOk := response.Body.(core.RelayResponseBodyOk); isOk {
+				if _, held := ok.Payload.(core.RelayResponsePayloadInPlaceMoveDispatchHeld); held {
+					// Drain every credential RPC that took a read guard
+					// before the hold was recorded, before telling the
+					// controller it may harvest or overwrite staged profile
+					// files.
+					credentials.drain()
+				}
 			}
 			// One relay lock decides who owns the relay-local lifecycle work
 			// this request may have queued. Until preparation publishes
@@ -2896,6 +3161,8 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 					accepted = true
 				case core.RelayResponsePayloadIdleReservation:
 					accepted = payload.Ordinal != nil
+				case core.RelayResponsePayloadInPlaceMoveDispatchReleased:
+					accepted = true
 				}
 			}
 			if accepted {
@@ -2906,7 +3173,7 @@ func serveClientWithMemory(ctx context.Context, stream *net.UnixConn, relay *Rel
 					delete(checkpointBarriers, change.Value)
 				}
 			}
-			if (wakesDispatch && accepted) || mailboxLeaseChanged {
+			if (wakesDispatch && accepted) || hookActivityChanged {
 				if err := wakeDispatch(relay, dispatchWake); err != nil {
 					return err
 				}
@@ -3259,4 +3526,311 @@ func (p commandPermit) release() {
 	defer c.mu.Unlock()
 	c.reserved--
 	c.notifyLocked()
+}
+
+// inPlaceHarnessRestartGuard holds the relay's in-place restart reservation
+// for one operation. Close releases it unless complete marked the restart
+// durably (Rust's Drop).
+type inPlaceHarnessRestartGuard struct {
+	relay           *RelayCell
+	operationID     string
+	expectedStoreID string
+	completed       bool
+}
+
+func (g *inPlaceHarnessRestartGuard) complete() error {
+	guard := g.relay.Lock()
+	err := guard.markInPlaceHarnessRestarted(g.operationID, g.expectedStoreID)
+	guard.Unlock()
+	if err == nil {
+		g.completed = true
+	}
+	return err
+}
+
+func (g *inPlaceHarnessRestartGuard) Close() {
+	if !g.completed {
+		guard := g.relay.Lock()
+		guard.cancelInPlaceHarnessRestart(g.operationID)
+		guard.Unlock()
+	}
+}
+
+// sharedCredentials is the worker-wide credential endpoint shared across all
+// active and future proxy connections. Credential requests hold a read guard
+// across both the in-place move hold check and the filesystem operation,
+// while HoldInPlaceMoveDispatch drains in-flight requests and
+// RestartHarnessInPlace swaps the endpoint under the write guard.
+type sharedCredentials struct {
+	mu    sync.RWMutex
+	value credentialEndpointResult
+}
+
+func newSharedCredentials(initial credentialEndpointResult) *sharedCredentials {
+	return &sharedCredentials{value: initial}
+}
+
+// read takes the read guard; call release when the request is done with the
+// endpoint.
+func (c *sharedCredentials) read() (credentialEndpointResult, func()) {
+	c.mu.RLock()
+	return c.value, c.mu.RUnlock
+}
+
+// drain waits for every request holding a read guard.
+func (c *sharedCredentials) drain() {
+	c.mu.Lock()
+	c.mu.Unlock()
+}
+
+func (c *sharedCredentials) set(updated credentialEndpointResult) {
+	c.mu.Lock()
+	c.value = updated
+	c.mu.Unlock()
+}
+
+func (c *sharedCredentials) snapshot() credentialEndpointResult {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.value
+}
+
+func harnessTurnPolicyFor(harness core.HarnessKind) HarnessTurnPolicy {
+	switch harness {
+	case core.HarnessKindClaude:
+		return HarnessTurnPolicyClaudeAdapter
+	case core.HarnessKindCodex:
+		return HarnessTurnPolicyCodexAdapter
+	case core.HarnessKindAntigravity:
+		return HarnessTurnPolicyAntigravity
+	}
+	return HarnessTurnPolicyDisabled
+}
+
+// inPlaceRestartStep runs a blocking preparation step for an in-place
+// harness restart within localPreparationStepTimeout; timedOut reports a
+// step that did not finish in time.
+func inPlaceRestartStep[T any](ctx context.Context, work func() (T, error)) (value T, err error, timedOut bool) {
+	stepCtx, stop := context.WithTimeout(ctx, localPreparationStepTimeout)
+	defer stop()
+	type outcome struct {
+		value T
+		err   error
+	}
+	result, joinErr := core.SpawnBlocking(func() outcome {
+		value, err := work()
+		return outcome{value: value, err: err}
+	}).Join(stepCtx)
+	if joinErr != nil {
+		if stepCtx.Err() != nil && ctx.Err() == nil {
+			return value, nil, true
+		}
+		return value, joinErr, false
+	}
+	return result.value, result.err, false
+}
+
+// restartHarnessInPlaceResponse answers RestartHarnessInPlace: it restarts
+// only the harness bridge under the updated launch configuration while the
+// in-place move hold of the operation holds dispatch.
+func restartHarnessInPlaceResponse(ctx context.Context, envelope core.RelayRequestEnvelope, commands *commandChannel, relay *RelayCell, credentials *sharedCredentials, relayRoot string) core.RelayResponseEnvelope {
+	if body := core.RelayProtocolRejection(&envelope); body != nil {
+		return core.RelayResponseEnvelope{RequestID: envelope.RequestID, ProtocolVersion: envelope.ProtocolVersion, Body: body}
+	}
+	protocolVersion, requestID := envelope.ProtocolVersion, envelope.RequestID
+	request, ok := envelope.Request.(core.RelayRequestRestartHarnessInPlace)
+	if !ok {
+		panic("unreachable: restartHarnessInPlaceResponse only serves RestartHarnessInPlace")
+	}
+	answer := func(body core.RelayResponseBody) core.RelayResponseEnvelope {
+		return core.RelayResponseEnvelope{RequestID: requestID, ProtocolVersion: protocolVersion, Body: body}
+	}
+	guard := relay.Lock()
+	decision, refusal := guard.admitInPlaceHarnessRestart(request.OperationID, request.ExpectedStoreID)
+	guard.Unlock()
+	if refusal != nil {
+		return answer(core.RelayResponseBodyError{Error: *refusal})
+	}
+	if decision == InPlaceHarnessRestartAlreadyRestarted {
+		return answer(core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadHarnessRestartedInPlace{}})
+	}
+	restartGuard := &inPlaceHarnessRestartGuard{
+		relay:           relay,
+		operationID:     request.OperationID,
+		expectedStoreID: request.ExpectedStoreID,
+	}
+	defer restartGuard.Close()
+	if commands == nil {
+		return answer(compactionError(core.RelayErrorCodeInvalidState,
+			"session is closed; no ACP runtime can restart the harness in place"))
+	}
+	launchConfig := *request.LaunchConfig
+	persistedLaunchConfig := *request.LaunchConfig
+	// Apply the same target_environment merge, policy enforcement,
+	// staged-home env, and $MJ_KEEP_DIR setup as initial startup
+	// (RunDaemonOwned / PrepareManagedHarness) so managed harness discovery
+	// sees the target's XDG_CACHE_HOME/PATH and the restarted bridge keeps
+	// $MJ_KEEP_DIR.
+	mergedEnvironment := maps.Clone(launchConfig.TargetEnvironment)
+	if mergedEnvironment == nil {
+		mergedEnvironment = map[string]string{}
+	}
+	strip := func(environment map[string]string) {
+		delete(environment, core.SessionNitroMbxEnv)
+		delete(environment, core.SessionGitConfigIncludePath)
+		delete(environment, core.FastinoKeyEnvironment)
+	}
+	strip(mergedEnvironment)
+	maps.Copy(mergedEnvironment, launchConfig.Environment)
+	strip(mergedEnvironment)
+	launchConfig.Environment = mergedEnvironment
+	launchConfig.TargetEnvironment = maps.Clone(launchConfig.TargetEnvironment)
+	if startupDirectory, err := os.Getwd(); err == nil {
+		resolveRelativeHarnessHome(&launchConfig, startupDirectory)
+	}
+	if launchConfig.NoGithubCredentials {
+		core.RemoveGithubAuthenticationEnvironment(launchConfig.Environment)
+		core.RemoveGithubAuthenticationEnvironment(launchConfig.TargetEnvironment)
+	}
+	if err := enforceExecutionPolicy(&launchConfig); err != nil {
+		return answer(compactionError(core.RelayErrorCodeInvalidState,
+			fmt.Sprintf("enforce execution policy for in-place harness restart: %v", err)))
+	}
+	if launchConfig.Harness == core.HarnessKindOpenCode {
+		if endpoint, err := credentialEndpoint(&launchConfig); err == nil {
+			launchConfig.Harness.ConfigureStagedHomeEnvironment(endpoint.Home, launchConfig.Environment)
+		}
+	}
+	keepCwd, keepSessionID := launchConfig.Cwd, launchConfig.SessionID
+	keepEnvironment := maps.Clone(launchConfig.Environment)
+	_, keepErr, keepTimedOut := inPlaceRestartStep(ctx, func() (string, error) {
+		return core.InstallSessionKeepDir(keepCwd, keepSessionID, keepEnvironment)
+	})
+	switch {
+	case keepTimedOut:
+		slog.Warn("session keep directory preparation timed out during in-place harness restart",
+			"session_id", launchConfig.SessionID, "cwd", launchConfig.Cwd, "timeout", localPreparationStepTimeout)
+	case keepErr != nil:
+		slog.Warn("could not prepare the session keep directory during in-place harness restart",
+			"session_id", launchConfig.SessionID, "cwd", launchConfig.Cwd, "error", keepErr)
+	default:
+		launchConfig.Environment = keepEnvironment
+	}
+	supervisorPath := filepath.Join(relayRoot, "acp-supervisor.json")
+	prepared, err := PrepareHarnessLaunch(ctx, launchConfig.Harness, launchConfig.HarnessRuntime, launchConfig.ExecutionPolicy, primarySupervisorSpec(&launchConfig))
+	if err != nil {
+		return answer(compactionError(core.RelayErrorCodeInternal, fmt.Sprintf("prepare updated harness launch: %v", err)))
+	}
+	if err := freezeNodeEntrypoints(ctx, relayRoot, prepared); err != nil {
+		prepared.Release()
+		return answer(compactionError(core.RelayErrorCodeInternal, fmt.Sprintf("freeze updated harness entrypoints: %v", err)))
+	}
+	additionalDirectories := acpAdditionalDirectories(&launchConfig)
+	extendWritableDirectories(launchConfig.Harness, prepared.environment, &additionalDirectories)
+	for _, name := range []string{core.SessionGitConfigIncludePath, core.SessionManagedSubagentEnv,
+		core.SessionRawLaunchRecordEnv, core.SessionMessageMCPEnv, core.SessionProjectToolsRoots} {
+		delete(prepared.environment, name)
+	}
+	updatedEndpoint, updatedEndpointErr := credentialEndpoint(&launchConfig)
+	updatedCredentials := credentialEndpointResult{endpoint: updatedEndpoint, err: updatedEndpointErr}
+	updatedHarness := launchConfig.Harness
+	var updatedClaudeLoginPath *string
+	if updatedHarness == core.HarnessKindClaude {
+		if path, ok := core.ClaudeOauthLoginPath(launchConfig.Environment); ok {
+			updatedClaudeLoginPath = &path
+		}
+	}
+	boundaryMailboxHookAvailable := false
+	var updatedMailboxDeliveryMode *core.MailboxDeliveryMode
+	if updatedEndpointErr == nil {
+		hookSessionID, hookHome := launchConfig.SessionID, updatedEndpoint.Home
+		verifyHook := func(name string, configure func(string, string, string) (bool, error)) bool {
+			available, err, timedOut := inPlaceRestartStep(ctx, func() (bool, error) {
+				return configure(relayRoot, hookSessionID, hookHome)
+			})
+			switch {
+			case timedOut:
+				slog.Warn(name+" mailbox hook verification timed out during in-place harness restart",
+					"session_id", launchConfig.SessionID)
+				return false
+			case err != nil:
+				slog.Warn("could not verify "+name+" mailbox hook during in-place harness restart",
+					"session_id", launchConfig.SessionID, "error", err)
+				return false
+			}
+			return available
+		}
+		switch updatedHarness {
+		case core.HarnessKindClaude:
+			boundaryMailboxHookAvailable = verifyHook("Claude", configureClaudeMailboxHook)
+		case core.HarnessKindAntigravity:
+			boundaryMailboxHookAvailable = verifyHook("Antigravity", configureAntigravityMailboxHook)
+			mode := core.MailboxDeliveryModeTurnBoundary
+			if boundaryMailboxHookAvailable {
+				mode = core.MailboxDeliveryModeToolBoundary
+			}
+			updatedMailboxDeliveryMode = &mode
+		case core.HarnessKindCodex:
+			provider, err, timedOut := inPlaceRestartStep(ctx, func() (*core.CodexProvider, error) {
+				return core.ReadCodexProvider(hookHome, nil)
+			})
+			if err == nil && !timedOut {
+				mode := core.MailboxDeliveryModeForCodexProvider(provider)
+				updatedMailboxDeliveryMode = &mode
+			}
+		}
+	}
+	resolved := make(chan error, 1)
+	reload := CommandRequestReloadLaunchConfig{
+		LaunchConfig:          &launchConfig,
+		Environment:           prepared.environment,
+		AdditionalDirectories: additionalDirectories,
+		SupervisorSpec:        &ReloadSupervisorSpec{Path: supervisorPath, Spec: prepared.Spec},
+		Leases:                prepared,
+		Resolved:              resolved,
+	}
+	if err := commands.send(ctx, reload); err != nil {
+		prepared.Release()
+		return answer(compactionError(core.RelayErrorCodeInvalidState, "ACP runtime is unavailable for in-place harness restart"))
+	}
+	var resolution error
+	var resolutionOK bool
+	select {
+	case resolution, resolutionOK = <-resolved:
+	case <-ctx.Done():
+	}
+	if !resolutionOK {
+		return answer(compactionError(core.RelayErrorCodeInvalidState,
+			"ACP runtime stopped before completing in-place harness restart"))
+	}
+	if resolution != nil {
+		return answer(compactionError(core.RelayErrorCodeInvalidState, resolution.Error()))
+	}
+	// The replacement bridge is now live under the updated launch config.
+	// Refresh the shared credential endpoint and harness policies
+	// immediately so subsequent credential RPCs and relay state match the
+	// live harness.
+	credentials.set(updatedCredentials)
+	guard = relay.Lock()
+	guard.SetTurnVerdictHarness(updatedHarness)
+	guard.authenticationLoginPath = updatedClaudeLoginPath
+	guard.SetSteeringDeliveryMode(updatedHarness, boundaryMailboxHookAvailable)
+	guard.updateMailboxDeliveryMode(updatedMailboxDeliveryMode)
+	guard.SetHarnessTurnPolicy(harnessTurnPolicyFor(updatedHarness))
+	loginIdentity := guard.loginIdentity
+	guard.Unlock()
+	if updatedEndpointErr == nil {
+		if err := observeInitialLogin(ctx, &updatedEndpoint, loginIdentity); err != nil {
+			slog.Warn("could not read staged login after in-place harness restart", "error", err)
+		}
+	} else {
+		loginIdentity.observeFile(nil)
+	}
+	if err := persistedLaunchConfig.Write(filepath.Join(relayRoot, "launch.json")); err != nil {
+		return answer(compactionError(core.RelayErrorCodeInternal, fmt.Sprintf("persist updated launch.json: %v", err)))
+	}
+	if err := restartGuard.complete(); err != nil {
+		return answer(compactionError(core.RelayErrorCodeInternal, fmt.Sprintf("persist in-place harness restart state: %v", err)))
+	}
+	return answer(core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadHarnessRestartedInPlace{}})
 }

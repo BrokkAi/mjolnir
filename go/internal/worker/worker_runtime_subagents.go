@@ -8,6 +8,7 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -414,6 +415,89 @@ func regularFileOrAbsent(path string) bool {
 		return errors.Is(err, fs.ErrNotExist)
 	}
 	return info.Mode().IsRegular()
+}
+
+// dirOrAbsent reports whether a profile subdirectory may be created or
+// traversed: only when it is a real directory or does not exist yet; a
+// symlink may lead out of the private profile.
+func dirOrAbsent(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return info.IsDir()
+}
+
+// configureAntigravityMailboxHook installs the Mjolnir mailbox plugin hook
+// in the session-private Antigravity home
+// (`<home>/config/plugins/mjolnir-mailbox/{plugin.json,hooks.json}`) so
+// `agy acp` discovers and merges it alongside any user `config/hooks.json`.
+func configureAntigravityMailboxHook(root string, sessionID string, home string) (bool, error) {
+	configDir := filepath.Join(home, "config")
+	pluginsDir := filepath.Join(configDir, "plugins")
+	pluginDir := filepath.Join(pluginsDir, "mjolnir-mailbox")
+	pluginJSONPath := filepath.Join(pluginDir, "plugin.json")
+	hooksJSONPath := filepath.Join(pluginDir, "hooks.json")
+
+	safe := filepath.IsAbs(root) &&
+		privateStagedHome(root, sessionID, home) &&
+		dirOrAbsent(configDir) &&
+		dirOrAbsent(pluginsDir) &&
+		dirOrAbsent(pluginDir) &&
+		regularFileOrAbsent(pluginJSONPath) &&
+		regularFileOrAbsent(hooksJSONPath)
+	if !safe {
+		slog.Warn("skipping Antigravity mailbox hook setup: profile path is not a private staged directory", "path", home)
+		return false, nil
+	}
+
+	if err := os.MkdirAll(pluginDir, 0o777); err != nil {
+		return false, fmt.Errorf("create Antigravity plugin dir %s: %w", pluginDir, err)
+	}
+
+	worker, err := os.Executable()
+	if err != nil {
+		return false, fmt.Errorf("locate worker for Antigravity mailbox hook: %w", err)
+	}
+	socket := filepath.Join(root, "control.sock")
+	hook := func(event string) jsonvalue.Object {
+		command := fmt.Sprintf("MJOLNIR_MAILBOX_HOOK=1 %s worker mailbox-hook --socket %s --event %s --format antigravity",
+			core.PosixQuote(worker), core.PosixQuote(socket), event)
+		return jsonvalue.Object{
+			{Key: "type", Value: "command"},
+			{Key: "command", Value: command},
+			{Key: "timeout", Value: core.MailboxHookTimeoutSecs},
+		}
+	}
+
+	pluginBytes, err := workerRuntimeMarshalPretty(jsonvalue.Object{{Key: "name", Value: "mjolnir-mailbox"}})
+	if err != nil {
+		return false, err
+	}
+	pluginBytes = append(pluginBytes, '\n')
+	if existing, err := os.ReadFile(pluginJSONPath); err != nil || !bytes.Equal(existing, pluginBytes) {
+		if err := core.AtomicWrite(pluginJSONPath, pluginBytes); err != nil {
+			return false, fmt.Errorf("write Antigravity mailbox plugin manifest %s: %w", pluginJSONPath, err)
+		}
+	}
+
+	hooksBytes, err := workerRuntimeMarshalPretty(jsonvalue.Object{
+		{Key: "mjolnir-mailbox", Value: jsonvalue.Object{
+			{Key: "PreInvocation", Value: []any{hook("PostToolBatch")}},
+			{Key: "Stop", Value: []any{hook("Stop")}},
+		}},
+	})
+	if err != nil {
+		return false, err
+	}
+	hooksBytes = append(hooksBytes, '\n')
+	if existing, err := os.ReadFile(hooksJSONPath); err != nil || !bytes.Equal(existing, hooksBytes) {
+		if err := core.AtomicWrite(hooksJSONPath, hooksBytes); err != nil {
+			return false, fmt.Errorf("write Antigravity mailbox plugin hooks %s: %w", hooksJSONPath, err)
+		}
+	}
+
+	return true, nil
 }
 
 // configureClaudeMailboxHook installs the mailbox command hook in the

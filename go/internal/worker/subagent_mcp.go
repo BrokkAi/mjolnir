@@ -328,7 +328,7 @@ func (b *childReportBudget) check() error {
 			}
 		case info.Mode().IsRegular():
 			size := uint64(info.Size())
-			total = moveSaturatingAdd(total, size)
+			total = subagentSaturatingAdd(total, size)
 			largest = append(largest, sizedFile{size: size, path: path})
 			slices.SortFunc(largest, func(a, b sizedFile) int {
 				if order := cmp.Compare(b.size, a.size); order != 0 {
@@ -1333,4 +1333,12 @@ func subagentMCPExpected(names []string) string {
 		return "expected " + quoted[0] + " or " + quoted[1]
 	}
 	return "expected one of " + strings.Join(quoted, ", ")
+}
+
+// subagentSaturatingAdd is u64::saturating_add.
+func subagentSaturatingAdd(a, b uint64) uint64 {
+	if sum := a + b; sum >= a {
+		return sum
+	}
+	return ^uint64(0)
 }

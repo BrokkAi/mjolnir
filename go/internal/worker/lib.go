@@ -26,6 +26,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // DefaultWorkerLogFilter is the default diagnostics filter: it includes the
@@ -101,7 +103,7 @@ func startWithOutputPipes(command *exec.Cmd) (stdout, stderr *os.File, err error
 	}
 	command.Stdout = stdoutWrite
 	command.Stderr = stderrWrite
-	err = command.Start()
+	err = core.SpawnAsyncChild(command)
 	// The child holds its own copies of the write ends; ours would keep the
 	// pipes open after it and its descendants exit.
 	stdoutWrite.Close()

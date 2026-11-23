@@ -1,7 +1,7 @@
 // Port of mj-worker/src/stand_in_relay.rs: the leased relay's journal owner
 // lock on Unix (Rust's File::lock, flock(LOCK_EX)).
 
-//go:build testhooks && unix
+//go:build unix
 
 package worker
 

@@ -91,6 +91,8 @@ func (c *reviewCapture) run(ctx context.Context, request core.ReviewerRequest) (
 		return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewBaselineAdvanced{}}, nil
 	case core.ReviewerRequestSetReviewBase:
 		return c.setReviewBase(ctx, request.Path, request.Commit)
+	case core.ReviewerRequestResolveRepositories:
+		return c.resolveRepositories(request.Paths)
 	}
 	return nil, fmt.Errorf("unknown reviewer request %T", request)
 }
@@ -143,6 +145,18 @@ func (c *reviewCapture) captureDelta(ctx context.Context, requested *[]string) (
 		deltas = append(deltas, delta)
 	}
 	return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewDelta{Repositories: deltas}}, nil
+}
+
+// resolveRepositories names the repository root each path selects and
+// changes nothing: the resolution half of a scoped capture, without its
+// start ref or its diff.
+func (c *reviewCapture) resolveRepositories(paths []string) (core.RelayResponseBody, error) {
+	discovered := DiscoverRepositories(checkpoint.SystemGit{}, c.roots())
+	roots, _, err := scopedRepositories(c.Cwd, discovered, paths)
+	if err != nil {
+		return nil, err
+	}
+	return core.RelayResponseBodyOk{Payload: core.RelayResponsePayloadReviewRepositories{Roots: roots}}, nil
 }
 
 // setReviewBase makes a reviewed or overridden commit the base of the next
@@ -225,7 +239,15 @@ func scopedRepositories(cwd string, discovered []string, paths []string) ([]stri
 		// reports the same repository keys the verdict recorded.
 		root, ok := captureRepositoryRoot(git, directory)
 		if !ok {
-			return nil, nil, fmt.Errorf("%s is not in a Git repository", path)
+			named := path
+			if path == "." {
+				named = "the working directory"
+			}
+			if len(discovered) == 0 {
+				return nil, nil, fmt.Errorf("%s is not in a Git repository", named)
+			}
+			return nil, nil, fmt.Errorf("%s is not in a Git repository; name one of the workspace repositories: %s",
+				named, strings.Join(discovered, ", "))
 		}
 		repository, err := common(root)
 		if err != nil {

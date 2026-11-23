@@ -16,12 +16,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/BrokkAi/acp-go/jsonvalue"
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -256,7 +259,7 @@ func TestHarnessStartupReadyAndExpiryHaveOneOutcome(t *testing.T) {
 			coordinatorCtx, abort := context.WithCancel(context.Background())
 			defer abort()
 			coordinator := core.Spawn(func() error {
-				return runRelayCoordinator(coordinatorCtx, relay, events, wakes, commands, shells, nil, nil, nil, &startup)
+				return runRelayCoordinator(coordinatorCtx, relay, events, wakes, commands, shells, &taskMonitors{}, nil, nil, &startup)
 			})
 			nativeReady := func() bool {
 				guard := relay.Lock()
@@ -940,4 +943,268 @@ func TestScopedLogCaptureKeepsACallsiteFirstReachedWithoutASubscriber(t *testing
 	if !strings.Contains(string(log), "GLiDE classification requested") {
 		t.Error(string(log))
 	}
+}
+
+// verdictTestsReadGlideRequest reads one GLiDE HTTP request and returns its
+// JSON body.
+func verdictTestsReadGlideRequest(stream net.Conn) (map[string]any, error) {
+	reader := bufio.NewReader(stream)
+	length := 0
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		if line == "\r\n" {
+			break
+		}
+		if value, ok := strings.CutPrefix(strings.ToLower(line), "content-length:"); ok {
+			if length, err = strconv.Atoi(strings.TrimSpace(value)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return nil, err
+	}
+	var request map[string]any
+	return request, json.Unmarshal(body, &request)
+}
+
+type quotaCase int
+
+const (
+	quotaCaseUntimedRecovery quotaCase = iota
+	quotaCaseFailedBackoff
+	quotaCaseProseOnly
+	quotaCasePausedGoal
+)
+
+func completedQuotaTurn(t *testing.T, quota quotaCase) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	endpoint := "http://" + listener.Addr().String()
+	var requests atomic.Int64
+	go func() {
+		for {
+			stream, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			if _, err := verdictTestsReadGlideRequest(stream); err == nil {
+				requests.Add(1)
+				_, _ = stream.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			}
+			stream.Close()
+		}
+	}()
+	providerError := jsonvalue.Object{{Key: "message", Value: "Plan usage exhausted"}, {Key: "code", Value: "usageLimitExceeded"}}
+	if quota == quotaCaseProseOnly {
+		providerError = jsonvalue.Object{{Key: "message", Value: "RPM quota exceeded"}}
+	}
+	diagnostic := core.TurnDiagnosticFromProvider(providerError)
+	temp := t.TempDir()
+	durable, err := DurableRelayOpen(temp, verdictTestsSessionID, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit := func(relay *DurableRelay, id string, command core.RelayCommand) {
+		t.Helper()
+		response := relay.Handle(core.RelayRequestEnvelope{
+			RequestID:       "submit-" + id,
+			ProtocolVersion: core.RelayProtocolVersion,
+			Request:         core.RelayRequestSubmit{CommandID: id, Command: command},
+		})
+		if _, ok := response.Body.(core.RelayResponseBodyOk); !ok {
+			t.Fatalf("%#v", response)
+		}
+	}
+	submit(durable, "prompt-1", core.RelayCommandPrompt{Prompt: core.PromptBlocks()})
+	var failed *core.TurnAssessment
+	if quota == quotaCaseFailedBackoff {
+		// Write and reopen the durable state left by a worker that asked
+		// GLiDE. Install the harness on the reopened relay so only it
+		// settles locally.
+		if _, err := durable.RecordObservation(core.RelayObservationSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}}); err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := durable.ClaimPendingCommands(true)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claimed %d: %v", len(claimed), err)
+		}
+		if _, err := durable.RecordCommandCompleted("prompt-1", core.RelayCommandOutcomePrompt{
+			StopReason: core.QuotaStopReason,
+			Diagnostic: diagnostic,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		pending := durable.OperationalState().Assessment
+		if err := durable.failTurnAssessment(pending.Revision, "classifier_failed"); err != nil {
+			t.Fatal(err)
+		}
+		durable, err = DurableRelayOpen(temp, verdictTestsSessionID, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed = durable.OperationalState().Assessment
+		if failed.Status != core.StatusFailed {
+			t.Fatalf("status = %v", failed.Status)
+		}
+		if failed.RetryAtMs == nil || *failed.RetryAtMs <= core.EpochMillis() {
+			t.Fatalf("retry at %v", failed.RetryAtMs)
+		}
+	}
+	durable.SetTurnVerdictHarness(core.HarnessKindCodex)
+	if quota == quotaCaseUntimedRecovery {
+		durable.SetBackgroundWorkPolicy(BackgroundWorkPolicyAirTasks)
+		if err := durable.setAirTasks([]AirTaskFixture{{TaskID: "background-task", Description: "Waiting for a build"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relay := NewRelayCell(durable)
+	events := make(chan core.RuntimeEvent, 4)
+	wakes := newDispatchWakeChannel()
+	commands := newCommandChannel(4)
+	userShells := NewUserShellRegistry(temp, map[string]string{}, events)
+	client, err := newVerdictClient(VerdictSourceHosted{Endpoint: endpoint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinatorCtx, abort := context.WithCancel(context.Background())
+	defer abort()
+	coordinator := core.Spawn(func() error {
+		return runRelayCoordinatorWithVerdict(coordinatorCtx, relay, events, wakes, commands, userShells, nil, client, nil)
+	})
+	if failed == nil {
+		events <- core.RuntimeEventSessionConfigured{ConfigOptions: []acpschema.SessionConfigOption{}}
+		select {
+		case command := <-commands.receiver():
+			if _, ok := command.(CommandRequestPrompt); !ok {
+				t.Fatalf("dispatched %#v", command)
+			}
+		case <-time.After(ioTimeout):
+			t.Fatal("the prompt was not dispatched")
+		}
+		if quota == quotaCasePausedGoal {
+			events <- core.RuntimeEventSessionUpdate{Update: json.RawMessage(`{"sessionUpdate":"session_info_update","_meta":{"goal":{"objective":"Build it","createdAt":1,"status":"paused"}}}`)}
+		}
+		// The harness can use QuotaLimit even for a prose-only diagnosis.
+		events <- core.RuntimeEventPromptFinished{RequestID: "prompt-1", StopReason: core.QuotaStopReason, Diagnostic: diagnostic}
+	}
+	expectedStatus := core.StatusDeferred
+	switch quota {
+	case quotaCaseProseOnly:
+		expectedStatus = core.StatusFailed
+	case quotaCasePausedGoal:
+		expectedStatus = core.StatusSuperseded
+	}
+	settled := testSupportWaitFor("the completed quota turn assessment", func() core.TurnAssessment {
+		for {
+			guard := relay.Lock()
+			assessment := guard.OperationalState().Assessment
+			guard.Unlock()
+			if assessment != nil && assessment.Status == expectedStatus &&
+				(quota != quotaCaseProseOnly || requests.Load() == 1) {
+				return *assessment
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+	if quota == quotaCaseProseOnly {
+		if settled.Action != nil {
+			t.Fatalf("action = %v", *settled.Action)
+		}
+	} else {
+		if settled.Action == nil || *settled.Action != core.AssessmentActionRecoverQuota {
+			t.Fatalf("action = %v", settled.Action)
+		}
+		if settled.Verdict != nil || settled.Glide != nil || settled.RetryAtMs != nil {
+			t.Fatalf("settled = %#v", settled)
+		}
+		reason := "quota_resolution_required"
+		if quota == quotaCasePausedGoal {
+			reason = "automatic_action_suppressed"
+		}
+		if settled.Reason != reason {
+			t.Fatalf("reason = %q, want %q", settled.Reason, reason)
+		}
+	}
+	if failed != nil {
+		if settled.TurnID != failed.TurnID || settled.CompletedOrdinal != failed.CompletedOrdinal ||
+			settled.Revision != failed.Revision || !reflect.DeepEqual(settled.Completion, failed.Completion) ||
+			settled.Failures != failed.Failures {
+			t.Fatalf("settled %#v does not continue %#v", settled, failed)
+		}
+	}
+	if quota == quotaCaseUntimedRecovery {
+		guard := relay.Lock()
+		state := guard.OperationalState()
+		if len(state.BackgroundCommands) != 1 {
+			t.Fatalf("background commands = %#v", state.BackgroundCommands)
+		}
+		submit(guard.DurableRelay, "record-quota-recovery", core.RelayCommandSetQuotaRecovery{
+			Expected: core.RelayCursor{Ordinal: state.LatestOrdinal, Digest: state.LatestDigest},
+			Recovery: &core.QuotaRecovery{
+				UserCommandID:      "prompt-1",
+				CompletedCommandID: "prompt-1",
+				ProfileID:          "isolated-quota-test",
+				Notice:             "Quota deadline unavailable",
+			},
+		})
+		guard.Unlock()
+		// Each wake waits for the previous one to be taken, so the third
+		// proves the coordinator returned to its assessment loop after
+		// processing the first.
+		for range 3 {
+			testSupportWaitFor("the coordinator to process recovery", func() struct{} {
+				wakes.wakes <- struct{}{}
+				return struct{}{}
+			})
+		}
+		guard = relay.Lock()
+		recovered := guard.OperationalState().Assessment
+		guard.Unlock()
+		if recovered.Status != core.StatusAssessed || recovered.Action == nil ||
+			*recovered.Action != core.AssessmentActionRecoverQuota ||
+			recovered.Reason != "quota_deadline_unavailable" ||
+			recovered.Revision != settled.Revision || recovered.Glide != nil {
+			t.Fatalf("recovered = %#v", recovered)
+		}
+	}
+	events <- core.RuntimeEventStopped{}
+	if err := testSupportWaitFor("quota coordinator shutdown", func() error {
+		err, joinErr := coordinator.Join(context.Background())
+		return errors.Join(err, joinErr)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := int64(0)
+	if quota == quotaCaseProseOnly {
+		want = 1
+	}
+	if got := requests.Load(); got != want {
+		t.Fatalf("GLiDE requests = %d, want %d", got, want)
+	}
+}
+
+// Hard-won: 2026-11-22 live GLiDE 502 outage blocked top-level typed QuotaLimit automove
+func TestTypedQuotaSettlesLocallyAndUntimedRecoveryDoesNotReaskGlide(t *testing.T) {
+	completedQuotaTurn(t, quotaCaseUntimedRecovery)
+}
+
+func TestTypedQuotaSettlesDuringAPersistedGlideBackoff(t *testing.T) {
+	completedQuotaTurn(t, quotaCaseFailedBackoff)
+}
+
+func TestProseOnlyQuotaStillAsksGlide(t *testing.T) {
+	completedQuotaTurn(t, quotaCaseProseOnly)
+}
+
+func TestTypedQuotaRespectsAPausedGoalWithoutAskingGlide(t *testing.T) {
+	completedQuotaTurn(t, quotaCasePausedGoal)
 }

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BrokkAi/acp-go/jsonvalue"
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -222,7 +223,7 @@ func preparationStartControlServer(t *testing.T, root string, relay *RelayCell, 
 	ctx, abort := context.WithCancel(context.Background())
 	accept := core.Spawn(func() error {
 		return acceptWorkerClients(ctx, listener, guard, relay, dispatchWake,
-			credentialEndpointResult{err: errors.New("fixture has no credentials")}, runtime, fatal)
+			newSharedCredentials(credentialEndpointResult{err: errors.New("fixture has no credentials")}), runtime, fatal)
 	})
 	conn, err := core.ConnectUnixStream(socket)
 	if err != nil {
@@ -422,7 +423,7 @@ func TestFailingProjectRecipeRecordsNoticeAndContinuesPreparation(t *testing.T) 
 	install.run(context.Background(), root, relay)
 	guard := relay.Lock()
 	defer guard.Unlock()
-	payload, err := guard.DrainMailbox("PostToolBatch")
+	payload, err := guard.DrainMailbox("PostToolBatch", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,4 +914,351 @@ func TestCloseDuringPreparationKillsTheFakeHarnessProcessGroup(t *testing.T) {
 	}
 	_ = server.conn.CloseWrite()
 	server.abort()
+}
+
+func TestGuardianRelayWakesAndPreservesPendingRequestsAcrossDisconnect(t *testing.T) {
+	durable, err := DurableRelayOpen(t.TempDir(), "guardian-test", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := NewRelayCell(durable)
+	wake := newDispatchWakeChannel()
+	fatal := make(chan error, 1)
+	connect := func() (*net.UnixConn, *bufio.Reader, *core.JoinHandle[error]) {
+		server, client := runtimeUnixStreamPair(t)
+		task := core.Spawn(func() error {
+			return serveClientWithMemory(context.Background(), server, relay, wake,
+				credentialEndpointResult{err: errors.New("no credentials")}, defaultConnectionRuntime(), fatal)
+		})
+		return client, bufio.NewReader(client), task
+	}
+	connection, reader, server := connect()
+	observer := relay.Observe()
+	state := observer.OperationalState()
+	observer.Unlock()
+	digest, err := core.RelayStateDigest(&state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeUnixSend(t, connection, "request", core.RelayRequestWaitForChange{AfterOrdinal: state.LatestOrdinal, StateDigest: &digest})
+
+	// Exercise a real reply larger than a pipe buffer, and all four
+	// decisions the daemon can make.
+	request := core.GuardianReviewRequest{
+		Harness:          core.HarnessKindClaude,
+		SessionID:        "guardian-test",
+		ToolCallID:       "call",
+		Action:           jsonvalue.Object{{Key: "input", Value: strings.Repeat("x", 70_000)}},
+		UserInstructions: []string{},
+	}
+	pending := func() *core.JoinHandle[core.GuardianReviewResult] {
+		return core.Spawn(func() core.GuardianReviewResult {
+			result, err := relay.guardian.review(context.Background(), request, time.Now().Add(core.GuardianReviewTimeout))
+			if err != nil {
+				panic(err)
+			}
+			return result
+		})
+	}
+	first := pending()
+	observed, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, reader, connection)).(core.RelayResponsePayloadChangeObserved)
+	if !ok || !observed.GuardianQueueChanged {
+		t.Fatalf("observed = %#v", observed)
+	}
+	runtimeUnixSend(t, connection, "request", core.RelayRequestGuardianRequests{})
+	queued, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, reader, connection)).(core.RelayResponsePayloadGuardianRequests)
+	if !ok || len(queued.Requests) != 1 || !jsonvalue.Equal(queued.Requests[0].Action, request.Action) {
+		t.Fatalf("guardian requests = %#v", queued)
+	}
+	requestID := queued.Requests[0].RequestID
+	_ = connection.Close()
+	if err, joinErr := server.Join(context.Background()); err != nil || joinErr != nil {
+		t.Fatalf("server: %v %v", err, joinErr)
+	}
+	select {
+	case <-first.Done():
+		t.Fatal("the review ended with its connection")
+	default:
+	}
+
+	replacement, replacementReader, server := connect()
+	decisions := []core.GuardianReviewOutcome{
+		core.GuardianReviewOutcomeAllow{Stage: "utility_llm"},
+		core.GuardianReviewOutcomeDeny{Rationale: "risk", RiskLevel: core.RiskLevelHigh,
+			UserAuthorization: core.UserAuthorizationLow, Stage: "utility_llm"},
+		core.GuardianReviewOutcomeUseAcpFallback{},
+		core.GuardianReviewOutcomeAskPerson{Reason: "missing evidence"},
+	}
+	for index, decision := range decisions {
+		reconnecting := index == 0
+		task := first
+		if !reconnecting {
+			task = pending()
+		}
+		requests := testSupportWaitFor("a pending guardian request", func() []core.GuardianReviewRequest {
+			for {
+				runtimeUnixSend(t, replacement, "request", core.RelayRequestGuardianRequests{})
+				queued, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, replacementReader, replacement)).(core.RelayResponsePayloadGuardianRequests)
+				if !ok {
+					panic("guardian requests")
+				}
+				if len(queued.Requests) != 0 {
+					return queued.Requests
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+		if len(requests) != 1 {
+			t.Fatalf("requests = %#v", requests)
+		}
+		pendingID := requests[0].RequestID
+		if reconnecting && pendingID != requestID {
+			t.Fatalf("pending id %s, want %s", pendingID, requestID)
+		}
+		result := core.GuardianReviewResult{RequestID: pendingID, Decision: decision}
+		runtimeUnixSend(t, replacement, "request", core.RelayRequestCompleteGuardianRequest{Result: result})
+		if _, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, replacementReader, replacement)).(core.RelayResponsePayloadGuardianRequestCompleted); !ok {
+			t.Fatal("completion was not acknowledged")
+		}
+		answered, joinErr := task.Join(context.Background())
+		if joinErr != nil || !reflect.DeepEqual(answered, result) {
+			t.Fatalf("review answered %#v (%v), want %#v", answered, joinErr, result)
+		}
+	}
+	_ = replacement.Close()
+	if err, joinErr := server.Join(context.Background()); err != nil || joinErr != nil {
+		t.Fatalf("server: %v %v", err, joinErr)
+	}
+	if requests := relay.guardian.Requests(); len(requests) != 0 {
+		t.Fatalf("requests left: %#v", requests)
+	}
+	observer = relay.Observe()
+	latest := observer.OperationalState().LatestOrdinal
+	observer.Unlock()
+	if latest != state.LatestOrdinal {
+		t.Fatalf("guardian traffic journaled events: %d != %d", latest, state.LatestOrdinal)
+	}
+}
+
+func TestReleasingInPlaceMoveHoldWakesDispatch(t *testing.T) {
+	relay := preparationTestRelay(t, t.TempDir())
+	guard := relay.Lock()
+	storeID := *guard.OperationalState().StoreID
+	guard.Unlock()
+	server, client := runtimeUnixStreamPair(t)
+	wake := newDispatchWakeChannel()
+	fatal := make(chan error, 1)
+	handler := core.Spawn(func() error {
+		return serveClientWithMemory(context.Background(), server, relay, wake,
+			credentialEndpointResult{err: errors.New("fixture has no credentials")}, defaultConnectionRuntime(), fatal)
+	})
+	reader := bufio.NewReader(client)
+	request := func(id string, body core.RelayRequest) core.RelayResponseEnvelope {
+		runtimeUnixSend(t, client, id, body)
+		return runtimeUnixReceive(t, reader, client)
+	}
+	request("hello", preparationHello())
+	if _, ok := runtimeUnixPayload(t, request("hold", core.RelayRequestHoldInPlaceMoveDispatch{
+		OperationID: "move", ExpectedStoreID: storeID,
+	})).(core.RelayResponsePayloadInPlaceMoveDispatchHeld); !ok {
+		t.Fatal("the hold was not taken")
+	}
+	select {
+	case <-wake.receive():
+		t.Fatal("taking the hold woke dispatch")
+	default:
+	}
+	if _, ok := runtimeUnixPayload(t, request("release", core.RelayRequestReleaseInPlaceMoveDispatch{
+		OperationID: "move", ExpectedStoreID: storeID,
+	})).(core.RelayResponsePayloadInPlaceMoveDispatchReleased); !ok {
+		t.Fatal("the hold was not released")
+	}
+	// A continuation can already be pending when the worker releases the
+	// hold. The successful reply must wake dispatch before it is written.
+	select {
+	case <-wake.receive():
+	default:
+		t.Fatal("releasing the hold did not wake dispatch")
+	}
+	_ = client.CloseWrite()
+	if err, joinErr := handler.Join(context.Background()); err != nil || joinErr != nil {
+		t.Fatalf("handler: %v %v", err, joinErr)
+	}
+}
+
+func TestInPlaceMoveHoldDrainsAndBlocksCredentialRequestsUntilReleased(t *testing.T) {
+	temp := t.TempDir()
+	profile := filepath.Join(temp, "profile")
+	if err := os.MkdirAll(profile, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	launch := launchConfig(profile)
+	endpoint, endpointErr := credentialEndpoint(&launch)
+	credentials := newSharedCredentials(credentialEndpointResult{endpoint: endpoint, err: endpointErr})
+	relay := preparationTestRelay(t, temp)
+	guard := relay.Lock()
+	storeID := *guard.OperationalState().StoreID
+	guard.Unlock()
+	server, client := runtimeUnixStreamPair(t)
+	wake := newDispatchWakeChannel()
+	fatal := make(chan error, 1)
+	handler := core.Spawn(func() error {
+		return serveClientWithSharedCredentials(context.Background(), server, relay, wake, credentials, defaultConnectionRuntime(), fatal)
+	})
+	reader := bufio.NewReader(client)
+
+	// Hold a read guard simulating an in-flight credential request on
+	// another connection. HoldInPlaceMoveDispatch must wait for it to drain
+	// before returning InPlaceMoveDispatchHeld.
+	_, release := credentials.read()
+	runtimeUnixSend(t, client, "hold", core.RelayRequestHoldInPlaceMoveDispatch{OperationID: "move-cred", ExpectedStoreID: storeID})
+	if err := client.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Peek(1); err == nil {
+		t.Fatal("HoldInPlaceMoveDispatch must wait for in-flight credential requests to finish")
+	}
+	release()
+	if _, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, reader, client)).(core.RelayResponsePayloadInPlaceMoveDispatchHeld); !ok {
+		t.Fatal("the hold was not taken")
+	}
+
+	// While the dispatch hold is active, credential RPCs are refused with
+	// retryable InvalidState.
+	runtimeUnixSend(t, client, "cred-held", core.RelayRequestCredentialState{})
+	refused, isError := runtimeUnixReceive(t, reader, client).Body.(core.RelayResponseBodyError)
+	if !isError || refused.Error.Code != core.RelayErrorCodeInvalidState || !refused.Error.Retryable {
+		t.Fatalf("credential request during the hold = %#v", refused)
+	}
+
+	// Releasing the dispatch hold re-admits credential RPCs.
+	runtimeUnixSend(t, client, "release", core.RelayRequestReleaseInPlaceMoveDispatch{OperationID: "move-cred", ExpectedStoreID: storeID})
+	if _, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, reader, client)).(core.RelayResponsePayloadInPlaceMoveDispatchReleased); !ok {
+		t.Fatal("the hold was not released")
+	}
+	runtimeUnixSend(t, client, "cred-released", core.RelayRequestCredentialState{})
+	if _, ok := runtimeUnixPayload(t, runtimeUnixReceive(t, reader, client)).(core.RelayResponsePayloadCredentialState); !ok {
+		t.Fatal("credential requests were not re-admitted")
+	}
+	_ = client.CloseWrite()
+	if err, joinErr := handler.Join(context.Background()); err != nil || joinErr != nil {
+		t.Fatalf("handler: %v %v", err, joinErr)
+	}
+}
+
+func TestRestartHarnessInPlaceDoesNotOverwriteSupervisorSpecWhenRejected(t *testing.T) {
+	root := t.TempDir()
+	supervisorPath := filepath.Join(root, "acp-supervisor.json")
+	launchPath := filepath.Join(root, "launch.json")
+	if err := os.WriteFile(supervisorPath, []byte("original-supervisor-spec"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchPath, []byte("original-launch-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	durable, err := DurableRelayOpen(root, "session-1", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := NewRelayCell(durable)
+	guard := relay.Lock()
+	storeID := *guard.OperationalState().StoreID
+	guard.Unlock()
+
+	// No hold active -> rejected without touching acp-supervisor.json or
+	// credentials.
+	launch := launchConfig(root)
+	endpoint, endpointErr := credentialEndpoint(&launch)
+	initialCredentials := credentialEndpointResult{endpoint: endpoint, err: endpointErr}
+	shared := newSharedCredentials(initialCredentials)
+	commands := newCommandChannel(4)
+	restart := func(id string, config core.WorkerLaunchConfig) core.RelayResponseEnvelope {
+		return restartHarnessInPlaceResponse(context.Background(), core.RelayRequestEnvelope{
+			RequestID:       id,
+			ProtocolVersion: core.RelayProtocolVersion,
+			Request: core.RelayRequestRestartHarnessInPlace{
+				OperationID: "move-op-1", ExpectedStoreID: storeID, LaunchConfig: &config,
+			},
+		}, commands, relay, shared, root)
+	}
+	unchanged := func() {
+		t.Helper()
+		if body, _ := os.ReadFile(supervisorPath); string(body) != "original-supervisor-spec" {
+			t.Fatalf("acp-supervisor.json = %q", body)
+		}
+		if body, _ := os.ReadFile(launchPath); string(body) != "original-launch-json" {
+			t.Fatalf("launch.json = %q", body)
+		}
+		if !reflect.DeepEqual(shared.snapshot(), initialCredentials) {
+			t.Fatal("the shared credentials changed")
+		}
+	}
+	response := restart("r-restart-unheld", launch)
+	if refused, ok := response.Body.(core.RelayResponseBodyError); !ok || refused.Error.Code != core.RelayErrorCodeInvalidState {
+		t.Fatalf("response = %#v", response.Body)
+	}
+	unchanged()
+	select {
+	case command := <-commands.receiver():
+		t.Fatalf("a refused restart sent %#v", command)
+	default:
+	}
+
+	// Hold active, but ACP rejects the reload -> still does not overwrite
+	// acp-supervisor.json.
+	guard = relay.Lock()
+	guard.Handle(core.RelayRequestEnvelope{
+		RequestID:       "r-hold",
+		ProtocolVersion: core.RelayProtocolVersion,
+		Request:         core.RelayRequestHoldInPlaceMoveDispatch{OperationID: "move-op-1", ExpectedStoreID: storeID},
+	})
+	guard.Unlock()
+	rejector := core.Spawn(func() struct{} {
+		if reload, ok := (<-commands.receiver()).(CommandRequestReloadLaunchConfig); ok {
+			reload.Resolved <- errors.New("turn active")
+		}
+		return struct{}{}
+	})
+	response = restart("r-restart-rejected", launch)
+	if _, joinErr := rejector.Join(context.Background()); joinErr != nil {
+		t.Fatal(joinErr)
+	}
+	if refused, ok := response.Body.(core.RelayResponseBodyError); !ok || refused.Error.Code != core.RelayErrorCodeInvalidState {
+		t.Fatalf("response = %#v", response.Body)
+	}
+	unchanged()
+}
+
+func TestInPlaceHarnessRestartGuardClearsReservationWhenCompleteFails(t *testing.T) {
+	root := t.TempDir()
+	durable, err := DurableRelayOpen(root, "session-1", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := NewRelayCell(durable)
+	guard := relay.Lock()
+	storeID := *guard.OperationalState().StoreID
+	guard.Handle(core.RelayRequestEnvelope{
+		RequestID:       "r-hold",
+		ProtocolVersion: core.RelayProtocolVersion,
+		Request:         core.RelayRequestHoldInPlaceMoveDispatch{OperationID: "move-op-1", ExpectedStoreID: storeID},
+	})
+	decision, refusal := guard.admitInPlaceHarnessRestart("move-op-1", storeID)
+	guard.Unlock()
+	if refusal != nil || decision != InPlaceHarnessRestartProceed {
+		t.Fatalf("admission = %v %#v", decision, refusal)
+	}
+	restartGuard := &inPlaceHarnessRestartGuard{relay: relay, operationID: "move-op-1", expectedStoreID: "mismatched-store-id"}
+	if restartGuard.complete() == nil {
+		t.Fatal("completing against another store succeeded")
+	}
+	restartGuard.Close()
+	// Close must have cleared the in-flight reservation so a retry can
+	// proceed.
+	guard = relay.Lock()
+	decision, refusal = guard.admitInPlaceHarnessRestart("move-op-1", storeID)
+	guard.Unlock()
+	if refusal != nil || decision != InPlaceHarnessRestartProceed {
+		t.Fatalf("retry admission = %v %#v", decision, refusal)
+	}
 }

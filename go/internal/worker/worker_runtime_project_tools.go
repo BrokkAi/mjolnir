@@ -78,13 +78,23 @@ func projectToolsApplyEnvironment(environment map[string]string, roots []string,
 	environment["MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS"] = "rust,node,python,ruby,go"
 	shims := core.Join(data, "shims")
 	old := toolCacheSplitPaths(environment["PATH"])
-	// The build-cache launchers (tool_cache::prepare) wrap tools such as
-	// cmake and must stay ahead of the project's tools; they find the real
-	// tool, here a mise shim, after their own directory.
-	var wrappers *string
-	if bin, ok := environment["MJ_BUILD_TOOL_BIN"]; ok &&
-		slices.ContainsFunc(old, func(entry string) bool { return workerRuntimePathEqual(entry, bin) }) {
-		wrappers = &bin
+	// Cache launchers must wrap tools provided by mise. Cargo's mbx launcher
+	// lives alongside the session's GitHub CLI even without a host tool
+	// mount.
+	var candidates []string
+	if bin, ok := environment["MJ_BUILD_TOOL_BIN"]; ok {
+		candidates = append(candidates, bin)
+	}
+	if bin, ok := environment[githubCLIBinEnv]; ok {
+		if _, mbx := environment["MBX_SHIMS_DIR"]; mbx {
+			candidates = append(candidates, bin)
+		}
+	}
+	var wrappers []string
+	for _, bin := range candidates {
+		if slices.ContainsFunc(old, func(entry string) bool { return workerRuntimePathEqual(entry, bin) }) {
+			wrappers = append(wrappers, bin)
+		}
 	}
 	var miseDirectory *string
 	if mise != nil {
@@ -92,10 +102,7 @@ func projectToolsApplyEnvironment(environment map[string]string, roots []string,
 			miseDirectory = &parent
 		}
 	}
-	var entries []string
-	if wrappers != nil {
-		entries = append(entries, *wrappers)
-	}
+	entries := slices.Clone(wrappers)
 	entries = append(entries, shims)
 	if miseDirectory != nil {
 		entries = append(entries, *miseDirectory)
@@ -103,7 +110,7 @@ func projectToolsApplyEnvironment(environment map[string]string, roots []string,
 	for _, entry := range old {
 		if workerRuntimePathEqual(entry, shims) ||
 			(miseDirectory != nil && workerRuntimePathEqual(entry, *miseDirectory)) ||
-			(wrappers != nil && workerRuntimePathEqual(entry, *wrappers)) {
+			slices.ContainsFunc(wrappers, func(wrapper string) bool { return workerRuntimePathEqual(entry, wrapper) }) {
 			continue
 		}
 		entries = append(entries, entry)

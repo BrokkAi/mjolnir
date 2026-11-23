@@ -1955,3 +1955,104 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 		t.Fatalf("servers = %v", servers)
 	}
 }
+
+func TestConfigureAntigravityMailboxHookWritesAndProtectsPrivatePlugin(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "profile")
+	if err := os.MkdirAll(home, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	configured, err := configureAntigravityMailboxHook(root, "session-1", home)
+	if err != nil || !configured {
+		t.Fatalf("configure = %v, %v", configured, err)
+	}
+
+	pluginDir := filepath.Join(home, "config", "plugins", "mjolnir-mailbox")
+	readJSON := func(path string) any {
+		t.Helper()
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := jsonvalue.Parse(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	if plugin := readJSON(filepath.Join(pluginDir, "plugin.json")); !jsonvalue.Equal(plugin, jsonvalue.Object{{Key: "name", Value: "mjolnir-mailbox"}}) {
+		t.Fatalf("plugin.json = %#v", plugin)
+	}
+
+	hooksJSON := readJSON(filepath.Join(pluginDir, "hooks.json"))
+	hooks := hooksJSON.(jsonvalue.Object)
+	plugin, _ := hooks.Get("mjolnir-mailbox")
+	for _, pair := range [][2]string{{"PreInvocation", "PostToolBatch"}, {"Stop", "Stop"}} {
+		entries, _ := plugin.(jsonvalue.Object).Get(pair[0])
+		hook := entries.([]any)[0].(jsonvalue.Object)
+		if kind, _ := hook.Get("type"); kind != "command" {
+			t.Fatalf("type = %v", kind)
+		}
+		if timeout, _ := hook.Get("timeout"); !jsonvalue.Equal(timeout, int64(core.MailboxHookTimeoutSecs)) {
+			t.Fatalf("timeout = %v", timeout)
+		}
+		value, _ := hook.Get("command")
+		command := value.(string)
+		if !strings.HasPrefix(command, "MJOLNIR_MAILBOX_HOOK=1 ") {
+			t.Fatal(command)
+		}
+		if !strings.Contains(command, "worker mailbox-hook --socket ") ||
+			!strings.Contains(command, fmt.Sprintf("--event %s --format antigravity", pair[1])) {
+			t.Fatal(command)
+		}
+	}
+
+	// Stale worker path in hooks.json is overwritten on re-run.
+	if err := os.WriteFile(filepath.Join(pluginDir, "hooks.json"),
+		[]byte(`{"mjolnir-mailbox":{"PreInvocation":[{"type":"command","command":"stale"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if configured, err := configureAntigravityMailboxHook(root, "session-1", home); err != nil || !configured {
+		t.Fatalf("reconfigure = %v, %v", configured, err)
+	}
+	if refreshed := readJSON(filepath.Join(pluginDir, "hooks.json")); !jsonvalue.Equal(refreshed, hooksJSON) {
+		t.Fatalf("hooks.json = %#v", refreshed)
+	}
+
+	// Refuses non-private home.
+	if configured, err := configureAntigravityMailboxHook(root, "session-1", t.TempDir()); err != nil || configured {
+		t.Fatalf("configure elsewhere = %v, %v", configured, err)
+	}
+
+	// Refuses symlinked plugin file.
+	outside := t.TempDir()
+	targetFile := filepath.Join(outside, "target.json")
+	if err := os.WriteFile(targetFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(pluginDir, "hooks.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetFile, filepath.Join(pluginDir, "hooks.json")); err != nil {
+		t.Fatal(err)
+	}
+	if configured, err := configureAntigravityMailboxHook(root, "session-1", home); err != nil || configured {
+		t.Fatalf("configure through a symlinked file = %v, %v", configured, err)
+	}
+
+	// Refuses symlinked plugin directory.
+	if err := os.RemoveAll(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	outsideDir := filepath.Join(outside, "plugin-dir")
+	if err := os.MkdirAll(outsideDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	if configured, err := configureAntigravityMailboxHook(root, "session-1", home); err != nil || configured {
+		t.Fatalf("configure through a symlinked directory = %v, %v", configured, err)
+	}
+}
