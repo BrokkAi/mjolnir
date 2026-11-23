@@ -17,7 +17,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use mj_client::daemon::{
     CONTAINER_OWNER_SCHEMA, ContainerDaemonRecord, DaemonMetadata, DaemonPlacement,
-    PROTOCOL_VERSION, write_container_owner,
+    PROTOCOL_VERSION, remove_container_owner_if_matching, write_container_owner,
 };
 use mj_core::config::{DaemonConfig, DaemonRuntime, RELEASE_CONTAINER_IMAGE, data_dir};
 use sha2::Digest;
@@ -89,7 +89,10 @@ pub(super) async fn placement(config: &DaemonConfig) -> Result<Placement> {
 
 /// Start a daemon in the container `spec` describes, creating the container
 /// and its volume when they do not exist yet.
-pub(super) async fn launch(spec: &ContainerSpec) -> Result<ContainerLaunch> {
+pub(super) async fn launch(
+    spec: &ContainerSpec,
+    prior_unpublished: Option<&ContainerDaemonRecord>,
+) -> Result<ContainerLaunch> {
     let program = spec.program();
     remove_idle_predecessors(program, spec).await?;
     ensure_running(program, spec).await?;
@@ -97,7 +100,24 @@ pub(super) async fn launch(spec: &ContainerSpec) -> Result<ContainerLaunch> {
     let container_id = resolve_container_id(spec.runtime(), &spec.name)
         .await?
         .with_context(|| format!("daemon container {} disappeared before launch", spec.name))?;
-    let metadata = daemon_metadata(spec, port, super::random_token()?);
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let token = match prior_unpublished {
+        Some(prior)
+            if prior.runtime == spec.runtime()
+                && prior.container_id == container_id
+                && prior.address == address =>
+        {
+            // Both execs may reach the store lock. Either winner must accept the published token.
+            prior.token.clone()
+        }
+        prior => {
+            if let Some(prior) = prior {
+                remove_container_owner_if_matching(prior.address, &prior.token)?;
+            }
+            super::random_token()?
+        }
+    };
+    let metadata = daemon_metadata(spec, address, token);
     write_container_owner(&ContainerDaemonRecord {
         schema: CONTAINER_OWNER_SCHEMA,
         protocol_version: Some(metadata.protocol_version),
@@ -117,13 +137,17 @@ pub(super) async fn launch(spec: &ContainerSpec) -> Result<ContainerLaunch> {
     })
 }
 
-fn daemon_metadata(spec: &ContainerSpec, port: u16, token: String) -> DaemonMetadata {
+fn daemon_metadata(
+    spec: &ContainerSpec,
+    address: std::net::SocketAddr,
+    token: String,
+) -> DaemonMetadata {
     DaemonMetadata {
         protocol_version: PROTOCOL_VERSION,
         // The daemon's PID is a container PID. Clients ask `Identity`; this
         // field is the frozen status shape and is never a host PID here.
         pid: 0,
-        address: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        address,
         token,
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         build_version: mj_client::build_identity::this_build().published(),
@@ -881,7 +905,11 @@ mod tests {
 
     #[test]
     fn a_container_daemon_publishes_no_host_pid() {
-        let metadata = daemon_metadata(&spec(Vec::new()), 43123, "token".into());
+        let metadata = daemon_metadata(
+            &spec(Vec::new()),
+            ([127, 0, 0, 1], 43123).into(),
+            "token".into(),
+        );
         assert_eq!(metadata.pid, 0);
         assert_eq!(metadata.address.port(), 43123);
         assert!(matches!(

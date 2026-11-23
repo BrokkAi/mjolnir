@@ -332,9 +332,10 @@ async fn connect_or_start_local() -> Result<DaemonClient> {
 /// requirement is visible at every call site.
 async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonClient> {
     maybe_replace_stale_development_daemon(startup).await?;
-    if let Some(client) = prepare_existing_daemon(startup).await? {
-        return Ok(client);
-    }
+    let mut prior_unpublished = match prepare_existing_daemon(startup).await? {
+        PreparedDaemon::Ready(client) => return Ok(client),
+        PreparedDaemon::Launch { prior_unpublished } => prior_unpublished,
+    };
 
     // Metadata disappears before shutdown releases the sole-writer lock.
     // Do not launch a child that can only fail to acquire that lock. A
@@ -363,8 +364,11 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
                 break;
             }
             // A daemon started outside this client's startup lock may be becoming ready.
-            if let Some(client) = prepare_existing_daemon(startup).await? {
-                return Ok(client);
+            match prepare_existing_daemon(startup).await? {
+                PreparedDaemon::Ready(client) => return Ok(client),
+                PreparedDaemon::Launch {
+                    prior_unpublished: prior,
+                } => prior_unpublished = prior,
             }
             ensure!(
                 Instant::now() < handoff_deadline,
@@ -376,7 +380,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     }
 
     let log_path = data_dir().join("daemon.log");
-    let launched = launch_daemon(&log_path).await?;
+    let launched = launch_daemon(&log_path, prior_unpublished.as_ref()).await?;
     let launched_at = Instant::now();
     let label = launched.label();
     tracing::info!(daemon = %label, "launched the daemon");
@@ -416,12 +420,7 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
         // exits without ever publishing an endpoint. That explanation is the
         // answer; the client's own failure to reach the absent endpoint is not.
         StartupOutcome::Exited => {
-            if let Some(container) = &launched.container {
-                remove_container_owner_if_matching(
-                    container.metadata.address,
-                    &container.metadata.token,
-                )?;
-            }
+            // An engine may still finish an interrupted exec. Keep its credentials.
             format!("Mjolnir daemon {label} exited before it was ready")
         }
         StartupOutcome::StillStarting {
@@ -661,8 +660,11 @@ fn configure_host_daemon_environment(
 
 /// Start `mj daemon-run` where `[daemon] runtime` says: a detached process on
 /// this computer, or a process in this instance's daemon container. Either way
-/// the result is a host PID the caller follows until the daemon answers.
-async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
+/// the caller follows the launched process until the daemon answers.
+async fn launch_daemon(
+    log_path: &Path,
+    prior_unpublished: Option<&ContainerDaemonRecord>,
+) -> Result<LaunchedDaemon> {
     retire_legacy_node();
     // An unreadable file is the daemon's to report: it refuses to start and
     // says why, which is the answer this launch then shows.
@@ -677,7 +679,7 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             daemon.runtime.engine().unwrap_or("a container")
         )),
         ConfiguredPlacement::Container(spec) => {
-            let launched = container::launch(&spec).await?;
+            let launched = container::launch(&spec, prior_unpublished).await?;
             tracing::info!(
                 container = %launched.container_name,
                 port = launched.metadata.address.port(),
@@ -689,6 +691,9 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
                 container: Some(launched),
             });
         }
+    }
+    if let Some(prior) = prior_unpublished {
+        remove_container_owner_if_matching(prior.address, &prior.token)?;
     }
     mj_core::runtime::spawn_blocking({
         let log_path = log_path.to_path_buf();
@@ -1030,10 +1035,13 @@ async fn probe_daemon_release(metadata: &DaemonMetadata) -> Result<DaemonRelease
     )
 }
 
+const UNREADABLE_CONTAINER_OWNER_RECOVERY: &str = "Verify that no container daemon is running, then run `mj daemon stop --force` to clear the unreadable daemon-container.json";
+
 async fn unpublished_container() -> Result<ExistingDaemon> {
     Ok(mj_core::runtime::spawn_blocking(read_container_owner)
         .await
-        .context("read container daemon ownership task failed")??
+        .context("read container daemon ownership task failed")?
+        .context(UNREADABLE_CONTAINER_OWNER_RECOVERY)?
         .map_or(ExistingDaemon::Absent, ExistingDaemon::PendingContainer))
 }
 
@@ -1210,21 +1218,39 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     Ok(ExistingDaemon::Use(client))
 }
 
+enum PreparedDaemon {
+    Ready(DaemonClient),
+    Launch {
+        prior_unpublished: Option<ContainerDaemonRecord>,
+    },
+}
+
 /// Act on [`decide_existing_daemon`] while holding the startup lock
 /// exclusively: use the running daemon, or replace it and report that none is
 /// running yet. A recorded daemon that does not answer is waited for until it
 /// answers or provably exits; starting another beside it could leave two
 /// daemons serving one instance.
-async fn prepare_existing_daemon(startup: &DaemonStartGuard) -> Result<Option<DaemonClient>> {
+async fn prepare_existing_daemon(startup: &DaemonStartGuard) -> Result<PreparedDaemon> {
     let asked = Instant::now();
     let mut notice_at = asked + START_NOTICE_DELAY;
     loop {
         match decide_existing_daemon().await? {
-            ExistingDaemon::Absent => return Ok(None),
-            ExistingDaemon::Use(client) => return Ok(Some(client)),
+            ExistingDaemon::Absent => {
+                return Ok(PreparedDaemon::Launch {
+                    prior_unpublished: None,
+                });
+            }
+            ExistingDaemon::Use(client) => return Ok(PreparedDaemon::Ready(client)),
             ExistingDaemon::ExitedContainer(metadata) => clear_exited_daemon(&metadata)?,
             ExistingDaemon::PendingContainer(record) => {
-                adopt_container_daemon(&record).await?;
+                if matches!(
+                    adopt_container_daemon(&record).await?,
+                    ContainerAdoption::Exited
+                ) {
+                    return Ok(PreparedDaemon::Launch {
+                        prior_unpublished: Some(record),
+                    });
+                }
             }
             ExistingDaemon::Replaced => {}
             ExistingDaemon::Replace {
@@ -1301,10 +1327,15 @@ async fn container_daemon_may_be_alive(runtime: DaemonRuntime, id: &str) -> bool
     )
 }
 
-async fn adopt_container_daemon(record: &ContainerDaemonRecord) -> Result<()> {
+enum ContainerAdoption {
+    Published,
+    Exited,
+}
+
+async fn adopt_container_daemon(record: &ContainerDaemonRecord) -> Result<ContainerAdoption> {
     match container::probe_container_daemon(record.runtime, &record.container_id).await {
         container::ContainerDaemonStatus::Exited => {
-            return remove_container_owner_if_matching(record.address, &record.token);
+            return Ok(ContainerAdoption::Exited);
         }
         container::ContainerDaemonStatus::Unknown(reason) => bail!("{reason}"),
         container::ContainerDaemonStatus::Running => {}
@@ -1327,13 +1358,16 @@ async fn adopt_container_daemon(record: &ContainerDaemonRecord) -> Result<()> {
     )
     .await;
     match outcome {
-        StartupOutcome::Ready(identity) => write_launcher_metadata(&DaemonMetadata {
-            placement: daemon_placement(&metadata, Some(identity.placement)),
-            build_version: identity.build_version,
-            instance_id: identity.instance_id,
-            ..metadata
-        }),
-        StartupOutcome::Exited => remove_container_owner_if_matching(record.address, &record.token),
+        StartupOutcome::Ready(identity) => {
+            write_launcher_metadata(&DaemonMetadata {
+                placement: daemon_placement(&metadata, Some(identity.placement)),
+                build_version: identity.build_version,
+                instance_id: identity.instance_id,
+                ..metadata
+            })?;
+            Ok(ContainerAdoption::Published)
+        }
+        StartupOutcome::Exited => Ok(ContainerAdoption::Exited),
         StartupOutcome::StillStarting {
             last_error,
             probe_pending,
@@ -1389,14 +1423,29 @@ pub(crate) async fn stop_instance(force: bool) -> Result<bool> {
     };
     let stopped = match read_metadata_any() {
         Ok(metadata) => stop_daemon(&startup, &metadata, fallback).await?,
-        Err(error) if daemon_not_running(&error).is_some() => match read_container_owner()? {
-            Some(record) => stop_pending_container(&startup, &record, force).await?,
-            None => false,
+        Err(error) if daemon_not_running(&error).is_some() => match read_container_owner() {
+            Ok(Some(record)) => stop_pending_container(&startup, &record, force).await?,
+            Ok(None) => false,
+            Err(_) if force => {
+                clear_unreadable_container_owner()?;
+                true
+            }
+            Err(error) => return Err(error.context(UNREADABLE_CONTAINER_OWNER_RECOVERY)),
         },
         Err(error) => return Err(error),
     };
     retire_legacy_node();
     Ok(stopped)
+}
+
+fn clear_unreadable_container_owner() -> Result<()> {
+    let path = container_owner_path();
+    fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    eprintln!(
+        "Cleared the unreadable container daemon record in {}.",
+        path.display()
+    );
+    Ok(())
 }
 
 async fn stop_pending_container(
@@ -1462,7 +1511,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
                      start this older build instead."
                 )
             );
-            seed_container_owner_if_missing(&startup, &metadata, &identity.placement).await;
+            ensure_container_owner_recorded(&startup, &metadata, &identity.placement).await?;
             // Keep restart's ability to stop an unresponsive tracked daemon.
             // Clearing an untracked container record requires explicit stop --force.
             stop_daemon(&startup, &metadata, StopFallback::Restart).await?;
@@ -1786,7 +1835,7 @@ async fn replace_daemon(
         ),
     )?;
     ensure_config_loads(&mj_core::config::config_path(), "replaced")?;
-    seed_container_owner_if_missing(startup, metadata, placement).await;
+    ensure_container_owner_recorded(startup, metadata, placement).await?;
     // The replacement daemon pins this build's worker sources before it can
     // serve; for a new build that is seconds of copying and hashing. Do it
     // while the old daemon drains, and wait for it before the launch so the
@@ -2041,25 +2090,25 @@ async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
     }
 }
 
-async fn seed_container_owner_if_missing(
+async fn ensure_container_owner_recorded(
     _startup: &DaemonStartGuard,
     metadata: &DaemonMetadata,
     placement: &DaemonPlacement,
-) {
+) -> Result<()> {
     if metadata.pid != 0 {
-        return;
+        return Ok(());
     }
-    let DaemonPlacement::Container {
-        name,
-        runtime: Some(runtime),
-    } = placement
-    else {
-        return;
-    };
-    if matching_container_owner(metadata).is_ok_and(|record| record.is_some()) {
-        return;
-    }
-    let seed = async {
+    let record = async {
+        if matching_container_owner(metadata)?.is_some() {
+            return Ok(());
+        }
+        let DaemonPlacement::Container {
+            name,
+            runtime: Some(runtime),
+        } = placement
+        else {
+            bail!(missing_container_owner_reason(None));
+        };
         let container_id = container::resolve_container_id(*runtime, name)
             .await?
             .with_context(|| format!("container {name} was not listed by the engine"))?;
@@ -2074,9 +2123,9 @@ async fn seed_container_owner_if_missing(
             started_at: metadata.started_at.clone(),
         })
     };
-    if let Err(error) = seed.await {
-        tracing::warn!(%name, error = format!("{error:#}"), "could not record the daemon container owner");
-    }
+    record.await.context(
+        "The daemon was left running because its container owner record could not be established",
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -2092,28 +2141,33 @@ async fn stop_daemon(
     fallback: StopFallback,
 ) -> Result<bool> {
     let mut answering = false;
-    let attempt = async {
-        let mut client = DaemonClient::connect(metadata.clone()).await?;
-        // Before requesting stop, capture an authenticated legacy container's
-        // engine and ID while the daemon can still tell us where it runs.
-        if metadata.pid == 0
-            && !matching_container_owner(metadata).is_ok_and(|record| record.is_some())
-        {
-            match tokio::time::timeout(Duration::from_secs(2), request_daemon_identity(&mut client))
-                .await
+    let attempt = match DaemonClient::connect(metadata.clone()).await {
+        Ok(mut client) => {
+            // Capture ownership before sending Stop to a legacy container.
+            let identity = if metadata.pid == 0
+                && !matching_container_owner(metadata).is_ok_and(|record| record.is_some())
             {
-                Ok(Ok(identity)) => {
-                    answering = true;
-                    seed_container_owner_if_missing(startup, metadata, &identity.placement).await;
+                tokio::time::timeout(Duration::from_secs(2), request_daemon_identity(&mut client))
+                    .await
+                    .context("time out reading the legacy container daemon's identity")
+                    .and_then(|identity| identity.map(Some))
+            } else {
+                Ok(None)
+            };
+            match identity {
+                Ok(identity) => {
+                    if let Some(identity) = identity {
+                        answering = true;
+                        ensure_container_owner_recorded(startup, metadata, &identity.placement)
+                            .await?;
+                    }
+                    ManagementClient::new(client).stop().await
                 }
-                // Identity may have consumed the connection before failing.
-                // Stop is in the management subset and can still be accepted.
-                _ => client = DaemonClient::connect(metadata.clone()).await?,
+                Err(error) => Err(error),
             }
         }
-        ManagementClient::new(client).stop().await
-    }
-    .await;
+        Err(error) => Err(error),
+    };
     let error = match attempt {
         Ok(()) => {
             wait_for_daemon_release(metadata, STOP_DRAIN_TIMEOUT)
@@ -2139,23 +2193,41 @@ async fn stop_daemon(
         DaemonRelease::Unknown(reason) => {
             if matches!(fallback, StopFallback::Force)
                 && metadata.pid == 0
-                && matches!(matching_container_owner(metadata), Ok(None))
                 && !answering
-                && !matches!(
-                    tokio::time::timeout(Duration::from_secs(2), connect_ready_container(metadata)).await,
-                    Ok(Ok(_))
-                )
+                && clear_unreachable_container_record(metadata).await?
             {
-                ensure!(
-                    remove_matching_metadata(metadata)?,
-                    "The daemon.json record changed while stopping the Mjolnir daemon. Run the stop command again."
-                );
-                eprintln!("Cleared the stale container daemon record in {}.", metadata_path().display());
                 return Ok(true);
             }
             Err(error).context(reason)
         }
     }
+}
+
+/// The caller holds the startup lock and has explicitly forced legacy recovery.
+async fn clear_unreachable_container_record(metadata: &DaemonMetadata) -> Result<bool> {
+    let unreadable = match matching_container_owner(metadata) {
+        Ok(Some(_)) => return Ok(false),
+        Ok(None) => false,
+        Err(_) => true,
+    };
+    if matches!(
+        tokio::time::timeout(Duration::from_secs(2), connect_ready_container(metadata)).await,
+        Ok(Ok(_))
+    ) {
+        return Ok(false);
+    }
+    ensure!(
+        remove_matching_metadata(metadata)?,
+        "The daemon.json record changed while stopping the Mjolnir daemon. Run the stop command again."
+    );
+    eprintln!(
+        "Cleared the stale container daemon record in {}.",
+        metadata_path().display()
+    );
+    if unreadable {
+        clear_unreadable_container_owner()?;
+    }
+    Ok(true)
 }
 
 /// Stop the daemon `metadata` names after it did not answer a protocol
@@ -2486,6 +2558,10 @@ state=$(cat "$MJ_DATA_DIR/engine.state")
 case "$1" in
   image) printf 'test-image|%s\n' "$MJ_TEST_IMAGE_REVISION" ;;
   ps)
+    if [ "$state" = "ps-error" ]; then
+      echo 'simulated engine ps failure' >&2
+      exit 125
+    fi
     case "$*" in
       *--format={{.Names}}*) if [ "$state" = "inspect-error" ]; then echo predecessor; fi ;;
       *id=old-container-id*) ;;
@@ -2514,6 +2590,7 @@ case "$1" in
     [ "$2" = '--detach' ] || exit 64
     [ -s "$MJ_DATA_DIR/daemon-container.json" ] || exit 65
     [ ! -e "$MJ_DATA_DIR/daemon.json" ] || exit 66
+    printf '%s' "$MJ_DAEMON_TOKEN" > "$MJ_DATA_DIR/exec.token"
     echo daemon > "$MJ_DATA_DIR/engine.state" ;;
   stop)
     [ "$2" = 'test-container-id' ] || exit 64
@@ -2778,7 +2855,7 @@ esac
             set_endpoint(&listener);
             let lock = data_dir().join("daemon-start.lock");
             let launcher = acquire_start_guard(lock.clone()).await.unwrap();
-            let launch = container::launch(&spec).await.unwrap();
+            let launch = container::launch(&spec, None).await.unwrap();
             assert!(!metadata_path().exists());
             drop(launcher);
             assert!(matches!(
@@ -2821,6 +2898,171 @@ esac
                     .count(),
                 1
             );
+        }
+
+        #[tokio::test]
+        async fn retry_reuses_credentials_of_an_interrupted_container_exec() {
+            if fake_podman(
+                "MJ_TEST_RETRY_CONTAINER_EXEC",
+                "daemon::tests::container_tests::retry_reuses_credentials_of_an_interrupted_container_exec",
+            ) {
+                return;
+            }
+            engine_state("worker");
+            let spec = configure_container().await;
+            let (listener, metadata) = fake_daemon(0).await;
+            let prior = owner(&metadata, CONTAINER_ID, &spec.name);
+            set_endpoint(&listener);
+            write_container_owner(&prior).unwrap();
+            assert!(!metadata_path().exists());
+            assert_eq!(
+                container::probe_container_daemon(RUNTIME, CONTAINER_ID).await,
+                container::ContainerDaemonStatus::Exited
+            );
+
+            let peer = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(ping.action, DaemonAction::Ping));
+                // The delayed first exec wins the store lock. Only its original
+                // token authenticates, regardless of what the retry wrote.
+                assert_eq!(ping.token, prior.token);
+                assert_eq!(
+                    fs::read_to_string(data_dir().join("exec.token")).unwrap(),
+                    prior.token
+                );
+                assert_eq!(read_container_owner().unwrap().unwrap().token, prior.token);
+                answer(&mut stream, ping, Ok(DaemonReply::Pong)).await;
+            };
+            let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+                .await
+                .unwrap();
+            let (connected, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(connect_or_start_holding(&startup), peer)
+            })
+            .await
+            .unwrap();
+            connected.unwrap();
+            assert!(prior.matches(&read_metadata_any().unwrap()));
+        }
+
+        #[tokio::test]
+        async fn failing_to_record_legacy_container_owner_leaves_daemon_running() {
+            if fake_podman(
+                "MJ_TEST_LEGACY_OWNER_REQUIRED",
+                "daemon::tests::container_tests::failing_to_record_legacy_container_owner_leaves_daemon_running",
+            ) {
+                return;
+            }
+            engine_state("worker");
+            let spec = configure_container().await;
+            let (listener, metadata) = fake_daemon(0).await;
+            let identity = DaemonIdentity {
+                instance_id: "legacy-container".into(),
+                build_version: metadata.build_version.clone(),
+                placement: DaemonPlacement::Container {
+                    name: spec.name,
+                    runtime: Some(RUNTIME),
+                },
+            };
+            write_launcher_metadata(&metadata).unwrap();
+            engine_state("ps-error");
+            let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+                .await
+                .unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                replace_daemon(&startup, &metadata, &identity.placement),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("simulated engine ps failure"));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+            drop(startup);
+
+            for force in [false, true] {
+                let peer = async {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    assert!(matches!(request.action, DaemonAction::Identity));
+                    answer(
+                        &mut stream,
+                        request,
+                        Ok(DaemonReply::Identity(identity.clone())),
+                    )
+                    .await;
+                    use tokio::io::AsyncReadExt;
+                    assert_eq!(
+                        stream.read(&mut [0]).await.unwrap(),
+                        0,
+                        "client sent Stop after seeding failed"
+                    );
+                };
+                let (stopped, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(stop_instance(force), peer)
+                })
+                .await
+                .unwrap();
+                let error = format!("{:#}", stopped.unwrap_err());
+                assert!(error.contains("left running"), "{error}");
+                assert!(error.contains("simulated engine ps failure"), "{error}");
+            }
+            assert!(same_daemon_endpoint(
+                &read_metadata_any().unwrap(),
+                &metadata
+            ));
+            assert!(!container_owner_path().exists());
+            assert!(!calls().lines().any(|call| call.starts_with("stop ")));
+        }
+
+        #[tokio::test]
+        async fn force_stop_removes_unreadable_owner_but_preserves_valid_owner_on_engine_failure() {
+            if fake_podman(
+                "MJ_TEST_CLEAR_UNREADABLE_CONTAINER_OWNER",
+                "daemon::tests::container_tests::force_stop_removes_unreadable_owner_but_preserves_valid_owner_on_engine_failure",
+            ) {
+                return;
+            }
+            let (listener, metadata) = fake_daemon(0).await;
+            drop(listener);
+            for published in [false, true] {
+                fs::write(container_owner_path(), b"{").unwrap();
+                if published {
+                    write_launcher_metadata(&metadata).unwrap();
+                }
+                let Err(discovery) = decide_existing_daemon().await else {
+                    panic!("discovery accepted an unreadable owner");
+                };
+                for error in [discovery, stop_instance(false).await.unwrap_err()] {
+                    let error = format!("{error:#}");
+                    assert!(error.contains("daemon-container.json"), "{error}");
+                    assert!(error.contains("mj daemon stop --force"), "{error}");
+                }
+                assert_eq!(metadata_path().exists(), published);
+                assert!(container_owner_path().exists());
+                assert!(stop_instance(true).await.unwrap());
+                assert!(!metadata_path().exists());
+                assert!(!container_owner_path().exists());
+                assert!(matches!(
+                    decide_existing_daemon().await.unwrap(),
+                    ExistingDaemon::Absent
+                ));
+            }
+
+            engine_state("ps-error");
+            write_launcher_metadata(&metadata).unwrap();
+            let record = owner(&metadata, CONTAINER_ID, "daemon");
+            write_container_owner(&record).unwrap();
+            let error = format!("{:#}", stop_instance(true).await.unwrap_err());
+            assert!(error.contains("simulated engine ps failure"), "{error}");
+            assert!(record.matches(&read_metadata_any().unwrap()));
+            assert_eq!(read_container_owner().unwrap(), Some(record));
+            assert!(!calls().lines().any(|call| call.starts_with("stop ")));
         }
 
         // Hard-won: #1568: stop treated a container's closed socket as released ownership.

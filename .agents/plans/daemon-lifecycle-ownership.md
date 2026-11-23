@@ -63,9 +63,13 @@ After completing this plan, the daemon launch and discovery code is measurably s
   Rationale: Fixes Flaws F2 and F3 so a subsequent launcher can adopt an unpublished in-flight container daemon instead of stranding it or launching over it. Cuts `probe-store-lock`, launch tickets (`MJ_DAEMON_REQUIRE_TICKET`, `ticket_armed`), `MJ_DAEMON_GENERATION` / `instance_id` coupling, `published`, `token_sha256`, `OwnerPlacement::Host`, and `volume`/`image` fields.
   Date/Author: 2026-11-23 / Coordinator (incorporating MJ Advisor review)
 
-- Decision: Record as an explicit residual (do not build machinery for it here): if a launcher dies mid-`engine exec`, the engine could finish starting that `daemon-run` process after the next client's `top` check sees no process.
-  Rationale: The volume's `ControllerStoreGuard` still prevents two writers; the outcome is a visible launch failure, not data corruption. Closing that window structurally would mean letting the container daemon choose its own token and reading it from the volume's `daemon.json` (`process.rs:841`), which is separate work outside this epic.
-  Date/Author: 2026-11-23 / Coordinator (per MJ Advisor review)
+- Decision: Keep the unpublished owner record when a startup process probe reports exit. Reuse its token if the retry targets the same engine, full container ID, and published loopback address. Clear the record when the retry switches targets or the user explicitly stops an exited pending container.
+  Rationale: A detached engine exec can reach the store after the launcher's death and after the next client's process check. The volume store guard admits one daemon, and sharing the token lets the client authenticate to whichever exec wins.
+  Date/Author: 2026-11-23 / Milestone 2 review
+
+- Decision: Require a readable container owner record before requesting stop or handoff from a legacy container with a published endpoint. Allow explicit force recovery to clear an unreadable record after an unreachable legacy endpoint has been checked, or when there is no published endpoint.
+  Rationale: Stop and handoff need the recorded engine and ID to verify release. A failed ownership query leaves the daemon and its credentials available. A damaged record can be cleared after the operator verifies that there is no container daemon.
+  Date/Author: 2026-11-23 / Milestone 2 review
 
 - Decision: Delete `wait_until_answering`, `wait_for_endpoint_down`, and unconditionally delete the 3-second `Ping` in `recorded_daemon_is_gone`.
   Rationale: One authoritative ownership check per placement (`ControllerStoreGuard` + PID check on host; `daemon-container.json` + engine `ps`/`top` on container) replaces three redundant and contradictory RPC liveness loops.
@@ -96,6 +100,8 @@ Startup polls one readiness exchange at a time while the notice, deadline, and p
 Milestone 2 records the engine and full container ID before starting `mj daemon-run`. A later client can adopt that process and publish `daemon.json` after readiness. Startup, accepted stop, and handoff all check the recorded process through the engine. A stopped or absent daemon can be replaced while workers keep running in the container. Engine failures and unreachable legacy records produce a visible error. The legacy error explains when to use `mj daemon stop --force`.
 
 Dev-profile verification passed 15 client daemon tests, 38 CLI daemon tests, and 23 startup integration tests. Clippy, rustfmt, and `git diff --check` passed, and the removed polling helpers have no remaining references. The live Podman test is opt-in and was skipped because this environment has no engine socket. Fake Podman commands on an isolated `PATH` exercised the real subprocess path, and Docker and Podman process-list fixtures covered the daemon matcher.
+
+Milestone 2 review follow-up passed 15 client daemon tests, 41 CLI daemon tests, and 23 startup integration tests. New fake-engine regressions cover the original exec winning a same-target retry, owner seeding failure before an RPC mutation, and explicit recovery from a corrupt owner record. The live Podman test remains opt-in.
 
 Milestone 3 remains pending.
 
@@ -156,7 +162,7 @@ Execute in three sequential milestones, committing, reviewing (`request_review`)
    - **Seed legacy running containers:** When an authenticated `Identity` names a container and engine for a `pid: 0` record, resolve the full container ID and write a matching `daemon-container.json` under `DaemonStartGuard` before asking for stop or handoff. Shared discovery passes the placement to the lock holder.
    - **Pre-launch container adoption gate** (fixes Flaws F2 and F3): In `decide_existing_daemon` (when `daemon.json` is absent) and in `connect_or_start_holding` (before launching a new container daemon under `DaemonStartGuard`), read `daemon-container.json` if present:
      - `Running`: adopt it — run the unified `wait_for_ready_daemon` against the record's `metadata` and `probe_container_daemon`, publish `daemon.json` after `Ping` and `Identity`, then run the ordinary build and placement decision on the published record.
-     - `Exited`: remove the stale `daemon-container.json` and proceed to launch.
+     - `Exited`: pass the unpublished record to the launcher. A retry targeting the same engine, full container ID, and loopback address reuses the token. A different target clears the prior record.
      - `Unknown(reason)`: fail visibly with `reason` and do NOT launch a second container daemon.
    - **Legacy `pid: 0` recovery UX (`mj-cli/src/main.rs`, `mj-cli/src/daemon.rs`):** Add `--force` to `DaemonStopArgs` (`mj daemon stop --force`). When `daemon.json` has `pid: 0`, no matching `daemon-container.json`, and does not answer `Stop`/`Ping`:
      - Ordinary startup, handoff, and `mj daemon stop` refuse visibly with a message naming the stale `daemon.json`, explaining that Mjolnir cannot verify which container engine owns a pre-tracking `pid: 0` record, and directing the user to confirm no container daemon is running and run `mj daemon stop --force` to clear it.
