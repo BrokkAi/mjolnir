@@ -823,11 +823,11 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
 }
 
 /// How `spawn` opens when the parent chooses between two task types.
-const SPAWN_TWO_TASK_TYPES: &str = "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type.";
+const SPAWN_TWO_TASK_TYPES: &str = "Start a child in your target and filesystem using the task type's configured model and effort. Use `task_type` `straightforward` for bounded work with one clear path: mapping code, running exact build, test, or gate commands, and small mechanical edits. Use `subtle` for multi-file implementation (even from a settled design), multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, and work with a high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by scope and branching, not brief length or command runtime. Escalate stalled or incomplete `straightforward` work to `subtle` after one correction.";
 
 /// How `spawn` opens when only the straightforward type is configured: the
 /// parent delegates straightforward work and keeps work needing judgment.
-const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Do work that needs judgment yourself, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. Judge by difficulty, not by the length of the brief. The user configures the model and effort.";
+const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: bounded tasks with a single clear path, including locating and mapping code, running exact build, test, or gate commands, and small mechanical edits. Keep multi-file implementation, troubleshooting, ambiguous diagnosis, design choices, and changes with a high risk of hard-to-detect bugs yourself. Judge by scope and branching, not brief length or command runtime.";
 
 /// The parent's `spawn` tool. With only the straightforward type configured
 /// there is no choice to make, so it has no `task_type`.
@@ -840,27 +840,33 @@ fn spawn_tool(subtle_subagents: bool, supervisors_enabled: bool) -> Value {
     } else {
         (SPAWN_ONE_TASK_TYPE, "the configured model and effort")
     };
-    let mut task_types = vec!["straightforward"];
-    if subtle_subagents {
-        task_types.push("subtle");
-    }
-    if supervisors_enabled {
-        task_types.push("supervisor");
-    }
     let mut properties = json!({
         "no_github_credentials":{"type":"boolean","description":"Withhold GitHub credentials from this child and its descendants. A parent's credential opt-out is always inherited."},
         "task_name":{"type":"string"},
         "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
-        "task_type":{"type":"string","enum":task_types,"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs. `supervisor` starts a depth-1 supervisor from the primary pool that can delegate its own `straightforward`/`subtle` workers."},
         "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
     });
-    let mut required = json!(["task_name", "instructions", "task_type"]);
-    if !subtle_subagents && !supervisors_enabled {
-        properties
-            .as_object_mut()
-            .expect("properties are an object")
-            .remove("task_type");
-        required = json!(["task_name", "instructions"]);
+    let mut required = vec!["task_name", "instructions"];
+    if subtle_subagents || supervisors_enabled {
+        let mut task_types = vec!["straightforward"];
+        let mut description = String::from(
+            "`straightforward` is for bounded work with a single clear path, such as locating and mapping code, running exact build, test, or gate commands, and small mechanical edits.",
+        );
+        if subtle_subagents {
+            task_types.push("subtle");
+            description.push_str(
+                " `subtle` gets a smarter, more expensive agent for multi-file implementation, multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, or work with a high risk of subtle bugs.",
+            );
+        }
+        if supervisors_enabled {
+            task_types.push("supervisor");
+            description.push_str(
+                " `supervisor` starts a depth-1 supervisor from the primary pool that can delegate its own workers.",
+            );
+        }
+        properties["task_type"] =
+            json!({"type":"string","enum":task_types,"description":description});
+        required.push("task_type");
     }
     tool(
         "spawn",
@@ -1230,12 +1236,18 @@ mod tests {
         let spawn = spawn_definition(ParentTools::default());
         assert_eq!(
             spawn["description"],
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "Start a child in your target and filesystem using the task type's configured model and effort. Use `task_type` `straightforward` for bounded work with one clear path: mapping code, running exact build, test, or gate commands, and small mechanical edits. Use `subtle` for multi-file implementation (even from a settled design), multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, and work with a high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by scope and branching, not brief length or command runtime. Escalate stalled or incomplete `straightforward` work to `subtle` after one correction. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
         );
-        assert_eq!(
-            spawn["inputSchema"]["properties"]["task_type"]["enum"],
-            json!(["straightforward", "subtle"])
+        let task_type = &spawn["inputSchema"]["properties"]["task_type"];
+        assert_eq!(task_type["enum"], json!(["straightforward", "subtle"]));
+        let description = task_type["description"].as_str().unwrap();
+        assert!(
+            description.contains("`straightforward` is for bounded work with a single clear path")
         );
+        assert!(description.contains(
+            "multi-file implementation, multi-stage operational runs or troubleshooting"
+        ));
+        assert!(!description.contains("`supervisor`"));
     }
 
     #[test]
@@ -1243,7 +1255,7 @@ mod tests {
         let spawn = spawn_definition(STRAIGHTFORWARD_ONLY);
         let description = spawn["description"].as_str().unwrap();
         assert!(!description.contains("task_type"), "{description}");
-        assert!(!description.contains("`subtle`"), "{description}");
+        assert!(!description.contains("subtle"), "{description}");
         assert!(!description.contains("task type"), "{description}");
         assert!(
             description.starts_with(
@@ -1252,7 +1264,7 @@ mod tests {
             "{description}"
         );
         assert!(
-            description.contains("Do work that needs judgment yourself"),
+            description.contains("Keep multi-file implementation, troubleshooting, ambiguous diagnosis, design choices, and changes with a high risk of hard-to-detect bugs yourself."),
             "{description}"
         );
         assert!(
@@ -1871,12 +1883,9 @@ mod tests {
                             props["task_type"]["enum"],
                             json!(["straightforward", "subtle"])
                         );
-                        assert!(
-                            spawn["description"]
-                                .as_str()
-                                .unwrap()
-                                .contains("Judge by difficulty, not by the length of the brief")
-                        );
+                        assert!(spawn["description"].as_str().unwrap().contains(
+                            "Judge by scope and branching, not brief length or command runtime"
+                        ));
                         assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
                         assert_eq!(
                             tools
