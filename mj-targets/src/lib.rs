@@ -23,4 +23,4 @@ pub mod termination;
 #[doc(hidden)]
 pub mod test_isolation;
 #[doc(hidden)]
-pub mod test_log;
+pub use mj_core::test_log;

@@ -96,4 +96,5 @@ windows-sys = { workspace = true, features = [
 
 
 [dev-dependencies]
+futures = "0.3"
 tempfile.workspace = true

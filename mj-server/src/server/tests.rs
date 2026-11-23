@@ -844,6 +844,9 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
         } else {
             mj_core::state::SessionState::Stopped
         };
+        state
+            .environment_owners
+            .insert(id.into(), parent.id.clone());
         state.sessions.insert(id.into(), child);
         state.subagents.insert(
             id.into(),
@@ -1675,6 +1678,9 @@ fn the_project_key_groups_without_naming_a_path() {
     let first = state.sessions["session-1"].clone();
     let mut second = first.clone();
     second.id = "session-2".into();
+    state
+        .environment_owners
+        .insert(second.id.clone(), second.id.clone());
     state.sessions.insert(second.id.clone(), second);
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
 
@@ -1705,6 +1711,9 @@ fn web_project_keys_follow_the_complete_repository_set() {
     let mut other = state.sessions["session-1"].clone();
     other.id = "session-2".into();
     other.bundle_id = "other".into();
+    state
+        .environment_owners
+        .insert(other.id.clone(), other.id.clone());
     state.sessions.insert(other.id.clone(), other);
 
     assert_eq!(

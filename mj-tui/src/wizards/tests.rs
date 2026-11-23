@@ -671,6 +671,9 @@ fn refusal_to_remove_unavailable_project_is_visible_inside_picker() {
     let mut session = stopped_session();
     session.bundle_id = "missingpath".into();
     let mut state = State::default();
+    state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
@@ -759,6 +762,9 @@ fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() 
 fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selection() {
     let mut state = State::default();
     let session = stopped_session();
+    state
+        .environment_owners
+        .insert(session.id.clone(), session.id.clone());
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = dashboard_at_saved_projects(state);
 
@@ -6801,6 +6807,9 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
     let mut state = dashboard.state.clone();
+    state
+        .environment_owners
+        .insert(child.id.clone(), relation.parent_session_id.clone());
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);
@@ -6887,6 +6896,9 @@ fn new_session_like_carries_the_container_owners_size() {
         orchestrator: false,
     };
     let mut state = dashboard.state.clone();
+    state
+        .environment_owners
+        .insert(child.id.clone(), relation.parent_session_id.clone());
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);

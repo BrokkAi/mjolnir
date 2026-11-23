@@ -422,6 +422,7 @@ fn explicit_worktree_creation_rejects_plain_directories() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.clone(), id.clone())].into(),
             sessions: [(id.clone(), record)].into_iter().collect(),
             ..State::default()
         },
@@ -800,6 +801,7 @@ fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.clone(), id.clone())].into(),
             sessions: [(id.clone(), record)].into_iter().collect(),
             ..State::default()
         },
@@ -860,6 +862,7 @@ fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -960,6 +963,7 @@ fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     let controller = Controller {
         config: Config::default(),
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1049,6 +1053,7 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1126,6 +1131,7 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2484,6 +2490,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     let controller = Controller {
         config: Config::default(),
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())].into(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },

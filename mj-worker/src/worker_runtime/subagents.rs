@@ -2821,8 +2821,12 @@ enabled = false
                 child_session_id: "child".into(),
                 message: "note".into(),
             },
-            SubagentToolAction::LegacyInterruptAgent {
-                child_session_id: "child".into(),
+            SubagentToolAction::SpawnOrchestrator {
+                no_github_credentials: false,
+                task_name: "coordinate".into(),
+                instructions: "delegate the work".into(),
+                target: None,
+                repos: None,
             },
             SubagentToolAction::CloseAgent {
                 child_session_id: "child".into(),

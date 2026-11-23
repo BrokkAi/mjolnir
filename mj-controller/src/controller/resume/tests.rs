@@ -164,6 +164,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -222,6 +223,7 @@ async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() 
         let controller = Controller {
             config,
             state: State {
+                environment_owners: [(session_id.clone(), session_id.clone())].into(),
                 sessions: [(session_id.clone(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -2872,6 +2874,7 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
             let controller = Controller {
                 config,
                 state: State {
+                    environment_owners: [(id.into(), id.into())].into(),
                     sessions: [(id.into(), session)].into_iter().collect(),
                     ..State::default()
                 },
@@ -3021,6 +3024,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         let mut controller = Controller {
             config,
             state: State {
+                environment_owners: [(id.into(), id.into())].into(),
                 sessions: [(id.into(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -3282,6 +3286,7 @@ fn cross_target_resume_refuses_originless_and_origin_backed_raw_origin_delta_arc
         let mut controller = Controller {
             config,
             state: State {
+                environment_owners: [(session_id.clone(), session_id.clone())].into(),
                 sessions: [(session_id.clone(), session)].into_iter().collect(),
                 ..State::default()
             },
@@ -3621,6 +3626,7 @@ fn history_cutoff_origin_delta_archive_passes_resume_preflight_without_origin() 
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -3787,6 +3793,7 @@ fn cross_target_resume_refuses_legacy_managed_clone_still_on_disk() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },

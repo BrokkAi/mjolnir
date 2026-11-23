@@ -70,8 +70,11 @@ pub mod suspend_consent;
 pub mod target_path;
 pub mod targets;
 pub mod test_hooks;
+#[doc(hidden)]
+pub mod test_log;
 pub mod text;
 pub mod transcript;
+pub mod upgrade;
 pub mod usage;
 pub mod work_facts;
 pub mod worker_build;

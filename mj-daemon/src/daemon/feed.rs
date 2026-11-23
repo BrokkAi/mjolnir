@@ -1302,6 +1302,7 @@ mod tests {
         let mut history = RuntimeHistory::default();
         let mut runtime = RuntimeProjection::default();
         for id in ["active", "unchanged"] {
+            runtime.environment_owners.insert(id.into(), id.into());
             runtime
                 .records
                 .insert(id.into(), record(id, SessionState::Running));
@@ -1370,6 +1371,7 @@ mod tests {
 
         let id = "session";
         let state = super::super::tests::test_runtime_state_holding(mj_core::state::State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.to_owned(), record(id, SessionState::Running))].into(),
             ..Default::default()
         });
@@ -1493,6 +1495,7 @@ mod tests {
         record.target_template_id = "local".into();
         let config = super::super::tests::runtime_test_config();
         let mut records = State {
+            environment_owners: [(id.into(), id.into())].into(),
             sessions: [(id.into(), record)].into(),
             ..Default::default()
         };

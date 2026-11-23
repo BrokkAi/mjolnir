@@ -561,6 +561,9 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
     }));
+    state
+        .environment_owners
+        .insert(record.id.clone(), record.id.clone());
     state.sessions.insert(record.id.clone(), record);
     state.mount_history.insert(
         "local".into(),

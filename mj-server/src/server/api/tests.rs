@@ -6488,6 +6488,12 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
                 if prior_use == "sub-agent" {
                     let mut parent = record.clone();
                     parent.id = "parent".into();
+                    state
+                        .environment_owners
+                        .insert(parent.id.clone(), parent.id.clone());
+                    state
+                        .environment_owners
+                        .insert("session-1".into(), parent.id.clone());
                     state.sessions.insert(parent.id.clone(), parent);
                     state.subagents.insert(
                         "session-1".into(),
