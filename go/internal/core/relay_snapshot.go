@@ -79,15 +79,15 @@ func HoldFollowUpText(kind HoldFollowUpKind, running []string) string {
 	)
 }
 
-// RelayCommandPromptBlocksForCommand is the effective prompt, including the
-// worker-authored restart note. False when the command carries no prompt.
+// RelayCommandPromptBlocksForCommand is the effective prompt. Ordinary restart
+// continuations send only the recovery note. False when the command carries no prompt.
 func RelayCommandPromptBlocksForCommand(command RelayCommand, commandID string) ([]acpschema.ContentBlock, bool) {
 	prompt, ok := RelayCommandPromptBlocks(command)
 	if !ok {
 		return nil, false
 	}
 	if IsRestartContinuation(commandID) && !PromptIsSlashCommand(prompt) {
-		return append([]acpschema.ContentBlock{relayTextBlock(RestartRecoveryNote)}, prompt...), true
+		return []acpschema.ContentBlock{relayTextBlock(RestartRecoveryNote)}, true
 	}
 	return prompt, true
 }

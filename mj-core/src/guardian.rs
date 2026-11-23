@@ -32,10 +32,6 @@ pub const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// Protocol 82's `AskPerson` also carries daemon failures. This reason
 /// identifies the explicit settings choice to continue with manual approval.
 pub const GUARDIAN_DISABLED_REASON: &str = "Mjolnir guardian is disabled in settings";
-pub const GUARDIAN_CONFIG_UNREADABLE: &str = "the daemon configuration file is unreadable";
-pub const GUARDIAN_CONFIG_INVALID_TOML: &str = "the daemon configuration contains invalid TOML";
-pub const GUARDIAN_CONFIG_NEEDS_UPGRADE: &str =
-    "the daemon configuration uses a newer schema. Upgrade Mjolnir";
 pub const MAX_PENDING_GUARDIAN_REVIEWS: usize = 8;
 
 /// Codex's security policy, inserted into the template below.
@@ -697,40 +693,134 @@ pub struct GuardianReviewResult {
     pub decision: GuardianReviewOutcome,
 }
 
-/// Retain the failure category carried in the preexisting `AskPerson`
-/// response. Older daemons can send configuration contents or provider text
-/// in that field. Report only known messages and fixed category names.
-pub fn safe_daemon_guardian_failure_reason(reason: &str) -> &str {
-    match reason {
-        "its daemon review timed out" | "the daemon review timed out" => {
-            "the daemon review timed out"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtilityInferenceFailure {
+    InvalidRequest,
+    Cancelled,
+    Authentication,
+    RateLimited,
+    ContextLength,
+    Transport,
+    StructuredOutput,
+    Provider,
+}
+
+/// A daemon review failure safe to send to the worker and show to the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonGuardianFailure {
+    TimedOut,
+    ConfigUnreadable,
+    ConfigInvalidToml,
+    ConfigInvalidSchema,
+    ConfigNeedsUpgrade,
+    ConfigLoadFailed,
+    UtilityQuotaExhausted,
+    UtilityNoSupportedModel,
+    UtilityDiscoveryFailed,
+    UtilitySelectionFailed,
+    UtilityInference(Option<UtilityInferenceFailure>),
+    InvalidAssessment,
+    Other,
+}
+
+impl DaemonGuardianFailure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TimedOut => "the daemon review timed out",
+            Self::ConfigUnreadable => "the daemon configuration file is unreadable",
+            Self::ConfigInvalidToml => "the daemon configuration contains invalid TOML",
+            Self::ConfigInvalidSchema => "the daemon configuration has invalid settings",
+            Self::ConfigNeedsUpgrade => {
+                "the daemon configuration uses a newer schema. Upgrade Mjolnir"
+            }
+            Self::ConfigLoadFailed => "could not load configuration",
+            Self::UtilityQuotaExhausted => "all utility guardian models are out of quota",
+            Self::UtilityNoSupportedModel => "no supported utility guardian model was found",
+            Self::UtilityDiscoveryFailed => "utility guardian model discovery failed",
+            Self::UtilitySelectionFailed => "could not select a utility guardian model",
+            Self::UtilityInference(None) => "utility guardian inference failed",
+            Self::InvalidAssessment => "invalid guardian assessment",
+            Self::Other => "the daemon reviewer failed",
+            Self::UtilityInference(Some(UtilityInferenceFailure::InvalidRequest)) => {
+                "utility guardian inference failed (InvalidRequest)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::Cancelled)) => {
+                "utility guardian inference failed (Cancelled)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::Authentication)) => {
+                "utility guardian inference failed (Authentication)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::RateLimited)) => {
+                "utility guardian inference failed (RateLimited)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::ContextLength)) => {
+                "utility guardian inference failed (ContextLength)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::Transport)) => {
+                "utility guardian inference failed (Transport)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::StructuredOutput)) => {
+                "utility guardian inference failed (StructuredOutput)"
+            }
+            Self::UtilityInference(Some(UtilityInferenceFailure::Provider)) => {
+                "utility guardian inference failed (Provider)"
+            }
         }
-        "invalid guardian assessment"
-        | "utility guardian inference failed"
-        | "utility guardian inference failed (InvalidRequest)"
-        | "utility guardian inference failed (Cancelled)"
-        | "utility guardian inference failed (Authentication)"
-        | "utility guardian inference failed (RateLimited)"
-        | "utility guardian inference failed (ContextLength)"
-        | "utility guardian inference failed (Transport)"
-        | "utility guardian inference failed (StructuredOutput)"
-        | "utility guardian inference failed (Provider)"
-        | "could not read configuration"
-        | GUARDIAN_CONFIG_UNREADABLE
-        | GUARDIAN_CONFIG_INVALID_TOML
-        | GUARDIAN_CONFIG_NEEDS_UPGRADE => reason,
-        "could not load configuration" => reason,
-        reason if reason.starts_with("could not load configuration:") => {
-            "could not load configuration"
+    }
+
+    /// Accept known daemon messages, discarding any detail sent by older daemons.
+    pub fn from_wire(reason: &str) -> Self {
+        use UtilityInferenceFailure::*;
+
+        match reason {
+            "its daemon review timed out" => return Self::TimedOut,
+            "could not read configuration" => return Self::ConfigUnreadable,
+            reason if reason.starts_with("could not read configuration:") => {
+                return Self::ConfigUnreadable;
+            }
+            reason if reason.starts_with("could not load configuration:") => {
+                return Self::ConfigLoadFailed;
+            }
+            reason if reason.starts_with("no usable utility model:") => {
+                return Self::UtilitySelectionFailed;
+            }
+            _ => {}
         }
-        reason if reason.starts_with("could not read configuration:") => {
-            "could not read configuration"
-        }
-        "could not select a utility guardian model" => reason,
-        reason if reason.starts_with("no usable utility model:") => {
-            "could not select a utility guardian model"
-        }
-        _ => "the daemon reviewer failed",
+
+        [
+            Self::TimedOut,
+            Self::ConfigUnreadable,
+            Self::ConfigInvalidToml,
+            Self::ConfigInvalidSchema,
+            Self::ConfigNeedsUpgrade,
+            Self::ConfigLoadFailed,
+            Self::UtilityQuotaExhausted,
+            Self::UtilityNoSupportedModel,
+            Self::UtilityDiscoveryFailed,
+            Self::UtilitySelectionFailed,
+            Self::UtilityInference(None),
+            Self::InvalidAssessment,
+            Self::UtilityInference(Some(InvalidRequest)),
+            Self::UtilityInference(Some(Cancelled)),
+            Self::UtilityInference(Some(Authentication)),
+            Self::UtilityInference(Some(RateLimited)),
+            Self::UtilityInference(Some(ContextLength)),
+            Self::UtilityInference(Some(Transport)),
+            Self::UtilityInference(Some(StructuredOutput)),
+            Self::UtilityInference(Some(Provider)),
+        ]
+        .into_iter()
+        .find(|failure| failure.as_str() == reason)
+        .unwrap_or(Self::Other)
+    }
+}
+
+impl Serialize for DaemonGuardianFailure {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 

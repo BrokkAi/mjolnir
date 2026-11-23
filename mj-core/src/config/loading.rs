@@ -18,6 +18,10 @@ pub enum ConfigLoadError {
         path: PathBuf,
         location: Option<(usize, usize)>,
     },
+    Schema {
+        path: PathBuf,
+        location: Option<(usize, usize)>,
+    },
     NewerSchema {
         path: PathBuf,
         version: u32,
@@ -27,7 +31,9 @@ pub enum ConfigLoadError {
 impl std::fmt::Display for ConfigLoadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Toml { path, .. } => write!(formatter, "parse Mjolnir config {}", path.display()),
+            Self::Toml { path, .. } | Self::Schema { path, .. } => {
+                write!(formatter, "parse Mjolnir config {}", path.display())
+            }
             Self::NewerSchema { path, version } => write!(
                 formatter,
                 "{} was written by a newer Mjolnir (config version {version}; this build supports \
@@ -40,12 +46,17 @@ impl std::fmt::Display for ConfigLoadError {
 
 impl std::error::Error for ConfigLoadError {}
 
-pub(super) fn config_toml_error(
-    path: &Path,
-    contents: &str,
-    error: toml::de::Error,
-) -> anyhow::Error {
-    let location = error.span().map(|span| {
+impl ConfigLoadError {
+    pub fn location(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Toml { location, .. } | Self::Schema { location, .. } => *location,
+            Self::NewerSchema { .. } => None,
+        }
+    }
+}
+
+fn toml_location(contents: &str, error: &toml::de::Error) -> Option<(usize, usize)> {
+    error.span().map(|span| {
         let offset = contents.floor_char_boundary(span.start.min(contents.len()));
         let prefix = &contents[..offset];
         let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
@@ -57,8 +68,28 @@ pub(super) fn config_toml_error(
             .count()
             + 1;
         (line, column)
-    });
+    })
+}
+
+pub(super) fn config_toml_error(
+    path: &Path,
+    contents: &str,
+    error: toml::de::Error,
+) -> anyhow::Error {
+    let location = toml_location(contents, &error);
     anyhow::Error::new(error).context(ConfigLoadError::Toml {
+        path: path.to_owned(),
+        location,
+    })
+}
+
+pub(super) fn config_schema_error(
+    path: &Path,
+    source_for_location: Option<&str>,
+    error: toml::de::Error,
+) -> anyhow::Error {
+    let location = source_for_location.and_then(|source| toml_location(source, &error));
+    anyhow::Error::new(error).context(ConfigLoadError::Schema {
         path: path.to_owned(),
         location,
     })
@@ -77,9 +108,8 @@ pub fn newer_version_on_disk(path: &Path) -> Option<u32> {
     newer_version(&contents.parse::<toml::Value>().ok()?)
 }
 
-pub(super) fn reject_removed_profile_overrides(contents: &str) -> Result<()> {
-    let value: toml::Value = contents.parse().context("parse Mjolnir config TOML")?;
-    let Some(profiles) = value.get("profiles").and_then(toml::Value::as_table) else {
+pub(super) fn reject_removed_profile_overrides(document: &toml::Value) -> Result<()> {
+    let Some(profiles) = document.get("profiles").and_then(toml::Value::as_table) else {
         return Ok(());
     };
     for (id, profile) in profiles {

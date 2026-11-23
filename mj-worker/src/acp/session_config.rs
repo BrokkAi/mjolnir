@@ -110,7 +110,6 @@ pub(super) async fn resolve_session_config_recovery(
     spec: &LaunchSpec,
     events: &mpsc::Sender<RuntimeEvent>,
     config_options: &mut Vec<SessionConfigOption>,
-    grok_models: &mut Option<grok::GrokModelState>,
     pending: &mut Option<CommandLoopQuestion>,
     idle: bool,
     elicitation_id: &str,
@@ -165,7 +164,6 @@ pub(super) async fn resolve_session_config_recovery(
             connection,
             session_id,
             config_options,
-            grok_models,
             spec.harness,
             key,
             &value,
@@ -212,7 +210,6 @@ pub(super) async fn apply_session_selector(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
     options: &mut Vec<SessionConfigOption>,
-    grok_models: &mut Option<grok::GrokModelState>,
     harness: HarnessKind,
     key: &str,
     value: &str,
@@ -224,15 +221,7 @@ pub(super) async fn apply_session_selector(
     if harness == HarnessKind::Muse && key == "model" && muse_implicit_default(options, value) {
         return Ok(value.to_owned());
     }
-    match grok_models.as_mut() {
-        Some(state) if grok::handles_config_key(key) => {
-            grok::apply_model_change(connection, session_id, state, key, value)
-                .await
-                .inspect(|()| grok::merge_config_options(options, state))
-                .map(|()| value.to_owned())
-        }
-        _ => set_session_config(connection, session_id, options, harness, key, value).await,
-    }
+    set_session_config(connection, session_id, options, harness, key, value).await
 }
 
 /// The value to send for a requested selector change, or `None` when the

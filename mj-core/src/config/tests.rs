@@ -2729,6 +2729,29 @@ fn a_config_without_a_version_names_the_line_to_add() {
 }
 
 #[test]
+fn schema_error_locations_only_refer_to_the_config_on_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for (profiles, location) in [
+        ("", Some((3, 11))),
+        ("\n[profiles.retired]\nkind = \"mimo\"\n", None),
+    ] {
+        fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\n[guardian]\nenabled = \"false\"\n{profiles}"),
+        )
+        .unwrap();
+        let error = Config::load_from(&path).unwrap_err();
+        let config_error = error.downcast_ref::<ConfigLoadError>().unwrap();
+        assert!(
+            matches!(config_error, ConfigLoadError::Schema { .. }),
+            "{error:#}"
+        );
+        assert_eq!(config_error.location(), location, "{error:#}");
+    }
+}
+
+#[test]
 fn removed_profile_overrides_have_an_actionable_error() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

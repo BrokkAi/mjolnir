@@ -248,10 +248,6 @@ pub(super) async fn serve_session(
                 .map(|info| info.version.as_str()),
         );
 
-    // Grok Build publishes its catalogue here rather than as `configOptions`.
-    let mut grok_models = (spec.harness == HarnessKind::Grok)
-        .then(|| grok::model_state(initialized.meta.as_ref()))
-        .flatten();
     emit_runtime_event(
         events,
         RuntimeEvent::Connected {
@@ -483,11 +479,6 @@ pub(super) async fn serve_session(
         };
         match reloaded {
             Some((loaded_meta, config_options, modes)) => {
-                if let Some(state) = grok_models.as_mut()
-                    && let Some(fresh) = grok::model_state(loaded_meta.as_ref())
-                {
-                    *state = fresh;
-                }
                 if capability.is_some()
                     && let Some(meta) = loaded_meta.as_ref()
                 {
@@ -520,13 +511,6 @@ pub(super) async fn serve_session(
             && let Some(meta) = created.meta.as_ref()
         {
             goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
-        }
-        // A session may open on a different model than the agent-wide
-        // default, so a fresher catalogue on the session wins.
-        if let Some(state) = grok_models.as_mut()
-            && let Some(fresh) = grok::model_state(created.meta.as_ref())
-        {
-            *state = fresh;
         }
         (
             created.session_id,
@@ -589,12 +573,6 @@ pub(super) async fn serve_session(
     let enforcement = session_enforcement(spec);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    // Grok Build publishes model selection through its legacy catalogue. Keep
-    // any standard selectors it also returns while projecting model/effort
-    // into the shape the rest of Hel reads.
-    if let Some(state) = &grok_models {
-        grok::merge_config_options(&mut config_options, state);
-    }
     // Model selection can replace the effort catalogue. Both must be
     // restored before SessionConfigured releases queued prompts. They are
     // restored before the execution mode, because a harness judges a mode
@@ -618,7 +596,6 @@ pub(super) async fn serve_session(
                 connection,
                 &session_id,
                 &mut config_options,
-                &mut grok_models,
                 spec.harness,
                 key,
                 &value,
@@ -662,7 +639,6 @@ pub(super) async fn serve_session(
                 connection,
                 &session_id,
                 &mut config_options,
-                &mut grok_models,
                 spec.harness,
                 key,
                 value,
@@ -1580,7 +1556,6 @@ pub(super) async fn serve_session(
                                         spec,
                                         events,
                                         &mut config_options,
-                                        &mut grok_models,
                                         &mut config_recovery,
                                         false,
                                         &elicitation_id,
@@ -1695,7 +1670,6 @@ pub(super) async fn serve_session(
                     continue;
                 }
                 let previous_model = session_model(&config_options);
-                let grok_model_change = grok_models.is_some() && grok::handles_config_key(&key);
                 // A model change, even one the bridge then refuses and rolls
                 // back, can move the bridge's mode, so the policy follows it.
                 let model_change =
@@ -1706,7 +1680,6 @@ pub(super) async fn serve_session(
                     connection,
                     &session_id,
                     &mut config_options,
-                    &mut grok_models,
                     spec.harness,
                     &key,
                     &value,
@@ -1744,11 +1717,6 @@ pub(super) async fn serve_session(
                         .await?;
                     }
                     Err(error) => {
-                        if grok_model_change && grok::response_was_lost(&error) {
-                            return Err(error.context(
-                                "Grok model change response was lost; reload the session to reconcile its model state",
-                            ));
-                        }
                         if model_change {
                             reconcile_execution_policy(
                                 connection,
@@ -1955,7 +1923,6 @@ pub(super) async fn serve_session(
                         spec,
                         events,
                         &mut config_options,
-                        &mut grok_models,
                         &mut config_recovery,
                         true,
                         &elicitation_id,

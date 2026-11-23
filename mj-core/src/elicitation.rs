@@ -1,8 +1,10 @@
 //! ACP form elicitation shapes shared by the runtime, relay, and chat UI.
 //!
-//! The ACP crate version Hel currently uses predates enum-option descriptions,
-//! so requests are parsed from their raw JSON here. Keeping that interpretation
-//! in one place also lets Claude and Codex metadata conventions share one UI.
+//! Requests are parsed from the original ACP form parameters so Mjolnir can
+//! enforce request size limits, reject malformed supported fields with a
+//! reason, and preserve extension formats and harness metadata. The SDK
+//! `StringFormat` is a closed enum, and SDK defaults silently drop malformed
+//! values. Claude and Codex metadata conventions share this one interpretation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
