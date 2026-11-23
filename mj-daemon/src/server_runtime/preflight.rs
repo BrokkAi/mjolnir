@@ -178,12 +178,8 @@ pub(super) fn run_resume_preflight(
                 Ok(mut preview) => {
                     // Credentials never reach a browser, here as everywhere
                     // else a repository URL is published.
-                    preview.fetch_url = display_url(&preview.fetch_url);
-                    preview.push_urls = preview
-                        .push_urls
-                        .iter()
-                        .map(|url| display_url(url))
-                        .collect();
+                    preview.fetch_url = display_network_url(&preview.fetch_url);
+                    preview.push_urls = display_network_urls(&preview.push_urls);
                     crate::server::PreflightResume::ConvertingRawCheckout {
                         preview: Box::new(preview),
                     }

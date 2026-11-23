@@ -251,7 +251,10 @@ fn post_publication_error_runs_the_daemon_epilogue() {
             .expect("spawn the Mjolnir daemon at its publication hook"),
     ));
 
-    let deadline = Instant::now() + EXIT_WAIT;
+    // The daemon must complete cold startup up to metadata publication before
+    // the hook fails and runs the shutdown epilogue, so this wait spans both
+    // phases instead of charging startup against EXIT_WAIT alone.
+    let deadline = Instant::now() + METADATA_WAIT + EXIT_WAIT;
     let status = loop {
         if let Some(status) = daemon.child_mut().try_wait().expect("poll the daemon") {
             break status;

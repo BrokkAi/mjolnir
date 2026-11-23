@@ -275,6 +275,10 @@ fn in_place_protocol_gate_and_deferred_notice_contract() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn recover_legacy_move_operation_probes_dead_source_and_handles_stopped_checkpoint() {
     let name = crate::controller::test_support::test_name(
         module_path!(),

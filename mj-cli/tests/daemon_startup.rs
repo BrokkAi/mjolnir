@@ -448,6 +448,233 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
     assert_eq!(arguments, ["mj", "daemon-run"]);
 }
 
+#[cfg(unix)]
+fn start_host_daemon(storage: &common::DaemonStorage) -> mj_client::daemon::DaemonMetadata {
+    let mut command = upgrade_command(storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    let (status, output) = run_client_with_deadline(
+        command
+            .env("RUST_LOG", "info")
+            .env("XDG_RUNTIME_DIR", storage.path())
+            .args(["daemon", "endpoint", "--json"]),
+        &storage.path().join("start-client.log"),
+    );
+    assert!(status.success(), "{output}");
+    serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+fn daemon_waiter_pid(daemon_pid: u32) -> u32 {
+    let daemon = sysinfo::Pid::from_u32(daemon_pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[daemon]), true);
+    system.process(daemon).unwrap().parent().unwrap().as_u32()
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_exit_test(mut ready: impl FnMut() -> bool, failure: &str) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{failure}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn daemon_diagnostic_log(data: &std::path::Path, pid: u32) -> std::path::PathBuf {
+    fs::read_dir(data.join("logs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(mj_core::logging::parse_daemon_log_name)
+                .is_some_and(|name| name.pid == pid && !name.crashed)
+        })
+        .unwrap()
+}
+
+#[cfg(unix)]
+// Hard-won: #1644: a daemon disappeared without its OS exit status being captured.
+#[test]
+fn daemon_waiter_records_sigkill_and_successor_reports_it_once() {
+    use mj_core::daemon_exit::{daemon_exits_dir, read_daemon_exit_record};
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let previous = start_host_daemon(&storage);
+    let waiter_pid = daemon_waiter_pid(previous.pid);
+    assert!(mj_client::daemon::process_is_alive(waiter_pid));
+    let previous_log = daemon_diagnostic_log(&data, previous.pid);
+
+    // SAFETY: This PID belongs to the daemon the isolated fixture just started.
+    assert_eq!(
+        unsafe { libc::kill(previous.pid.try_into().unwrap(), libc::SIGKILL) },
+        0
+    );
+    let path = daemon_exits_dir(&data).join(format!("{}.json", previous.pid));
+    wait_for_daemon_exit_test(
+        || !mj_client::daemon::process_is_alive(waiter_pid),
+        "the waiter lingered after the daemon was killed",
+    );
+    let record = read_daemon_exit_record(&path).unwrap();
+    assert_eq!(record.pid, previous.pid);
+    assert_eq!(record.waiter_pid, Some(waiter_pid));
+    assert_eq!(record.exit_code, None);
+    assert_eq!(record.signal, Some(libc::SIGKILL));
+    assert_eq!(record.signal_name.as_deref(), Some("SIGKILL"));
+    assert_eq!(record.core_dumped, Some(false));
+
+    let successor = start_host_daemon(&storage);
+    let log = fs::read_to_string(daemon_diagnostic_log(&data, successor.pid)).unwrap();
+    let warnings = log
+        .lines()
+        .filter(|line| line.contains("terminated by signal SIGKILL (9)"))
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1, "{log}");
+    for field in [
+        "WARN",
+        "signal=9",
+        "signal_name=\"SIGKILL\"",
+        "core_dumped=false",
+    ] {
+        assert!(
+            warnings[0].contains(field),
+            "missing {field}: {}",
+            warnings[0]
+        );
+    }
+    assert!(!previous_log.exists());
+    assert!(previous_log.with_extension("crashed.log").exists());
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_daemon_stop_writes_no_exit_record_or_successor_warning() {
+    use mj_core::daemon_exit::daemon_exits_dir;
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let previous = start_host_daemon(&storage);
+    let waiter_pid = daemon_waiter_pid(previous.pid);
+    let (status, output) = run_client_with_deadline(
+        upgrade_command(&storage).args(["daemon", "stop"]),
+        &storage.path().join("stop-client.log"),
+    );
+    assert!(status.success(), "{output}");
+    wait_for_daemon_exit_test(
+        || !mj_client::daemon::process_is_alive(waiter_pid),
+        "the waiter lingered after a clean daemon stop",
+    );
+    assert!(!daemon_exits_dir(&data).exists());
+    let successor = start_host_daemon(&storage);
+    let log = fs::read_to_string(daemon_diagnostic_log(&data, successor.pid)).unwrap();
+    assert!(!log.contains("previous_pid="), "{log}");
+    assert!(!log.contains("did not shut down cleanly"), "{log}");
+    assert!(daemon_diagnostic_log(&data, previous.pid).is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn losing_the_daemon_store_lock_exits_with_75_and_writes_no_exit_record() {
+    use mj_core::daemon_exit::{STORE_OWNED_EXIT_CODE, daemon_exits_dir};
+
+    let storage = upgrade_storage();
+    let owner = start_host_daemon(&storage);
+    let (status, output) = run_client_with_deadline(
+        upgrade_command(&storage).arg("daemon-run"),
+        &storage.path().join("manual-daemon.log"),
+    );
+    assert_eq!(status.code(), Some(STORE_OWNED_EXIT_CODE), "{output}");
+    assert!(
+        output.contains("another Mjolnir controller is already using"),
+        "{output}"
+    );
+
+    let exit_dir = daemon_exits_dir(&storage.path().join("data"));
+    let (status, output) = run_client_with_deadline(
+        upgrade_command(&storage)
+            .args(["daemon-wait-exit", "--exit-dir"])
+            .arg(&exit_dir)
+            .args(["--", env!("CARGO_BIN_EXE_mj"), "daemon-run"]),
+        &storage.path().join("losing-waiter.log"),
+    );
+    assert!(status.success(), "{output}");
+    assert!(
+        output.contains("another Mjolnir controller is already using"),
+        "{output}"
+    );
+    assert!(!exit_dir.exists());
+    assert!(mj_client::daemon::process_is_alive(owner.pid));
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_waiter_ignores_shutdown_signals_and_records_a_nonzero_exit() {
+    use mj_core::daemon_exit::{daemon_exits_dir, read_daemon_exit_record};
+
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let exit_dir = daemon_exits_dir(&data);
+    let child_marker = storage.path().join("child-pid");
+    let waiter = upgrade_command(&storage)
+        .args(["daemon-wait-exit", "--exit-dir"])
+        .arg(&exit_dir)
+        .args([
+            "--",
+            "/bin/sh",
+            "-c",
+            r#"echo "$$" > "$1"; read -r line; exit 23"#,
+            "daemon-fixture",
+        ])
+        .arg(&child_marker)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let waiter_pid = waiter.id();
+    let mut waiter = OldDaemon(waiter);
+    let mut child_pid = None;
+    wait_for_daemon_exit_test(
+        || {
+            child_pid = fs::read_to_string(&child_marker)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok());
+            child_pid.is_some()
+        },
+        "the waiter did not launch its child",
+    );
+    let child_pid = child_pid.unwrap();
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: The waiter is the test's child. Its child is blocked on stdin.
+        assert_eq!(
+            unsafe { libc::kill(waiter_pid.try_into().unwrap(), signal) },
+            0
+        );
+    }
+    drop(waiter.0.stdin.take());
+
+    let mut status = None;
+    wait_for_daemon_exit_test(
+        || {
+            status = waiter.0.try_wait().unwrap();
+            status.is_some()
+        },
+        "the waiter did not reap its child",
+    );
+    assert!(status.unwrap().success());
+    let record = read_daemon_exit_record(&exit_dir.join(format!("{child_pid}.json"))).unwrap();
+    assert_eq!(record.pid, child_pid);
+    assert_eq!(record.waiter_pid, Some(waiter_pid));
+    assert_eq!(record.exit_code, Some(23));
+    assert_eq!(record.signal, None);
+    assert!(
+        !data.join("logs").exists(),
+        "the waiter opened a process log"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn the_daemon_launch_moves_from_the_login_cgroup_to_the_systemd_user_manager() {

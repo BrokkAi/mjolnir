@@ -16978,7 +16978,6 @@ fn adoption_destroy_advice_follows_durable_worker_ownership() {
         return;
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
-    let root = tempfile::tempdir().unwrap();
     let mut record = runtime_test_session(
         "owned-adoption",
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
@@ -16987,7 +16986,7 @@ fn adoption_destroy_advice_follows_durable_worker_ownership() {
     record.native_session_id = None;
     record.target_template_id = "bare".into();
     record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(&record.id),
+        worker_root: PathBuf::from(format!("/workers/{}", record.id)),
     }));
     mj_controller::database::save_session(&record).unwrap();
     assert_eq!(

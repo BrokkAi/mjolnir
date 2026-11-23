@@ -169,6 +169,21 @@ impl Controller {
         without_checkpoint: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
+        self.checkpoint_preflight(session_id, dry_run, without_checkpoint, None, executor)
+            .map(|(preflight, _)| preflight)
+    }
+
+    pub(super) fn checkpoint_preflight(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        without_checkpoint: bool,
+        move_keep: Option<&mj_core::session_keep::MoveKeep>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<(
+        mj_core::suspend_consent::SuspendPreflight,
+        Vec<(PathBuf, u64)>,
+    )> {
         let session = self
             .state
             .sessions
@@ -217,7 +232,7 @@ impl Controller {
         };
 
         if without_checkpoint {
-            return Ok(preflight);
+            return Ok((preflight, Vec::new()));
         }
 
         let checkout = self.state.checkout(session_id)?;
@@ -388,7 +403,7 @@ impl Controller {
                 let backend = backend_locator(locator, &session, &self.config)?;
                 let worker_spec = mj_core::suspend_consent::WorkerSuspendPreflightSpec {
                     session_id: session_id.to_owned(),
-                    repositories: repo_specs,
+                    repositories: repo_specs.clone(),
                     dry_run,
                 };
                 let spec_bytes = serde_json::to_vec(&worker_spec)?;
@@ -582,13 +597,57 @@ impl Controller {
             });
         }
 
-        Ok(preflight)
+        let mut skip_keep_sizes = Vec::new();
+        if let Some(keep) = move_keep {
+            skip_keep_sizes.extend(
+                keep.skipped_paths()
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, 0_u64)),
+            );
+            let keep_roots = repo_specs
+                .iter()
+                .filter_map(|repo| Some((repo.id.as_str(), repo.keep_dir.as_deref()?)))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            preflight.keep_dir_entries.retain(|entry| {
+                let Some(root) = keep_roots.get(entry.checkout.repository_id.as_str()) else {
+                    return true;
+                };
+                if let Some(relative) = keep.relative_path(root, &entry.path) {
+                    for (skip, bytes) in &mut skip_keep_sizes {
+                        if relative.starts_with(skip) {
+                            *bytes = bytes.saturating_add(entry.bytes);
+                        }
+                    }
+                }
+                !keep.carries(root, &entry.path)
+            });
+            preflight.keep_dir_bytes = preflight
+                .keep_dir_entries
+                .iter()
+                .map(|entry| entry.bytes)
+                .sum();
+            if let Some(estimate) = &mut preflight.dry_run {
+                estimate.keep_dir_bytes = preflight.keep_dir_bytes;
+            }
+        }
+        Ok((preflight, skip_keep_sizes))
     }
 
     pub fn preflight_origin_delta_suspension(
         &self,
         session_id: &str,
         consent: &mj_core::suspend_consent::SuspendConsent,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        self.check_origin_delta_preflight(session_id, consent, None, executor)
+    }
+
+    fn check_origin_delta_preflight(
+        &self,
+        session_id: &str,
+        consent: &mj_core::suspend_consent::SuspendConsent,
+        move_keep: Option<&mj_core::session_keep::MoveKeep>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if consent.without_checkpoint {
@@ -600,7 +659,8 @@ impl Controller {
         ) {
             return Ok(());
         }
-        let preflight = self.suspend_preflight(session_id, false, false, executor)?;
+        let (preflight, _) =
+            self.checkpoint_preflight(session_id, false, false, move_keep, executor)?;
         if preflight.has_blockers() {
             let summary = preflight
                 .blockers
@@ -643,12 +703,15 @@ impl Controller {
             }
         }
         if !uncovered_paths.is_empty() {
-            return Err(mj_core::refusal::Refusal::precondition(
-                mj_core::suspend_consent::format_untracked_refusal(
-                    uncovered_paths.len(),
-                    &uncovered_paths,
-                ),
-            )
+            let format_refusal = if move_keep.is_some() {
+                mj_core::suspend_consent::format_move_untracked_refusal
+            } else {
+                mj_core::suspend_consent::format_untracked_refusal
+            };
+            return Err(mj_core::refusal::Refusal::precondition(format_refusal(
+                uncovered_paths.len(),
+                &uncovered_paths,
+            ))
             .into());
         }
         Ok(())
@@ -946,15 +1009,24 @@ impl Controller {
         } else {
             Ok(None)
         };
-        let preflight_result = match &origin_delta {
-            Ok(Some(attempt))
-                if !attempt.accepted()
-                    || (before_close.is_none() && !attempt.request_recorded()) =>
+        let preflight_result = (|| -> Result<_> {
+            let mut capture_consent = consent.capture_consent();
+            if is_origin_delta
+                && let Some((operation, _)) = move_intent.as_ref()
+                && !operation.in_place
             {
-                self.preflight_origin_delta_suspension(session_id, consent, executor)
+                capture_consent.move_keep =
+                    Some(self.move_keep_selection(&previous, &operation.selection, executor)?);
             }
-            _ => Ok(()),
-        };
+            if let Ok(Some(attempt)) = &origin_delta
+                && (!attempt.accepted() || (before_close.is_none() && !attempt.request_recorded()))
+            {
+                self.check_origin_delta_preflight(
+                    session_id, consent, capture_consent.move_keep.as_ref(), executor,
+                )?;
+            }
+            Ok(capture_consent)
+        })();
         if yield_origin_delta_preflight {
             executor.end_resumable_work("persist Move source stop")?;
         }
@@ -969,22 +1041,38 @@ impl Controller {
         }
         let legacy_closing_intent = previous.state == SessionState::Closing
             && origin_delta.as_ref().is_some_and(|attempt| !attempt.accepted());
-        if let Err(error) = preflight_result {
-            let error = if legacy_closing_intent {
-                mj_core::refusal::Refusal::precondition(format!(
-                    "suspend requested before the upgrade needs consent: {error:#}"
-                ))
-                .into()
-            } else {
-                error
-            };
-            if previous.state == SessionState::Closing {
-                let record = self.state.sessions.get_mut(session_id).unwrap();
-                apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
-                return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+        let capture_consent = match preflight_result {
+            Ok(consent) => consent,
+            Err(error) => {
+                if let Some(attempt) = origin_delta.as_ref().filter(|attempt| attempt.accepted()) {
+                    // The stop request may still be draining the old worker.
+                    // Keep its durable intent until recovery has settled it.
+                    if attempt.request_recorded() && !attempt.already_quiescent()
+                        && let Err(wait_error) = attempt.wait_for_stop(executor).await
+                    {
+                        return Err(error.context(format!("wait for accepted suspend: {wait_error:#}")));
+                    }
+                    drop(held_relay.take());
+                    return Err(self.restart_after_refused_origin_delta(
+                        admission, session_id, executor, manager, attempt, &previous, error,
+                    ).await);
+                }
+                let error = if legacy_closing_intent {
+                    mj_core::refusal::Refusal::precondition(format!(
+                        "suspend requested before the upgrade needs consent: {error:#}"
+                    ))
+                    .into()
+                } else {
+                    error
+                };
+                if previous.state == SessionState::Closing {
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    apply_close_checkpoint_failure(record, &previous, &error, now(), harness_failure);
+                    return Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error));
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         if let Some(attempt) = origin_delta.as_mut()
             && !attempt.accepted()
         {
@@ -1260,7 +1348,6 @@ impl Controller {
 
         // Close seals the relay at the exact latched cursor, so this checkpoint
         // keeps its exclusive connection until the relay reports Closed.
-        let capture_consent = consent.capture_consent();
         let delivery = if move_intent.as_ref().is_some_and(|(op, _)| !op.in_place) {
             CheckpointDelivery::KeepOnSourceTarget
         } else {

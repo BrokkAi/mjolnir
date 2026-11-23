@@ -3168,13 +3168,12 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
         }
     }
 
-    let directory = tempfile::tempdir().unwrap();
     let session_id = "cancelled-without-checkpoint";
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
+        worker_root: PathBuf::from(format!("/workers/{session_id}")),
     }));
     let mut config = Config::default();
     config
@@ -3206,6 +3205,10 @@ fn suspend_without_checkpoint_respects_cancellation_without_settling_stopped() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
     if !in_isolated_store("suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir") {
         return;
@@ -3310,6 +3313,10 @@ fn suspend_preflight_inventories_origin_delta_cutoff_and_keep_dir() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_id() {
     if !in_isolated_store(
         "suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_id",
@@ -3442,6 +3449,7 @@ fn suspend_preflight_managed_worktree_shown_consent_matches_capture_repository_i
         repositories: [(
             expected_repo_id.to_owned(),
             mj_checkpoint::snapshot::CaptureConsent {
+                move_keep: None,
                 untracked: shown.discard_untracked,
                 operations: shown.abort_operations,
             },
@@ -3474,7 +3482,7 @@ fn suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpo
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
+        worker_root: PathBuf::from(format!("/workers/{session_id}")),
     }));
     session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path,
@@ -3511,6 +3519,10 @@ fn suspend_without_checkpoint_refuses_corrupt_archive_without_confirm_no_checkpo
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 async fn suspend_without_checkpoint_runs_before_close_before_parent_teardown() {
     if !in_isolated_store("suspend_without_checkpoint_runs_before_close_before_parent_teardown") {
         return;
@@ -3633,7 +3645,7 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
+        worker_root: PathBuf::from(format!("/workers/{session_id}")),
     }));
     session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path,
@@ -3690,6 +3702,10 @@ async fn suspend_without_checkpoint_refusal_does_not_invoke_before_close() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
     if !in_isolated_store("suspend_preflight_and_capture_align_session_keep_dir_shown_consent") {
         return;
@@ -3841,6 +3857,7 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         &checkout,
         input.keep_dir.as_deref().unwrap(),
         &consent.untracked,
+        None,
     )
     .expect("capture check_keep_dir_consent must accept Shown consent built from preflight");
     let refused = mj_checkpoint::snapshot::capture_session_snapshot(
@@ -3862,6 +3879,153 @@ fn suspend_preflight_and_capture_align_session_keep_dir_shown_consent() {
         &session_consent,
     )
     .expect("capture_session_snapshot must succeed with Shown consent built from preflight");
+}
+
+// Hard-won: #1660: Move asked for discard consent for files its keep stream carries.
+#[cfg(unix)]
+#[test]
+fn move_keep_preflight_and_capture_share_source_selection() {
+    let name = "move_keep_preflight_and_capture_share_source_selection";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    let source_root = mj_checkpoint::checkpoint::session_keep_dir(&repo, name).unwrap();
+    let keep_root = mj_checkpoint::checkpoint::checkout_keep_dir(&repo);
+    let outside = directory.path().join("outside");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+    };
+    git(&["worktree", "add", "--detach", outside.to_str().unwrap()]);
+    std::fs::write(repo.join(".git/info/exclude"), "/.mj/keep/\n").unwrap();
+    std::fs::create_dir_all(source_root.join("excluded")).unwrap();
+    std::fs::write(source_root.join("evidence.txt"), "carry this").unwrap();
+    std::fs::write(source_root.join("excluded/cache.dat"), "cache data").unwrap();
+    std::fs::write(keep_root.join("legacy.txt"), "older scratch").unwrap();
+    std::fs::create_dir(keep_root.join("sibling")).unwrap();
+    std::fs::write(keep_root.join("sibling/note.txt"), "sibling scratch").unwrap();
+    std::fs::write(repo.join("untracked.txt"), "untracked data").unwrap();
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Running;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: directory.path().join(name),
+    }));
+    attach_local_managed_clone(&mut session, repo.clone(), origin);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+
+    use mj_core::suspend_consent::{CaptureConsent, SuspendConsent};
+    let source = &controller.state.sessions[name];
+    let (backend, _) = controller.worker_placement(name).unwrap();
+    let keep = mj_core::session_keep::MoveKeep::new(
+        controller
+            .move_source_keep_dir(source, &backend, &ProcessExecutor)
+            .unwrap(),
+        &[PathBuf::from("./excluded")],
+    )
+    .unwrap();
+    let capture_input = mj_checkpoint::checkpoint::managed_clone_snapshot_input(
+        super::super::checkpoint::HOST_CHECKOUT_REPOSITORY,
+        &repo,
+        Some(name),
+        directory.path().join("workspace.pack"),
+        None,
+    )
+    .unwrap();
+    let capture = |consent| {
+        mj_checkpoint::snapshot::capture_session_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            std::slice::from_ref(&capture_input),
+            &mj_checkpoint::snapshot::SessionCaptureConsent {
+                repositories: [(capture_input.id.clone(), consent)].into_iter().collect(),
+            },
+        )
+    };
+    let (blocked, _) = controller
+        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .unwrap();
+    let blocker = &blocked.blockers[0].remedy;
+    assert!(blocker.contains("unrepresented worktree"), "{blocker}");
+    assert!(blocker.contains("or move it inside the clone"), "{blocker}");
+    let refusal = controller
+        .check_origin_delta_preflight(
+            name,
+            &SuspendConsent::default(),
+            Some(&keep),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    assert!(format!("{refusal:#}").contains(blocker));
+    assert!(format!("{:#}", capture(CaptureConsent::default()).unwrap_err()).contains(blocker));
+    git(&["worktree", "remove", outside.to_str().unwrap()]);
+
+    let (preflight, skips) = controller
+        .checkpoint_preflight(name, true, false, Some(&keep), &ProcessExecutor)
+        .unwrap();
+    assert_eq!(skips, [(PathBuf::from("excluded"), 10)]);
+    let lost = preflight.untracked_display_paths();
+    assert_eq!(
+        lost,
+        [
+            "untracked.txt",
+            ".mj/keep/legacy.txt",
+            &format!(".mj/keep/{name}/excluded/cache.dat"),
+            ".mj/keep/sibling/note.txt",
+        ]
+    );
+    let refusal = controller
+        .check_origin_delta_preflight(
+            name,
+            &SuspendConsent::default(),
+            Some(&keep),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    let refusal = format!("{refusal:#}");
+    assert!(lost.iter().all(|path| refusal.contains(path)), "{refusal}");
+    assert!(!refusal.contains("evidence.txt"), "{refusal}");
+
+    let shown = preflight.shown_consent();
+    let mut current_worker = shown.capture_consent();
+    current_worker.move_keep = Some(keep.clone());
+    // The older worker's nested CaptureConsent accepts unknown fields. Its
+    // capture still sees carried scratch as uncovered and refuses safely.
+    #[derive(serde::Deserialize)]
+    struct LegacyCaptureConsent {
+        untracked: mj_core::suspend_consent::UntrackedConsent,
+        operations: mj_core::suspend_consent::OperationConsent,
+    }
+    let legacy: LegacyCaptureConsent =
+        serde_json::from_value(serde_json::to_value(&current_worker).unwrap()).unwrap();
+    let refusal = capture(CaptureConsent {
+        untracked: legacy.untracked,
+        operations: legacy.operations,
+        move_keep: None,
+    })
+    .unwrap_err();
+    assert!(format!("{refusal:#}").contains("evidence.txt"));
+
+    // Files created after preview still travel even though the user's consent
+    // only covers the exact lost files they saw.
+    std::fs::write(source_root.join("after-preview.txt"), "also carried").unwrap();
+    controller
+        .check_origin_delta_preflight(name, &shown, Some(&keep), &ProcessExecutor)
+        .unwrap();
+    capture(current_worker).unwrap();
 }
 
 #[cfg(unix)]
@@ -3932,6 +4096,98 @@ fn attach_local_managed_clone(session: &mut SessionRecord, clone: PathBuf, origi
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         target: mj_core::state::ManagedWorktreeTarget::Local,
     }));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_move_keep_lookup_recovers_the_accepted_suspend() {
+    use crate::controller::move_session::test_fixtures::source_recovery_operation;
+    use mj_core::worker_suspend::{self as wire, SuspendReceipt, SuspendRequest, WorkerIdentity};
+
+    let name = "failed_move_keep_lookup_recovers_the_accepted_suspend";
+    if !in_isolated_store(name) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let (origin, clone) = init_managed_clone_with_origin(directory.path(), name);
+    let worker_root = directory.path().join("workers").join(name);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let operation = "origin-delta-suspend-test".to_owned();
+    wire::write(&worker_root, wire::ACCEPTED, &operation).unwrap();
+    wire::write(
+        &worker_root,
+        wire::REQUEST,
+        &SuspendRequest {
+            operation: operation.clone(),
+            worker: WorkerIdentity {
+                pid: u32::MAX,
+                start: 0,
+            },
+            checkout: clone.clone(),
+            child_sessions: Vec::new(),
+        },
+    )
+    .unwrap();
+    wire::write(
+        &worker_root,
+        wire::RECEIPT,
+        &SuspendReceipt {
+            operation: operation.clone(),
+            error: None,
+        },
+    )
+    .unwrap();
+
+    let mut session = checkpoint_test_session(name);
+    session.state = SessionState::Closing;
+    session.target = Some(Box::new(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    }));
+    attach_local_managed_clone(&mut session, clone.clone(), origin);
+    let mut move_operation = source_recovery_operation(&session);
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(name.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    persist_controller_fixture(&mut controller);
+    // The worker already stopped. The retained checkout can disappear before
+    // the resumed Move resolves its source keep path.
+    std::fs::rename(&clone, directory.path().join("unavailable-checkout")).unwrap();
+    let admission = crate::controller::test_support::session_admission(name);
+    let error = controller
+        .suspend_session_controlled_with_manager(
+            &admission,
+            name,
+            &ProcessExecutor,
+            None,
+            Some((&mut move_operation, None)),
+            SourceTargetDisposition::RetainForInPlaceSwap,
+            CheckpointExportPolicy::OriginDelta,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
+            None,
+            LatchExclusivity::HoldThroughClose,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let error = format!("{error:#}");
+    let lookup_error = format!("resolve checkout {}", clone.display());
+    assert!(error.contains(&lookup_error), "{error}");
+    let restart = wire::read::<SuspendReceipt>(&worker_root, wire::RESTART)
+        .unwrap()
+        .expect("the accepted suspend must durably request a restart");
+    assert_eq!(restart.operation, operation);
+    assert!(restart.error.unwrap().contains(&lookup_error));
+    // This fixture has no installed worker to restart. Its Closing state must
+    // survive so the durable restart can be retried, instead of claiming Running.
+    let stored = crate::database::load_session_record(name).unwrap().unwrap();
+    assert_eq!(stored.state, SessionState::Closing);
+    assert_eq!(controller.state.sessions[name].state, SessionState::Closing);
 }
 
 #[cfg(unix)]

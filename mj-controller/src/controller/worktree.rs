@@ -1318,6 +1318,7 @@ pub(super) fn capture_legacy_raw_checkout_snapshot(
     consent.repositories.insert(
         repository_id.to_owned(),
         CaptureConsent {
+            move_keep: None,
             untracked: UntrackedConsent::Any,
             operations: OperationConsent::None,
         },

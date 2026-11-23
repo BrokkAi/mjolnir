@@ -139,6 +139,10 @@ pub struct CaptureConsent {
     pub untracked: UntrackedConsent,
     #[serde(default)]
     pub operations: OperationConsent,
+    // Older workers ignore this field and keep requiring consent for these
+    // files. They cannot silently discard them because of the new exemption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_keep: Option<crate::session_keep::MoveKeep>,
 }
 
 /// Consent persisted on `sessions.closing_consent` when a suspend is accepted,
@@ -159,6 +163,7 @@ pub struct SuspendConsent {
 impl SuspendConsent {
     pub fn capture_consent(&self) -> CaptureConsent {
         CaptureConsent {
+            move_keep: None,
             untracked: self.discard_untracked.clone(),
             operations: self.abort_operations.clone(),
         }
@@ -436,10 +441,17 @@ pub fn format_dropped_untracked(items: &[UntrackedItem]) -> String {
 
 /// Format the canonical agent/CLI refusal message for untracked files.
 pub fn format_untracked_refusal(count: usize, first_paths: &[String]) -> String {
+    format!(
+        "{} Ignored files are never kept.",
+        format_move_untracked_refusal(count, first_paths)
+    )
+}
+
+pub fn format_move_untracked_refusal(count: usize, first_paths: &[String]) -> String {
     let preview: Vec<&str> = first_paths.iter().take(5).map(String::as_str).collect();
     let suffix = if count > preview.len() { "…" } else { "" };
     format!(
-        "{count} untracked files will not be kept: {}{suffix} `git add` (or commit) anything you want to keep, or pass `--discard-untracked`. Ignored files are never kept.",
+        "{count} untracked files will not be kept: {}{suffix} `git add` (or commit) anything you want to keep, or pass `--discard-untracked`.",
         preview.join(", ")
     )
 }

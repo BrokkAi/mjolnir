@@ -15,6 +15,7 @@ pub mod codex_provider;
 pub mod config;
 pub mod confined_path;
 pub mod credentials;
+pub mod daemon_exit;
 pub mod diagnostic;
 pub mod diff;
 pub mod draft;

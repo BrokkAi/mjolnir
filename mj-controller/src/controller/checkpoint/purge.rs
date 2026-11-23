@@ -1241,6 +1241,7 @@ mod tests {
             String::from_utf8(out.stdout).unwrap().trim().to_owned()
         };
         run_git_dest(&["init", "-b", "main"]);
+        run_git_dest(&["config", "core.autocrlf", "false"]);
         run_git_dest(&["config", "user.name", "Fixture"]);
         run_git_dest(&["config", "user.email", "fixture@example.test"]);
         fs::write(dest_repo.join("tracked.txt"), "base line\n").unwrap();

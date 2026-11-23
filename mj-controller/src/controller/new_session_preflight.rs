@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::is_bare_project_target;
 use mj_core::local_git::LocalRemoteRepair;
-use mj_core::remote_git::{default_branch, display_url, resolve_repository};
+use mj_core::remote_git::{
+    default_branch, display_network_url, display_network_urls, resolve_repository,
+};
 use mj_core::state::ManagedWorktreeOptions;
 
 use super::Controller;
@@ -115,13 +117,9 @@ impl Controller {
                     .with_context(|| format!("repository {:?}", repository.id))?;
                 Ok(NewSessionRepository {
                     id: repository.id.clone(),
-                    fetch_url: display_url(&source.fetch_url),
+                    fetch_url: display_network_url(&source.fetch_url),
                     default_branch,
-                    push_urls: source
-                        .push_urls
-                        .iter()
-                        .map(|url| display_url(url))
-                        .collect(),
+                    push_urls: display_network_urls(&source.push_urls),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -138,7 +136,7 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
     use crate::controller::config_only_controller;
@@ -151,6 +149,7 @@ mod tests {
     #[derive(Default)]
     struct RemoteExecutor {
         requests: Cell<usize>,
+        ls_remote_urls: RefCell<Vec<String>>,
         cancelled: Cell<bool>,
         cancel_after_request: bool,
         fail: bool,
@@ -182,6 +181,14 @@ mod tests {
 
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.args.iter().any(|arg| arg == "ls-remote") {
+                if let Some(url) = command
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--")
+                    .and_then(|index| command.args.get(index + 1))
+                {
+                    self.ls_remote_urls.borrow_mut().push(url.clone());
+                }
                 self.requests.set(self.requests.get() + 1);
                 self.cancelled.set(self.cancel_after_request);
                 if self.fail {
@@ -381,5 +388,100 @@ mod tests {
         assert!(format!("{error:#}").contains("repository \"one\""));
         assert!(format!("{error:#}").contains("remote unavailable"));
         assert_eq!(executor.requests.get(), 1);
+    }
+
+    #[test]
+    fn preflight_normalizes_local_ssh_and_https_github_urls_to_one_form() {
+        let local_repo = committed_repository();
+        test_git(
+            local_repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:BrokkAi/mjolnir.git",
+            ],
+        );
+        let credentialed_repo = committed_repository();
+        test_git(
+            credentialed_repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://user:secret@github.com/owner/private.git",
+            ],
+        );
+        let mut config = resume_compatibility_config();
+        config.bundles.insert(
+            "bundle".into(),
+            ProjectBundle {
+                primary_repo: "mjolnir".into(),
+                repositories: vec![
+                    ProjectRepository {
+                        id: "mjolnir".into(),
+                        github: None,
+                        local: Some(local_repo.path().to_path_buf()),
+                        destination: "mjolnir".into(),
+                        git_ref: None,
+                        mbx_namespace: None,
+                    },
+                    ProjectRepository {
+                        id: "sessionwiki".into(),
+                        github: Some("https://github.com/jbellis/sessionwiki".into()),
+                        local: None,
+                        destination: "sessionwiki".into(),
+                        git_ref: None,
+                        mbx_namespace: None,
+                    },
+                    ProjectRepository {
+                        id: "private".into(),
+                        github: None,
+                        local: Some(credentialed_repo.path().to_path_buf()),
+                        destination: "private".into(),
+                        git_ref: None,
+                        mbx_namespace: None,
+                    },
+                ],
+            },
+        );
+        let executor = RemoteExecutor::default();
+        let result = config_only_controller(config)
+            .preflight_new_session("bundle", "podman", None, &executor)
+            .unwrap();
+        // Operational ls-remote keeps the exact configured URLs, transports, and HTTP credentials.
+        assert_eq!(
+            executor.ls_remote_urls.borrow().as_slice(),
+            [
+                "git@github.com:BrokkAi/mjolnir.git",
+                "https://github.com/jbellis/sessionwiki",
+                "https://user:secret@github.com/owner/private.git",
+            ]
+        );
+        assert_eq!(result.remote_repositories.len(), 3);
+        assert_eq!(
+            result.remote_repositories[0].fetch_url,
+            "https://github.com/BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            result.remote_repositories[0].push_urls,
+            ["https://github.com/BrokkAi/mjolnir.git"]
+        );
+        assert_eq!(
+            result.remote_repositories[1].fetch_url,
+            "https://github.com/jbellis/sessionwiki.git"
+        );
+        assert_eq!(
+            result.remote_repositories[1].push_urls,
+            ["https://github.com/jbellis/sessionwiki.git"]
+        );
+        assert_eq!(
+            result.remote_repositories[2].fetch_url,
+            "https://github.com/owner/private.git"
+        );
+        assert_eq!(
+            result.remote_repositories[2].push_urls,
+            ["https://github.com/owner/private.git"]
+        );
     }
 }
