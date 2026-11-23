@@ -1699,12 +1699,22 @@ pub async fn run_daemon_owned(
     if !checkpoint_only {
         const STEP: &str = "working-directory";
         super::record_startup_step(&root, STEP);
+        // Only a directory that is gone or is not a directory is permanent.
+        // Other errors, such as ESTALE or EIO from a network filesystem, can
+        // clear up, so they fail this start without the typed kind and the
+        // wake stays retryable.
         let problem = match std::fs::metadata(&config.cwd) {
             Ok(metadata) if metadata.is_dir() => None,
-            Ok(_) => Some("path is not a directory".to_owned()),
-            Err(error) => Some(error.to_string()),
+            Ok(_) => Some(("path is not a directory".to_owned(), true)),
+            Err(error) => {
+                let permanent = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                );
+                Some((error.to_string(), permanent))
+            }
         };
-        if let Some(problem) = problem {
+        if let Some((problem, permanent)) = problem {
             let message = format!(
                 "worker working directory {} is unavailable: {problem}",
                 config.cwd.display()
@@ -1712,7 +1722,7 @@ pub async fn run_daemon_owned(
             super::record_startup_failure(&root, STEP, &message);
             return Err(mj_core::relay::WorkerHarnessStartupFailure {
                 message,
-                kind: Some(
+                kind: permanent.then_some(
                     mj_core::relay::WorkerHarnessStartupFailureKind::WorkingDirectoryUnavailable,
                 ),
             }
