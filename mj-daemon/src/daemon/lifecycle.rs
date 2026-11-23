@@ -635,7 +635,7 @@ impl RuntimeState {
                         } else {
                             "session lifecycle"
                         };
-                        if queued {
+                        if queued || (origin == LifecycleOrigin::Person && !holds_through_drain) {
                             mj_controller::upgrade::activity_unless_draining_described(
                                 label, describer,
                             )?

@@ -17,7 +17,9 @@ use tokio::sync::RwLock;
 mod projects;
 mod sessions;
 mod terminal;
+mod terminal_operations;
 pub use terminal::{ContainerSettingsRequest, ContainerSettingsResponse};
+pub use terminal_operations::*;
 mod workspaces;
 
 pub use workspaces::{
@@ -534,12 +536,32 @@ mod tests {
                 value.trim().parse().unwrap(),
             );
         }
-        let length = headers
-            .get("content-length")
-            .map(|length| length.to_str().unwrap().parse().unwrap())
-            .unwrap_or(0);
-        let mut body = vec![0; length];
-        stream.read_exact(&mut body).await.unwrap();
+        let mut body = Vec::new();
+        if headers
+            .get("transfer-encoding")
+            .is_some_and(|encoding| encoding == "chunked")
+        {
+            loop {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let length = usize::from_str_radix(line.trim_end(), 16).unwrap();
+                if length == 0 {
+                    line.clear();
+                    stream.read_line(&mut line).await.unwrap();
+                    assert_eq!(line, "\r\n");
+                    break;
+                }
+                let offset = body.len();
+                body.resize(offset + length, 0);
+                stream.read_exact(&mut body[offset..]).await.unwrap();
+                let mut end = [0; 2];
+                stream.read_exact(&mut end).await.unwrap();
+                assert_eq!(&end, b"\r\n");
+            }
+        } else if let Some(length) = headers.get("content-length") {
+            body.resize(length.to_str().unwrap().parse().unwrap(), 0);
+            stream.read_exact(&mut body).await.unwrap();
+        }
         (stream, first_line.trim_end().to_owned(), headers, body)
     }
 
@@ -584,6 +606,68 @@ mod tests {
             })
         }));
         (client, reconnects)
+    }
+
+    #[tokio::test]
+    async fn import_rewinds_after_explicit_handoff_and_refreshes_the_endpoint() {
+        let initial = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, reconnects) = reconnecting_client(&initial, Some(&replacement));
+        let metadata = ImportSessionMetadata {
+            session: serde_json::from_value(json!({
+                "id": "import-session",
+                "title": "Imported",
+                "harness_kind": "codex",
+                "last_profile": "codex",
+                "bundle_id": "project",
+                "target_template_id": "local",
+                "state": "stopped",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap(),
+            bundle: None,
+        };
+        let archive = vec![0x27; 128 * 1024];
+        let staged = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(staged.path(), &archive).await.unwrap();
+        let mut file = tokio::fs::File::open(staged.path()).await.unwrap();
+        let phases = std::cell::RefCell::new(Vec::new());
+        let server = async {
+            let (connection, line, headers, first) = read_request(&initial).await;
+            assert_eq!(line, "POST /api/v1/sessions/import HTTP/1.1");
+            assert_eq!(headers[AUTHORIZATION], "Bearer endpoint-secret");
+            let header_len = u32::from_be_bytes(first[..4].try_into().unwrap()) as usize;
+            assert_eq!(&first[4 + header_len..], &archive);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&first[4..4 + header_len]).unwrap()["session"]["id"],
+                "import-session"
+            );
+            respond(connection, UNAVAILABLE, HANDOFF).await;
+
+            let (connection, line, headers, replay) = read_request(&replacement).await;
+            assert_eq!(line, "POST /replacement/api/v1/sessions/import HTTP/1.1");
+            assert_eq!(headers[AUTHORIZATION], "Bearer replacement-secret");
+            assert_eq!(replay, first);
+            respond(connection, "204 No Content", "").await;
+        };
+        let import = client.import_session_observed(
+            metadata,
+            &mut file,
+            |uploading| {
+                phases.borrow_mut().push(uploading);
+                std::future::ready(Ok(()))
+            },
+            std::future::pending(),
+        );
+        let ((), result) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, import)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(*phases.borrow(), [true, false, true, false]);
+        assert_eq!(reconnects.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

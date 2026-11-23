@@ -2127,16 +2127,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lifecycle_quit_protects_submission_but_not_daemon_completion() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = daemon::DaemonMetadata {
-            protocol_version: daemon::PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "lifecycle-acceptance-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: "lifecycle-acceptance-test".into(),
-            placement: daemon::DaemonPlacement::Host,
-        };
+        let http = mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "lifecycle-acceptance-test",
+        )
+        .unwrap();
         let session_id = "0123456789abcdef0123456789abcdef".to_owned();
         let receipt = daemon::LifecycleReceipt {
             session_id: session_id.clone(),
@@ -2147,42 +2142,52 @@ mod tests {
         let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
         let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
         let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
-            assert!(matches!(
-                request.action,
-                daemon::DaemonAction::StartSessionLifecycle(
-                    daemon::SessionLifecycleRequest::Suspend { .. }
+            use axum::{Json, Router, routing::post};
+            use mj_client::http::LifecycleCompletion;
+            let observed = receipt.clone();
+            let accept = Arc::new(std::sync::Mutex::new(Some((
+                submitted_tx,
+                accept_rx,
+                receipt,
+            ))));
+            let complete = Arc::new(std::sync::Mutex::new(Some((
+                waiting_tx,
+                complete_rx,
+                observed,
+            ))));
+            let app = Router::new()
+                .route(
+                    "/api/v1/sessions/lifecycle/start",
+                    post(
+                        move |Json(request): Json<daemon::SessionLifecycleRequest>| {
+                            let (submitted_tx, accept_rx, receipt) =
+                                accept.lock().unwrap().take().unwrap();
+                            async move {
+                                assert!(matches!(
+                                    request,
+                                    daemon::SessionLifecycleRequest::Suspend { .. }
+                                ));
+                                submitted_tx.send(()).unwrap();
+                                accept_rx.await.unwrap();
+                                Json(receipt)
+                            }
+                        },
+                    ),
                 )
-            ));
-            submitted_tx.send(()).unwrap();
-            accept_rx.await.unwrap();
-            daemon::write_frame(
-                &mut stream,
-                &daemon::ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(daemon::DaemonReply::LifecycleAccepted(receipt.clone())),
-                },
-            )
-            .await
-            .unwrap();
-            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
-            assert!(
-                matches!(request.action, daemon::DaemonAction::WaitSessionLifecycle(ref actual) if actual == &receipt)
-            );
-            waiting_tx.send(()).unwrap();
-            complete_rx.await.unwrap();
-            daemon::write_frame(
-                &mut stream,
-                &daemon::ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(daemon::DaemonReply::Done),
-                },
-            )
-            .await
-            .unwrap();
+                .route(
+                    "/api/v1/sessions/lifecycle/wait",
+                    post(move |Json(actual): Json<daemon::LifecycleReceipt>| {
+                        let (waiting_tx, complete_rx, observed) =
+                            complete.lock().unwrap().take().unwrap();
+                        async move {
+                            assert_eq!(actual, observed);
+                            waiting_tx.send(()).unwrap();
+                            complete_rx.await.unwrap();
+                            Json(LifecycleCompletion::Done)
+                        }
+                    }),
+                );
+            axum::serve(listener, app).await.unwrap();
         });
         let (tracker, _) = CriticalOperationTracker::new();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2198,10 +2203,8 @@ mod tests {
             tracker.clone(),
             move |_cancelled, admission| {
                 mj_core::runtime::block_on(async move {
-                    let mut client = daemon::DaemonClient::connect(metadata).await?;
                     let receipt = admission
-                        .submit(
-                            &mut client,
+                        .submit_receipt(http.start_session_lifecycle(
                             daemon::SessionLifecycleRequest::Suspend {
                                 session_id,
                                 discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
@@ -2209,9 +2212,9 @@ mod tests {
                                 without_checkpoint: false,
                                 confirm_no_checkpoint: false,
                             },
-                        )
+                        ))
                         .await?;
-                    client.wait_session_lifecycle(receipt).await?;
+                    http.wait_session_lifecycle(receipt).await?;
                     Ok(LifecycleSuccess::Closed)
                 })?
             },
@@ -2248,7 +2251,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(result.result, Ok(LifecycleSuccess::Closed)));
-        server.await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[test]

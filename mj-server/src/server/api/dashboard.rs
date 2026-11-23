@@ -77,14 +77,16 @@ pub(super) fn dashboard_routes() -> Router<ServerState> {
         )
 }
 
-fn dashboard_backend(state: &ServerState) -> Result<Arc<dyn DashboardBackend>, ApiFailure> {
+pub(super) fn dashboard_backend(
+    state: &ServerState,
+) -> Result<Arc<dyn DashboardBackend>, ApiFailure> {
     backend(state)?
         .dashboard_backend()
         .ok_or_else(|| ApiError::controller_unavailable().into())
 }
 
 /// Dashboard operations owned by the daemon runtime.
-pub trait DashboardBackend: Send + Sync {
+pub trait DashboardBackend: TerminalOperations {
     fn dashboard_startup(
         &self,
         client_id: String,

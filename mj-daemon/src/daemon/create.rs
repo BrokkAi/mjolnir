@@ -712,7 +712,7 @@ impl RuntimeState {
             )
             .await?;
         // Discovery is restartable preparation, not admitted lifecycle work.
-        let _upgrade_work = mj_controller::upgrade::activity("session admission")?;
+        let _upgrade_work = mj_controller::upgrade::activity_unless_draining("session admission")?;
         let skip_remembering_subagent_policy = delegation_notice.is_some();
         let path_cancelled = control.cancelled.clone();
         let remember_launch_choices = request.remember_launch_choices;
@@ -1205,7 +1205,13 @@ impl RuntimeState {
         let mut changes = self.revisions.subscribe();
         loop {
             let id = session_id.to_owned();
-            match blocking(move || mj_controller::database::session_create_end(&id)).await {
+            let outcome = mj_core::runtime::spawn_blocking(move || {
+                mj_controller::database::session_create_end(&id)
+            })
+            .await
+            .context("create outcome task panicked")
+            .and_then(std::convert::identity);
+            match outcome {
                 Ok(mj_controller::database::CreateEnd::Finished) => return CreateWait::Finished,
                 Ok(mj_controller::database::CreateEnd::Failed(reason)) => {
                     return CreateWait::Failed(anyhow::anyhow!(reason));

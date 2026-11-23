@@ -794,7 +794,15 @@ impl LifecycleSubmission {
         client: &mut daemon::DaemonClient,
         request: daemon::SessionLifecycleRequest,
     ) -> Result<daemon::LifecycleReceipt> {
-        let receipt = client.start_session_lifecycle(request).await?;
+        self.submit_receipt(client.start_session_lifecycle(request))
+            .await
+    }
+
+    pub(super) async fn submit_receipt(
+        self,
+        request: impl std::future::Future<Output = Result<daemon::LifecycleReceipt>>,
+    ) -> Result<daemon::LifecycleReceipt> {
+        let receipt = request.await?;
         self.release();
         Ok(receipt)
     }
@@ -1730,19 +1738,25 @@ async fn await_daemon_creation(
     session_id: &str,
     cancelled: &AtomicBool,
 ) -> Result<LifecycleSuccess> {
-    follow_create_wait(session_id, cancelled, daemon::connect_or_start).await
+    follow_create_wait(session_id, cancelled, || async {
+        daemon::connect_or_start()
+            .await?
+            .wait_create_session(session_id.to_owned())
+            .await
+    })
+    .await
 }
 
 /// The loop of [`await_daemon_creation`], with the way it reaches a daemon
 /// given, so a test can answer it from a fake daemon.
-async fn follow_create_wait<Connect, Connecting>(
+async fn follow_create_wait<Wait, Waiting>(
     session_id: &str,
     cancelled: &AtomicBool,
-    connect: Connect,
+    wait: Wait,
 ) -> Result<LifecycleSuccess>
 where
-    Connect: Fn() -> Connecting,
-    Connecting: std::future::Future<Output = Result<mj_client::daemon::DaemonClient>>,
+    Wait: Fn() -> Waiting,
+    Waiting: std::future::Future<Output = Result<()>>,
 {
     const RETRY_DELAY: Duration = Duration::from_millis(250);
     // Every wait below, including the connection and the backoff, is watched
@@ -1756,12 +1770,8 @@ where
         // One attempt, with no reconnect inside the client: a daemon that
         // stops drops the connection, and this loop starts the next daemon
         // through `connect`.
-        let attempt = async {
-            let mut daemon = connect().await?;
-            daemon.wait_create_session(session_id.to_owned()).await
-        };
         let error = tokio::select! {
-            outcome = attempt => match outcome {
+            outcome = wait() => match outcome {
                 Ok(()) => return Ok(LifecycleSuccess::Created),
                 Err(error) => error,
             },
@@ -2247,64 +2257,52 @@ mod wiki_search_tests {
 #[cfg(test)]
 mod create_wait_tests {
     use super::*;
-    use mj_client::daemon::{
-        DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
-        RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
-    };
+    use mj_client::http::HttpDaemonClient;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    fn metadata(address: std::net::SocketAddr) -> DaemonMetadata {
-        DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address,
-            token: "create-wait-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        }
-    }
-
-    /// A fake daemon that serves one scripted answer per connection: `None`
-    /// reads the request and drops the connection.
     async fn serve(
-        script: Vec<Option<std::result::Result<DaemonReply, String>>>,
-    ) -> (DaemonMetadata, tokio::task::JoinHandle<()>) {
+        script: Vec<Option<(&str, &str)>>,
+    ) -> (HttpDaemonClient, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = metadata(listener.local_addr().unwrap());
+        let client = HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "create-test",
+        )
+        .unwrap();
+        let script: Vec<_> = script.into_iter().map(|entry| entry.map(|(status, body)| format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))).collect();
         let server = mj_core::runtime::spawn(async move {
             for answer in script {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(
-                    request.action,
-                    DaemonAction::WaitCreateSession { .. }
-                ));
-                if let Some(result) = answer {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result,
-                        },
-                    )
-                    .await
-                    .unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    line.trim_end(),
+                    "POST /api/v1/sessions/session-1/create/wait HTTP/1.1"
+                );
+                loop {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if let Some(answer) = answer {
+                    stream.write_all(answer.as_bytes()).await.unwrap();
                 }
             }
         });
-        (metadata, server)
+        (client, server)
     }
 
     /// Dropped connections, then the answer: the wait reconnects each time
     /// and ends Finished.
     #[tokio::test]
     async fn the_create_wait_reconnects_after_a_dropped_connection() {
-        let (metadata, server) = serve(vec![None, None, Some(Ok(DaemonReply::Done))]).await;
+        let (client, server) = serve(vec![None, None, Some(("204 No Content", ""))]).await;
         let cancelled = AtomicBool::new(false);
         let outcome = follow_create_wait("session-1", &cancelled, || {
-            DaemonClient::connect(metadata.clone())
+            client.wait_create_session("session-1".into())
         })
         .await
         .unwrap();
@@ -2314,10 +2312,11 @@ mod create_wait_tests {
 
     #[tokio::test]
     async fn a_refusal_ends_the_create_wait_with_its_reason() {
-        let (metadata, server) = serve(vec![Some(Err("clone refused".to_owned()))]).await;
+        let (client, server) =
+            serve(vec![Some(("409 Conflict", r#"{"error":"clone refused"}"#))]).await;
         let cancelled = AtomicBool::new(false);
         let error = follow_create_wait("session-1", &cancelled, || {
-            DaemonClient::connect(metadata.clone())
+            client.wait_create_session("session-1".into())
         })
         .await
         .err()

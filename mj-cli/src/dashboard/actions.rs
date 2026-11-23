@@ -348,13 +348,7 @@ pub(crate) async fn apply_dashboard_action(
             mj_core::runtime::spawn(async move {
                 let result = async {
                     let mut client = daemon::connect_existing().await?;
-                    match client
-                        .request(daemon::DaemonAction::InterruptAll { session_id })
-                        .await?
-                    {
-                        daemon::DaemonReply::InterruptedAll(result) => Ok(result),
-                        reply => anyhow::bail!("unexpected Interrupt All reply: {reply:?}"),
-                    }
+                    client.http().await?.interrupt_all(session_id).await
                 }
                 .await;
                 if updates
@@ -2283,9 +2277,11 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
     });
 }
 
-fn lifecycle_move_outcome(reply: daemon::DaemonReply) -> Result<mj_core::state::MoveOutcome> {
+fn lifecycle_move_outcome(
+    reply: mj_client::http::LifecycleCompletion,
+) -> Result<mj_core::state::MoveOutcome> {
     match reply {
-        daemon::DaemonReply::MoveOutcome(outcome) => Ok(outcome),
+        mj_client::http::LifecycleCompletion::MoveOutcome(outcome) => Ok(outcome),
         _ => bail!("daemon returned an unexpected move reply"),
     }
 }
@@ -2310,17 +2306,6 @@ pub(crate) fn spawn_notification_dismissal(
             },
         );
     }
-}
-
-#[cfg(test)]
-async fn dispatch_restart(
-    daemon: &mut daemon::DaemonClient,
-    session_id: String,
-    acknowledge_container_recreation: bool,
-) -> Result<()> {
-    daemon
-        .restart_session_with_ack(session_id, acknowledge_container_recreation)
-        .await
 }
 
 /// Asks the daemon to dismiss one session's notification; the single and the
@@ -2382,39 +2367,42 @@ mod tests {
     #[tokio::test]
     async fn restart_dispatch_sends_one_daemon_restart_action() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = daemon::DaemonMetadata {
-            protocol_version: daemon::PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "restart-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: crate::daemon::DaemonPlacement::Host,
-        };
+        let client = mj_client::http::HttpDaemonClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "restart-test",
+        )
+        .unwrap();
+        let (seen, received) = tokio::sync::oneshot::channel();
+        let seen = Arc::new(std::sync::Mutex::new(Some(seen)));
         let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
-            assert!(matches!(
-                request.action,
-                daemon::DaemonAction::RestartSession { session_id, acknowledge_container_recreation: true } if session_id == "session-1"
-            ));
-            daemon::write_frame(
-                &mut stream,
-                &daemon::ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(daemon::DaemonReply::Done),
+            let app = axum::Router::new().route(
+                "/api/v1/sessions/session-1/lifecycle/restart",
+                axum::routing::post(
+                    move |axum::Json(request): axum::Json<
+                        mj_client::http::RestartSessionRequest,
+                    >| {
+                        let seen = seen.lock().unwrap().take().unwrap();
+                        async move {
+                            assert!(request.acknowledge_container_recreation);
+                            seen.send(()).unwrap();
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        client
+            .restart_session_with_ack(
+                "session-1".into(),
+                mj_client::http::RestartSessionRequest {
+                    acknowledge_container_recreation: true,
                 },
             )
             .await
             .unwrap();
-        });
-        let mut client = daemon::DaemonClient::connect(metadata).await.unwrap();
-
-        dispatch_restart(&mut client, "session-1".into(), true)
-            .await
-            .unwrap();
-        server.await.unwrap();
+        received.await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 }

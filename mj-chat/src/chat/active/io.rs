@@ -225,19 +225,15 @@ impl ActiveChat {
                     return Ok(Err(reason));
                 }
                 let mut client = mj_client::daemon::connect_existing().await?;
-                match client
-                    .request(mj_client::daemon::DaemonAction::TranscriptionAvailable {
-                        preferred_profile: preferred,
-                    })
+                if client
+                    .http()
+                    .await?
+                    .transcription_available(preferred)
                     .await?
                 {
-                    mj_client::daemon::DaemonReply::TranscriptionAvailable(true) => Ok(Ok(())),
-                    mj_client::daemon::DaemonReply::TranscriptionAvailable(false) => {
-                        Ok(Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned()))
-                    }
-                    reply => Err(anyhow::anyhow!(
-                        "unexpected transcription availability reply: {reply:?}"
-                    )),
+                    Ok(Ok(()))
+                } else {
+                    Ok(Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned()))
                 }
             }
             .await;

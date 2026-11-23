@@ -42,8 +42,10 @@
 //! because one is a decision for a person and the other is not.
 
 mod dashboard;
+mod terminal_operations;
 pub use dashboard::DashboardBackend;
 use dashboard::dashboard_routes;
+pub use terminal_operations::TerminalOperations;
 mod events;
 
 use std::future::Future;

@@ -992,19 +992,12 @@ async fn dictation_handoff(
     };
     let transcribe = async {
         let mut client = mj_client::daemon::connect_existing().await?;
-        let mut file = tokio::fs::File::open(recording.path()).await?;
-        match client
-            .upload_and_consume(&mut file, |blob| {
-                mj_client::daemon::DaemonAction::TranscribeAudio {
-                    preferred_profile: preferred_profile.clone(),
-                    blob,
-                }
-            })
+        let audio = tokio::fs::read(recording.path()).await?;
+        client
+            .http()
             .await?
-        {
-            mj_client::daemon::DaemonReply::Transcription(text) => Ok(text),
-            reply => Err(anyhow::anyhow!("unexpected transcription reply: {reply:?}")),
-        }
+            .transcribe_audio(preferred_profile, audio)
+            .await
     };
     tokio::select! {
         biased;

@@ -9537,6 +9537,72 @@ async fn dashboard_routes_enforce_terminal_auth_and_mutations_refuse_drain() {
     let cookie = login_cookie(&app).await;
     let cursor = r#"{"cursor":{"incarnation":"test","sequence":0,"alert_sequence":0,"subagent_parents":[]}}"#;
     let terminal_routes = [
+        ("POST", "/sessions/session-1/interrupt-all", "", true),
+        (
+            "POST",
+            "/sessions/session-1/commands",
+            r#"{"command_id":"id","command":{"type":"clear_queued_prompts"}}"#,
+            true,
+        ),
+        (
+            "POST",
+            "/sessions/session-1/startup-prompts",
+            r#"{"command_id":"id","text":"text","prompt":[],"encoded_draft":"text"}"#,
+            true,
+        ),
+        ("DELETE", "/sessions/session-1/startup-prompts/id", "", true),
+        (
+            "POST",
+            "/sessions/session-1/startup-prompts/outcomes",
+            r#"{"command_ids":["id"]}"#,
+            false,
+        ),
+        (
+            "POST",
+            "/sessions/session-1/elicitations/elicitation-1/respond",
+            r#"{"action":"cancel"}"#,
+            true,
+        ),
+        ("POST", "/sessions/session-1/sync", "", true),
+        (
+            "POST",
+            "/sessions/session-1/abandoned-prompts",
+            r#"{"bundle_id":"id","text":"draft"}"#,
+            true,
+        ),
+        (
+            "POST",
+            "/sessions/lifecycle/start",
+            r#"{"operation":"force_destroy","options":{"session_id":"session-1"}}"#,
+            false,
+        ),
+        (
+            "POST",
+            "/sessions/lifecycle/wait",
+            r#"{"session_id":"session-1","operation_id":"id"}"#,
+            false,
+        ),
+        ("POST", "/sessions/session-1/create/wait", "", false),
+        (
+            "POST",
+            "/sessions/session-1/lifecycle/suspend-preflight",
+            r#"{"dry_run":true,"without_checkpoint":false}"#,
+            false,
+        ),
+        ("POST", "/sessions/session-1/lifecycle/cancel", "", false),
+        ("POST", "/sessions/import", "", false),
+        (
+            "GET",
+            "/audio/transcription-available?preferred_profile=codex",
+            "",
+            false,
+        ),
+        (
+            "POST",
+            "/audio/transcribe?preferred_profile=codex",
+            "",
+            false,
+        ),
         (
             "POST",
             "/dashboard/startup",

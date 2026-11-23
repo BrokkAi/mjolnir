@@ -1,7 +1,12 @@
 //! Authenticated local daemon protocol and client transport.
-mod chunk_bytes;
+use crate::http::{
+    AbandonedPromptRequest, LifecycleCompletion, MoveSourcesRequest, RestartSessionRequest,
+    SessionCommandRequest, StartupPromptOutcomesRequest, StartupPromptRequest,
+    SuspendPreflightRequest,
+};
 pub mod connector;
 pub mod login_terminal;
+mod reply_fragment;
 pub mod ssh;
 mod ssh_http_proxy;
 use crate::executable::describe_running_daemon_and_client_builds;
@@ -986,19 +991,6 @@ pub enum DaemonAction {
         target_id: String,
         mounts: Vec<mj_core::targets::AdditionalMount>,
     },
-    /// Raw file fragments. Completion supplies the SHA-256 of all bytes.
-    UploadChunk {
-        #[serde(with = "chunk_bytes")]
-        bytes: Vec<u8>,
-        sha256: Option<String>,
-    },
-    TranscriptionAvailable {
-        preferred_profile: String,
-    },
-    TranscribeAudio {
-        preferred_profile: String,
-        blob: String,
-    },
     Ping,
     /// Frozen upgrade handshake, available from daemon protocol 33 onward.
     /// Busy replies leave every operation and control channel running.
@@ -1058,19 +1050,6 @@ pub enum DaemonAction {
     /// Write the daemon host's global Git commit author.
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
-    RecordAbandonedPrompt {
-        session_id: String,
-        bundle_id: String,
-        text: String,
-    },
-    ImportSession {
-        blob: String,
-        session: Box<SessionRecord>,
-        /// A project the import synthesized. The daemon writes it with the
-        /// session, so a client never edits the daemon's configuration.
-        #[serde(default)]
-        bundle: Option<ImportedBundle>,
-    },
     /// Legacy wire tombstone: rejected with guidance to suspend.
     CheckpointSession {
         session_id: String,
@@ -1149,99 +1128,6 @@ pub enum DaemonAction {
     RenameTarget {
         old_id: String,
         new_id: String,
-    },
-    InterruptAll {
-        session_id: String,
-    },
-    SubmitSessionCommand {
-        #[serde(default)]
-        inherited_draft: Option<String>,
-        session_id: String,
-        command_id: String,
-        command: RelayCommand,
-    },
-    /// Deliver a prompt typed while a session was still starting, once the
-    /// daemon sees that session's harness become ready. The daemon owns the
-    /// wait, so the prompt arrives whether or not this client is still
-    /// running or still showing that session.
-    QueueStartupPrompt {
-        session_id: String,
-        command_id: String,
-        text: String,
-        prompt: Vec<ContentBlock>,
-        encoded_draft: String,
-        #[serde(default)]
-        move_operation_id: Option<String>,
-        /// The saved draft text this prompt was typed from, if the client
-        /// also persisted it. Cleared after a successful submit so the
-        /// delivered prompt does not reappear as a draft.
-        #[serde(default)]
-        inherited_draft: Option<String>,
-    },
-    /// Take back a prompt queued with `QueueStartupPrompt` that the daemon has
-    /// not started delivering, so the person can edit it. The daemon cancels
-    /// the prompt with this caller-owned command ID and replies
-    /// `PromptWithdrawn(true)`, or `PromptWithdrawn(false)` when none is
-    /// waiting because delivery already started.
-    WithdrawStartupPrompt {
-        session_id: String,
-        command_id: String,
-    },
-    StartupPromptOutcomes {
-        session_id: String,
-        command_ids: Vec<String>,
-    },
-    SyncSession {
-        session_id: String,
-    },
-    RespondElicitation {
-        session_id: String,
-        elicitation_id: String,
-        response: ElicitationResponse,
-    },
-    StartSessionLifecycle(SessionLifecycleRequest),
-    WaitSessionLifecycle(LifecycleReceipt),
-    SuspendPreflight {
-        session_id: String,
-        #[serde(default)]
-        dry_run: bool,
-        #[serde(default)]
-        without_checkpoint: bool,
-    },
-    SuspendSession {
-        session_id: String,
-        #[serde(default)]
-        discard_untracked: mj_core::suspend_consent::UntrackedConsent,
-        #[serde(default)]
-        abort_operations: mj_core::suspend_consent::OperationConsent,
-        #[serde(default)]
-        without_checkpoint: bool,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        confirm_no_checkpoint: bool,
-    },
-    RestartSession {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        acknowledge_container_recreation: bool,
-    },
-    StartCreateSession(CreateSessionRequest),
-    WaitCreateSession {
-        session_id: String,
-    },
-    ResumeSession(ResumeSessionRequest),
-    MoveSession(MoveSessionRequest),
-    MoveSources {
-        session_id: String,
-        cleanup_operation_id: Option<String>,
-    },
-    DestroyStoppedSession {
-        session_id: String,
-    },
-    ForceDestroySession {
-        session_id: String,
-    },
-    CancelLifecycle {
-        session_id: String,
     },
     Stop,
 }
@@ -1329,7 +1215,6 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
-    InterruptedAll(InterruptAllResult),
     AdoptionInstalled {
         session_id: String,
     },
@@ -1354,13 +1239,6 @@ pub enum DaemonReply {
     ResolvedPath(std::path::PathBuf),
     MountValidation(std::path::PathBuf, Option<String>),
     SessionMountValidation(Option<(String, String)>),
-    TranscriptionAvailable(bool),
-    Transcription(String),
-    BlobUploaded(String),
-    LifecycleAccepted(LifecycleReceipt),
-    /// Only a captured operation result may report this failure.
-    LifecycleFailed(String),
-    LifecycleObservationUnavailable(LifecycleReceipt),
     Pong,
     UpgradePending,
     /// Labels for the work holding an automatic handoff open, empty when
@@ -1386,20 +1264,11 @@ pub enum DaemonReply {
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
-        #[serde(with = "chunk_bytes")]
+        #[serde(with = "reply_fragment")]
         bytes: Vec<u8>,
         finished: bool,
     },
-    RegisteredSession(Box<RegisteredSession>),
-    SuspendPreflight(Box<mj_core::suspend_consent::SuspendPreflight>),
-    MoveOutcome(MoveOutcome),
-    MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
-    Ordinal(u64),
     RecoveryScan(mj_core::state::RecoveryScan),
-    /// Whether a queued startup prompt was withdrawn before delivery.
-    PromptWithdrawn(bool),
-    StartupPromptIdentityConflict,
-    StartupPromptOutcomes(std::collections::BTreeMap<String, StartupPromptOutcome>),
     Done,
 }
 
@@ -2027,159 +1896,6 @@ impl DaemonClient {
         }
     }
 
-    /// Streams raw bytes on this connection. The returned blob is connection-scoped;
-    /// consume it before disconnecting. Delivery failures are never replayed.
-    pub async fn upload(
-        &mut self,
-        reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    ) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        let mut stream = self.take_stream()?;
-        let mut digest = Sha256::new();
-        let request_id = self.next_request_id;
-        self.next_request_id += 1;
-        let mut buffer = vec![0; 64 * 1024];
-        loop {
-            let n = reader.read(&mut buffer).await?;
-            digest.update(&buffer[..n]);
-            write_frame(
-                &mut stream,
-                &RequestEnvelope {
-                    protocol_version: self.metadata.protocol_version,
-                    request_id,
-                    token: self.metadata.token.clone(),
-                    action: DaemonAction::UploadChunk {
-                        bytes: buffer[..n].to_vec(),
-                        sha256: (n == 0).then(|| {
-                            digest
-                                .clone()
-                                .finalize()
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>()
-                        }),
-                    },
-                },
-            )
-            .await?;
-            if n == 0 {
-                break;
-            }
-        }
-        let response = self.finish_exchange(stream, request_id).await?;
-        match response.result.map_err(anyhow::Error::msg)? {
-            DaemonReply::BlobUploaded(blob) => Ok(blob),
-            reply => bail!("unexpected blob upload reply {reply:?}"),
-        }
-    }
-
-    /// Upload and consume on one connection. Only explicit non-admission permits
-    /// replay; a transport error may hide acceptance and is returned to the caller.
-    pub async fn upload_and_consume<R, A>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-    {
-        self.upload_and_consume_with_reconnect(reader, action, reconnect_after_upload_refusal)
-            .await
-    }
-
-    async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-        mut reconnect: F,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-        F: FnMut() -> Fut,
-        Fut: Future<Output = Result<Self>>,
-    {
-        self.upload_and_consume_observed_with_reconnect(
-            reader,
-            action,
-            &mut reconnect,
-            |_| std::future::ready(Ok(())),
-            std::future::pending(),
-        )
-        .await
-    }
-
-    /// Report each phase; cancellation is observed only during byte upload.
-    pub async fn upload_and_consume_observed<R, A, P, PF, C>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-        phase: P,
-        cancel: C,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-        P: FnMut(bool) -> PF,
-        PF: Future<Output = Result<()>>,
-        C: Future<Output = ()>,
-    {
-        self.upload_and_consume_observed_with_reconnect(
-            reader,
-            action,
-            reconnect_after_upload_refusal,
-            phase,
-            cancel,
-        )
-        .await
-    }
-
-    async fn upload_and_consume_observed_with_reconnect<R, A, F, Fut, P, PF, C>(
-        &mut self,
-        reader: &mut R,
-        action: A,
-        mut reconnect: F,
-        mut phase: P,
-        cancel: C,
-    ) -> Result<DaemonReply>
-    where
-        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
-        A: Fn(String) -> DaemonAction,
-        F: FnMut() -> Fut,
-        Fut: Future<Output = Result<Self>>,
-        P: FnMut(bool) -> PF,
-        PF: Future<Output = Result<()>>,
-        C: Future<Output = ()>,
-    {
-        tokio::pin!(cancel);
-        use tokio::io::AsyncSeekExt;
-        let start = reader.stream_position().await?;
-        phase(true).await?;
-        loop {
-            let blob = tokio::select! {
-                biased;
-                _ = &mut cancel => bail!("upload cancelled"),
-                result = self.upload(reader) => result?,
-            };
-            phase(false).await?;
-            let reply = self.request_once(action(blob)).await?;
-            if !matches!(reply, DaemonReply::UpgradePending) {
-                return Ok(reply);
-            }
-            phase(true).await?;
-            *self = tokio::select! {
-                biased;
-                _ = &mut cancel => bail!("upload cancelled"),
-                result = async {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    reconnect().await
-                } => result?,
-            };
-            reader.seek(std::io::SeekFrom::Start(start)).await?;
-        }
-    }
-
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
         let mut stream = self.take_stream()?;
         let protocol_version = self.metadata.protocol_version;
@@ -2472,17 +2188,11 @@ impl DaemonClient {
         bundle_id: String,
         text: String,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::RecordAbandonedPrompt {
-                session_id,
-                bundle_id,
-                text,
-            })
+        let request = AbandonedPromptRequest { bundle_id, text };
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected abandoned-prompt reply {reply:?}"),
-        }
+            .record_abandoned_prompt(session_id, request)
+            .await
     }
 
     /// Write the load-balancing preference order, most preferred first.
@@ -2493,25 +2203,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected quota-preference save reply {reply:?}"),
-        }
-    }
-
-    pub async fn import_session(
-        &mut self,
-        session: SessionRecord,
-        bundle: Option<ImportedBundle>,
-        reader: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin),
-    ) -> Result<()> {
-        match self
-            .upload_and_consume(reader, |blob| DaemonAction::ImportSession {
-                blob,
-                session: Box::new(session.clone()),
-                bundle: bundle.clone(),
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected imported-session reply {reply:?}"),
         }
     }
 
@@ -2700,18 +2391,16 @@ impl DaemonClient {
         command: RelayCommand,
         inherited_draft: Option<String>,
     ) -> Result<u64> {
-        match self
-            .request(DaemonAction::SubmitSessionCommand {
-                inherited_draft,
-                session_id,
-                command_id,
-                command,
-            })
+        let request = SessionCommandRequest {
+            command_id,
+            command,
+            inherited_draft,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::Ordinal(ordinal) => Ok(ordinal),
-            reply => bail!("unexpected session command reply {reply:?}"),
-        }
+            .submit_session_command(session_id, request)
+            .await
+            .map_err(terminal_action_refusal)
     }
 
     /// Hand the daemon a prompt for a session that is still starting. The
@@ -2728,22 +2417,19 @@ impl DaemonClient {
         encoded_draft: String,
         move_operation_id: Option<String>,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::QueueStartupPrompt {
-                session_id,
-                command_id,
-                text,
-                prompt,
-                encoded_draft,
-                move_operation_id,
-                inherited_draft,
-            })
+        let request = StartupPromptRequest {
+            command_id,
+            text,
+            prompt,
+            encoded_draft,
+            move_operation_id,
+            inherited_draft,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            DaemonReply::StartupPromptIdentityConflict => Err(StartupPromptIdentityConflict.into()),
-            reply => bail!("unexpected startup prompt reply {reply:?}"),
-        }
+            .queue_startup_prompt(session_id, request)
+            .await
+            .map_err(terminal_action_refusal)
     }
 
     /// Take a prompt back from the daemon's startup queue before delivery.
@@ -2755,16 +2441,10 @@ impl DaemonClient {
         session_id: String,
         command_id: String,
     ) -> Result<bool> {
-        match self
-            .request(DaemonAction::WithdrawStartupPrompt {
-                session_id,
-                command_id,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::PromptWithdrawn(withdrawn) => Ok(withdrawn),
-            reply => bail!("unexpected startup prompt withdrawal reply {reply:?}"),
-        }
+            .withdraw_startup_prompt(session_id, command_id)
+            .await
     }
 
     /// Read only the requested durable terminal receipts (at most 128 IDs).
@@ -2773,26 +2453,15 @@ impl DaemonClient {
         session_id: String,
         command_ids: Vec<String>,
     ) -> Result<std::collections::BTreeMap<String, StartupPromptOutcome>> {
-        match self
-            .request(DaemonAction::StartupPromptOutcomes {
-                session_id,
-                command_ids,
-            })
+        let request = StartupPromptOutcomesRequest { command_ids };
+        self.http()
             .await?
-        {
-            DaemonReply::StartupPromptOutcomes(outcomes) => Ok(outcomes),
-            reply => bail!("unexpected startup prompt outcomes reply {reply:?}"),
-        }
+            .startup_prompt_outcomes(session_id, request)
+            .await
     }
 
     pub async fn sync_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::SyncSession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected session sync reply {reply:?}"),
-        }
+        self.http().await?.sync_session(session_id).await
     }
 
     pub async fn respond_elicitation(
@@ -2801,17 +2470,10 @@ impl DaemonClient {
         elicitation_id: String,
         response: ElicitationResponse,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::RespondElicitation {
-                session_id,
-                elicitation_id,
-                response,
-            })
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected elicitation reply {reply:?}"),
-        }
+            .respond_elicitation(session_id, elicitation_id, response)
+            .await
     }
 
     /// Submit once and retain the receipt; a lost reply does not permit replay.
@@ -2820,45 +2482,40 @@ impl DaemonClient {
         request: SessionLifecycleRequest,
     ) -> Result<LifecycleReceipt> {
         let session_id = request.session_id().to_owned();
-        let reply = self
-            .request(DaemonAction::StartSessionLifecycle(request))
+        async { self.http().await?.start_session_lifecycle(request).await }
             .await
             .map_err(|error| {
-                if error.is::<DaemonRefusal>() {
+                if let Some(failure) = error.downcast_ref::<crate::http::HttpApiError>() {
+                    DaemonRefusal(failure.message.clone()).into()
+                } else if error.is::<DaemonRefusal>() {
                     error
                 } else {
-                    anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id.clone()))
-                        .context(error)
+                    anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id)).context(error)
                 }
-            })?;
-        match reply {
-            DaemonReply::LifecycleAccepted(receipt) => Ok(receipt),
-            reply => Err(
-                anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id))
-                    .context(format!("unexpected lifecycle acceptance reply {reply:?}")),
-            ),
-        }
+            })
     }
 
     /// Observe exactly this operation. Dropping the observer never cancels it.
     pub async fn wait_session_lifecycle(
         &mut self,
         receipt: LifecycleReceipt,
-    ) -> Result<DaemonReply> {
-        let reply = self
-            .request(DaemonAction::WaitSessionLifecycle(receipt.clone()))
-            .await
-            .map_err(|error| {
-                anyhow::Error::new(LifecycleObservationUnavailable(receipt.clone())).context(error)
-            })?;
+    ) -> Result<LifecycleCompletion> {
+        let reply = async {
+            self.http()
+                .await?
+                .wait_session_lifecycle(receipt.clone())
+                .await
+        }
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(LifecycleObservationUnavailable(receipt.clone())).context(error)
+        })?;
         match reply {
-            reply @ (DaemonReply::Done | DaemonReply::MoveOutcome(_)) => Ok(reply),
-            DaemonReply::LifecycleFailed(detail) => Err(DaemonRefusal(detail).into()),
-            DaemonReply::LifecycleObservationUnavailable(receipt) => {
+            reply @ (LifecycleCompletion::Done | LifecycleCompletion::MoveOutcome(_)) => Ok(reply),
+            LifecycleCompletion::LifecycleFailed(detail) => Err(DaemonRefusal(detail).into()),
+            LifecycleCompletion::LifecycleObservationUnavailable(receipt) => {
                 Err(LifecycleObservationUnavailable(receipt).into())
             }
-            reply => Err(anyhow::Error::new(LifecycleObservationUnavailable(receipt))
-                .context(format!("unexpected lifecycle completion reply {reply:?}"))),
         }
     }
 
@@ -2868,17 +2525,14 @@ impl DaemonClient {
         dry_run: bool,
         without_checkpoint: bool,
     ) -> Result<mj_core::suspend_consent::SuspendPreflight> {
-        match self
-            .request(DaemonAction::SuspendPreflight {
-                session_id,
-                dry_run,
-                without_checkpoint,
-            })
+        let request = SuspendPreflightRequest {
+            dry_run,
+            without_checkpoint,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::SuspendPreflight(preflight) => Ok(*preflight),
-            reply => bail!("unexpected suspend-preflight reply {reply:?}"),
-        }
+            .suspend_preflight(session_id, request)
+            .await
     }
 
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
@@ -2894,19 +2548,11 @@ impl DaemonClient {
         session_id: String,
         consent: mj_core::suspend_consent::SuspendConsent,
     ) -> Result<()> {
-        match self
-            .request(DaemonAction::SuspendSession {
-                session_id,
-                discard_untracked: consent.discard_untracked,
-                abort_operations: consent.abort_operations,
-                without_checkpoint: consent.without_checkpoint,
-                confirm_no_checkpoint: consent.confirm_no_checkpoint,
-            })
+        let request = consent;
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected close-session reply {reply:?}"),
-        }
+            .suspend_session_with_consent(session_id, request)
+            .await
     }
 
     pub async fn restart_session(&mut self, session_id: String) -> Result<()> {
@@ -2924,29 +2570,20 @@ impl DaemonClient {
             self.metadata.protocol_version,
             PROTOCOL_VERSION
         );
-        match self
-            .request(DaemonAction::RestartSession {
-                session_id,
-                acknowledge_container_recreation,
-            })
+        let request = RestartSessionRequest {
+            acknowledge_container_recreation,
+        };
+        self.http()
             .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected restart-session reply {reply:?}"),
-        }
+            .restart_session_with_ack(session_id, request)
+            .await
     }
 
     pub async fn start_create_session(
         &mut self,
         request: CreateSessionRequest,
     ) -> Result<RegisteredSession> {
-        match self
-            .request(DaemonAction::StartCreateSession(request))
-            .await?
-        {
-            DaemonReply::RegisteredSession(registered) => Ok(*registered),
-            reply => bail!("unexpected start-create reply {reply:?}"),
-        }
+        self.http().await?.start_create_session(request).await
     }
 
     /// Wait for a session's creation to end. Answered from durable state, so
@@ -2955,50 +2592,23 @@ impl DaemonClient {
     /// connection, which carries [`DaemonTransportLost`], and the caller
     /// starts the next daemon and asks again.
     pub async fn wait_create_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request_once(DaemonAction::WaitCreateSession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected wait-create reply {reply:?}"),
-        }
+        self.http().await?.wait_create_session(session_id).await
     }
 
     pub async fn resume_session(&mut self, request: ResumeSessionRequest) -> Result<()> {
-        match self.request(DaemonAction::ResumeSession(request)).await? {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected resume-session reply {reply:?}"),
-        }
+        self.http().await?.resume_session(request).await
     }
 
     pub async fn destroy_stopped_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::DestroyStoppedSession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected destroy-stopped reply {reply:?}"),
-        }
+        self.http().await?.destroy_stopped_session(session_id).await
     }
 
     pub async fn force_destroy_session(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::ForceDestroySession { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected force-destroy reply {reply:?}"),
-        }
+        self.http().await?.force_destroy_session(session_id).await
     }
 
     pub async fn cancel_lifecycle(&mut self, session_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CancelLifecycle { session_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected cancel-lifecycle reply {reply:?}"),
-        }
+        self.http().await?.cancel_lifecycle(session_id).await
     }
 
     pub async fn stop(&mut self) -> Result<()> {
@@ -3179,7 +2789,7 @@ pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
 const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
 /// Dashboard reads, terminal presence, and session settings use HTTP.
-pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 3;
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 4;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
@@ -3204,23 +2814,22 @@ impl DaemonClient {
         session_id: String,
         cleanup_operation_id: Option<String>,
     ) -> Result<Vec<mj_core::move_workspace::RetainedMoveSource>> {
-        match self
-            .request(DaemonAction::MoveSources {
-                session_id,
-                cleanup_operation_id,
-            })
-            .await?
-        {
-            DaemonReply::MoveSources(sources) => Ok(sources),
-            reply => bail!("unexpected Move sources reply: {reply:?}"),
-        }
+        let request = MoveSourcesRequest {
+            cleanup_operation_id,
+        };
+        self.http().await?.move_sources(session_id, request).await
     }
 
     pub async fn move_session(&mut self, request: MoveSessionRequest) -> Result<MoveOutcome> {
-        match self.request(DaemonAction::MoveSession(request)).await? {
-            DaemonReply::MoveOutcome(outcome) => Ok(outcome),
-            _ => bail!("daemon returned an unexpected move reply"),
-        }
+        self.http().await?.move_session(request).await
+    }
+}
+
+fn terminal_action_refusal(error: anyhow::Error) -> anyhow::Error {
+    if let Some(failure) = error.downcast_ref::<crate::http::HttpApiError>() {
+        DaemonRefusal(failure.message.clone()).into()
+    } else {
+        error
     }
 }
 
@@ -3236,7 +2845,6 @@ impl DaemonAction {
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses
                 | Self::DiscoverSetup { .. }
-                | Self::SuspendPreflight { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CheckProjectDirectories { .. }
                 | Self::ResolveContainerPath { .. }
@@ -3307,15 +2915,6 @@ pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
     mac.update(b"mj-daemon-identity-v1");
     mac.update(nonce.as_bytes());
     mac
-}
-
-async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
-    loop {
-        if let Ok(client) = connect_existing().await {
-            return Ok(client);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
 }
 
 #[cfg(test)]
@@ -3520,42 +3119,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_upload_cannot_reuse_its_connection() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = cancellation_metadata(listener.local_addr().unwrap());
-        let (received, waiting) = tokio::sync::oneshot::channel();
-        let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut total = 0;
-            while total < 128 * 1024 {
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
-                    panic!("expected upload chunk");
-                };
-                assert!(sha256.is_none());
-                total += bytes.len();
-            }
-            received.send(()).unwrap();
-            let mut byte = [0];
-            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
-        });
-        let (mut writer, mut reader) = tokio::io::duplex(128 * 1024);
-        writer.write_all(&vec![42; 128 * 1024]).await.unwrap();
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        {
-            let upload = client.upload(&mut reader);
-            tokio::pin!(upload);
-            tokio::select! {
-                result = &mut upload => panic!("upload source remains open: {result:?}"),
-                result = waiting => result.unwrap(),
-            }
-        }
-        let error = client.request(DaemonAction::Ping).await.unwrap_err();
-        assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn adoption_progress_keeps_response_identity_and_cancel_closes_its_connection() {
         for cancel in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3737,59 +3300,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn abandoned_prompt_history_uses_the_daemon_protocol_action() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "abandoned-prompt-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let server = mj_core::runtime::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            assert_eq!(request.protocol_version, PROTOCOL_VERSION);
-            assert_eq!(request.token, "abandoned-prompt-test");
-            assert_eq!(
-                serde_json::to_value(request.action).unwrap(),
-                serde_json::json!({
-                    "action": "record_abandoned_prompt",
-                    "arguments": {
-                        "session_id": "session-1",
-                        "bundle_id": "project-1",
-                        "text": "unfinished draft"
-                    }
-                })
-            );
-            write_frame(
-                &mut stream,
-                &ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(DaemonReply::Done),
-                },
-            )
-            .await
-            .unwrap();
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-
-        client
-            .record_abandoned_prompt(
-                "session-1".into(),
-                "project-1".into(),
-                "unfinished draft".into(),
-            )
-            .await
-            .unwrap();
-        server.await.unwrap();
-    }
-
     // Hard-won: c502e9bdf662: cold-cache discovery failed to save and left Codex profiles out of model choices
     #[tokio::test]
     async fn subagent_discovery_uses_the_daemon_and_preserves_choices_and_failures() {
@@ -3899,14 +3409,8 @@ mod tests {
             instance_id: String::new(),
             placement: DaemonPlacement::Host,
         };
-        let action = DaemonAction::SubmitSessionCommand {
-            inherited_draft: None,
-            session_id: "test-session".into(),
-            command_id: "steer-command".into(),
-            command: RelayCommand::Steer {
-                active_prompt_id: "active-command".into(),
-                queued_prompt_id: "queued-command".into(),
-            },
+        let action = DaemonAction::SaveSpinnerStyle {
+            style: Default::default(),
         };
         let expected = serde_json::to_value(&action).unwrap();
         let server = mj_core::runtime::spawn(async move {
@@ -3947,122 +3451,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        server.await.unwrap();
-    }
-
-    // Hard-won: #1514: a refused consumer reused a blob from the old connection.
-    #[tokio::test]
-    async fn refused_blob_consumer_reuploads_before_single_acceptance() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let bytes = vec![42; 192 * 1024];
-        let expected = bytes.clone();
-        let server = mj_core::runtime::spawn(async move {
-            let mut accepted = 0;
-            for attempt in 0..4 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut received: Vec<u8> = Vec::new();
-                let upload = loop {
-                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                    let DaemonAction::UploadChunk { bytes, sha256 } = &request.action else {
-                        panic!("expected upload before consuming action");
-                    };
-                    received.extend(bytes);
-                    if sha256.is_some() {
-                        break request;
-                    }
-                };
-                assert_eq!(received, expected);
-                let blob = format!("connection-{attempt}");
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: upload.protocol_version,
-                        request_id: upload.request_id,
-                        result: Ok(DaemonReply::BlobUploaded(blob.clone())),
-                    },
-                )
-                .await
-                .unwrap();
-                let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                let DaemonAction::TranscribeAudio { blob: actual, .. } = consume.action else {
-                    panic!("expected consumer");
-                };
-                assert_eq!(actual, blob);
-                if attempt == 2 {
-                    continue;
-                } // Lost ACK must not reconnect or replay.
-                let reply = if attempt == 0 || attempt == 3 {
-                    DaemonReply::UpgradePending
-                } else {
-                    accepted += 1;
-                    DaemonReply::Done
-                };
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: consume.protocol_version,
-                        request_id: consume.request_id,
-                        result: Ok(reply),
-                    },
-                )
-                .await
-                .unwrap();
-            }
-            assert_eq!(accepted, 1);
-        });
-        let action = |blob| DaemonAction::TranscribeAudio {
-            preferred_profile: "test".into(),
-            blob,
-        };
-        let mut reader = std::io::Cursor::new(bytes);
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let reply = client
-            .upload_and_consume_with_reconnect(&mut reader, action, || {
-                DaemonClient::connect(metadata.clone())
-            })
-            .await
-            .unwrap();
-        assert!(matches!(reply, DaemonReply::Done));
-        reader.set_position(0);
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        assert!(
-            client
-                .upload_and_consume_with_reconnect(&mut reader, action, || async {
-                    panic!("lost acknowledgement cannot authorize replay");
-                })
-                .await
-                .is_err()
-        );
-        // Hard-won: af709d6e2: cancellation was ignored during refused-upload reconnection.
-        reader.set_position(0);
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let reconnecting = tokio::sync::Notify::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.upload_and_consume_observed_with_reconnect(
-                &mut reader,
-                action,
-                || async {
-                    reconnecting.notify_one();
-                    std::future::pending::<Result<DaemonClient>>().await
-                },
-                |_| std::future::ready(Ok(())),
-                reconnecting.notified(),
-            ),
-        )
-        .await
-        .expect("cancellation must interrupt reconnection");
-        assert!(result.unwrap_err().to_string().contains("upload cancelled"));
         server.await.unwrap();
     }
 
@@ -4119,107 +3507,5 @@ mod tests {
             message.contains("this client runs /home/dev/.cargo/bin/mj (version 2.9.0)"),
             "{message}"
         );
-    }
-
-    #[tokio::test]
-    async fn unavailable_lifecycle_observation_distinguishes_disconnect_from_operation_failure() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "lifecycle-observation".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-            instance_id: String::new(),
-            placement: DaemonPlacement::Host,
-        };
-        let receipt = LifecycleReceipt {
-            session_id: "observed-session".into(),
-            operation_id: "accepted-operation".into(),
-        };
-        let server = mj_core::runtime::spawn(async move {
-            for phase in 0..5 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(
-                    (&request.action, phase),
-                    (DaemonAction::WaitSessionLifecycle(_), 0 | 1 | 4)
-                        | (DaemonAction::StartSessionLifecycle(_), 2 | 3)
-                ));
-                if matches!(phase, 1 | 3 | 4) {
-                    write_frame(
-                        &mut stream,
-                        &ResponseEnvelope {
-                            protocol_version: request.protocol_version,
-                            request_id: request.request_id,
-                            result: if phase == 4 {
-                                Ok(DaemonReply::LifecycleFailed(
-                                    "checkpoint verification failed".into(),
-                                ))
-                            } else {
-                                Err("daemon is shutting down; retry to reach a fresh daemon".into())
-                            },
-                        },
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-        });
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let error = client
-            .wait_session_lifecycle(receipt.clone())
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error
-                .downcast_ref::<LifecycleObservationUnavailable>()
-                .unwrap()
-                .0,
-            receipt
-        );
-        drop(client);
-        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-        let error = client
-            .wait_session_lifecycle(receipt.clone())
-            .await
-            .unwrap_err();
-        assert!(error.is::<LifecycleObservationUnavailable>());
-        assert!(format!("{error:#}").contains("daemon is shutting down"));
-        drop(client);
-        for disconnected in [true, false] {
-            let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
-            let error = client
-                .start_session_lifecycle(SessionLifecycleRequest::Suspend {
-                    session_id: "observed-session".into(),
-                    discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
-                    abort_operations: mj_core::suspend_consent::OperationConsent::None,
-                    without_checkpoint: false,
-                    confirm_no_checkpoint: false,
-                })
-                .await
-                .unwrap_err();
-            if disconnected {
-                assert_eq!(
-                    error
-                        .downcast_ref::<LifecycleAdmissionUnconfirmed>()
-                        .unwrap()
-                        .0,
-                    "observed-session"
-                );
-                assert!(!error.is::<DaemonRefusal>());
-            } else {
-                assert!(error.is::<DaemonRefusal>());
-                assert!(!error.is::<LifecycleAdmissionUnconfirmed>());
-            }
-        }
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let error = client.wait_session_lifecycle(receipt).await.unwrap_err();
-        assert!(error.is::<DaemonRefusal>());
-        assert!(!error.is::<LifecycleObservationUnavailable>());
-        assert!(error.to_string().contains("checkpoint verification failed"));
-        drop(client);
-        server.await.unwrap();
     }
 }

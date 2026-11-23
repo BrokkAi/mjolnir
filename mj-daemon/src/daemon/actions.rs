@@ -17,7 +17,6 @@ pub(super) async fn handle_action(
         | DaemonAction::TestTarget { .. }
         | DaemonAction::DiscoverSetup { .. }
         | DaemonAction::ProfileLoginStatuses
-        | DaemonAction::SuspendPreflight { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
         | DaemonAction::CheckProjectDirectories { .. }
         | DaemonAction::ResolveContainerPath { .. }
@@ -29,17 +28,6 @@ pub(super) async fn handle_action(
         DaemonAction::CheckAvailability => {
             state.request_availability_check()?;
             Ok(DaemonReply::Done)
-        }
-        DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
-        DaemonAction::TranscribeAudio { .. } => {
-            bail!("blob action outside connection transport")
-        }
-        DaemonAction::TranscriptionAvailable { preferred_profile } => {
-            let config = state.with_config(Clone::clone);
-            let available =
-                blocking(move || Ok(transcription_auth(&config, &preferred_profile).is_some()))
-                    .await?;
-            Ok(DaemonReply::TranscriptionAvailable(available))
         }
         DaemonAction::PrepareUpgrade => {
             if mj_controller::upgrade::gate().try_close() {
@@ -224,25 +212,6 @@ pub(super) async fn handle_action(
             );
             Ok(DaemonReply::WebListeners(processes))
         }
-        DaemonAction::RecordAbandonedPrompt {
-            session_id,
-            bundle_id,
-            text,
-        } => {
-            let warning_session_id = session_id.clone();
-            if let Err(error) = blocking(move || {
-                mj_controller::database::record_abandoned_prompt(&session_id, &bundle_id, &text)
-            })
-            .await
-            {
-                tracing::warn!(
-                    session_id = warning_session_id,
-                    error = format!("{error:#}"),
-                    "abandoned prompt history could not be stored"
-                );
-            }
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::SaveSpinnerStyle { style } => {
             // Hold the configuration owner through persistence and publication:
             // an acknowledged save must be visible to the next dashboard.
@@ -287,7 +256,6 @@ pub(super) async fn handle_action(
             state.publish_revision();
             Ok(DaemonReply::Done)
         }
-        DaemonAction::ImportSession { .. } => bail!("blob action outside connection transport"),
         DaemonAction::SessionProjectSource { session_id } => {
             let controller =
                 state.with_controller(|controller| mj_controller::controller::Controller {
@@ -478,334 +446,6 @@ pub(super) async fn handle_action(
             install_renamed_controller(state, controller);
             Ok(DaemonReply::Done)
         }
-        DaemonAction::InterruptAll { session_id } => Ok(DaemonReply::InterruptedAll(
-            state.interrupt_all(&session_id).await?,
-        )),
-        DaemonAction::SubmitSessionCommand {
-            inherited_draft,
-            session_id,
-            command_id,
-            command,
-        } => {
-            let history = if let RelayCommand::Prompt { prompt } = &command {
-                let values = serde_json::to_value(prompt)?;
-                let values = values
-                    .as_array()
-                    .context("serialized prompt content is not an array")?;
-                Some(mj_core::transcript::materialized_content_text(values))
-            } else {
-                None
-            };
-            // A completed restore is ready before the background target feed
-            // has necessarily installed its new actor. Match local control
-            // surfaces by awaiting that bounded handoff, not losing the first
-            // command immediately after Move/Resume.
-            let session = state
-                .session_manager
-                .wait_for_session(&session_id, Duration::from_secs(5))
-                .await?;
-            let session_id = session.session_id().to_owned();
-            // History is written before the session sees the prompt; see
-            // `record_user_prompt`.
-            if let Some(text) = history {
-                let history_id = session_id.clone();
-                let history_command = command_id.clone();
-                if let Err(error) = blocking(move || {
-                    mj_controller::database::record_user_prompt(
-                        &history_id,
-                        &history_command,
-                        &text,
-                    )
-                })
-                .await
-                {
-                    tracing::warn!(%error, "prompt history could not be stored");
-                }
-            }
-            let ordinal = session.submit(command_id, command).await?;
-            if let Some(expected) = inherited_draft {
-                let persisted_id = session_id.clone();
-                let persisted_expected = expected.clone();
-                blocking(move || {
-                    mj_controller::database::clear_session_draft_input_if_matches(
-                        &persisted_id,
-                        &persisted_expected,
-                    )
-                })
-                .await?;
-                state.owner().edit_sessions(|sessions| {
-                    if let Some(record) = sessions.get_mut(&session_id)
-                        && record.draft_input == expected
-                    {
-                        record.draft_input.clear();
-                    }
-                });
-                state.publish_revision();
-            }
-            Ok(DaemonReply::Ordinal(ordinal))
-        }
-        DaemonAction::QueueStartupPrompt {
-            session_id,
-            command_id,
-            text,
-            prompt,
-            encoded_draft,
-            move_operation_id,
-            inherited_draft,
-        } => {
-            ensure!(
-                !command_id.is_empty(),
-                "a queued startup prompt needs a command ID"
-            );
-            ensure!(
-                !prompt.is_empty(),
-                "a queued startup prompt needs content to send"
-            );
-            // Validate references before persistence: raw image bytes never belong
-            // in a durable command, including while the destination is unknown.
-            mj_core::attachment::references(&prompt)?;
-            mj_core::draft::validate_reference_draft(&encoded_draft)?;
-            if let Some(draft) = &inherited_draft {
-                mj_core::draft::validate_reference_draft(draft)?;
-            }
-            for block in &prompt {
-                match block {
-                    ContentBlock::Text(_) => {}
-                    ContentBlock::Image(image) => {
-                        ensure!(
-                            mj_core::attachment::image_reference(image)?.is_some(),
-                            "queued images must be installed attachments"
-                        );
-                    }
-                    _ => bail!("startup prompts support text and installed images"),
-                }
-            }
-            let command = RelayCommand::Prompt { prompt };
-            mj_core::relay::ensure_serialized_budget(
-                &command,
-                mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
-                "startup prompt",
-            )?;
-            let RelayCommand::Prompt { prompt } = command else {
-                unreachable!("just constructed a prompt");
-            };
-            match state
-                .queue_startup_steps_with_ids(
-                    &session_id,
-                    vec![(
-                        command_id,
-                        StartupStep::Prompt {
-                            text,
-                            prompt: Some(prompt),
-                            encoded_draft: Some(encoded_draft),
-                            move_operation_id,
-                            inherited_draft,
-                        },
-                    )],
-                    None,
-                    cancellation,
-                )
-                .await
-            {
-                Ok(()) => Ok(DaemonReply::Done),
-                Err(error) if error.is::<mj_client::daemon::StartupPromptIdentityConflict>() => {
-                    Ok(DaemonReply::StartupPromptIdentityConflict)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        DaemonAction::WithdrawStartupPrompt {
-            session_id,
-            command_id,
-        } => Ok(DaemonReply::PromptWithdrawn(
-            state
-                .withdraw_startup_prompt(&session_id, &command_id)
-                .await?,
-        )),
-        DaemonAction::StartupPromptOutcomes {
-            session_id,
-            command_ids,
-        } => {
-            ensure!(
-                command_ids.len() <= 128,
-                "request at most 128 startup prompt outcomes"
-            );
-            Ok(DaemonReply::StartupPromptOutcomes(
-                blocking(move || {
-                    mj_controller::database::startup_prompt_outcomes(&session_id, &command_ids)
-                })
-                .await?,
-            ))
-        }
-        DaemonAction::SyncSession { session_id } => {
-            state
-                .session_manager
-                .session(session_id)
-                .await?
-                .sync_now()
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::RespondElicitation {
-            session_id,
-            elicitation_id,
-            response,
-        } => {
-            let target = state
-                .review_host()
-                .question_target(&session_id, &elicitation_id)
-                .await;
-            let (session_id, elicitation_id) = match target {
-                Some(target) => target,
-                None if mj_client::review::parse_reviewer_question_id(&elicitation_id)
-                    .is_some() =>
-                {
-                    anyhow::bail!("that reviewer question is no longer active")
-                }
-                None => (session_id, elicitation_id),
-            };
-            state
-                .session_manager
-                .session(session_id)
-                .await?
-                .respond_elicitation(elicitation_id, response)
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::StartSessionLifecycle(request) => {
-            match state.start_session_lifecycle(request).await {
-                Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
-                Err(error) if is_upgrade_handoff_refusal(&error) => {
-                    // Only unaccepted lifecycle admission carries this code.
-                    // The client retries its original request and selections.
-                    Ok(DaemonReply::UpgradePending)
-                }
-                Err(error) => Err(error),
-            }
-        }
-        DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
-        DaemonAction::SuspendSession {
-            session_id,
-            discard_untracked,
-            abort_operations,
-            without_checkpoint,
-            confirm_no_checkpoint,
-        } => {
-            state
-                .suspend_session_with_consent(
-                    session_id,
-                    mj_core::suspend_consent::SuspendConsent {
-                        discard_untracked,
-                        abort_operations,
-                        without_checkpoint,
-                        confirm_no_checkpoint,
-                    },
-                )
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::RestartSession {
-            session_id,
-            acknowledge_container_recreation,
-        } => {
-            state
-                .restart_session(session_id, acknowledge_container_recreation)
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::StartCreateSession(request) => Ok(DaemonReply::RegisteredSession(Box::new(
-            state.start_create_session(request).await?,
-        ))),
-        DaemonAction::WaitCreateSession { session_id } => {
-            match state.wait_create_outcome(&session_id).await {
-                crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
-                crate::daemon::create::CreateWait::Failed(error) => Err(error),
-            }
-        }
-        DaemonAction::ResumeSession(request) => {
-            state.resume_session(request).await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::MoveSession(request) => {
-            Ok(DaemonReply::MoveOutcome(state.move_session(request).await?))
-        }
-        DaemonAction::MoveSources {
-            session_id,
-            cleanup_operation_id,
-        } => {
-            let admission = if cleanup_operation_id.is_some() {
-                Some(
-                    state
-                        .session_gate
-                        .enter_foreground(
-                            &session_id,
-                            "retained Move source cleanup",
-                            mj_controller::recovery_gate::LifecycleOrigin::Person,
-                            &AtomicBool::new(false),
-                            &ProcessExecutor,
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-            let owner = admission
-                .as_ref()
-                .map(|admission| {
-                    mj_controller::worker_lifecycle::WorkerPermit::acquire(&session_id, admission)
-                })
-                .transpose()?;
-            let sources = blocking(move || {
-                let cleanup = || {
-                    let _guard =
-                        mj_controller::controller::move_session::MoveMutationGuard::reserve(
-                            &session_id,
-                        )?;
-                    if let Some(operation_id) = cleanup_operation_id {
-                        Controller::load()?.cleanup_retained_move_source(
-                            &session_id,
-                            &operation_id,
-                            &ProcessExecutor,
-                        )?;
-                    }
-                    mj_controller::database::retained_move_sources(&session_id)
-                };
-                match owner {
-                    Some(owner) => owner.scope_blocking(cleanup),
-                    None => cleanup(),
-                }
-            })
-            .await?;
-            Ok(DaemonReply::MoveSources(sources))
-        }
-        DaemonAction::DestroyStoppedSession { session_id } => {
-            match state
-                .start_destroy_stopped_session(session_id, BranchDisposition::Keep)
-                .await
-            {
-                Ok(started) => {
-                    RuntimeState::wait_lifecycle_result(started.result).await?;
-                    Ok(DaemonReply::Done)
-                }
-                Err(error) if is_upgrade_handoff_refusal(&error) => Ok(DaemonReply::UpgradePending),
-                Err(error) => Err(error),
-            }
-        }
-        DaemonAction::ForceDestroySession { session_id } => {
-            state
-                .force_destroy_session(session_id, BranchDisposition::Keep)
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::CancelLifecycle { session_id } => {
-            blocking({
-                let session_id = session_id.clone();
-                move || mj_controller::database::request_move_cancellation(&session_id)
-            })
-            .await?;
-            state.cancel_lifecycle_with_intent(&session_id).await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::Stop => {
             if cancellation.is_cancelled() {
                 return Ok(DaemonReply::Done);
@@ -833,9 +473,6 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<mj_controller::upgrade::Work>> {
-    if matches!(action, DaemonAction::InterruptAll { .. }) {
-        return mj_controller::upgrade::activity("interrupt session work").map(Some);
-    }
     if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
         return mj_controller::upgrade::activity("spinner style setting").map(Some);
     }
@@ -846,18 +483,11 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(
         action,
-        DaemonAction::TranscribeAudio { .. }
-            | DaemonAction::ProveIdentity { .. }
+        DaemonAction::ProveIdentity { .. }
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration
-            | DaemonAction::WaitSessionLifecycle(_)
-            | DaemonAction::DestroyStoppedSession { .. }
-            // Answered from durable state, so it holds no daemon work and a
-            // handoff does not wait for it; the client asks again.
-            | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::AdoptRecovery(_)
-            | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
@@ -866,7 +496,6 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::RuntimeChanges { .. }
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
-            | DaemonAction::ImportSession { .. }
             // Read-only and repeatable; the client reports an interrupted run.
             | DaemonAction::RunDoctor
             | DaemonAction::FirstRunSetupDue

@@ -1,4 +1,5 @@
 use super::*;
+use mj_client::http::LifecycleCompletion;
 use mj_controller::controller::BranchDisposition;
 
 impl RuntimeState {
@@ -102,7 +103,7 @@ impl RuntimeState {
     pub(super) async fn wait_session_lifecycle(
         &self,
         receipt: LifecycleReceipt,
-    ) -> Result<DaemonReply> {
+    ) -> Result<LifecycleCompletion> {
         let result = {
             let owner = self.owner();
             owner.ensure_available()?;
@@ -113,14 +114,18 @@ impl RuntimeState {
                 .map(|active| active.result.clone())
         };
         let Some(result) = result else {
-            return Ok(DaemonReply::LifecycleObservationUnavailable(receipt));
+            return Ok(LifecycleCompletion::LifecycleObservationUnavailable(
+                receipt,
+            ));
         };
         match Self::wait_lifecycle_result(result).await {
-            Err(error) => Ok(DaemonReply::LifecycleFailed(format!("{error:#}"))),
+            Err(error) => Ok(LifecycleCompletion::LifecycleFailed(format!("{error:#}"))),
             Ok(DaemonLifecycleResult::Done | DaemonLifecycleResult::DeferredCleanup) => {
-                Ok(DaemonReply::Done)
+                Ok(LifecycleCompletion::Done)
             }
-            Ok(DaemonLifecycleResult::Move(outcome)) => Ok(DaemonReply::MoveOutcome(outcome)),
+            Ok(DaemonLifecycleResult::Move(outcome)) => {
+                Ok(LifecycleCompletion::MoveOutcome(outcome))
+            }
             Ok(DaemonLifecycleResult::Park(_)) => {
                 bail!("this operation is not a session lifecycle request")
             }
@@ -129,12 +134,12 @@ impl RuntimeState {
 }
 
 impl StartedLifecycle {
-    pub(crate) async fn wait(self) -> Result<DaemonReply> {
+    pub(crate) async fn wait(self) -> Result<LifecycleCompletion> {
         match RuntimeState::wait_lifecycle_result(self.result).await? {
             DaemonLifecycleResult::Done | DaemonLifecycleResult::DeferredCleanup => {
-                Ok(DaemonReply::Done)
+                Ok(LifecycleCompletion::Done)
             }
-            DaemonLifecycleResult::Move(outcome) => Ok(DaemonReply::MoveOutcome(outcome)),
+            DaemonLifecycleResult::Move(outcome) => Ok(LifecycleCompletion::MoveOutcome(outcome)),
             DaemonLifecycleResult::Park(_) => bail!("not a session lifecycle operation"),
         }
     }
@@ -181,7 +186,7 @@ impl StartedLifecycle {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{test_metadata, test_runtime_state};
+    use super::super::tests::test_runtime_state;
     use super::*;
 
     // Hard-won: #1507: quit waited for completion instead of daemon ownership transfer.
@@ -231,7 +236,7 @@ mod tests {
         release.notify_one();
         assert!(matches!(
             state.wait_session_lifecycle(receipt.clone()).await.unwrap(),
-            DaemonReply::Done
+            LifecycleCompletion::Done
         ));
         assert!(!state.owner().lifecycle[&receipt.session_id].is_running());
         let newer = state
@@ -251,7 +256,7 @@ mod tests {
         assert_ne!(newer.receipt.operation_id, receipt.operation_id);
         assert!(matches!(
             state.wait_session_lifecycle(receipt).await.unwrap(),
-            DaemonReply::LifecycleObservationUnavailable(_)
+            LifecycleCompletion::LifecycleObservationUnavailable(_)
         ));
         RuntimeState::wait_lifecycle_result(newer.result)
             .await
@@ -283,62 +288,24 @@ mod tests {
                 .await
                 .is_err()
         );
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let metadata = test_metadata(listener.local_addr().unwrap());
-        let server_metadata = metadata.clone();
-        let server = mj_core::runtime::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            super::super::serve::serve_client(
-                stream,
-                server_metadata,
-                state,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        });
+        let (client, shutdown, server) =
+            super::super::tests::start_test_dashboard_http_api(state).await;
         let receipt = LifecycleReceipt {
             session_id: "session-observation".into(),
             operation_id: "superseded".into(),
         };
-        assert!(
-            super::super::actions::upgrade_request_activity(&DaemonAction::WaitSessionLifecycle(
-                receipt.clone()
-            ))
-            .unwrap()
-            .is_none(),
-            "a completion observer must not hold daemon replacement"
-        );
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let error = client
+        let unavailable = client
             .wait_session_lifecycle(receipt.clone())
             .await
-            .unwrap_err();
-        assert_eq!(
-            error
-                .downcast_ref::<LifecycleObservationUnavailable>()
-                .unwrap()
-                .0,
-            receipt
-        );
-        let error = client
-            .wait_session_lifecycle(failed_receipt)
-            .await
-            .unwrap_err();
-        assert!(error.is::<DaemonRefusal>());
-        assert!(!error.is::<LifecycleObservationUnavailable>());
+            .unwrap();
         assert!(
-            error
-                .to_string()
-                .contains("captured checkpoint verification failure")
+            matches!(unavailable, LifecycleCompletion::LifecycleObservationUnavailable(actual) if actual == receipt)
         );
-        assert!(matches!(
-            client.request(DaemonAction::Ping).await.unwrap(),
-            DaemonReply::Pong
-        ));
-        drop(client);
-        server.await.unwrap();
+        let failed = client.wait_session_lifecycle(failed_receipt).await.unwrap();
+        assert!(
+            matches!(failed, LifecycleCompletion::LifecycleFailed(detail) if detail.contains("captured checkpoint verification failure"))
+        );
+        shutdown.cancel();
+        server.await.unwrap().unwrap();
     }
 }
