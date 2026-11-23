@@ -5,7 +5,6 @@ use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
 use mj_core::project_catalog::{ProjectCatalogView, SavedProject};
 use mj_core::project_picker::{ProjectDiscovery, ProjectDiscoveryRequest};
 use mj_core::state::{MovePreparation, MoveSelection};
-use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -41,11 +40,8 @@ impl HttpDaemonClient {
 
     pub async fn project_catalog(&self, refresh: bool, retry: bool) -> Result<ProjectCatalogView> {
         if refresh {
-            Self::json(
-                self.request(Method::POST, "/api/v1/projects")
-                    .query(&[("retry", retry)]),
-            )
-            .await
+            self.post_empty_query("/api/v1/projects", &[("retry", retry)])
+                .await
         } else {
             self.get_json("/api/v1/projects").await
         }

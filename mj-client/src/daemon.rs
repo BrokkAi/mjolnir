@@ -2077,6 +2077,10 @@ impl DaemonClient {
         Ok(client)
     }
 
+    pub(crate) fn metadata(&self) -> &DaemonMetadata {
+        &self.metadata
+    }
+
     pub fn pid(&self) -> u32 {
         self.metadata.pid
     }

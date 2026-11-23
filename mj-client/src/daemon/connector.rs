@@ -106,7 +106,7 @@ impl DaemonConnector {
         DaemonClient::connect(metadata).await
     }
 
-    pub(super) async fn refresh(
+    pub(crate) async fn refresh(
         self: &Arc<Self>,
         previous: &DaemonMetadata,
     ) -> Result<DaemonClient> {

@@ -3,7 +3,6 @@ use crate::daemon::WorkspaceDrafts;
 use anyhow::Result;
 use mj_core::storage::DetachedSessionDraft;
 use mj_core::workspace::WorkspaceRecord;
-use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,9 +68,11 @@ impl HttpDaemonClient {
     }
 
     pub async fn rename_workspace(&self, workspace_id: String, name: String) -> Result<()> {
-        let request = self.request(Method::PATCH, &workspace_path(&workspace_id, "")?);
-        Self::send(request.json(&serde_json::json!({ "name": name }))).await?;
-        Ok(())
+        self.patch_json_no_content(
+            &workspace_path(&workspace_id, "")?,
+            &serde_json::json!({ "name": name }),
+        )
+        .await
     }
 
     pub async fn touch_workspace(&self, workspace_id: String) -> Result<()> {

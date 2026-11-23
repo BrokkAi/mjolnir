@@ -2247,6 +2247,7 @@ async fn start_dashboard(
 ) -> Result<DashboardStartup> {
     let mut daemon = daemon::connect_or_start().await?;
     let http = daemon.http().await?;
+    let initial_instance = http.instance_id().await;
     let workspaces = http.list_workspaces().await?;
     let selected = if let Some(resumed) = resumed_workspace
         .filter(|resumed| workspaces.iter().any(|workspace| workspace.id == *resumed))
@@ -2272,9 +2273,18 @@ async fn start_dashboard(
             .id
     };
     http.touch_workspace(selected.clone()).await?;
-    let loaded = if interactive {
+    let startup_workspaces = if interactive {
         // Listed again: choosing may have created a workspace.
-        let workspaces = http.list_workspaces().await?;
+        Some(http.list_workspaces().await?)
+    } else {
+        None
+    };
+    // HTTP handoff recovery owns its own endpoint. If it switched daemons,
+    // use a fresh control connection for the snapshot and later attachment.
+    if http.instance_id().await != initial_instance {
+        daemon = daemon::connect_or_start().await?;
+    }
+    let loaded = if let Some(workspaces) = startup_workspaces {
         let startup = daemon
             .dashboard_startup(client_id.clone(), selected.clone())
             .await?;

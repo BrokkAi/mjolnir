@@ -134,11 +134,11 @@ impl HttpDaemonClient {
     }
 
     pub async fn wiki_sync_request(&self) -> Result<WikiSyncStatus> {
-        self.post_empty("/api/v1/wiki/sync").await
+        self.post_empty_once("/api/v1/wiki/sync").await
     }
 
     pub async fn wiki_sync_watch(&self, epoch: &str, after: u64) -> Result<WikiSyncStatus> {
-        self.get_json_query(
+        self.get_json_query_once(
             "/api/v1/wiki/sync/watch",
             &[("epoch", epoch), ("after", &after.to_string())],
         )
@@ -146,7 +146,7 @@ impl HttpDaemonClient {
     }
 
     pub async fn wiki_search(&self, query: &str, limit: usize) -> Result<WikiSearchPage> {
-        self.get_json_query(
+        self.get_json_query_once(
             "/api/v1/wiki/search",
             &[("q", query), ("limit", &limit.to_string())],
         )
