@@ -1,6 +1,9 @@
 //! Application-owned daemon startup and attachment maintenance.
 use mj_controller::controller::ControllerStoreGuard;
 use mj_core::config::{DaemonRuntime, data_dir};
+use mj_core::daemon_exit::{
+    DaemonExitRecord, daemon_exits_dir, format_exit_reason, read_daemon_exit_record,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
@@ -93,6 +96,7 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
 
 pub(crate) mod choice;
 pub(crate) mod container;
+pub(crate) mod wait_exit;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -728,30 +732,36 @@ async fn launch_daemon(
 fn host_daemon_command() -> Result<std::process::Command> {
     use std::process::Command;
 
+    let executable = daemon_launch_executable()?;
+    let exit_dir = std::path::absolute(daemon_exits_dir(&data_dir()))?;
+    let mut command = Command::new(&executable);
+    command
+        .args(["daemon-wait-exit", "--exit-dir"])
+        .arg(exit_dir)
+        .arg("--");
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::arg0(&mut command, "mj");
+
     let login_environment = host_daemon_login_environment()?;
     #[cfg(target_os = "linux")]
-    if let Some((systemd_run, runtime_dir)) = daemon_scope_launcher(login_environment.as_ref()) {
+    let scope = daemon_scope_launcher(login_environment.as_ref());
+    configure_host_daemon_environment(&mut command, login_environment)?;
+
+    #[cfg(target_os = "linux")]
+    if let Some((systemd_run, runtime_dir)) = scope {
+        // Keep the waiter outside the scope so it can record a scope-level kill.
         // Resolve PATH before the launcher changes into the daemon data directory.
-        let mut command = Command::new(std::path::absolute(systemd_run)?);
         let instance = mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned());
-        let client = std::process::id();
-        // systemd-run execs the daemon itself. Refer to the live client inode
-        // explicitly because /proc/self/exe would point to systemd-run there.
         command
+            .arg(std::path::absolute(systemd_run)?)
             .args(["--user", "--scope", "--quiet", "--collect"])
             .arg(format!("--description=Mjolnir daemon ({instance})"))
-            .args(["--", &format!("/proc/{client}/exe"), "daemon-run"]);
-        configure_host_daemon_environment(&mut command, login_environment)?;
-        command.env("XDG_RUNTIME_DIR", runtime_dir);
+            .args(["--", "/proc/self/exe", "daemon-run"])
+            .env("XDG_RUNTIME_DIR", runtime_dir);
         return Ok(command);
     }
 
-    let mut command = Command::new(daemon_launch_executable()?);
-    command.arg("daemon-run");
-    // Keep the direct launch recognizable in ps as mj daemon-run (R13-9).
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::arg0(&mut command, "mj");
-    configure_host_daemon_environment(&mut command, login_environment)?;
+    command.arg(executable).arg("daemon-run");
     Ok(command)
 }
 
@@ -1646,7 +1656,7 @@ impl LaunchedDaemon {
     fn label(&self) -> String {
         match &self.container {
             Some(container) => format!("container {}", container.container_name),
-            None => format!("{}", self.pid),
+            None => format!("(waiter PID {})", self.pid),
         }
     }
 
@@ -1684,7 +1694,7 @@ impl LaunchedDaemon {
             let directory = log_path
                 .parent()
                 .context("daemon stderr path has no parent")?;
-            let diagnostics = crate::logging::daemon_log_path(directory, pid)?;
+            let (diagnostics, exit) = launch_diagnostics(directory, pid)?;
             let mut output = String::new();
             if let Some(path) = &diagnostics {
                 output.push_str(&launch_log_tail(path, 0)?);
@@ -1695,6 +1705,12 @@ impl LaunchedDaemon {
                     output.push_str("\nDaemon stderr:\n");
                 }
                 output.push_str(&stderr);
+            }
+            if let Some(exit) = exit {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&format_exit_reason(&exit));
             }
             Ok((diagnostics.unwrap_or(log_path), output))
         })
@@ -1729,6 +1745,50 @@ impl LaunchedDaemon {
             log_path.display()
         ))
     }
+}
+
+fn launch_diagnostics(
+    directory: &Path,
+    pid: u32,
+) -> Result<(Option<PathBuf>, Option<DaemonExitRecord>)> {
+    use crate::logging::daemon_log_path;
+
+    if let Some(path) = daemon_log_path(directory, pid)? {
+        return Ok((Some(path), None));
+    }
+    // Failed children have already been reaped by the waiter. Their record
+    // links the launch PID to the PID used in the daemon's log filename.
+    if let Ok(entries) = fs::read_dir(daemon_exits_dir(directory)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && !entry.file_name().as_encoded_bytes().starts_with(b".")
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+                && let Ok(record) = read_daemon_exit_record(&path)
+                && record.waiter_pid == Some(pid)
+            {
+                return Ok((daemon_log_path(directory, record.pid)?, Some(record)));
+            }
+        }
+    }
+    // A launch that is still starting has a child process and no exit record.
+    let parent = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::new(),
+    );
+    for process in system.processes().values() {
+        if process.parent() == Some(parent)
+            && let Some(path) = daemon_log_path(directory, process.pid().as_u32())?
+        {
+            return Ok((Some(path), None));
+        }
+    }
+    Ok((None, None))
 }
 
 fn launch_log_tail(path: &Path, offset: u64) -> Result<String> {
@@ -4236,6 +4296,32 @@ esac
             launched.failure("startup timed out".into(), output, &path)
         );
         assert!(message.contains(&diagnostics.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launch_that_is_still_starting_uses_its_live_childs_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        let stderr = dir.path().join("daemon.log");
+        fs::write(&stderr, "").unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let diagnostics = logs.join(format!("mj-daemon-20260930T000000.000Z-{}.log", child.id()));
+        fs::write(&diagnostics, "recovering store").unwrap();
+        let launched = LaunchedDaemon {
+            pid: std::process::id(),
+            log_offset: 0,
+            container: None,
+        };
+        let (path, output) = launched.output_since_launch(&stderr).await;
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(path, diagnostics);
+        assert_eq!(output, "recovering store");
     }
 
     #[tokio::test]
