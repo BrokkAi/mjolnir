@@ -717,10 +717,19 @@ func (o *OwnedMcpApprovals) response(request *schema.RequestPermissionRequest) *
 func awaitElicitationResponse(ctx context.Context, pending *PendingElicitations, id string, answer *PendingAnswerReceiver, cancellation <-chan struct{}) PendingAnswer {
 	defer answer.Close()
 	// The classifier's refinement belongs to this wait: an answer or a
-	// cancellation ends it and drops its work.
+	// cancellation ends it and drops its work. Rust drops the refinement
+	// future before returning, so its classification has recorded its
+	// outcome or cancellation by then; wait for it to end likewise.
 	refining, stopRefining := context.WithCancel(ctx)
-	defer stopRefining()
-	go pending.refineQuestion(refining, id)
+	refined := make(chan struct{})
+	go func() {
+		defer close(refined)
+		pending.refineQuestion(refining, id)
+	}()
+	defer func() {
+		stopRefining()
+		<-refined
+	}()
 	receive := func() PendingAnswer {
 		value, ok := <-answer.C()
 		if !ok {

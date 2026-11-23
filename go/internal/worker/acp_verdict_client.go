@@ -301,6 +301,16 @@ func (c VerdictClient) post(ctx context.Context, endpoint *url.URL, timeout time
 	return response, nil
 }
 
+// verdictDropped reports whether err is the cancellation of ctx: the caller
+// dropped the request before the service answered. Cancellation decides the
+// record only when it interrupted the request. Once the service has answered,
+// even with a refusal or a malformed body, that answer is the outcome, as when
+// Rust's future completes before it is dropped; a cancellation arriving later
+// must not turn it into a cancelled record.
+func verdictDropped(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err())
+}
+
 // verdictRetryAfter is a response's Retry-After header, nil when absent.
 func verdictRetryAfter(response *http.Response) *string {
 	values, ok := response.Header["Retry-After"]
@@ -373,7 +383,7 @@ func (c VerdictClient) sameAfkQuestion(ctx context.Context, session string, curr
 		}))
 	}
 	same, different, err := c.afkProbabilities(ctx, body)
-	if err != nil && ctx.Err() != nil {
+	if verdictDropped(ctx, err) {
 		// Dropped mid-request: the released attempt records its cancellation.
 		return false, ctx.Err()
 	}
@@ -550,7 +560,7 @@ func (c VerdictClient) locateQuestion(ctx context.Context, session string, reque
 		}
 		return index, ok, nil
 	}()
-	if err != nil && ctx.Err() != nil {
+	if verdictDropped(ctx, err) {
 		// Dropped mid-request: the released attempt records its cancellation.
 		return 0, false, ctx.Err()
 	}

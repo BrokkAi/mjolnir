@@ -90,6 +90,14 @@ func (c *afkClassifier) request(t *testing.T) (net.Conn, any) {
 
 func (c *afkClassifier) respond(t *testing.T, stream net.Conn, choice string) {
 	t.Helper()
+	c.writeVerdict(t, stream, choice)
+	stream.Close()
+}
+
+// writeVerdict writes respond's answer and leaves the connection open, so
+// the caller can wait for the client to consume it.
+func (c *afkClassifier) writeVerdict(t *testing.T, stream net.Conn, choice string) {
+	t.Helper()
 	same, different := 0.01, 0.99
 	if choice == "same" {
 		same, different = 0.99, 0.01
@@ -100,8 +108,9 @@ func (c *afkClassifier) respond(t *testing.T, stream net.Conn, choice string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fmt.Fprintf(stream, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
-	stream.Close()
+	if _, err := fmt.Fprintf(stream, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // afkReadToEnd waits until the client has closed its side of stream.
@@ -385,7 +394,12 @@ func TestAfkQuestionDecisionsAreRecordedWithTheRedactedRequestAndOutcome(t *test
 	afkAway(t, <-newQuestion)
 	repeat := afkAsk(pending, "repeat", "Please assign #11482.")
 	stream, _ = classifier.request(t)
-	classifier.respond(t, stream, "same")
+	// Rust's current-thread test runtime has the check consume this answer
+	// before the test reaches the resolve below; Go's scheduler gives no
+	// such order, and resolving first cancels the check. Wait for the client
+	// to finish with the connection, as the 413 case below does.
+	classifier.writeVerdict(t, stream, "same")
+	afkReadToEnd(t, stream)
 	failed := afkAsk(pending, "failed", "Another decision?")
 	stream, _ = classifier.request(t)
 	if _, err := stream.Write([]byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")); err != nil {
