@@ -13,7 +13,7 @@ import driver
 from driver import expected_provider_model, verify_session_selection
 from rql_engine_tools import STAGED_ENGINE_SETTINGS
 
-from . import fidelity_live
+from . import bifrost_gold, fidelity_live
 from .fidelity import (BARS, CENSUS, Query, accuracy, bar_failures, gate_report, load_inputs,
                        measure, pooled_prescience, prescience_metrics, sample, step_result, stratum_metrics)
 from .engine.grammar import MENU
@@ -252,8 +252,8 @@ class EnginePhase(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.manifest_path = CENSUS / "pilot/manifest.json"
-        digest, manifest, served, documents, _ = load_inputs(self.manifest_path)
-        step = served[0]
+        digest, manifest, _served, documents, _ = load_inputs(self.manifest_path)
+        step = next(iter(MENU))
         commit = "a" * 40
         self.rows = [{"name": name, "sites": []} for name in ("decisive", "other")]
         self.queries = [
@@ -277,6 +277,9 @@ class EnginePhase(unittest.TestCase):
                     "snapshot_repo": self.root},
             manifest={**manifest, "eligible_diffs": [{"intro": commit, "repo": "mjolnir"}]},
         )
+        self.bifrost_bin = self.root / "fake-bifrost"
+        self.bifrost_bin.write_text("#!/bin/sh\necho fixture\n")
+        self.bifrost_bin.chmod(0o700)
         # The real phase selection, checkpoints, measurement and reporting run offline.
         for name, fake in {
             "load_inputs": lambda path: (digest, None, [step], documents, None),
@@ -284,6 +287,7 @@ class EnginePhase(unittest.TestCase):
             "touched_symbols": lambda *args: [],
             "sample": lambda *args: (self.queries, self.fresh),
             "prepared_snapshot": lambda *args: None,
+            "BifrostRunner": self.fake_bifrost_runner,
             "LiveModels": self.gold_models,
         }.items():
             self.addCleanup(setattr, fidelity_live, name, getattr(fidelity_live, name))
@@ -291,6 +295,16 @@ class EnginePhase(unittest.TestCase):
         self.grammar = self.root / "grammar"
         (self.grammar / "src").mkdir(parents=True)
         (self.grammar / "src/parser.c").write_text("fixture")
+
+    def fake_bifrost_runner(self, binary, repos, work_root, checkpoint_root, **kwargs):
+        self.assertEqual(binary, self.bifrost_bin)
+
+        def query(repo, commit, text):
+            self.gold_calls.append(("bifrost", text))
+            return {"rows": self.rows, "complete": True, "truncated": False, "diagnostics": [],
+                    "bifrost_binary_sha256": "0" * 64, "bifrost_build_identity": "fixture-bifrost"}
+
+        return SimpleNamespace(query=query, binary_sha256="0" * 64, build_identity="fixture-bifrost")
 
     def answer(self, commit, text, *, fresh=False):
         call = (text, fresh)
@@ -305,7 +319,7 @@ class EnginePhase(unittest.TestCase):
         return {"status": "ok", "rows": self.rows,
                 "provenance": {"login_profile": login, "engine_profile": f"{login}-engine"}}
 
-    def gold_models(self, *args):
+    def gold_models(self, *args, bifrost=None):
         self.gold_calls.append("started")
 
         def enumerate_rows(repo, commit, text):
@@ -317,14 +331,16 @@ class EnginePhase(unittest.TestCase):
             return {key: {"in_scope": True, "key": row["name"], "reason": "fixture evidence"}
                     for key, row in candidates.items()}
 
-        return SimpleNamespace(enumerate_rows=enumerate_rows, adjudicate=adjudicate)
+        return SimpleNamespace(enumerate_rows=enumerate_rows, adjudicate=adjudicate,
+                               bifrost=bifrost, bifrost_rows=bifrost.query if bifrost else None)
 
     def run_phase(self, root, *options):
         output = StringIO()
+        extra = ["--bifrost-bin", str(self.bifrost_bin)] if "--phase" not in options else []
         with redirect_stdout(output):
             status = fidelity_live.main(["--live", "--run-root", str(root), "--manifest", str(self.manifest_path),
                                          "--rust-grammar", str(self.grammar), "--js-grammar", str(self.grammar),
-                                         *options])
+                                         *extra, *options])
         return status, [json.loads(line) for line in output.getvalue().splitlines()]
 
     def test_engine_phase_and_full_run_match_a_single_full_run(self):
@@ -468,6 +484,32 @@ class TerraOutput(unittest.TestCase):
             "operand": {"site": site, "verbatim": [{"start_byte": 3, "end_byte": 5, "text": "α"}]},
         }}])
 
+    # Hard-won: 82a0658a0: Terra bailed out with non-semantic coverage.open reasons and passed validation.
+    def test_terra_partial_enumeration_bailout_is_rejected(self):
+        model = fidelity_live.LiveModels.__new__(fidelity_live.LiveModels)
+        model.manifest = {"diffs": [], "served_steps": []}
+        model.catalogue = model.menu = ""
+        model.directory = Path("fixture")
+        model.terra_profile = "terra"
+        site = {"path": "source.rs", "start_line": 1, "end_line": 1}
+
+        for reason in (
+            "The matching callers have not been enumerated.",
+            "Contract cases and guard alternatives in this seed were not fully evaluated.",
+        ):
+            with self.subTest(reason=reason):
+                bailout = {"rows": [], "coverage": {"complete": False, "open": [{"reason": reason, "site": site}]},
+                           "excluded": []}
+
+                def sealed_task(commit, directory, name, profile, files, prompt, check_output):
+                    self.assertIn("incomplete enumeration is rejected as a validation error",
+                                  prompt("/fixture/.scratch"))
+                    return check_output(json.dumps(bailout), {"source.rs": b"fn f() {}\n"}.get), {"model": name}
+
+                model.sealed_task = sealed_task
+                with self.assertRaisesRegex(fidelity_live.TerraEvidenceError, "incomplete or partial enumeration"):
+                    model.enumerate_rows("fixture", "a" * 40, '(callers (enclosing-decl (callable :name "f")))')
+
     # Hard-won: d4028a66b: the live gate stopped on Terra's first repairable schema error.
     def test_enumerator_repairs_in_session_and_restarts_a_stall_once(self):
         query = Query("documented", "random", "fixture", "b" * 40, '(function :name "f")')
@@ -480,14 +522,15 @@ class TerraOutput(unittest.TestCase):
                 "coverage": {"complete": True, "open": []}, "excluded": [],
             }).encode()
 
-        good, bad = answer(operand), answer({**operand, "extra": True})
+        good, bad, missing = answer(operand), answer({**operand, "extra": True}), None
         # Normalizes cleanly but fails answer validation with three errors.
         staged = json.dumps({
             "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": operand}}],
             "coverage": {"complete": True, "open": [{"reason": 3}, {"reason": 4}]}, "excluded": [],
         }).encode()
         errors_named = {bad: "written evidence must contain only site and verbatim",
-                        staged: "coverage.complete must be true exactly when coverage.open is empty"}
+                        staged: "coverage.complete must be true exactly when coverage.open is empty",
+                        missing: "output.json was not written"}
         orphan = "c" * 40
         model_usage = fidelity_live.model_usage
         sessions, checks, destroyed = {}, [], []
@@ -514,7 +557,12 @@ class TerraOutput(unittest.TestCase):
             if operation == "put-file":
                 return b""
             if operation == "fetch":
-                return schedule[int(sid[0]) - 1][len(turns) - 1]
+                if "--ls" in args:
+                    return json.dumps({"path": args[3], "entries": []}).encode()
+                payload = schedule[int(sid[0]) - 1][len(turns) - 1]
+                if payload is missing:
+                    raise RuntimeError("mj fetch failed: output.json does not exist on the session's target")
+                return payload
             self.assertEqual(operation, "destroy")
             destroyed.append(sid)
             return json.dumps({"session_id": sid, "accepted": True}).encode()
@@ -575,7 +623,16 @@ class TerraOutput(unittest.TestCase):
             ):
                 stack.enter_context(patch.object(target, name, new=fake))
             # Hard-won: 2da79e863: fixing normalization exposed more validation errors and counted as a stall
-            for schedule in (((bad, good),), ((bad, staged, good),), ((bad, bad), (good,)), ((bad, bad), (bad, bad))):
+            # Hard-won: 1a919b31c: Terra withheld output.json instead of enumerating, crashing turn 1 without repair
+            for schedule in (
+                ((bad, good),),
+                ((missing, good),),
+                ((missing, bad, good),),
+                ((bad, staged, good),),
+                ((bad, bad), (good,)),
+                ((missing, missing), (good,)),
+                ((bad, bad), (bad, bad)),
+            ):
                 with self.subTest(rounds=[len(turns) for turns in schedule]), TemporaryDirectory() as root:
                     sessions.clear()
                     checks.clear()
@@ -1139,3 +1196,359 @@ class ModelIdentity(unittest.TestCase):
                             model_usage(usage, command, 32, TERRA, "unused", directory)
                     else:
                         self.assertEqual(model_usage(usage, command, 32, TERRA, "unused", directory), TERRA)
+
+
+class BifrostGoldTests(unittest.TestCase):
+    def test_normalize_bifrost_results_handles_documented_types_and_filters_external(self):
+        blobs = {
+            "src/lib.rs": b"pub fn helper() {}\npub fn target() {\n    helper();\n}\n",
+            "src/caller.rs": b"pub fn call_it() {\n    crate::target();\n}\n",
+        }
+        raw = {
+            "isError": False,
+            "structuredContent": {
+                "truncated": False,
+                "diagnostics": [{"code": "uses_candidates_omitted", "impact": "incomplete", "message": "partial"}],
+                "results": [
+                    {
+                        "result_type": "call_site",
+                        "site_id": "deadbeef" * 8,
+                        "program_point_id": "cafebabe" * 8,
+                        "target_id": "12345678" * 8,
+                        "path": "src/caller.rs",
+                        "range": {"start_line": 2, "start_column": 5, "end_line": 2, "end_column": 20},
+                        "caller": {"path": "src/caller.rs", "fq_name": "p.call_it", "start_line": 1, "end_line": 3},
+                        "callee": {"path": "src/lib.rs", "fq_name": "p.target", "start_line": 2, "end_line": 4},
+                        "provenance": [{"seed": {"path": "src/lib.rs"}, "steps": []}],
+                    },
+                    {
+                        "result_type": "declaration",
+                        "path": "src/lib.rs",
+                        "fq_name": "p.target",
+                        "start_line": 2,
+                        "end_line": 4,
+                        "provenance": [{"seed": {}}],
+                    },
+                    {
+                        "result_type": "occurrence",
+                        "id": "aaa",
+                        "ast_id": "bbb",
+                        "path": "src/lib.rs",
+                        "range": {"start_line": 3, "start_column": 5, "end_line": 3, "end_column": 11},
+                        "raw_spelling": "helper",
+                    },
+                    {
+                        "result_type": "file",
+                        "path": "src/lib.rs",
+                        "language": "rust",
+                    },
+                    {
+                        "result_type": "declaration",
+                        "path": "/external/stdlib/core.rs",
+                        "start_line": 1,
+                        "end_line": 2,
+                    },
+                ],
+            },
+        }
+        rows, meta = bifrost_gold.normalize_bifrost_results(raw, blobs.get)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(meta["skipped_external"], 1)
+        self.assertFalse(meta["complete"])
+        self.assertEqual(meta["raw_row_count"], 5)
+        call_row = next(row for row in rows if row["kind"] == "call_site")
+        self.assertEqual(call_row["sites"], [
+            {"path": "src/caller.rs", "start_line": 2, "end_line": 2},
+            {"path": "src/caller.rs", "start_line": 1, "end_line": 3},
+            {"path": "src/lib.rs", "start_line": 2, "end_line": 4},
+        ])
+        for secret in ("provenance", "site_id", "program_point_id", "target_id", "result_type"):
+            self.assertNotIn(secret, call_row["fields"])
+        file_row = next(row for row in rows if row["kind"] == "file")
+        self.assertEqual(file_row["sites"], [{"path": "src/lib.rs", "start_line": 1, "end_line": 1}])
+
+        with self.assertRaisesRegex(RuntimeError, "query error"):
+            bifrost_gold.normalize_bifrost_results({"isError": True, "error": "boom"}, blobs.get)
+        bad_span = {"isError": False, "structuredContent": {"results": [
+            {"result_type": "declaration", "path": "src/lib.rs", "start_line": 1, "end_line": 99},
+        ]}}
+        with self.assertRaisesRegex(ValueError, "outside its 4 lines"):
+            bifrost_gold.normalize_bifrost_results(bad_span, blobs.get)
+
+    def test_documented_measure_and_gate_report_pool_real_bifrost_rows(self):
+        doc_query = Query("documented", "random", "mjolnir", "a" * 40, '(callers (enclosing-decl (callable :name "f")))')
+        added_query = Query("contract-cases", "random", "mjolnir", "a" * 40, '(contract-cases (procedure-of (callable :name "f")))')
+        bifrost_calls = []
+
+        def fake_engine(commit, text, *, fresh):
+            return {"status": "ok", "rows": [{"name": "found_by_engine", "sites": []}]}
+
+        def fake_terra(repo, commit, text):
+            return {"rows": [{"name": "found_by_engine", "sites": []}]}
+
+        def fake_bifrost(repo, commit, text):
+            bifrost_calls.append((repo, commit, text))
+            return {
+                "rows": [{"name": "found_by_engine", "sites": []}, {"name": "bifrost_only", "sites": []}],
+                "complete": True, "truncated": False, "diagnostics": [],
+                "bifrost_binary_sha256": "1" * 64, "bifrost_build_identity": "abc123",
+            }
+
+        def fake_adjudicate(query, candidates):
+            return {cid: {"key": row["name"], "in_scope": True, "reason": "verified"} for cid, row in candidates.items()}
+
+        doc_record = measure(doc_query, True, fake_engine, fake_terra, fake_adjudicate, bifrost_rows=fake_bifrost)
+        added_record = measure(added_query, False, fake_engine, fake_terra, fake_adjudicate, bifrost_rows=fake_bifrost)
+        self.assertEqual(bifrost_calls, [("mjolnir", "a" * 40, doc_query.text)])
+        self.assertEqual(doc_record["bifrost"], ["bifrost_only", "found_by_engine"])
+        self.assertEqual(doc_record["gold"], ["bifrost_only", "found_by_engine"])
+        self.assertEqual(doc_record["engine"], ["found_by_engine"])
+        self.assertNotIn("bifrost", added_record)
+
+        report = gate_report("m" * 64, [], [doc_query], {doc_query.key: doc_record}, 20261120)
+        self.assertEqual(report["candidate_sources"], ["engine", "terra_enumerator", "bifrost", "census"])
+        self.assertEqual(report["documented"]["metrics"]["recall"], 0.5)
+        self.assertEqual(report["documented"]["bifrost"], {
+            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0, "total_rows": 2,
+            "gold_rows_found": 2, "gold_rows_outside_engine": 1, "precision": 1.0, "recall": 1.0,
+            "binary_sha256": ["1" * 64], "build_identity": ["abc123"],
+        })
+
+    def test_bifrost_runner_checkpoints_resumes_and_isolates_checkouts(self):
+        import subprocess
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init", "--template="], check=True, capture_output=True)
+            (repo / "src").mkdir()
+            (repo / "src/lib.rs").write_text("pub fn target() {}\npub fn caller() { target(); }\n")
+            subprocess.run(["git", "-C", str(repo), "add", "src/lib.rs"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@t",
+                            "-c", "commit.gpgsign=false", "commit", "-m", "v1"], check=True, capture_output=True)
+            c1 = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            (repo / "src/lib.rs").write_text("pub fn dirty() {}\n")
+
+            invocations = root / "invocations.log"
+            fake_bin = root / "fake-bifrost"
+            fake_bin.write_text(f"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args == ["--build-identity"]:
+    print("fake-build-id")
+    sys.exit(0)
+root_dir = Path(args[args.index("--root") + 1])
+with open({str(invocations)!r}, "a") as f:
+    f.write(json.dumps(args) + "\\n")
+if "--query-file" in args:
+    qfile = root_dir / args[args.index("--query-file") + 1]
+    qtext = qfile.read_text().strip()
+    assert qtext.startswith("(limit 1000 "), qtext
+    assert "--workspace-scaled-limits" in args
+    if "trigger-error" in qtext:
+        print(json.dumps({{"isError": True, "error": "simulated failure"}}))
+        sys.exit(0)
+    print(json.dumps({{"isError": False, "structuredContent": {{"truncated": False, "results": [
+        {{"result_type": "declaration", "path": "src/lib.rs", "fq_name": "p.caller", "start_line": 2, "end_line": 2}}
+    ]}}}}))
+    sys.exit(0)
+# MCP warm-up mode
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg["method"] == "initialize":
+        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": {{}}}}), flush=True)
+    elif msg["method"] == "tools/call":
+        print(json.dumps({{"jsonrpc": "2.0", "id": msg["id"], "result": {{"structuredContent": {{
+            "analyzer_ready": True, "usage_index_ready": True, "semantic_packs_ready": True,
+            "workspace_build": {{"status": "completed"}}
+        }}}}}}), flush=True)
+""")
+            fake_bin.chmod(0o700)
+
+            runner = bifrost_gold.BifrostRunner(
+                fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
+                memory_cap_gib=None, use_systemd_cap=False,
+            )
+            q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "target"))))'
+            first = runner.query("mjolnir", c1, q)
+            self.assertEqual(len(first["rows"]), 1)
+            self.assertEqual(first["rows"][0]["sites"], [{"path": "src/lib.rs", "start_line": 2, "end_line": 2}])
+            self.assertEqual((repo / "src/lib.rs").read_text(), "pub fn dirty() {}\n")
+            self.assertFalse((root / "work/checkouts/mjolnir" / bifrost_gold.QUERY_FILENAME).exists())
+
+            # Second call resumes from checkpoint without invoking bifrost again.
+            count_before = len(invocations.read_text().splitlines())
+            self.assertEqual(count_before, 2)  # 1 warm + 1 query
+            self.assertEqual(runner.query("mjolnir", c1, q), first)
+            self.assertEqual(len(invocations.read_text().splitlines()), count_before)
+
+            # Changed binary sha invalidates intent visibly.
+            fake_bin.write_text(fake_bin.read_text() + "# bumped\n")
+            bumped = bifrost_gold.BifrostRunner(
+                fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
+                memory_cap_gib=None, use_systemd_cap=False,
+            )
+            with self.assertRaisesRegex(ValueError, "bifrost checkpoint inputs changed"):
+                bumped.query("mjolnir", c1, q)
+
+            # Query error fails visibly and writes no completed.json.
+            bad_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-error"))))'
+            with self.assertRaisesRegex(RuntimeError, "simulated failure"):
+                runner.query("mjolnir", c1, bad_q)
+            bad_key = fidelity_live.sha(fidelity_live.canonical(["documented", "mjolnir", c1, bad_q]).encode())
+            self.assertFalse((root / "checkpoints" / bad_key / "bifrost/completed.json").exists())
+
+    def test_concurrent_run_sample_enforces_commit_repo_bounds_and_resumes_cleanly(self):
+        import threading
+        import time
+
+        c_shared = "a" * 40
+        c_other = "b" * 40
+        c_bf = "c" * 40
+        queries = [
+            Query("documented", "random", "mjolnir", c_shared, '(callers (callable :name "f1"))'),
+            Query("documented", "random", "mjolnir", c_shared, '(callers (callable :name "f2"))'),
+            Query("documented", "random", "mjolnir", c_other, '(callers (callable :name "f3"))'),
+            Query("documented", "random", "bifrost-dev", c_bf, '(callers (callable :name "f4"))'),
+            Query("documented", "random", "bifrost-dev", c_bf, '(callers (callable :name "f5"))'),
+        ]
+        fresh = {q.key for q in queries}
+
+        def make_harness(stop_after_first_engine=None):
+            lock = threading.Lock()
+            active_models = 0
+            peak_models = 0
+            active_commits = set()
+            active_repos = set()
+            commit_overlap = []
+            repo_overlap = []
+            distinct_repo_overlap = False
+            engine_done = 0
+
+            def enter_model():
+                nonlocal active_models, peak_models
+                with lock:
+                    active_models += 1
+                    peak_models = max(peak_models, active_models)
+
+            def leave_model():
+                nonlocal active_models
+                with lock:
+                    active_models -= 1
+
+            def answer(commit, text, *, fresh=False):
+                nonlocal engine_done
+                enter_model()
+                with lock:
+                    if commit in active_commits:
+                        commit_overlap.append(commit)
+                    active_commits.add(commit)
+                try:
+                    time.sleep(0.03)
+                    return {"status": "ok", "rows": [{"kind": "declaration", "sites": [], "fields": {"text": text}}],
+                            "coverage": {"complete": True, "open": []}}
+                finally:
+                    with lock:
+                        active_commits.remove(commit)
+                        engine_done += 1
+                        if stop_after_first_engine is not None and engine_done == 1:
+                            stop_after_first_engine.write_text("stop\n")
+                    leave_model()
+
+            def enumerate_rows(repo, commit, text):
+                enter_model()
+                try:
+                    time.sleep(0.02)
+                    return {"rows": [{"kind": "declaration", "sites": [], "fields": {"text": text, "src": "t"}}],
+                            "coverage": {"complete": True, "open": []}}
+                finally:
+                    leave_model()
+
+            def bifrost_rows(repo, commit, text):
+                nonlocal distinct_repo_overlap
+                with lock:
+                    if repo in active_repos:
+                        repo_overlap.append(repo)
+                    active_repos.add(repo)
+                    if len(active_repos) >= 2:
+                        distinct_repo_overlap = True
+                try:
+                    time.sleep(0.04)
+                    return {"rows": [{"kind": "declaration", "sites": [], "fields": {"text": text, "src": "b"}}],
+                            "complete": True, "truncated": False,
+                            "bifrost_binary_sha256": "1" * 64, "bifrost_build_identity": "fake"}
+                finally:
+                    with lock:
+                        active_repos.remove(repo)
+
+            def adjudicate(query, candidates):
+                enter_model()
+                try:
+                    time.sleep(0.01)
+                    return {cid: {"in_scope": True, "key": row["fields"]["text"], "reason": "ok"}
+                            for cid, row in candidates.items()}
+                finally:
+                    leave_model()
+
+            engine = SimpleNamespace(answer=answer)
+            models = SimpleNamespace(enumerate_rows=enumerate_rows, adjudicate=adjudicate,
+                                     bifrost_rows=bifrost_rows)
+            stats = lambda: (peak_models, commit_overlap, repo_overlap, distinct_repo_overlap)
+            return engine, models, stats
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            serial_engine, serial_models, _ = make_harness()
+            serial = fidelity_live.run_sample(
+                root / "serial", queries, fresh, serial_engine, serial_models,
+                stop_request=root / "no-stop", concurrency=1,
+            )
+
+            conc_engine, conc_models, stats = make_harness()
+            conc = fidelity_live.run_sample(
+                root / "conc", queries, fresh, conc_engine, conc_models,
+                stop_request=root / "no-stop", concurrency=4,
+            )
+            peak_models, commit_overlap, repo_overlap, distinct_repo_overlap = stats()
+            self.assertEqual(conc, serial)
+            self.assertLessEqual(peak_models, 4)
+            self.assertGreaterEqual(peak_models, 2)
+            self.assertEqual(commit_overlap, [])
+            self.assertEqual(repo_overlap, [])
+            self.assertTrue(distinct_repo_overlap)
+
+            # Mid-flight stop drains cleanly and subsequent resume finishes identically.
+            stop_file = root / "stop-requested"
+            stop_engine, stop_models, _ = make_harness(stop_after_first_engine=stop_file)
+            with self.assertRaises(fidelity_live.StopRequested):
+                fidelity_live.run_sample(
+                    root / "resumed", queries, fresh, stop_engine, stop_models,
+                    stop_request=stop_file, concurrency=3,
+                )
+            stop_file.unlink()
+            resume_engine, resume_models, _ = make_harness()
+            resumed = fidelity_live.run_sample(
+                root / "resumed", queries, fresh, resume_engine, resume_models,
+                stop_request=stop_file, concurrency=3,
+            )
+            self.assertEqual(resumed, serial)
+
+            # Changing the Bifrost binary invalidates completed measurements on resume (serial and concurrent).
+            changed_bifrost = SimpleNamespace(binary_sha256="2" * 64, build_identity="other")
+            mismatch_models = SimpleNamespace(
+                enumerate_rows=resume_models.enumerate_rows,
+                adjudicate=resume_models.adjudicate,
+                bifrost=changed_bifrost,
+                bifrost_rows=resume_models.bifrost_rows,
+            )
+            for workers in (1, 3):
+                with self.subTest(concurrency=workers):
+                    with self.assertRaisesRegex(ValueError, "used a different Bifrost binary"):
+                        fidelity_live.run_sample(
+                            root / "resumed", queries, fresh, resume_engine, mismatch_models,
+                            stop_request=stop_file, concurrency=workers,
+                        )

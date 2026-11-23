@@ -94,6 +94,12 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
                     json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"hello back"}),
                 ].map(|record| record.to_string()).join("\n"),
             ).unwrap();
+            let conversations = home.join("antigravity-cli/conversations");
+            fs::create_dir_all(&conversations).unwrap();
+            rusqlite::Connection::open(
+                conversations.join("90c30a64-54f7-4261-90f1-e75b1c14311c.db"),
+            )
+            .unwrap();
             path
         }
         _ => unreachable!("fixture only covers the extracted native adapters"),
@@ -257,13 +263,13 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
         }
         for hit in &hits {
             let path = Path::new(&hit.row.path);
-            if crate::import::native_sessions_enumerable(kind) {
+            if crate::import::native_source_import_issue(kind, path).is_none() {
                 // Muse stores its ID above session.jsonl; import must still
                 // resolve the indexed path through its harness-specific reader.
-                let native_session_id = if kind == HarnessKind::Muse {
-                    path.parent().unwrap().file_name().unwrap()
-                } else {
-                    path.file_name().unwrap()
+                let native_session_id = match kind {
+                    HarnessKind::Muse => path.parent().unwrap().file_name().unwrap(),
+                    HarnessKind::Dsh => path.file_stem().unwrap(),
+                    _ => path.file_name().unwrap(),
                 };
                 assert_eq!(
                     wiki_continuation(&hit.row.session_id, tool, path, false).unwrap(),
@@ -363,4 +369,71 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
             );
         }
     }
+}
+
+#[test]
+fn indexed_opencode_sqlite_keys_continue_remotely_and_check_migration_on_import() {
+    let _held = tags::testing::lock();
+    let (_index, index) = tags::testing::isolated_index();
+    let directory = tempfile::tempdir().unwrap();
+    use crate::import::{ClaudeSessionSelection, locate_native_session};
+
+    let data = directory.path().join(".data/opencode");
+    fs::create_dir_all(&data).unwrap();
+    let db = data.join("opencode.db");
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch(r#"
+        CREATE TABLE session_v2(id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, parent_id TEXT);
+        CREATE TABLE session(id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, parent_id TEXT);
+        INSERT INTO session VALUES ('Legacy-ID', '/work/legacy', 'Legacy', 1794272400000, 1794272400000, NULL);
+        INSERT INTO session_v2 VALUES ('Literal-Session_ID', '/work/app', 'Current', 1794272400000, 1794272400000, NULL);
+        CREATE TABLE session_message(id TEXT, session_id TEXT, type TEXT, time_created INTEGER, seq INTEGER, data TEXT);
+        INSERT INTO session_message VALUES ('user', 'Literal-Session_ID', 'user', 1794272400000, 1, '{"text":"remember imported native session"}');
+    "#).unwrap();
+    let current = format!("{}\u{1f}Literal-Session_ID", db.display());
+    let adapter = sessionwiki::adapters::by_name("opencode").unwrap();
+    let session = adapter.parse_key(&current).unwrap();
+    assert_eq!(session.messages[0].text, "remember imported native session");
+    // The index uses the opaque key with the physical database and native ID,
+    // while Session.path is the rendered form for human consumers.
+    let remote_db = directory
+        .path()
+        .join("remote/daemon/.data/opencode/opencode.db");
+    assert!(!remote_db.exists());
+    let remote_key = format!("{}\u{1f}Literal-Session_ID", remote_db.display());
+    tags::testing::index_row(&index, &session.id, "opencode");
+    index
+        .execute(
+            "UPDATE files SET path = ?1 WHERE session_id = ?2",
+            [&remote_key, &session.id],
+        )
+        .unwrap();
+    let path: String = index
+        .query_row(
+            "SELECT path FROM files WHERE session_id = ?1",
+            [&session.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        wiki_continuation(&session.id, "opencode", Path::new(&path), false).unwrap(),
+        WikiContinuation::Import {
+            harness: HarnessKind::OpenCode,
+            native_session_id: "Literal-Session_ID".into()
+        },
+    );
+    let error = locate_native_session(
+        HarnessKind::OpenCode,
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("Legacy-ID".into()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("finish migrating"), "{error}");
+    let located = locate_native_session(
+        HarnessKind::OpenCode,
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("Literal-Session_ID".into()),
+    )
+    .unwrap();
+    assert_eq!(located.source_path, Path::new(&current));
 }

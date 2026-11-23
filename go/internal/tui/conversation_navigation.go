@@ -5,6 +5,10 @@
 package tui
 
 import (
+	"maps"
+	"math"
+	"slices"
+
 	uv "github.com/charmbracelet/ultraviolet"
 
 	"github.com/BrokkAi/mjolnir/go/internal/chat"
@@ -60,13 +64,47 @@ func (n *ConversationNavigation) assignment(pane PaneId) (PaneAssignment, bool) 
 // assign shows session in pane, or empties the pane for nil. It reports
 // whether anything changed.
 func (n *ConversationNavigation) assign(pane PaneId, session *string) bool {
-	panic("unported: mj-tui/src/conversation_navigation.rs ConversationNavigation::assign")
+	if !slices.Contains(n.layoutField.PaneIDs(), pane) {
+		return false
+	}
+	if shown, ok := n.sessionsField[pane]; ok == (session != nil) && (!ok || shown == *session) {
+		return false
+	}
+	if n.sessionsField == nil {
+		n.sessionsField = map[PaneId]string{}
+	}
+	if n.assignments == nil {
+		n.assignments = map[PaneId]PaneAssignment{}
+	}
+	if session != nil {
+		for id, shown := range n.sessionsField {
+			if shown == *session {
+				delete(n.sessionsField, id)
+			}
+		}
+		for id := range n.assignments {
+			if _, kept := n.sessionsField[id]; !kept {
+				delete(n.assignments, id)
+			}
+		}
+		if n.nextAssignment == math.MaxUint64 {
+			panic("assignment identity exhausted")
+		}
+		n.nextAssignment++
+		n.sessionsField[pane] = *session
+		n.assignments[pane] = PaneAssignment(n.nextAssignment)
+	} else {
+		delete(n.sessionsField, pane)
+		delete(n.assignments, pane)
+	}
+	return true
 }
 
 func (n *ConversationNavigation) retainSessions(keep func(string) bool) bool {
 	before := len(n.sessionsField)
-	for pane, session := range n.sessionsField {
-		if !keep(session) {
+	// Panes are visited in order, as Rust's BTreeMap::retain visits them.
+	for _, pane := range slices.Sorted(maps.Keys(n.sessionsField)) {
+		if !keep(n.sessionsField[pane]) {
 			delete(n.sessionsField, pane)
 		}
 	}
@@ -105,7 +143,16 @@ func (n *ConversationNavigation) resizeFocused(nav NavDirection, delta float32, 
 }
 
 func (n *ConversationNavigation) restore(saved *core.ConversationLayout, keep func(string) bool) {
-	panic("unported: mj-tui/src/conversation_navigation.rs ConversationNavigation::restore")
+	layout, sessions := TileLayoutFromConversationLayout(saved)
+	n.layoutField = layout
+	n.sessionsField = map[PaneId]string{}
+	n.assignments = map[PaneId]PaneAssignment{}
+	for _, pane := range slices.Sorted(maps.Keys(sessions)) {
+		session := sessions[pane]
+		if keep(session) && !slices.Contains(slices.Collect(maps.Values(n.sessionsField)), session) {
+			n.assign(pane, &session)
+		}
+	}
 }
 
 func (n *ConversationNavigation) reset() {

@@ -324,6 +324,24 @@ feature request does not authorize an incompatible upgrade of the live store.
 Keep existing isolated tests isolated even for compatible changes. Never rewrite
 an already-applied migration; give subsequent schema changes a new revision.
 
+Keep startup migrations O(1) on large tables (`materialized_transcript_items`,
+`api_events`, `native_agent_transcript`): never run a blocking full-table
+`UPDATE` or table rebuild over multi-GB blob tables during startup. Use a narrow
+sidecar table, an expression index or `VIRTUAL` generated column, or O(1) DDL
+plus a cancellable background backfill (as `backfill_tool_details` does) with
+fallback reads for unbackfilled rows. Keep large `TEXT`/`BLOB` payload columns
+last on any new or rebuilt table, and do not append frequently indexed or
+filtered columns after a large blob column via `ALTER TABLE ADD COLUMN` (SQLite
+places trailing columns at the end of the overflow chain). Do not put evolving
+enums in SQLite `CHECK(col IN (...))` constraints; validate them in Rust instead
+so new values never force a table rebuild. When a rebuild with
+`PRAGMA foreign_keys = OFF` is unavoidable, check integrity with
+`has_foreign_key_violation_for_tables` (scoped `PRAGMA foreign_key_check(<table>)`)
+instead of unscoped `PRAGMA foreign_key_check`, and if a JSON scan is
+unavoidable, parse each row once in Rust with a streaming zero-allocation
+visitor rather than repeating `json_valid`/`json_extract` in SQL. See
+`.agents/docs/schema-migrations.md` for details.
+
 Plain Cargo commands build for the current host. Build a portable container
 worker explicitly with `--target x86_64-unknown-linux-musl` or
 `--target aarch64-unknown-linux-musl`.

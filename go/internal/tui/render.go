@@ -46,7 +46,61 @@ func takeSelectionRecenter(dashboard *DashboardState, focus Focus) bool {
 // The registry moves out for the call because the modal renderers read the
 // rest of the dashboard while they register their own surfaces.
 func renderModal(frame *chat.Frame, area uv.Rectangle, dashboard *DashboardState) {
-	panic("unported: mj-tui/src/render.rs render_modal")
+	dashboard.prepareDialogState()
+	surfaces := dashboard.frameSurfaces
+	dashboard.frameSurfaces = chat.FrameSurfaces{}
+	if dialog := dashboard.awayDialog(); dialog != nil {
+		operatorAwayRender(frame, area, dashboard, dialog, &surfaces)
+		dashboard.frameSurfaces = surfaces
+		return
+	}
+	switch mode := dashboard.mode.(type) {
+	case ModeNew:
+		renderNewWizard(frame, area, dashboard, mode.NewWizard, &surfaces)
+	case ModeResume:
+		renderResumeWizard(frame, area, dashboard, mode.ResumeWizard, &surfaces)
+	case ModeResumeDialog:
+		renderResumeDialog(frame, area, dashboard, mode.ResumeDialog, &surfaces)
+	case ModeRepositoryOrigin:
+		renderRepositoryOrigin(frame, area, mode.RepositoryOriginDialog, &surfaces)
+	case ModeConfigId:
+		renderConfigIDEditor(frame, area, mode.ConfigIdEditor, &surfaces)
+	case ModeTargetActions:
+		renderTargetActions(frame, area, dashboard, mode.TargetActionsDialog, &surfaces)
+	case ModeWeb:
+		renderWebDialog(frame, area, mode.WebDialog, &surfaces)
+	case ModeWorkspaceManager:
+		renderWorkspaceManager(frame, area, mode.WorkspaceManager, &surfaces)
+	case ModeRename:
+		renderRenameEditor(frame, area, mode.RenameEditor, &surfaces)
+	case ModeChangedFiles:
+		renderChangedFiles(frame, area, dashboard, mode.ChangedFilesDialog, &surfaces)
+	case ModeSessionCpuReport:
+		renderSessionCpuReport(frame, area, dashboard, mode.SessionCpuReportDialog, &surfaces)
+	case ModeSessionUsageReport:
+		sessionUsageReportRender(frame, area, dashboard, mode.SessionUsageDialog, &surfaces)
+	case ModeNoticeLog:
+		renderNoticeLog(frame, area, dashboard, mode.NoticeLogDialog, &surfaces)
+	case ModeEditContainer:
+		renderContainerEditor(frame, area, mode.ContainerEditor, &surfaces)
+	case ModeGitIdentity:
+		renderGitIdentityDialog(frame, area, mode.GitIdentityDialog, &surfaces)
+	case ModeImporting:
+		renderImportProgress(frame, area, mode.ImportProgress, &surfaces)
+	case ModeConfirmImportBundle:
+		renderImportBundleConfirmation(frame, area, mode.ImportBundleConfirmation, &surfaces)
+	case ModeConfirm:
+		renderConfirmation(frame, area, mode.ConfirmDialog, &surfaces)
+	case ModePalette:
+		renderPalette(frame, area, dashboard, mode.CommandPalette, &surfaces)
+	case ModeSetup:
+		renderSetup(frame, area, dashboard, mode.SetupDialog, &surfaces)
+	case ModeWelcome:
+		renderWelcome(frame, area, dashboard, mode.WelcomeDialog, &surfaces)
+	case ModeDashboard:
+	}
+	dashboard.renderDialogConfirmation(frame, area, &surfaces)
+	dashboard.frameSurfaces = surfaces
 }
 
 // minimumTerminalWidth is the width from which the Sessions sidebar sits

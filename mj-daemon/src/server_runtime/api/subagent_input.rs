@@ -530,6 +530,15 @@ impl ApiBackend {
     /// worker queue is unknown while the parent has no session actor or its
     /// actor has no snapshot yet; see [`InputProgress::queue_known`].
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
+        let snapshot = self.subagent_queue_snapshot(parent).await?;
+        self.input_progress_with_mailbox(parent, snapshot.as_ref())
+            .await
+    }
+
+    pub(super) async fn subagent_queue_snapshot(
+        &self,
+        parent: &str,
+    ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
         let snapshot = self
             .session_handle(parent.to_owned())
             .await?
@@ -540,11 +549,18 @@ impl ApiBackend {
         {
             anyhow::bail!("{error}");
         }
+        Ok(snapshot)
+    }
+
+    pub(super) async fn input_progress_with_mailbox(
+        &self,
+        parent: &str,
+        snapshot: Option<&mj_core::state::ManagedSessionSnapshot>,
+    ) -> Result<InputProgress> {
         // The snapshot that scheduled these tools includes preceding requests.
         // The actor publishes completion updates; forcing a sync here would
         // race the lease used to deliver those very completions.
         let mut progress = snapshot
-            .as_ref()
             .map(InputProgress::from_snapshot)
             .unwrap_or_default();
         let parent = parent.to_owned();

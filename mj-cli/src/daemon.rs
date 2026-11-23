@@ -393,12 +393,14 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
         || launched.is_alive(),
         || async {
             if let Some(container) = &launched.container {
-                return connect_ready_container(&container.metadata).await;
+                let mut client = connect_ready_container(&container.metadata).await?;
+                let identity = request_daemon_identity(&mut client).await?;
+                return Ok((client, Some(identity)));
             }
             let mut client = connect_existing().await?;
             ping_daemon(&mut client).await?;
             check_store_readiness().await?;
-            Ok(client)
+            Ok((client, None))
         },
         |waited| {
             startup_notice(format!(
@@ -409,8 +411,20 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
     )
     .await;
     let reason = match outcome {
-        StartupOutcome::Ready(client) => {
-            if let Some(container) = &launched.container {
+        StartupOutcome::Ready((client, identity)) => {
+            if let Some(container) = &launched.container
+                && let Some(identity) = identity
+            {
+                if let (Some(address), Some(token)) = (container.api_address, &container.api_token)
+                {
+                    write_api_endpoint(&ApiEndpointMetadata {
+                        address,
+                        token: token.clone(),
+                        pid: 0,
+                        instance_id: identity.instance_id,
+                        protocol_version: container.metadata.protocol_version,
+                    })?;
+                }
                 write_launcher_metadata(&container.metadata)?;
             }
             tracing::info!(
@@ -697,7 +711,7 @@ async fn launch_daemon(
         }
     }
     if let Some(prior) = prior_unpublished {
-        remove_container_owner_if_matching(prior.address, &prior.token)?;
+        clear_container_owner(prior)?;
     }
     mj_core::runtime::spawn_blocking({
         let log_path = log_path.to_path_buf();
@@ -1373,6 +1387,15 @@ async fn adopt_container_daemon(record: &ContainerDaemonRecord) -> Result<Contai
     .await;
     match outcome {
         StartupOutcome::Ready(identity) => {
+            if let (Some(address), Some(token)) = (record.api_address, &record.api_token) {
+                write_api_endpoint(&ApiEndpointMetadata {
+                    address,
+                    token: token.clone(),
+                    pid: 0,
+                    instance_id: identity.instance_id.clone(),
+                    protocol_version: metadata.protocol_version,
+                })?;
+            }
             write_launcher_metadata(&DaemonMetadata {
                 placement: daemon_placement(&metadata, Some(identity.placement)),
                 build_version: identity.build_version,
@@ -1472,7 +1495,7 @@ async fn stop_pending_container(
             container_running: false,
         } => {
             // A stopped or absent container cannot start a delayed exec.
-            remove_container_owner_if_matching(record.address, &record.token)?;
+            clear_container_owner(record)?;
             Ok(false)
         }
         container::ContainerDaemonStatus::Running
@@ -1480,7 +1503,7 @@ async fn stop_pending_container(
             container_running: true,
         } if force => {
             container::stop(record.runtime, &record.container_id).await?;
-            remove_container_owner_if_matching(record.address, &record.token)?;
+            clear_container_owner(record)?;
             Ok(true)
         }
         container::ContainerDaemonStatus::Exited {
@@ -2049,11 +2072,33 @@ async fn handoff_owner_change(metadata: &DaemonMetadata) -> Result<Option<Handof
 
 // The caller holds the startup lock across the compare and removal.
 fn clear_exited_daemon(metadata: &DaemonMetadata) -> Result<()> {
+    let owner = if metadata.pid == 0 {
+        matching_container_owner(metadata)?
+    } else {
+        None
+    };
+    if let Some(record) = &owner {
+        remove_container_api_endpoint(record)?;
+    }
     remove_matching_metadata(metadata)?;
-    if metadata.pid == 0 {
-        remove_container_owner_if_matching(metadata.address, &metadata.token)?;
+    if let Some(record) = owner {
+        remove_container_owner_if_matching(record.address, &record.token)?;
     }
     Ok(())
+}
+
+fn remove_container_api_endpoint(record: &ContainerDaemonRecord) -> Result<()> {
+    let (Some(address), Some(token)) = (record.api_address, &record.api_token) else {
+        return Ok(());
+    };
+    remove_api_endpoint_if_matching(|endpoint| {
+        endpoint.pid == 0 && endpoint.address == address && &endpoint.token == token
+    })
+}
+
+fn clear_container_owner(record: &ContainerDaemonRecord) -> Result<()> {
+    remove_container_api_endpoint(record)?;
+    remove_container_owner_if_matching(record.address, &record.token)
 }
 
 fn remove_matching_metadata(previous: &DaemonMetadata) -> Result<bool> {
@@ -2190,6 +2235,8 @@ async fn ensure_container_owner_recorded(
             .await?
             .with_context(|| format!("container {name} was not listed by the engine"))?;
         write_container_owner(&ContainerDaemonRecord {
+            api_address: None,
+            api_token: None,
             schema: CONTAINER_OWNER_SCHEMA,
             protocol_version: Some(metadata.protocol_version),
             runtime: *runtime,
@@ -2282,11 +2329,11 @@ async fn stop_daemon(
 
 /// The caller holds the startup lock and has explicitly forced legacy recovery.
 async fn clear_unreachable_container_record(metadata: &DaemonMetadata) -> Result<bool> {
-    let unreadable = match matching_container_owner(metadata) {
-        Ok(Some(_)) => return Ok(false),
-        Ok(None) => false,
-        Err(_) => true,
-    };
+    let owner = read_container_owner();
+    let other_owner = owner.as_ref().ok().and_then(Option::as_ref);
+    if other_owner.is_some_and(|record| record.matches(metadata)) {
+        return Ok(false);
+    }
     if matches!(
         tokio::time::timeout(Duration::from_secs(2), connect_ready_container(metadata)).await,
         Ok(Ok(_))
@@ -2297,11 +2344,18 @@ async fn clear_unreachable_container_record(metadata: &DaemonMetadata) -> Result
         remove_matching_metadata(metadata)?,
         "The daemon.json record changed while stopping the Mjolnir daemon. Run the stop command again."
     );
+    remove_api_endpoint_if_matching(|endpoint| {
+        endpoint.pid == 0
+            && !other_owner.is_some_and(|record| {
+                record.api_address == Some(endpoint.address)
+                    && record.api_token.as_ref() == Some(&endpoint.token)
+            })
+    })?;
     eprintln!(
         "Cleared the stale container daemon record in {}.",
         metadata_path().display()
     );
-    if unreadable {
+    if owner.is_err() {
         clear_unreadable_container_owner()?;
     }
     Ok(true)
@@ -2660,6 +2714,8 @@ mod tests {
                     r#"
 printf '%s\n' "$*" >> "$MJ_DATA_DIR/engine.calls"
 state=$(cat "$MJ_DATA_DIR/engine.state")
+id=test-container-id
+[ ! -e "$MJ_DATA_DIR/engine.recreated" ] || id=recreated-container-id
 case "$1" in
   image) printf 'test-image|%s\n' "$MJ_TEST_IMAGE_REVISION" ;;
   ps)
@@ -2670,38 +2726,71 @@ case "$1" in
     case "$*" in
       *--format={{.Names}}*) if [ "$state" = "inspect-error" ]; then echo predecessor; fi ;;
       *id=old-container-id*) ;;
-      *id=test-container-id*) echo test-container-id ;;
+      *id="$id"*) echo "$id" ;;
       *'name=^/?'*)
         # Podman matches names without a leading slash; require `^/?` so a
         # Docker-only `^/` filter fails the suite.
         filter=$(printf '%s\n' "$*" | sed -n 's/.*name=\^\/?\([^$]*\)\$.*/\1/p' | sed 's/\[\.\]/./g')
         [ -n "$filter" ] || exit 64
-        printf 'test-container-id\t%s\n' "$filter" ;;
+        if [ "$state" != removed ]; then printf '%s\t%s\n' "$id" "$filter"; fi ;;
       *) exit 64 ;;
     esac ;;
   inspect)
-    [ "$2 $3" = "--format={{.State.Running}} test-container-id" ] || exit 64
+    [ "$2 $3" = "--format={{.State.Running}} $id" ] || exit 64
     case "$state" in
       inspect-error) echo 'No such container (simulated engine failure)' >&2; exit 125 ;;
       stopped) echo false ;;
       *) echo true ;;
     esac ;;
   top)
-    [ "$2 $3" = 'test-container-id args' ] || exit 64
-    printf 'COMMAND\nsleep infinity\n'
-    case "$state" in
-      daemon) echo '/opt/mjolnir/mj daemon-run' ;;
-      *) printf 'hel worker\ncodex app-server\n' ;;
+    [ "$2" = "$id" ] || exit 64
+    case "$3" in
+      args)
+        printf 'COMMAND\nsleep infinity\n'
+        case "$state" in
+          daemon) echo '/opt/mjolnir/mj daemon-run' ;;
+          legacy-idle) ;;
+          *) printf 'hel worker\ncodex app-server\n' ;;
+        esac ;;
+      pid)
+        printf 'PID\n1\n'
+        [ "$state" = legacy-idle ] || printf '2\n3\n' ;;
+      *) exit 64 ;;
     esac ;;
   start)
     [ "$2" = 'test-container-id' ] || exit 64
     echo worker > "$MJ_DATA_DIR/engine.state" ;;
-  port) cat "$MJ_DATA_DIR/engine.endpoint" ;;
+  port)
+    [ -z "$3" ] || exit 64
+    printf '8787/tcp -> %s\n' "$(cat "$MJ_DATA_DIR/engine.endpoint")"
+    case "$state" in
+      legacy-idle|legacy-workers) ;;
+      *)
+        api=127.0.0.1:8788
+        if [ -e "$MJ_DATA_DIR/engine.api-endpoint" ]; then
+          api=$(cat "$MJ_DATA_DIR/engine.api-endpoint")
+        fi
+        printf '8788/tcp -> %s\n' "$api" ;;
+    esac ;;
+  rm)
+    [ "$2 $3 $state" = '--force test-container-id legacy-idle' ] || exit 64
+    echo removed > "$MJ_DATA_DIR/engine.state" ;;
+  volume)
+    [ "$2 $state" = 'create removed' ] || exit 64 ;;
+  run)
+    [ "$state" = removed ] || exit 64
+    case "$*" in
+      *--publish=127.0.0.1::8787*--publish=127.0.0.1::8788*) ;;
+      *) exit 64 ;;
+    esac
+    touch "$MJ_DATA_DIR/engine.recreated"
+    echo idle > "$MJ_DATA_DIR/engine.state" ;;
   exec)
     [ "$2" = '--detach' ] || exit 64
     [ -s "$MJ_DATA_DIR/daemon-container.json" ] || exit 65
     [ ! -e "$MJ_DATA_DIR/daemon.json" ] || exit 66
     printf '%s' "$MJ_DAEMON_TOKEN" > "$MJ_DATA_DIR/exec.token"
+    printf '%s' "$MJ_DAEMON_API_TOKEN" > "$MJ_DATA_DIR/exec.api-token"
     echo daemon > "$MJ_DATA_DIR/engine.state" ;;
   stop)
     [ "$2" = 'test-container-id' ] || exit 64
@@ -2749,6 +2838,8 @@ esac
             name: &str,
         ) -> ContainerDaemonRecord {
             ContainerDaemonRecord {
+                api_address: None,
+                api_token: None,
                 schema: CONTAINER_OWNER_SCHEMA,
                 protocol_version: Some(metadata.protocol_version),
                 runtime: RUNTIME,
@@ -2770,17 +2861,96 @@ esac
 
         async fn serve_container_readiness(
             listener: &tokio::net::TcpListener,
-            identity: Option<DaemonIdentity>,
-        ) {
+            identity: DaemonIdentity,
+        ) -> tokio::net::TcpStream {
             let (mut stream, _) = listener.accept().await.unwrap();
             let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
             assert!(matches!(ping.action, DaemonAction::Ping));
             assert_eq!(ping.token, read_container_owner().unwrap().unwrap().token);
             answer(&mut stream, ping, Ok(DaemonReply::Pong)).await;
-            if let Some(identity) = identity {
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert!(matches!(request.action, DaemonAction::Identity));
-                answer(&mut stream, request, Ok(DaemonReply::Identity(identity))).await;
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            assert!(matches!(request.action, DaemonAction::Identity));
+            answer(&mut stream, request, Ok(DaemonReply::Identity(identity))).await;
+            stream
+        }
+
+        #[tokio::test]
+        async fn single_port_container_is_recreated_only_when_idle() {
+            if fake_podman(
+                "MJ_TEST_SINGLE_PORT_CONTAINER",
+                "daemon::tests::container_tests::single_port_container_is_recreated_only_when_idle",
+            ) {
+                return;
+            }
+            for (state, pending, recreate) in [
+                ("legacy-workers", false, false),
+                ("legacy-idle", true, false),
+                ("legacy-idle", false, true),
+            ] {
+                engine_state(state);
+                fs::write(data_dir().join("engine.calls"), "").unwrap();
+                let spec = configure_container().await;
+                let (listener, metadata) = fake_daemon(0).await;
+                set_endpoint(&listener);
+                if pending {
+                    write_container_owner(&owner(&metadata, CONTAINER_ID, &spec.name)).unwrap();
+                }
+                let identity = DaemonIdentity {
+                    instance_id: state.into(),
+                    build_version: this_build().published(),
+                    placement: DaemonPlacement::Container {
+                        name: spec.name,
+                        runtime: Some(RUNTIME),
+                    },
+                };
+                let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+                    .await
+                    .unwrap();
+                let (opened, _stream) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(
+                        connect_or_start_holding(&startup),
+                        serve_container_readiness(&listener, identity),
+                    )
+                })
+                .await
+                .unwrap();
+                opened.unwrap();
+                let metadata = read_metadata_any().unwrap();
+                let owner = read_container_owner().unwrap().unwrap();
+                assert!(owner.matches(&metadata));
+                if pending {
+                    assert_eq!(owner.token, "lifecycle-test");
+                }
+                let calls = calls();
+                assert_eq!(calls.contains("top test-container-id pid"), !pending);
+                assert_eq!(calls.contains("rm --force test-container-id"), recreate);
+                assert!(!calls.contains("stop test-container-id"));
+                assert_eq!(
+                    owner.container_id,
+                    if recreate {
+                        "recreated-container-id"
+                    } else {
+                        CONTAINER_ID
+                    }
+                );
+                assert_eq!(
+                    calls.contains("--env=MJ_DAEMON_API_LISTEN=0.0.0.0:8788"),
+                    recreate
+                );
+                assert_eq!(calls.contains("--env=MJ_DAEMON_API_TOKEN"), recreate);
+                if recreate {
+                    let endpoint = read_api_endpoint().unwrap().unwrap();
+                    assert_eq!(endpoint.instance_id, state);
+                    assert_eq!(owner.api_address, Some(endpoint.address));
+                    assert_eq!(owner.api_token, Some(endpoint.token));
+                    assert!(calls.contains("recreated-container-id sh -c"));
+                } else {
+                    assert!(owner.api_address.is_none());
+                    assert!(owner.api_token.is_none());
+                    assert!(read_api_endpoint().unwrap().is_none());
+                    assert!(calls.contains("test-container-id sh -c"));
+                }
+                clear_exited_daemon(&metadata).unwrap();
             }
         }
 
@@ -2793,6 +2963,7 @@ esac
             ) {
                 return;
             }
+            mj_daemon::server::install_rustls_crypto_provider();
             engine_state("worker");
             let spec = configure_container().await;
             for (state, old_id) in [
@@ -2804,6 +2975,28 @@ esac
                 fs::write(data_dir().join("engine.calls"), "").unwrap();
                 let (old, metadata) = fake_daemon(0).await;
                 let (ready, _) = fake_daemon(0).await;
+                let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let api_address = api.local_addr().unwrap();
+                fs::write(
+                    data_dir().join("engine.api-endpoint"),
+                    api_address.to_string(),
+                )
+                .unwrap();
+                let api_task = mj_core::runtime::spawn(async move {
+                    let router = axum::Router::new().route(
+                        "/api/v1/sessions",
+                        axum::routing::get(|| async {
+                            (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                [(
+                                    mj_daemon::server::api::API_VERSION_HEADER,
+                                    mj_daemon::server::api::API_VERSION,
+                                )],
+                            )
+                        }),
+                    );
+                    axum::serve(api, router).await.unwrap();
+                });
                 drop(old);
                 set_endpoint(&ready);
                 write_launcher_metadata(&metadata).unwrap();
@@ -2816,15 +3009,47 @@ esac
                 let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
                     .await
                     .unwrap();
-                let (opened, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-                    tokio::join!(
-                        connect_or_start_holding(&startup),
-                        serve_container_readiness(&ready, None),
+                let identity = DaemonIdentity {
+                    instance_id: "replacement".into(),
+                    build_version: this_build().published(),
+                    placement: DaemonPlacement::Container {
+                        name: spec.name.clone(),
+                        runtime: Some(RUNTIME),
+                    },
+                };
+                let peer = async {
+                    let mut stream = serve_container_readiness(&ready, identity.clone()).await;
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    assert!(matches!(request.action, DaemonAction::WebViewerAccess));
+                    answer(
+                        &mut stream,
+                        request,
+                        Ok(DaemonReply::WebViewerAccess(
+                            mj_client::web::WebViewerAccess::Unavailable("viewer disabled".into()),
+                        )),
                     )
+                    .await;
+                };
+                let check = async {
+                    let mut client = connect_or_start_holding(&startup).await.unwrap();
+                    crate::api_client::ApiClient::connect_to(&mut client, &identity)
+                        .await
+                        .unwrap();
+                    let stale = DaemonIdentity {
+                        instance_id: "old".into(),
+                        ..identity.clone()
+                    };
+                    let error = crate::api_client::ApiClient::connect_to(&mut client, &stale)
+                        .await
+                        .err()
+                        .unwrap();
+                    assert!(format!("{error:#}").contains("viewer disabled"));
+                };
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(check, peer);
                 })
                 .await
                 .unwrap();
-                opened.unwrap();
                 let published = read_metadata_any().unwrap();
                 let record = read_container_owner().unwrap().unwrap();
                 assert_eq!(published.address, ready.local_addr().unwrap());
@@ -2850,7 +3075,23 @@ esac
                     state == "stopped",
                     "{calls}"
                 );
+                let mut endpoint = read_api_endpoint().unwrap().unwrap();
+                assert_eq!(endpoint.address, api_address);
+                assert_eq!(endpoint.instance_id, identity.instance_id);
+                assert_eq!(endpoint.pid, 0);
+                assert_eq!(record.api_token.as_deref(), Some(endpoint.token.as_str()));
+                assert_eq!(
+                    fs::read_to_string(data_dir().join("exec.api-token")).unwrap(),
+                    endpoint.token
+                );
+                let preserve = state == "worker";
+                if preserve {
+                    endpoint.token = "another-owner".into();
+                    write_api_endpoint(&endpoint).unwrap();
+                }
                 clear_exited_daemon(&published).unwrap();
+                assert_eq!(read_api_endpoint().unwrap().is_some(), preserve);
+                api_task.abort();
             }
         }
 
@@ -2989,9 +3230,9 @@ esac
             };
             let peer = async {
                 assert!(!metadata_path().exists());
-                serve_container_readiness(&listener, Some(identity.clone())).await;
+                serve_container_readiness(&listener, identity.clone()).await;
                 // The published record now goes back through build/placement discovery.
-                serve_container_readiness(&listener, Some(identity)).await;
+                serve_container_readiness(&listener, identity).await;
             };
             let (opened, ()) = tokio::time::timeout(Duration::from_secs(10), async {
                 tokio::join!(connect_or_start_local(), peer)
@@ -3002,6 +3243,10 @@ esac
             let published = read_metadata_any().unwrap();
             assert!(same_daemon_endpoint(&published, &launch.metadata));
             assert_eq!(published.build_version, "999.0.0");
+            let endpoint = read_api_endpoint().unwrap().unwrap();
+            assert_eq!(endpoint.instance_id, "adopted");
+            assert_eq!(Some(endpoint.address), launch.api_address);
+            assert_eq!(Some(endpoint.token), launch.api_token);
             assert_eq!(
                 calls()
                     .lines()
@@ -3022,7 +3267,11 @@ esac
             engine_state("worker");
             let spec = configure_container().await;
             let (listener, metadata) = fake_daemon(0).await;
-            let prior = owner(&metadata, CONTAINER_ID, &spec.name);
+            let prior = ContainerDaemonRecord {
+                api_address: Some("127.0.0.1:8788".parse().unwrap()),
+                api_token: Some("prior-http-token".into()),
+                ..owner(&metadata, CONTAINER_ID, &spec.name)
+            };
             set_endpoint(&listener);
             write_container_owner(&prior).unwrap();
             assert!(!metadata_path().exists());
@@ -3059,8 +3308,25 @@ esac
                     fs::read_to_string(data_dir().join("exec.token")).unwrap(),
                     prior.token
                 );
-                assert_eq!(read_container_owner().unwrap().unwrap().token, prior.token);
+                let record = read_container_owner().unwrap().unwrap();
+                assert_eq!(record.token, prior.token);
+                assert_eq!(record.api_token, prior.api_token);
+                let api_token = fs::read_to_string(data_dir().join("exec.api-token")).unwrap();
+                assert_eq!(Some(&api_token), prior.api_token.as_ref());
+                assert!(!calls().contains(&api_token));
                 answer(&mut stream, ping, Ok(DaemonReply::Pong)).await;
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(request.action, DaemonAction::Identity));
+                answer(
+                    &mut stream,
+                    request,
+                    Ok(DaemonReply::Identity(DaemonIdentity {
+                        instance_id: "retried".into(),
+                        build_version: this_build().published(),
+                        placement: metadata.placement.clone(),
+                    })),
+                )
+                .await;
             };
             let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
                 .await

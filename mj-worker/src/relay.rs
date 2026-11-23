@@ -1341,11 +1341,16 @@ impl DurableRelay {
                 .get(&initial.command_id)
                 .and_then(|receipt| receipt.failure.as_deref())
             {
-                anyhow::bail!(
-                    "initial worker command {} ({:?}) failed: {failure}",
-                    initial.command_id,
-                    initial.command.kind()
-                );
+                return Err(anyhow::Error::new(
+                    mj_core::relay::WorkerHarnessStartupFailure {
+                        message: format!(
+                            "initial worker command {} ({:?}) failed: {failure}",
+                            initial.command_id,
+                            initial.command.kind()
+                        ),
+                        kind: None,
+                    },
+                ));
             }
         }
         Ok(())
@@ -1425,8 +1430,6 @@ impl DurableRelay {
         state.turn_controls = Some(self.turn_controls());
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
-        state.tools_in_flight = self.foreground_tools.snapshot();
-        state.foreground_tool_started_at_ms = self.foreground_tools.newest_started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.native_agent_count = self.native_agent_count();
         state.clear_context = self.supports_clear_context();
@@ -1440,6 +1443,9 @@ impl DurableRelay {
         state.task_settled_at_ms = facts.task_settled_at_ms;
         state.background_needed = facts.background_needed;
         state.activity = Some(mj_core::activity::classify(&facts));
+        state.foreground_tool_started_at_ms =
+            facts.tools_in_flight.last().map(|tool| tool.started_at_ms);
+        state.tools_in_flight = facts.tools_in_flight;
         // The worker alone decides whether it still owes a retry of a failed
         // turn (the durable intent, apart from its submit gate); the daemon
         // only reads the answer. `authentication_retry_waiting` is retired.
@@ -1968,16 +1974,6 @@ impl DurableRelay {
             | RelayObservation::Closed => Some(false),
             _ => None,
         };
-        // A restart or a close ends the harness process that owned whatever it
-        // had left running, so nothing it reported is still alive.
-        if matches!(
-            observation,
-            RelayObservation::SessionRestarted
-                | RelayObservation::Closing
-                | RelayObservation::Closed
-        ) {
-            self.forget_harness_processes();
-        }
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {
             self.set_acp_ready(ready);
@@ -2081,14 +2077,6 @@ impl DurableRelay {
         }
         if claude && !ack && self.opens_harness_turn(&update) {
             self.open_harness_turn_if_allowed()?;
-        }
-        self.foreground_tools.observe_with_start(
-            &update,
-            self.step_clock.started_at_ms().unwrap_or_else(epoch_millis),
-        );
-        if self.background_work == BackgroundWorkPolicy::KimiTasks {
-            self.track_agent_terminal_tool_call(&update);
-            self.track_kimi_background_agent(&update);
         }
         let ordinal = self.record_observation(RelayObservation::SessionUpdate {
             update: Box::new(update),
@@ -2281,14 +2269,6 @@ impl DurableRelay {
                 *ordinal = None;
             }
         }
-        self.finish_turn_activity()?;
-        Ok(())
-    }
-
-    /// Forget provisional tool statuses at a boundary the harness itself has
-    /// confirmed. Independently tracked background work survives into idle.
-    fn finish_turn_activity(&mut self) -> Result<()> {
-        self.foreground_tools.clear();
         self.persist_activity_transition()
     }
 
@@ -2333,8 +2313,10 @@ impl DurableRelay {
             && !matches!(update, SessionUpdate::ToolCallUpdate(_))
             // Our terminal inventory/card is not evidence of a parent model
             // cycle: a child may request it while the parent remains idle.
+            // Reannouncing a retired call also cannot establish a new cycle.
             && !matches!(update, SessionUpdate::ToolCall(call)
-                if crate::acp::is_fallback_terminal_tool_call(call))
+                if crate::acp::is_fallback_terminal_tool_call(call)
+                    || self.foreground_tools.is_retired(call.tool_call_id.0.as_ref()))
             && self.can_open_harness_turn()
     }
 

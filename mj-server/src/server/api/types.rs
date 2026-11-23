@@ -238,11 +238,7 @@ impl From<&ViewerSession> for ApiSession {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StopBackgroundTaskRequest {
-    pub background_task_id: String,
-}
+pub use mj_client::http::StopBackgroundTaskRequest;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionListResponse {
@@ -892,20 +888,7 @@ pub struct WikiHitsQuery {
 
 /// The fields of a start request a restore needs. The archived session decides
 /// the rest: its title, and the project it ran in when the caller names none.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WikiRestoreBody {
-    #[serde(default)]
-    pub workspace_id: Option<String>,
-    pub profile_id: String,
-    pub target_id: String,
-    #[serde(default)]
-    pub project_directory: Option<PathBuf>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-}
+pub use mj_client::http::{WikiRestoreBody, WikiRestoreResponse};
 
 // ---------------------------------------------------------------------------
 // Launch options

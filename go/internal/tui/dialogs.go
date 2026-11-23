@@ -13,8 +13,10 @@
 package tui
 
 import (
+	"maps"
 	"math"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -311,7 +313,39 @@ func (d *WebDialog) Clone() WebDialog {
 
 // buttonRows is the dialog's footer: one row of buttons per line.
 func (d *WebDialog) buttonRows() [][]chat.ButtonSpec[DialogControl] {
-	panic("unported: mj-tui/src/dialogs.rs WebDialog::button_rows")
+	if d.confirmStop != nil {
+		return [][]chat.ButtonSpec[DialogControl]{{
+			{ID: DialogControlWebCancelStop, Label: "Cancel", Enabled: true},
+			{ID: DialogControlWebConfirmStop, Label: "Stop and retry", Enabled: true},
+		}}
+	}
+	if d.loading || d.failedAddress == nil {
+		// One empty row: the footer keeps its height while nothing is
+		// actionable.
+		return [][]chat.ButtonSpec[DialogControl]{nil}
+	}
+	rows := [][]chat.ButtonSpec[DialogControl]{{
+		{ID: DialogControlWebAnotherPort, Label: "Use another port", Enabled: !d.inspecting},
+		{ID: DialogControlWebRetry, Label: "Retry", Enabled: !d.inspecting},
+	}}
+	if d.listenerIndex >= 0 && d.listenerIndex < len(d.listeners) {
+		process := d.listeners[d.listenerIndex]
+		buttons := []chat.ButtonSpec[DialogControl]{{
+			ID:      DialogControlWebStop,
+			Label:   "Stop server…",
+			Enabled: process.StopDisabledReason == nil,
+		}}
+		if len(d.listeners) > 1 {
+			buttons = append(buttons, chat.ButtonSpec[DialogControl]{ID: DialogControlWebNextProcess, Label: "Next process", Enabled: true})
+		}
+		rows = append(rows, buttons)
+	}
+	var footer []chat.ButtonSpec[DialogControl]
+	if d.portConflict {
+		footer = append(footer, chat.ButtonSpec[DialogControl]{ID: DialogControlWebInspect, Label: "Inspect port", Enabled: !d.inspecting})
+	}
+	rows = append(rows, footer)
+	return rows
 }
 
 func (d *WebDialog) defaultControl() DialogControl {
@@ -722,33 +756,220 @@ func confirmationSessionID(confirmation Confirmation) (string, bool) {
 // the user sees in the session list, with the id only when the record is
 // gone.
 func (d *DashboardState) confirmDialog(confirmation Confirmation) ConfirmDialog {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::confirm_dialog")
+	var name *string
+	if sessionID, ok := confirmationSessionID(confirmation); ok {
+		if session := d.SessionRecord(sessionID); session != nil {
+			listed := sessionName(session)
+			name = &listed
+		}
+	}
+	dialog := newConfirmDialog(confirmation)
+	if name != nil {
+		return dialog.namingSession(*name)
+	}
+	return dialog
 }
 
 func (d *DashboardState) ApplyWebAccess(access client.WebViewerAccess) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::apply_web_access")
+	current, ok := d.mode.(ModeWeb)
+	if !ok {
+		return
+	}
+	if _, starting := access.(client.WebViewerAccessStarting); starting {
+		current.loading = true
+		current.resetForm()
+		return
+	}
+	dialog := webDialogLoading()
+	dialog.loading = false
+	switch access := access.(type) {
+	case client.WebViewerAccessReady:
+		viewerURL, viewerCode := access.ViewerURL, access.ViewerCode
+		dialog.viewerURL = &viewerURL
+		dialog.viewerCode = &viewerCode
+		dialog.fallbackReason = dialogsCloneString(access.FallbackReason)
+		if access.QrLoginURL != nil {
+			qr, err := renderQR(*access.QrLoginURL)
+			if err != nil {
+				reason := err.Error()
+				dialog.fallbackReason = &reason
+			} else {
+				dialog.qr = &qr
+			}
+		}
+	case client.WebViewerAccessFailed:
+		address, message := access.Address, access.Message
+		dialog.failedAddress = &address
+		dialog.portConflict = access.PortConflict
+		dialog.message = &message
+	case client.WebViewerAccessUnavailable:
+		message := access.Message
+		dialog.message = &message
+	}
+	dialog.resetForm()
+	d.mode = ModeWeb{&dialog}
+}
+
+// dialogsCloneString is a copy of an optional string, so the copy owns its value
+// as Rust's moved Option<String> does.
+func dialogsCloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }
 
 // ApplyWebListeners takes the processes found listening on the web viewer's
 // port, or the error that stopped the inspection.
 func (d *DashboardState) ApplyWebListeners(processes []client.WebListenerProcess, err error) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::apply_web_listeners")
+	current, ok := d.mode.(ModeWeb)
+	if !ok {
+		return
+	}
+	dialog := current.WebDialog
+	dialog.inspecting = false
+	if err == nil {
+		dialog.inspectionMessage = nil
+		if len(processes) == 0 {
+			message := "No visible listener was found. It may have exited, or your account may not have permission to inspect it. Retry or use another port."
+			dialog.inspectionMessage = &message
+		}
+		dialog.listeners = processes
+		dialog.listenerIndex = 0
+	} else {
+		message := err.Error()
+		dialog.inspectionMessage = &message
+	}
+	dialog.resetForm()
 }
 
 func (d *DashboardState) ApplyWebError(message string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::apply_web_error")
+	current, ok := d.mode.(ModeWeb)
+	if !ok {
+		return
+	}
+	dialog := current.WebDialog
+	dialog.loading = false
+	dialog.confirmStop = nil
+	inspection := message
+	dialog.inspectionMessage = &inspection
+	if dialog.failedAddress == nil {
+		dialog.message = &message
+	}
+	dialog.resetForm()
 }
 
 func (d *DashboardState) handleWebEvent(event tea.Msg, dialog WebDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_web_event")
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	var action DashboardAction = DashboardActionNone{}
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		if dialog.confirmStop != nil {
+			dialog.confirmStop = nil
+			dialog.resetForm()
+		} else {
+			d.CancelModal()
+			return DashboardActionCancelWebAccess{}
+		}
+	case chat.InteractionActivate[DialogControl]:
+		switch {
+		case interaction.ID == DialogControlWebRetry && !dialog.loading:
+			action = DashboardActionRecoverWebViewer{Recovery: client.WebViewerRecoveryRetry{}}
+		case interaction.ID == DialogControlWebAnotherPort && !dialog.loading:
+			action = DashboardActionRecoverWebViewer{Recovery: client.WebViewerRecoveryAnotherPort{}}
+		case interaction.ID == DialogControlWebInspect && !dialog.inspecting:
+			dialog.inspecting = true
+			dialog.inspectionMessage = nil
+			dialog.listeners = dialog.listeners[:0]
+			dialog.resetForm()
+			action = DashboardActionInspectWebListener{}
+		case interaction.ID == DialogControlWebNextProcess && len(dialog.listeners) > 0:
+			dialog.listenerIndex = (dialog.listenerIndex + 1) % len(dialog.listeners)
+		case interaction.ID == DialogControlWebStop:
+			if dialog.listenerIndex >= 0 && dialog.listenerIndex < len(dialog.listeners) {
+				process := dialog.listeners[dialog.listenerIndex]
+				if process.StopDisabledReason == nil {
+					dialog.confirmStop = &process
+					dialog.resetForm()
+				}
+			}
+		case interaction.ID == DialogControlWebCancelStop:
+			dialog.confirmStop = nil
+			dialog.resetForm()
+		case interaction.ID == DialogControlWebConfirmStop:
+			if process := dialog.confirmStop; process != nil {
+				dialog.confirmStop = nil
+				action = DashboardActionRecoverWebViewer{Recovery: client.WebViewerRecoveryStopAndRetry{Process: *process}}
+			}
+		}
+	}
+	if _, recovering := action.(DashboardActionRecoverWebViewer); recovering {
+		dialog.loading = true
+		dialog.inspectionMessage = nil
+		dialog.resetForm()
+	}
+	d.mode = ModeWeb{&dialog}
+	return action
 }
 
 func (d *DashboardState) beginProfileRename() {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::begin_profile_rename")
+	var oldID string
+	found := false
+	switch row := d.selectedQuotaRow().(type) {
+	case QuotaRowLane:
+		oldID, found = row.ID, true
+	case QuotaRowProfile:
+		oldID, found = row.ID, true
+	case QuotaRowPool:
+	pools:
+		for _, provider := range d.quotaPools() {
+			for _, pool := range provider.Pools {
+				if pool.Key == row.Key && len(pool.Members) == 1 {
+					oldID, found = pool.Members[0].ID, true
+					break pools
+				}
+			}
+		}
+	}
+	if !found {
+		d.beginSettingsSection("profiles", nil)
+		return
+	}
+	d.mode = ModeConfigId{&ConfigIdEditor{
+		kind:  ConfigEntryKindProfile,
+		value: chat.TextInputFromValue(oldID).WithMaxChars(64),
+		oldID: oldID,
+		form: dialogForm(
+			[]DialogControl{DialogControlField, DialogControlCancel, DialogControlSave},
+			DialogControlField,
+		),
+	}}
 }
 
 func (d *DashboardState) beginTargetActions() {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::begin_target_actions")
+	var preferred *string
+	capacityKeys := slices.Sorted(maps.Keys(d.capacityDetails))
+	if d.capacityIndex >= 0 && d.capacityIndex < len(capacityKeys) {
+		if detail := d.capacityDetails[capacityKeys[d.capacityIndex]]; len(detail.Reading.TargetIDs) > 0 {
+			first := detail.Reading.TargetIDs[0]
+			preferred = &first
+		}
+	}
+	targetIDs := slices.Sorted(maps.Keys(d.config.Get().Targets))
+	targetIndex := 0
+	if preferred != nil {
+		if index := slices.Index(targetIDs, *preferred); index >= 0 {
+			targetIndex = index
+		}
+	}
+	targetCount := len(targetIDs)
+	d.mode = ModeTargetActions{&TargetActionsDialog{
+		targetIDs:   targetIDs,
+		targetIndex: targetIndex,
+		form:        targetActionsForm(targetCount, targetIndex, DialogControlTargetList),
+	}}
 }
 
 // targetTestRunning says whether the target-actions dialog is running a test
@@ -758,17 +979,90 @@ func (d *DashboardState) beginTargetActions() {
 // allowed through, so both the availability gate and the dispatch arm ask
 // this question.
 func (d *DashboardState) targetTestRunning() bool {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::target_test_running")
+	mode, ok := d.mode.(ModeTargetActions)
+	return ok && mode.testing != nil
 }
 
 // cancelTargetTest cancels the target test the dialog is running, if there
 // is one; nil when there is none.
 func (d *DashboardState) cancelTargetTest() DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::cancel_target_test")
+	mode, ok := d.mode.(ModeTargetActions)
+	if !ok || mode.testing == nil {
+		return nil
+	}
+	dialog := mode.TargetActionsDialog
+	dialog.testing = nil
+	cancelled := "cancelled"
+	dialog.result = &targetTestResult{targetID: "Target test", failure: &cancelled}
+	syncTargetActionsForm(dialog)
+	return DashboardActionCancelTargetTest{}
 }
 
 func (d *DashboardState) handleTargetActionsEvent(event tea.Msg, dialog TargetActionsDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_target_actions_event")
+	// Preserve the convenient Up/Down target selection from the old surface
+	// while letting the form own the selection metadata.
+	if press, ok := event.(tea.KeyPressMsg); ok && !press.IsRepeat {
+		switch chat.KeyPressCode(press) {
+		case tea.KeyUp, tea.KeyDown, 'j', 'k':
+			if !dialog.form.IsFocused(DialogControlTargetList) {
+				dialog.form.Focus(DialogControlTargetList)
+			}
+		}
+	}
+	// The field's kind carries its popup state, so it is re-declared on every
+	// event before the form reads keys against it.
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		cancelTest := dialog.testing != nil
+		d.CancelModal()
+		if cancelTest {
+			return DashboardActionCancelTargetTest{}
+		}
+	case chat.InteractionSelect[DialogControl]:
+		if interaction.ID != DialogControlTargetList {
+			d.mode = ModeTargetActions{&dialog}
+			break
+		}
+		dialog.targetIndex = min(interaction.Index, max(len(dialog.targetIDs)-1, 0))
+		d.mode = ModeTargetActions{&dialog}
+	case chat.InteractionActivate[DialogControl]:
+		if dialog.targetIndex < 0 || dialog.targetIndex >= len(dialog.targetIDs) {
+			d.CancelModal()
+			return DashboardActionNone{}
+		}
+		targetID := dialog.targetIDs[dialog.targetIndex]
+		switch {
+		case interaction.ID == DialogControlTargetSettings && dialog.testing == nil:
+			d.beginSettingsSection("targets", &targetID)
+			return DashboardActionNone{}
+		case interaction.ID == DialogControlTargetRename:
+			parent := dialog
+			d.mode = ModeConfigId{&ConfigIdEditor{
+				kind:     ConfigEntryKindTarget,
+				returnTo: &parent,
+				value:    chat.TextInputFromValue(targetID).WithMaxChars(64),
+				oldID:    targetID,
+				form: dialogForm(
+					[]DialogControl{DialogControlField, DialogControlCancel, DialogControlSave},
+					DialogControlField,
+				),
+			}}
+			return DashboardActionNone{}
+		case interaction.ID == DialogControlTargetTest && dialog.testing == nil:
+			testing := targetID
+			dialog.testing = &testing
+			dialog.result = nil
+			syncTargetActionsForm(&dialog)
+			d.mode = ModeTargetActions{&dialog}
+			return DashboardActionTestTarget{TargetID: targetID}
+		}
+		d.mode = ModeTargetActions{&dialog}
+	default:
+		d.mode = ModeTargetActions{&dialog}
+	}
+	return DashboardActionNone{}
 }
 
 // handleTextPromptEvent routes one event through a text-prompt dialog: the
@@ -776,25 +1070,102 @@ func (d *DashboardState) handleTargetActionsEvent(event tea.Msg, dialog TargetAc
 // make. The caller keeps what only it knows: where a cancel goes and what a
 // submitted value means.
 func (d *DashboardState) handleTextPromptEvent(form *chat.Dialog[DialogControl], value *chat.TextInput, event tea.Msg, emptyMessage string) TextPromptOutcome {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_text_prompt_event")
+	result := form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		return TextPromptOutcomeCancel
+	case chat.InteractionActivate[DialogControl]:
+		switch interaction.ID {
+		case DialogControlCancel:
+			return TextPromptOutcomeCancel
+		case DialogControlField, DialogControlSave:
+			if strings.TrimSpace(value.Value()) == "" {
+				d.notices.Set(emptyMessage)
+				return TextPromptOutcomeRejected
+			}
+			return TextPromptOutcomeSubmit
+		}
+	case chat.InteractionEdit[DialogControl]:
+		if interaction.ID == DialogControlField {
+			chat.TextFieldApply(value, interaction.Edit)
+			return TextPromptOutcomeEdited
+		}
+	}
+	return TextPromptOutcomeEdited
 }
 
 func (d *DashboardState) handleConfigIDEvent(event tea.Msg, editor ConfigIdEditor) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_config_id_event")
+	outcome := d.handleTextPromptEvent(&editor.form, &editor.value, event, "Configuration ID cannot be empty.")
+	switch outcome {
+	case TextPromptOutcomeCancel:
+		// This editor can be reached from the target actions dialog, which
+		// expects to come back when the rename is abandoned.
+		if parent := editor.returnTo; parent != nil {
+			editor.returnTo = nil
+			d.mode = ModeTargetActions{parent}
+		} else {
+			d.CancelModal()
+		}
+	case TextPromptOutcomeEdited, TextPromptOutcomeRejected:
+		d.mode = ModeConfigId{&editor}
+	case TextPromptOutcomeSubmit:
+		d.CancelModal()
+		switch editor.kind {
+		case ConfigEntryKindTarget:
+			return DashboardActionRenameTarget{OldID: editor.oldID, NewID: editor.value.IntoValue()}
+		default:
+			return DashboardActionRenameProfile{OldID: editor.oldID, NewID: editor.value.IntoValue()}
+		}
+	}
+	return DashboardActionNone{}
 }
 
 // ApplyTargetTest takes the result of testing targetID; err is nil when the
 // target was ready.
 func (d *DashboardState) ApplyTargetTest(targetID string, err error) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::apply_target_test")
+	mode, ok := d.mode.(ModeTargetActions)
+	if !ok || mode.testing == nil || *mode.testing != targetID {
+		return
+	}
+	dialog := mode.TargetActionsDialog
+	dialog.testing = nil
+	result := &targetTestResult{targetID: targetID}
+	if err != nil {
+		failure := err.Error()
+		result.failure = &failure
+	}
+	dialog.result = result
+	syncTargetActionsForm(dialog)
 }
 
 func (d *DashboardState) ShowRepositoryOriginDialog(sessionID string, repositoryID string, missingCommit string, archivedOrigin string, configuredOrigin string, launch DashboardAction) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_repository_origin_dialog")
+	// This dialog is a result of the resume check. Moving the generation on
+	// ends the check, so any other result sent under it is dropped instead of
+	// replacing this dialog or launching behind it.
+	d.invalidateSessionPreflight()
+	d.mode = ModeRepositoryOrigin{&RepositoryOriginDialog{
+		sessionID:        sessionID,
+		repositoryID:     repositoryID,
+		missingCommit:    missingCommit,
+		archivedOrigin:   archivedOrigin,
+		replacement:      chat.NewPathInput(),
+		configuredOrigin: configuredOrigin,
+		form: dialogForm(
+			[]DialogControl{DialogControlField, DialogControlCancel, DialogControlPrimary},
+			DialogControlField,
+		),
+		launch: launch,
+	}}
 }
 
 func (d *DashboardState) ApplyRepositoryOriginFailure(repositoryID string, message string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::apply_repository_origin_failure")
+	mode, ok := d.mode.(ModeRepositoryOrigin)
+	if !ok || mode.repositoryID != repositoryID {
+		return
+	}
+	mode.error = &message
+	mode.form.Focus(DialogControlField)
 }
 
 func (d *DashboardState) FinishResumeRepositoryPreflight() {
@@ -802,7 +1173,53 @@ func (d *DashboardState) FinishResumeRepositoryPreflight() {
 }
 
 func (d *DashboardState) handleRepositoryOriginEvent(event tea.Msg, dialog RepositoryOriginDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_repository_origin_event")
+	// The field's kind carries its popup state, so it is re-declared on every
+	// event before the form reads keys against it.
+	dialog.form.Declare(DialogControlField, dialog.replacement.ControlKind())
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	action, interaction, consumed := routePathCompletion(d, &dialog, result.Action)
+	if consumed {
+		d.mode = ModeRepositoryOrigin{&dialog}
+		return action
+	}
+	switch interaction := interaction.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		d.CancelModal()
+	case chat.InteractionActivate[DialogControl]:
+		switch interaction.ID {
+		case DialogControlCancel:
+			d.CancelModal()
+		case DialogControlField, DialogControlPrimary:
+			if strings.TrimSpace(dialog.replacement.Value()) == "" {
+				message := "Enter the repository's new origin."
+				dialog.error = &message
+				dialog.form.Focus(DialogControlField)
+				d.mode = ModeRepositoryOrigin{&dialog}
+			} else {
+				action := DashboardActionReplaceResumeRepositoryOrigin{
+					SessionID:    dialog.sessionID,
+					RepositoryID: dialog.repositoryID,
+					Replacement:  dialog.replacement.String(),
+					Launch:       dialog.launch,
+				}
+				d.mode = ModeRepositoryOrigin{&dialog}
+				return action
+			}
+		default:
+			d.mode = ModeRepositoryOrigin{&dialog}
+		}
+	case chat.InteractionEdit[DialogControl]:
+		if interaction.ID == DialogControlField {
+			if chat.PathFieldApply(&dialog.replacement, interaction.Edit) == chat.EditOutcomeChanged {
+				dialog.error = nil
+			}
+		}
+		d.mode = ModeRepositoryOrigin{&dialog}
+	default:
+		d.mode = ModeRepositoryOrigin{&dialog}
+	}
+	return DashboardActionNone{}
 }
 
 // ShowLaunchFailure keeps launch errors independent of the transient shared
@@ -813,52 +1230,119 @@ func (d *DashboardState) handleRepositoryOriginEvent(event tea.Msg, dialog Repos
 // replaces it now, with the dialog's own first sentence, while the details
 // stay in the dialog.
 func (d *DashboardState) ShowLaunchFailure(message string, retry DashboardAction) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_launch_failure")
+	d.SetFailureNotice("The session could not start.")
+	previous := d.mode
+	dialog := newConfirmDialog(ConfirmationLaunchFailed{Error: message, Retry: retry, Previous: previous})
+	d.mode = ModeConfirm{&dialog}
 }
 
 // ShowImportFailure reports a failed import in a dialog that stays until
 // dismissed. The footer gets only a short failure line; the details stay in
 // the dialog.
 func (d *DashboardState) ShowImportFailure(message string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_import_failure")
+	d.SetFailureNotice("The session import failed.")
+	previous := d.mode
+	dialog := newConfirmDialog(ConfirmationImportFailed{Error: message, Previous: previous})
+	d.mode = ModeConfirm{&dialog}
 }
 
 func (d *DashboardState) ShowRemoteRepairConfirmation(bundleID string, repairs []core.LocalRemoteRepair, retry DashboardAction) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_remote_repair_confirmation")
+	previous := d.mode
+	action := DashboardActionRepairRepositoryRemotes{
+		BundleID: bundleID,
+		Repairs:  slices.Clone(repairs),
+		Retry:    retry,
+	}
+	dialog := newConfirmDialog(ConfirmationRepairRepositoryRemotes{Action: action, Repairs: repairs, Previous: previous})
+	d.mode = ModeConfirm{&dialog}
 }
 
 // ShowCloseFailure shows the recovery choices after a checkpointed close
 // could not finish.
 func (d *DashboardState) ShowCloseFailure(sessionID string, message string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_close_failure")
+	dialog := d.confirmDialog(ConfirmationCloseFailed{SessionID: sessionID, Error: message})
+	d.mode = ModeConfirm{&dialog}
 }
 
 func (d *DashboardState) ShowImportProgress(sessionTitle string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_import_progress")
+	d.mode = ModeImporting{&ImportProgress{
+		cancellable:  true,
+		sessionTitle: sessionTitle,
+		step:         1,
+		message:      "Locating native session…",
+		lastUpdated:  time.Now(),
+		form:         dialogForm([]DialogControl{DialogControlCancel}, DialogControlCancel),
+	}}
 }
 
 func (d *DashboardState) ShowImportUpload() {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_import_upload")
+	if progress := importProgressMut(&d.mode); progress != nil {
+		progress.cancellable = true
+		progress.message = "Uploading archive…"
+		progress.lastUpdated = time.Now()
+		shown := progress.Clone()
+		d.mode = ModeImporting{&shown}
+	}
 }
 
 func (d *DashboardState) ShowImportRegistration() {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_import_registration")
+	if progress := importProgressMut(&d.mode); progress != nil {
+		progress.cancellable = false
+		progress.message = "Registering on the daemon — cannot be cancelled."
+		progress.lastUpdated = time.Now()
+		// An upload-cancel confirmation cannot outlive that upload phase.
+		shown := progress.Clone()
+		d.mode = ModeImporting{&shown}
+	}
 }
 
 // UpdateImportProgress records an import step; total is nil while unknown.
 func (d *DashboardState) UpdateImportProgress(step int, total *int, message string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::update_import_progress")
+	progress := importProgressMut(&d.mode)
+	if progress == nil {
+		return
+	}
+	progress.step = step
+	progress.total = total
+	progress.message = message
+	progress.lastUpdated = time.Now()
 }
 
 func (d *DashboardState) ShowImportBundleConfirmation(dirtyGitRoots []string, omittedNonGitDirs []string, scratchGitRoots []string, managedWorktree core.ManagedWorktreeOptions, recordedRoot string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_import_bundle_confirmation")
+	form := dialogForm(
+		[]DialogControl{DialogControlField, DialogControlImportCancel, DialogControlImportContinue},
+		DialogControlImportContinue,
+	)
+	if managedWorktree.Available {
+		form.DeclareWithEnabled(DialogControlImportManagedWorktree, chat.ControlKindCheckbox{}, true)
+	}
+	d.mode = ModeConfirmImportBundle{&ImportBundleConfirmation{
+		projectRoot:           chat.TextInputFromValue(recordedRoot),
+		managedWorktree:       managedWorktree,
+		createManagedWorktree: managedWorktree.DefaultCreate,
+		dirtyGitRoots:         dirtyGitRoots,
+		omittedNonGitDirs:     omittedNonGitDirs,
+		scratchGitRoots:       scratchGitRoots,
+		form:                  form,
+	}}
 }
 
 // ShowRawConversionConfirmation asks before a resume moves a local checkout
 // into an isolated workspace. Cancelling returns to the wizard the preflight
 // was started from.
 func (d *DashboardState) ShowRawConversionConfirmation(launch DashboardAction, receipt core.ResumeRepositorySourceReceipt, preview core.RawConversionPreview) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_raw_conversion_confirmation")
+	// This confirmation is a result of the resume check. Moving the
+	// generation on ends the check, so any other result sent under it is
+	// dropped instead of opening a second confirmation over this one.
+	d.invalidateSessionPreflight()
+	previous := d.mode
+	dialog := newConfirmDialog(ConfirmationConvertRawCheckout{
+		Launch:   launch,
+		Receipt:  receipt,
+		Preview:  preview,
+		Previous: previous,
+	})
+	d.mode = ModeConfirm{&dialog}
 }
 
 func (d *DashboardState) FinishImport() {
@@ -866,56 +1350,576 @@ func (d *DashboardState) FinishImport() {
 }
 
 func (d *DashboardState) handleImportProgressEvent(event tea.Msg, progress ImportProgress) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_import_progress_event")
+	if !progress.cancellable {
+		d.mode = ModeImporting{&progress}
+		return DashboardActionNone{}
+	}
+	result := progress.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	cancel := false
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		cancel = true
+	case chat.InteractionActivate[DialogControl]:
+		cancel = interaction.ID == DialogControlCancel
+	}
+	if cancel {
+		dialog := newConfirmDialog(ConfirmationDismiss{
+			Mode:   ModeImporting{&progress},
+			Intent: DismissalIntentCancelImport,
+		})
+		d.mode = ModeConfirm{&dialog}
+		return DashboardActionNone{}
+	}
+	d.mode = ModeImporting{&progress}
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) beginRename() {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::begin_rename")
+	session := d.selectedSession()
+	if session == nil {
+		return
+	}
+	given, _ := session.GivenName()
+	d.mode = ModeRename{&RenameEditor{
+		sessionID:   session.ID,
+		sessionName: sessionName(session),
+		title:       chat.TextInputFromValue(given).WithMaxChars(64),
+		form: dialogForm(
+			[]DialogControl{DialogControlField, DialogControlCancel, DialogControlSave},
+			DialogControlField,
+		),
+	}}
 }
 
 func (d *DashboardState) beginNoticeLog() {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::begin_notice_log")
+	d.mode = ModeNoticeLog{&NoticeLogDialog{form: chat.NewDialog[DialogControl]()}}
 }
 
 func (d *DashboardState) handleNoticeLogEvent(event tea.Msg, dialog NoticeLogDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_notice_log_event")
+	last := dialog.maxScroll
+	if press, ok := event.(tea.KeyPressMsg); ok {
+		scroll, scrolled := 0, true
+		switch chat.KeyPressCode(press) {
+		case tea.KeyDown, 'j':
+			scroll = dialog.scroll + 1
+		case tea.KeyUp, 'k':
+			scroll = max(dialog.scroll-1, 0)
+		case tea.KeyPgDown:
+			scroll = dialog.scroll + 10
+		case tea.KeyPgUp:
+			scroll = max(dialog.scroll-10, 0)
+		case tea.KeyHome:
+			scroll = 0
+		case tea.KeyEnd:
+			scroll = last
+		default:
+			scrolled = false
+		}
+		if scrolled {
+			dialog.scroll = min(scroll, last)
+			d.recordEventHandled()
+			d.mode = ModeNoticeLog{&dialog}
+			return DashboardActionNone{}
+		}
+	}
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		d.CancelModal()
+	case chat.InteractionActivate[DialogControl]:
+		if interaction.ID == DialogControlNoticeLogClose {
+			d.CancelModal()
+		} else {
+			d.mode = ModeNoticeLog{&dialog}
+		}
+	default:
+		d.mode = ModeNoticeLog{&dialog}
+	}
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) handleSessionCpuReportEvent(event tea.Msg, dialog SessionCpuReportDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_session_cpu_report_event")
+	groups := reportGroups(d, dialog.metric)
+	groupIndex, hasGroup := reconcileSessionCpuReport(d, &dialog, groups)
+	if press, ok := event.(tea.KeyPressMsg); ok {
+		code := chat.KeyPressCode(press)
+		tabStep := 0
+		switch code {
+		case tea.KeyLeft:
+			tabStep = -1
+		case tea.KeyRight:
+			tabStep = 1
+		}
+		if tabStep != 0 && len(groups) > 1 {
+			current := 0
+			if hasGroup {
+				current = groupIndex
+			}
+			count := len(groups)
+			next := ((current+tabStep)%count + count) % count
+			switchSessionCpuReportTab(&dialog, groups, next)
+			d.recordEventHandled()
+			d.mode = ModeSessionCpuReport{&dialog}
+			return DashboardActionNone{}
+		}
+		rowDelta, hasDelta := 0, true
+		switch code {
+		case tea.KeyDown, 'j':
+			rowDelta = 1
+		case tea.KeyUp, 'k':
+			rowDelta = -1
+		case tea.KeyPgDown:
+			rowDelta = 10
+		case tea.KeyPgUp:
+			rowDelta = -10
+		case tea.KeyHome:
+			rowDelta = math.MinInt
+		case tea.KeyEnd:
+			rowDelta = math.MaxInt
+		default:
+			hasDelta = false
+		}
+		if hasDelta && hasGroup {
+			moveSessionCpuReportSelection(&dialog, &groups[groupIndex], rowDelta)
+			d.recordEventHandled()
+			d.mode = ModeSessionCpuReport{&dialog}
+			return DashboardActionNone{}
+		}
+		if code == tea.KeyEnter {
+			focused, isFocused := dialog.form.Focused()
+			switch {
+			case isFocused && focused == DialogControlSessionCpuReportTabs:
+				dialog.form.Focus(DialogControlSessionCpuReportRows)
+				d.recordEventHandled()
+				d.mode = ModeSessionCpuReport{&dialog}
+				return DashboardActionNone{}
+			case isFocused && (focused == DialogControlSessionCpuReportClose ||
+				focused == DialogControlSessionCpuReportHourly ||
+				focused == DialogControlSessionCpuReportRecent):
+			case !isFocused || focused == DialogControlSessionCpuReportRows:
+				if dialog.selectedSessionID != nil {
+					sessionID := *dialog.selectedSessionID
+					d.recordEventHandled()
+					return d.focusSessionFromCPUReport(sessionID)
+				}
+			}
+		}
+	}
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		d.CancelModal()
+	case chat.InteractionSelect[DialogControl]:
+		switch interaction.ID {
+		case DialogControlSessionCpuReportTabs:
+			switchSessionCpuReportTab(&dialog, groups, interaction.Index)
+		case DialogControlSessionCpuReportRows:
+			if hasGroup {
+				selectSessionCpuReportRow(&dialog, &groups[groupIndex], interaction.Index)
+			}
+		}
+		d.mode = ModeSessionCpuReport{&dialog}
+	case chat.InteractionActivate[DialogControl]:
+		switch interaction.ID {
+		case DialogControlSessionCpuReportClose:
+			d.CancelModal()
+			return DashboardActionNone{}
+		case DialogControlSessionCpuReportHourly:
+			dialog.metric = CpuMetricHourly
+		case DialogControlSessionCpuReportRecent:
+			dialog.metric = CpuMetricRecent
+		case DialogControlSessionCpuReportTabs:
+			dialog.form.Focus(DialogControlSessionCpuReportRows)
+		case DialogControlSessionCpuReportRows:
+			selection, ok := dialog.form.Selected(DialogControlSessionCpuReportRows)
+			if !ok {
+				selection = dialog.selectedRow
+			}
+			if hasGroup {
+				selectSessionCpuReportRow(&dialog, &groups[groupIndex], selection)
+			}
+			if dialog.selectedSessionID != nil {
+				return d.focusSessionFromCPUReport(*dialog.selectedSessionID)
+			}
+		}
+		d.mode = ModeSessionCpuReport{&dialog}
+	default:
+		d.mode = ModeSessionCpuReport{&dialog}
+	}
+	return DashboardActionNone{}
 }
 
 // beginChangedFiles opens the changed-files overlay for the selected session
 // and asks the host to read its checkout, so the list is fresh even when a
 // row was probed a while ago.
 func (d *DashboardState) beginChangedFiles() DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::begin_changed_files")
+	session := d.selectedSession()
+	if session == nil {
+		return DashboardActionNone{}
+	}
+	sessionID := session.ID
+	d.mode = ModeChangedFiles{&ChangedFilesDialog{
+		sessionID: sessionID,
+		form:      chat.NewDialog[DialogControl](),
+	}}
+	return d.requestGitProbe(sessionID)
 }
 
 func (d *DashboardState) handleChangedFilesEvent(event tea.Msg, dialog ChangedFilesDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_changed_files_event")
+	files := 0
+	if status, ok := d.gitStatus[dialog.sessionID]; ok && status.Err == nil {
+		files = len(status.Ok.Changed)
+	}
+	if press, ok := event.(tea.KeyPressMsg); ok {
+		last := max(files-1, 0)
+		scroll, scrolled := 0, true
+		switch chat.KeyPressCode(press) {
+		case tea.KeyDown, 'j':
+			scroll = dialog.scroll + 1
+		case tea.KeyUp, 'k':
+			scroll = max(dialog.scroll-1, 0)
+		case tea.KeyPgDown:
+			scroll = dialog.scroll + 10
+		case tea.KeyPgUp:
+			scroll = max(dialog.scroll-10, 0)
+		case tea.KeyHome:
+			scroll = 0
+		case tea.KeyEnd:
+			scroll = last
+		case 'r':
+			sessionID := dialog.sessionID
+			d.mode = ModeChangedFiles{&dialog}
+			return d.requestGitProbe(sessionID)
+		default:
+			scrolled = false
+		}
+		if scrolled {
+			dialog.scroll = min(scroll, last)
+			d.recordEventHandled()
+			d.mode = ModeChangedFiles{&dialog}
+			return DashboardActionNone{}
+		}
+	}
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		d.CancelModal()
+	case chat.InteractionActivate[DialogControl]:
+		switch interaction.ID {
+		case DialogControlChangedFilesClose:
+			d.CancelModal()
+		case DialogControlChangedFilesRefresh:
+			sessionID := dialog.sessionID
+			d.mode = ModeChangedFiles{&dialog}
+			return d.requestGitProbe(sessionID)
+		default:
+			d.mode = ModeChangedFiles{&dialog}
+		}
+	default:
+		d.mode = ModeChangedFiles{&dialog}
+	}
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) handleRenameEvent(event tea.Msg, editor RenameEditor) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_rename_event")
+	outcome := d.handleTextPromptEvent(&editor.form, &editor.title, event, "Session name cannot be empty.")
+	switch outcome {
+	case TextPromptOutcomeCancel:
+		d.CancelModal()
+	case TextPromptOutcomeEdited:
+		d.mode = ModeRename{&editor}
+	case TextPromptOutcomeRejected:
+		// Put the caret back where the missing name has to be typed.
+		editor.form.Focus(DialogControlField)
+		d.mode = ModeRename{&editor}
+	case TextPromptOutcomeSubmit:
+		d.CancelModal()
+		return DashboardActionRenameSession{SessionID: editor.sessionID, Title: editor.title.IntoValue()}
+	}
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) handleImportBundleEvent(event tea.Msg, confirmation ImportBundleConfirmation) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_import_bundle_event")
+	result := confirmation.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		return DashboardActionConfirmImportBundle{ProjectRoot: confirmation.projectRoot.Value()}
+	case chat.InteractionActivate[DialogControl]:
+		switch interaction.ID {
+		case DialogControlImportCancel:
+			return DashboardActionConfirmImportBundle{ProjectRoot: confirmation.projectRoot.Value()}
+		case DialogControlImportContinue:
+			create := confirmation.managedWorktree.Available && confirmation.createManagedWorktree
+			return DashboardActionConfirmImportBundle{
+				CreateManagedWorktree: &create,
+				ProjectRoot:           confirmation.projectRoot.Value(),
+				Accepted:              true,
+			}
+		}
+		d.mode = ModeConfirmImportBundle{&confirmation}
+	case chat.InteractionToggle[DialogControl]:
+		if interaction.ID == DialogControlImportManagedWorktree && confirmation.managedWorktree.Available {
+			confirmation.createManagedWorktree = !confirmation.createManagedWorktree
+		}
+		d.mode = ModeConfirmImportBundle{&confirmation}
+	case chat.InteractionEdit[DialogControl]:
+		if interaction.ID == DialogControlField {
+			chat.TextFieldApply(&confirmation.projectRoot, interaction.Edit)
+		}
+		d.mode = ModeConfirmImportBundle{&confirmation}
+	default:
+		d.mode = ModeConfirmImportBundle{&confirmation}
+	}
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) handleConfirmationEvent(event tea.Msg, dialog ConfirmDialog) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_confirmation_event")
+	// Every button has a letter, derived from its label by
+	// confirmationAccelerators, so a confirmation never needs Tab.
+	if press, ok := event.(tea.KeyPressMsg); ok {
+		letter, modifiers := chat.NormalizeKey(chat.KeyPressCode(press), press.Mod)
+		if modifiers&(tea.ModCtrl|tea.ModAlt) == 0 && chat.IsCharKeyCode(letter) {
+			if letter == 'v' || letter == 'V' {
+				if suspend, ok := dialog.confirmation.(ConfirmationSuspendSession); ok {
+					suspend.ViewingAllUntracked = !suspend.ViewingAllUntracked
+					dialog.confirmation = suspend
+					d.mode = ModeConfirm{&dialog}
+					return DashboardActionNone{}
+				}
+			}
+			buttons := confirmationButtons(dialog.confirmation)
+			accelerators := confirmationAccelerators(buttons)
+			lower := letter
+			if 'A' <= lower && lower <= 'Z' {
+				lower += 'a' - 'A'
+			}
+			if index := slices.Index(accelerators, lower); index >= 0 {
+				return d.activateConfirmationButton(dialog.confirmation, index)
+			}
+		}
+	}
+	switch dialog.confirmation.(type) {
+	case ConfirmationConfigurationRepair, ConfirmationLaunchFailed, ConfirmationImportFailed,
+		ConfirmationRepairRepositoryRemotes, ConfirmationConvertRawCheckout, ConfirmationSuspendSession:
+		if press, ok := event.(tea.KeyPressMsg); ok {
+			switch chat.KeyPressCode(press) {
+			case tea.KeyPgDown:
+				dialog.scroll = min(dialog.scroll+5, dialog.maxScroll)
+			case tea.KeyPgUp:
+				dialog.scroll = max(dialog.scroll-5, 0)
+			case tea.KeyHome:
+				dialog.scroll = 0
+			default:
+				return d.handleConfirmationControls(dialog, event)
+			}
+			d.mode = ModeConfirm{&dialog}
+			return DashboardActionNone{}
+		}
+	}
+	return d.handleConfirmationControls(dialog, event)
 }
 
 func (d *DashboardState) handleConfirmationControls(dialog ConfirmDialog, event tea.Msg) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::handle_confirmation_controls")
+	// The field's kind carries its popup state, so it is re-declared on every
+	// event before the form reads keys against it.
+	result := dialog.form.Handle(event)
+	d.lastEventConsumed = result.Consumed
+	switch interaction := result.Action.(type) {
+	case chat.InteractionCancel[DialogControl]:
+		switch confirmation := dialog.confirmation.(type) {
+		case ConfirmationDismiss:
+			d.restoreDismissedMode(confirmation.Mode)
+		case ConfirmationRepairRepositoryRemotes:
+			d.restoreDismissedMode(confirmation.Previous)
+		case ConfirmationConfigurationRepair:
+			d.restoreDismissedMode(confirmation.Previous)
+		case ConfirmationLaunchFailed:
+			d.restoreDismissedMode(confirmation.Previous)
+		case ConfirmationImportFailed:
+			d.restoreDismissedMode(confirmation.Previous)
+		case ConfirmationInstallMbx:
+			d.restoreDismissedMode(confirmation.Previous)
+		case ConfirmationConvertRawCheckout:
+			d.restoreDismissedMode(confirmation.Previous)
+		case ConfirmationDestroyStopped:
+			d.restoreAfterConfirmation(confirmation.Reopen)
+		default:
+			d.CancelModal()
+		}
+	case chat.InteractionActivate[DialogControl]:
+		if index, ok := interaction.ID.confirmButtonIndex(); ok {
+			return d.activateConfirmationButton(dialog.confirmation, index)
+		}
+		d.mode = ModeConfirm{&dialog}
+	default:
+		d.mode = ModeConfirm{&dialog}
+	}
+	return DashboardActionNone{}
 }
 
 // activateConfirmationButton runs the button at index of
 // confirmationButtons, where index 0 is always Cancel.
 func (d *DashboardState) activateConfirmationButton(confirmation Confirmation, index int) DashboardAction {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::activate_confirmation_button")
+	switch c := confirmation.(type) {
+	case ConfirmationConfigurationRepair:
+		d.restoreDismissedMode(c.Previous)
+		switch index {
+		case 1:
+			return DashboardActionOpen{SessionID: c.SessionID}
+		case 2:
+			d.BeginSetup()
+		}
+		return DashboardActionNone{}
+	case ConfirmationRepairRepositoryRemotes:
+		d.restoreDismissedMode(c.Previous)
+		if index == 1 {
+			return c.Action
+		}
+		return DashboardActionNone{}
+	case ConfirmationImportFailed:
+		d.restoreDismissedMode(c.Previous)
+		return DashboardActionNone{}
+	case ConfirmationLaunchFailed:
+		d.restoreDismissedMode(c.Previous)
+		switch {
+		case (c.Retry != nil && index == 2) || (c.Retry == nil && index == 1):
+			d.BeginSetup()
+			return DashboardActionNone{}
+		case index == 1:
+			var retry DashboardAction = DashboardActionNone{}
+			if c.Retry != nil {
+				retry = c.Retry
+			}
+			// A retried restore holds its archive as the wizard's Resume does,
+			// so reopening the archive cannot start a second restore beside
+			// it.
+			if restore, ok := retry.(DashboardActionRestoreArchivedSession); ok && !d.claimArchiveRestore(restore.WikiID) {
+				return DashboardActionNone{}
+			}
+			return retry
+		}
+		return DashboardActionNone{}
+	case ConfirmationInstallMbx:
+		d.restoreDismissedMode(c.Previous)
+		if index == 1 {
+			return DashboardActionInstallMbx{
+				Generation: c.Generation,
+				Key:        c.Key,
+				MachineID:  c.MachineID,
+				Machine:    c.Machine,
+			}
+		}
+		return DashboardActionNone{}
+	case ConfirmationDismiss:
+		switch index {
+		case 0:
+			return d.restoreDismissedMode(c.Mode)
+		case 1:
+			d.CancelModal()
+			if c.Intent == DismissalIntentCancelImport {
+				return DashboardActionCancelImport{}
+			}
+			return DashboardActionNone{}
+		}
+	case ConfirmationConvertRawCheckout:
+		if index == 1 {
+			d.CancelModal()
+			return DashboardActionConfirmRawConversion{Launch: c.Launch, Receipt: c.Receipt}
+		}
+		return d.restoreDismissedMode(c.Previous)
+	case ConfirmationForceDestroy:
+		if index == 1 {
+			d.CancelModal()
+			return DashboardActionForceDestroy{SessionID: c.SessionID}
+		}
+	case ConfirmationDestroyStopped:
+		d.restoreAfterConfirmation(c.Reopen)
+		if index == 1 {
+			return DashboardActionDestroyStopped{SessionID: c.SessionID}
+		}
+		return DashboardActionNone{}
+	case ConfirmationCloseFailed:
+		switch index {
+		case 1:
+			d.CancelModal()
+			return DashboardActionSuspend{SessionID: c.SessionID, Consent: core.SuspendConsent{}}
+		case 2:
+			d.CancelModal()
+			return DashboardActionSuspend{SessionID: c.SessionID, Consent: core.SuspendConsent{
+				WithoutCheckpoint:   true,
+				ConfirmNoCheckpoint: true,
+			}}
+		}
+	case ConfirmationSuspendSession:
+		if index == 1 && !c.Checking && (c.Preflight == nil || !c.Preflight.HasBlockers()) {
+			d.CancelModal()
+			consent := core.SuspendConsent{}
+			if c.Preflight != nil {
+				consent = c.Preflight.ShownConsent()
+			}
+			return DashboardActionSuspend{SessionID: c.SessionID, Consent: consent}
+		}
+	case ConfirmationRestartAgent:
+		if index == 1 {
+			d.CancelModal()
+			return DashboardActionRestartSession{SessionID: c.SessionID}
+		}
+	case ConfirmationRestartContainer:
+		if !c.UpgradeOnly && index == 1 {
+			d.CancelModal()
+			return DashboardActionRestartSession{SessionID: c.SessionID}
+		}
+		upgradeIndex := 2
+		if c.UpgradeOnly {
+			upgradeIndex = 1
+		}
+		if index == upgradeIndex {
+			d.CancelModal()
+			return DashboardActionUpgradeContainer{Request: core.ContainerUpgradeRequest{
+				Selection:                    c.Preview,
+				AcknowledgeWritableLayerLoss: true,
+			}}
+		}
+	case ConfirmationInterruptWork:
+		if index == 1 {
+			d.CancelModal()
+			if c.Restart {
+				return DashboardActionRestartSession{SessionID: c.SessionID}
+			}
+			return DashboardActionSuspend{SessionID: c.SessionID, Consent: core.SuspendConsent{}}
+		}
+	case ConfirmationInterruptAll:
+		if index == 1 {
+			d.CancelModal()
+			return DashboardActionInterruptAll{SessionID: c.SessionID}
+		}
+	case ConfirmationRecoverFailed:
+		switch index {
+		case 1:
+			d.CancelModal()
+			d.focus = FocusPrompt
+			return DashboardActionOpen{SessionID: c.SessionID}
+		case 2:
+			d.CancelModal()
+			return d.BeginResumeFor(c.SessionID)
+		}
+	case ConfirmationRecoverMove:
+		switch index {
+		case 2:
+			d.CancelModal()
+			return DashboardActionRetryMove{Operation: c.Operation}
+		case 3:
+			d.CancelModal()
+			return DashboardActionResumeMove{Operation: c.Operation}
+		}
+	}
+	d.CancelModal()
+	return DashboardActionNone{}
 }
 
 func (d *DashboardState) restoreDismissedMode(mode Mode) DashboardAction {
@@ -927,7 +1931,12 @@ func (d *DashboardState) restoreDismissedMode(mode Mode) DashboardAction {
 // interrupted, or to the dashboard when the confirmation did not come from
 // one (reopen nil).
 func (d *DashboardState) restoreAfterConfirmation(reopen *ResumeDialog) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::restore_after_confirmation")
+	if reopen == nil {
+		d.CancelModal()
+		return
+	}
+	d.mode = ModeResumeDialog{reopen}
+	d.RebuildResumeRows()
 }
 
 // focusedPathInput is CompletesPaths::focused_path_input. The replacement
@@ -951,7 +1960,51 @@ func (d *RepositoryOriginDialog) dismissUnfocusedCompletions() {
 // against the current groups, returning the selected group's index (false
 // when there are no groups).
 func reconcileSessionCpuReport(dashboard *DashboardState, dialog *SessionCpuReportDialog, groups []MachineReport) (int, bool) {
-	panic("unported: mj-tui/src/dialogs.rs reconcile_session_cpu_report")
+	if len(groups) == 0 {
+		dialog.machineKey = nil
+		dialog.selectedSessionID = nil
+		dialog.selectedRow = 0
+		return 0, false
+	}
+
+	rememberedKey := dialog.machineKey
+	dashboardSelection, hasDashboardSelection := dashboard.SelectedSessionID()
+	groupIndex := -1
+	if rememberedKey != nil {
+		groupIndex = slices.IndexFunc(groups, func(group MachineReport) bool { return group.key == *rememberedKey })
+	}
+	if groupIndex < 0 && rememberedKey == nil && hasDashboardSelection {
+		groupIndex = slices.IndexFunc(groups, func(group MachineReport) bool {
+			return slices.Contains(group.sessionIDs, dashboardSelection)
+		})
+	}
+	if groupIndex < 0 {
+		groupIndex = 0
+	}
+	group := &groups[groupIndex]
+	key := group.key
+	dialog.machineKey = &key
+
+	previousRow := dialog.selectedRow
+	storedSelection := dialog.selectedSessionID
+	rowIndex := -1
+	if storedSelection != nil {
+		rowIndex = slices.Index(group.sessionIDs, *storedSelection)
+	}
+	if rowIndex < 0 && storedSelection == nil && hasDashboardSelection {
+		rowIndex = slices.Index(group.sessionIDs, dashboardSelection)
+	}
+	if rowIndex < 0 {
+		rowIndex = min(previousRow, max(len(group.sessionIDs)-1, 0))
+	}
+	dialog.selectedSessionID = nil
+	if rowIndex < len(group.sessionIDs) {
+		selected := group.sessionIDs[rowIndex]
+		dialog.selectedSessionID = &selected
+	}
+	dialog.selectedRow = rowIndex
+	dialog.form.SetSelected(DialogControlSessionCpuReportRows, rowIndex)
+	return groupIndex, true
 }
 
 func switchSessionCpuReportTab(dialog *SessionCpuReportDialog, groups []MachineReport, index int) {
@@ -1002,9 +2055,24 @@ func selectSessionCpuReportRow(dialog *SessionCpuReportDialog, group *MachineRep
 }
 
 func (d *DashboardState) ShowContainerUpgradePreview(preview core.ContainerUpgradePreview, upgradeOnly bool) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_container_upgrade_preview")
+	if !preview.Available {
+		if upgradeOnly {
+			d.SetNotice("The container already uses the selected image.")
+		} else {
+			d.ShowNormalRestart(preview.SessionID)
+		}
+		return
+	}
+	dialog := newConfirmDialog(ConfirmationRestartContainer{
+		SessionID:   preview.SessionID,
+		Preview:     preview,
+		UpgradeOnly: upgradeOnly,
+	})
+	d.mode = ModeConfirm{&dialog}
 }
 
 func (d *DashboardState) ShowNormalRestart(sessionID string) {
-	panic("unported: mj-tui/src/dialogs.rs DashboardState::show_normal_restart")
+	interrupting := d.hasActiveWork(sessionID)
+	dialog := newConfirmDialog(ConfirmationRestartAgent{SessionID: sessionID, Interrupting: interrupting})
+	d.mode = ModeConfirm{&dialog}
 }

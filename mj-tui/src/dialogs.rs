@@ -775,6 +775,12 @@ impl DashboardState {
                 .flat_map(|provider| provider.pools)
                 .find(|pool| pool.key == key && pool.members.len() == 1)
                 .map(|pool| pool.members[0].id.clone()),
+            QuotaRow::ProviderText(kind) => self
+                .quota_pools()
+                .into_iter()
+                .find(|provider| provider.provider == kind && provider.text.len() == 1)
+                .and_then(|provider| provider.text.into_iter().next())
+                .map(|(id, _)| id),
         }) else {
             self.begin_settings_section("profiles", None);
             return;

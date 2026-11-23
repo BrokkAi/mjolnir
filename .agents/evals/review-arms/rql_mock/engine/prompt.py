@@ -100,6 +100,10 @@ complete=true with an empty open list when the query's scope is closed.
 The catalogue sometimes describes Bifrost implementation outcomes such as over
 budget, exhaustion or cancellation. Do not return those outcomes. Enumerate
 the complete bounded relation and put only unresolved in-scope frontiers in coverage.open.
+Do not stop after a subset, representative sample, or partial list of rows, and
+never use coverage.open to report unenumerated, unevaluated, untraced, or
+unscanned in-scope work (for example "have not been enumerated" or "were not
+fully evaluated"); incomplete enumeration is rejected as a validation error.
 Do not include prose outside the structured output.
 
 Read the catalogue and menu semantics files. Distinguish lexical matches from

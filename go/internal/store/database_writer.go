@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,13 +94,76 @@ func (w *DatabaseWriter) CommittedChanges() *core.Watch[CommittedPublication] {
 // the records it changed (Rust's DatabaseWriter::run; Go methods cannot be
 // generic).
 func databaseWriterRun[T any](w *DatabaseWriter, label string, conn *Connection, connErr error, operation func(conn *Connection) (T, error)) (T, error) {
-	panic("unported: mj-store/src/database/writer.rs DatabaseWriter::run")
+	var zero T
+	if connErr != nil {
+		return zero, connErr
+	}
+	previous, err := w.CommittedState()
+	if err != nil {
+		return zero, err
+	}
+	beginOperation(w.path)
+	value, operationErr := operation(conn)
+	next, err := finishOperation(conn, previous)
+	if err != nil {
+		detail := fmt.Sprintf("database publication failed after %s; a commit may have occurred, do not replay this mutation: %v", label, err)
+		w.committed.SendReplace(CommittedPublication{Err: detail})
+		return zero, errors.New(detail)
+	}
+	if next != nil {
+		w.committed.SendReplace(CommittedPublication{State: next})
+	}
+	return value, operationErr
+}
+
+// databaseWriteResult is one job's reply.
+type databaseWriteResult[T any] struct {
+	value T
+	err   error
+}
+
+// send queues message unless the writer has stopped receiving, which is
+// Rust's SyncSender::send failing on a disconnected receiver. A full queue
+// waits for space.
+func (w *DatabaseWriter) send(message databaseWriterMessage) bool {
+	select {
+	case <-w.stopped:
+		return false
+	default:
+	}
+	select {
+	case w.sender <- message:
+		return true
+	case <-w.stopped:
+		return false
+	}
 }
 
 // DatabaseWriterExecute submits operation and waits for its result (Rust's
 // DatabaseWriter::execute; Go methods cannot be generic).
 func DatabaseWriterExecute[T any](w *DatabaseWriter, label string, operation func(conn *Connection) (T, error)) (T, error) {
-	panic("unported: mj-store/src/database/writer.rs DatabaseWriter::execute")
+	var zero T
+	reply := make(chan databaseWriteResult[T], 1)
+	job := func(conn *Connection, err error) {
+		value, err := databaseWriterRun(w, label, conn, err, operation)
+		reply <- databaseWriteResult[T]{value: value, err: err}
+	}
+	if !w.send(databaseWriterMessageRun{label: label, job: job}) {
+		return zero, fmt.Errorf("submit database writer operation %s: writer stopped", label)
+	}
+	select {
+	case result := <-reply:
+		return result.value, result.err
+	case <-w.stopped:
+		// A job runs before the writer stops receiving, so its reply is
+		// already buffered; an empty reply means the job was dropped.
+		select {
+		case result := <-reply:
+			return result.value, result.err
+		default:
+		}
+		return zero, fmt.Errorf("database writer stopped during %s: receiving on a closed channel", label)
+	}
 }
 
 // DatabaseWriterEnqueue submits operation without waiting for it (Rust's
@@ -107,7 +171,25 @@ func DatabaseWriterExecute[T any](w *DatabaseWriter, label string, operation fun
 // before the write is queued accepts nothing. After it returns, the caller
 // owns a durable obligation to finish publication and its reply.
 func DatabaseWriterEnqueue[T, G any](ctx context.Context, w *DatabaseWriter, label string, guard G, operation func(conn *Connection) (T, error)) (*AcceptedDatabaseWrite[T, G], error) {
-	panic("unported: mj-store/src/database/writer.rs DatabaseWriter::enqueue")
+	reply := make(chan DatabaseWriteReply[T, G], 1)
+	message := databaseWriterMessageRun{label: label, job: func(conn *Connection, err error) {
+		value, err := databaseWriterRun(w, label, conn, err, operation)
+		reply <- DatabaseWriteReply[T, G]{Value: value, Err: err, Guard: guard}
+	}}
+	stopped := fmt.Errorf("submit database writer operation %s: writer stopped", label)
+	select {
+	case <-w.stopped:
+		return nil, stopped
+	default:
+	}
+	select {
+	case w.sender <- message:
+		return &AcceptedDatabaseWrite[T, G]{reply: reply, stopped: w.stopped}, nil
+	case <-w.stopped:
+		return nil, stopped
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // DatabaseWriteReply is an accepted write's result and the guard that covered
@@ -129,7 +211,17 @@ type AcceptedDatabaseWrite[T, G any] struct {
 // the guard covers the committed publication and the originating
 // connection's reply attempt.
 func (a *AcceptedDatabaseWrite[T, G]) Finish() (DatabaseWriteReply[T, G], error) {
-	panic("unported: mj-store/src/database/writer.rs AcceptedDatabaseWrite::finish")
+	select {
+	case reply := <-a.reply:
+		return reply, nil
+	case <-a.stopped:
+		select {
+		case reply := <-a.reply:
+			return reply, nil
+		default:
+		}
+		return DatabaseWriteReply[T, G]{}, errors.New("database writer stopped during accepted write: channel closed")
+	}
 }
 
 func enqueueDatabaseWrite[T, G any](ctx context.Context, label string, guard G, operation func(conn *Connection) (T, error)) (*AcceptedDatabaseWrite[T, G], error) {
@@ -171,7 +263,27 @@ func (o *DatabaseWriterOwner) Shutdown() error {
 }
 
 func (o *DatabaseWriterOwner) shutdownInner() error {
-	panic("unported: mj-store/src/database/writer.rs DatabaseWriterOwner::shutdown_inner")
+	if o.thread == nil {
+		return nil
+	}
+	clearDatabaseWriter(o.writer.id)
+	sent := o.writer.send(databaseWriterMessageShutdown{})
+	workerResult, reported := <-o.stopped
+	<-o.thread
+	o.thread = nil
+	if o.panicked != nil {
+		panic(*o.panicked)
+	}
+	if !reported {
+		return errors.New("database writer stopped without reporting its result: receiving on a closed channel")
+	}
+	if workerResult != nil {
+		return workerResult
+	}
+	if !sent {
+		return errors.New("request database writer shutdown: writer stopped")
+	}
+	return nil
 }
 
 // databaseWriterSlotState is the process-wide writer handle.
@@ -264,13 +376,141 @@ func StartDatabaseWriter() (*DatabaseWriterOwner, error) {
 var nextWriterID atomic.Uint64
 
 func startDatabaseWriterAt(path string, installGlobally bool) (*DatabaseWriterOwner, error) {
-	panic("unported: mj-store/src/database/writer.rs start_database_writer_at")
+	connection, err := openWriter(path)
+	if err != nil {
+		return nil, err
+	}
+	// 0x10002 is SQLite's recommendation for long-lived connections. Bit 0x10
+	// applies a temporary analysis_limit, keeping the first run bounded on a
+	// large store that has never been analyzed. Refresh statistics once at
+	// every daemon start by design; there is no periodic run.
+	optimizeStarted := time.Now()
+	if _, err := connection.Exec("PRAGMA optimize=0x10012"); err != nil {
+		slog.Warn("failed to optimize SQLite query planner statistics; continuing startup",
+			"error", err, "elapsed_ms", time.Since(optimizeStarted).Milliseconds())
+	} else {
+		slog.Info("optimized SQLite query planner statistics",
+			"elapsed_ms", time.Since(optimizeStarted).Milliseconds())
+	}
+	state, err := readSchemaState(connection)
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	observedRevision := state.revision
+	initial, err := committedStateBootstrap(connection)
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	receiver := make(chan databaseWriterMessage, databaseWriteQueueCapacity)
+	disconnected := make(chan struct{})
+	stopped := make(chan error, 1)
+	threadDone := make(chan struct{})
+	id := nextWriterID.Add(1)
+	writer := &DatabaseWriter{
+		id:        id,
+		sender:    receiver,
+		stopped:   disconnected,
+		path:      path,
+		committed: core.NewWatch(CommittedPublication{State: initial}),
+	}
+	if installGlobally {
+		slot := databaseWriterSlot()
+		slot.mu.Lock()
+		if slot.writer != nil {
+			slot.mu.Unlock()
+			_ = connection.Close()
+			return nil, errors.New("database writer is already running")
+		}
+		slot.writer = writer
+		slot.mu.Unlock()
+	}
+	publication := writer
+	go func() {
+		defer close(threadDone)
+		defer func() { _ = connection.Close() }()
+		result := func() (result error) {
+			defer func() {
+				if panicked := recover(); panicked != nil {
+					detail := "unknown panic payload"
+					switch payload := panicked.(type) {
+					case string:
+						detail = payload
+					case error:
+						detail = payload.Error()
+					}
+					result = fmt.Errorf("database writer thread panicked: %s", detail)
+				}
+			}()
+			for message := range receiver {
+				switch message := message.(type) {
+				case databaseWriterMessageRun:
+					slog.Debug("running database writer operation", "operation", message.label)
+					jobStarted := time.Now()
+					// Recheck compatibility even after startup, and remember
+					// forward progress to detect rollback.
+					if err := writerSchemaState(path, connection, message.label, &observedRevision); err != nil {
+						message.job(nil, err)
+					} else {
+						message.job(connection, nil)
+					}
+					// Every write waits behind the one before it, so a slow
+					// one delays all of them, the daemon's exit included.
+					if took := time.Since(jobStarted); took >= slowWrite {
+						slog.Info("slow database write", "operation", message.label, "duration_ms", took.Milliseconds())
+					}
+					if _, err := publication.CommittedState(); err != nil {
+						return err
+					}
+				case databaseWriterMessageShutdown:
+					return nil
+				}
+			}
+			return errors.New("database writer queue disconnected")
+		}()
+		// The writer no longer receives: queued jobs are dropped and their
+		// callers told the writer stopped.
+		close(disconnected)
+		if result != nil {
+			publication.committed.SendReplace(CommittedPublication{Err: fmt.Sprintf("database writer stopped: %v", result)})
+		} else {
+			clearDatabaseWriter(id)
+		}
+		stopped <- result
+		close(stopped)
+	}()
+	return &DatabaseWriterOwner{
+		writer:  writer,
+		thread:  threadDone,
+		stopped: stopped,
+	}, nil
 }
 
 // writerSchemaState refuses incompatible stores, rollback, and unreadable
 // metadata before a job.
 func writerSchemaState(path string, conn *Connection, label string, observedRevision *int64) error {
-	panic("unported: mj-store/src/database/writer.rs writer_schema_state")
+	err := func() error {
+		state, err := readSchemaState(conn)
+		if err != nil {
+			return err
+		}
+		if state.revision < *observedRevision {
+			return core.StoreSchemaMismatch{
+				Found:     state.revision,
+				Supported: schemaVersion,
+				Reason:    core.StoreSchemaMismatchReasonRollback{Previous: *observedRevision},
+			}
+		}
+		*observedRevision = state.revision
+		return state.ensureSupported()
+	}()
+	if err == nil {
+		return nil
+	}
+	slog.Error("could not establish store compatibility; refusing the operation",
+		"operation", label, "path", path, "error", err)
+	return fmt.Errorf("check database compatibility before %s at %s: %w", label, path, err)
 }
 
 func submitDatabaseWrite[T any](label string, operation func(conn *Connection) (T, error)) (T, error) {

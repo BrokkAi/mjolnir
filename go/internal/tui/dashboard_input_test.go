@@ -22,5 +22,10 @@ func (d *DashboardState) focusedPromptArea() (uv.Rectangle, bool) {
 
 // paneBands are the transcript and composer rectangles one pane drew into.
 func (d *DashboardState) paneBands(pane PaneId) (uv.Rectangle, uv.Rectangle, bool) {
-	panic("unported: mj-tui/src/dashboard_input.rs DashboardState::pane_bands")
+	for _, area := range d.conversationPaneAreas {
+		if area.pane == pane {
+			return area.transcript, area.prompt, true
+		}
+	}
+	return uv.Rectangle{}, uv.Rectangle{}, false
 }

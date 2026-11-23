@@ -1360,8 +1360,7 @@ fn write_session_tags(
 /// neither trigger a home-directory walk nor add unrelated search results.
 ///
 /// Kimi Code, Grok Build, Muse, DSH and Antigravity CLI use SessionWiki's public adapters
-/// directly, one per enabled profile home. DSH histories are searchable even
-/// though Mjolnir does not yet import them for native resume.
+/// directly, one per enabled profile home.
 ///
 /// Each per-home adapter reports a reconcile scope covering only its own root,
 /// so a sync of one install never archives the rows of another.
@@ -3037,14 +3036,9 @@ pub fn wiki_continuation(
     }
     let harness = harness_tools::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
-    anyhow::ensure!(
-        crate::import::native_sessions_enumerable(harness),
-        "Mjolnir cannot import {tool} sessions"
-    );
-    anyhow::ensure!(
-        harness != HarnessKind::Codex || !path.to_string_lossy().contains('\u{1f}'),
-        "Mjolnir can only import Codex sessions with a rollout log; this row is from the Codex history database"
-    );
+    if let Some(reason) = crate::import::native_source_import_issue(harness, path) {
+        anyhow::bail!("{reason}");
+    }
     let native_session_id = crate::import::native_session_id_from_path(harness, path)
         .with_context(|| {
             format!(
@@ -3199,13 +3193,21 @@ mod tests {
 
         #[test]
         fn searchable_native_rows_without_an_importable_source_cannot_continue() {
-            for tool in ["antigravity", "dsh", "opencode"] {
-                let error = wiki_continuation("abc123", tool, Path::new("/home/session"), false)
-                    .unwrap_err();
-                assert!(
-                    error.to_string().contains(&format!("cannot import {tool}")),
-                    "{error}"
-                );
+            for (tool, path, reason) in [
+                (
+                    "antigravity",
+                    "/home/.gemini/antigravity/brain/ID",
+                    "Antigravity IDE",
+                ),
+                ("dsh", "/home/.dsh/sessions/project/ID", "DSH CLI store"),
+                (
+                    "opencode",
+                    "/home/opencode/storage/session/project/ID.json",
+                    "migrating",
+                ),
+            ] {
+                let error = wiki_continuation("abc123", tool, Path::new(path), false).unwrap_err();
+                assert!(error.to_string().contains(reason), "{error}");
             }
             let path = Path::new(
                 "/home/user/.codex/thread_history_1.sqlite\u{1f}7F3A1C20-0B11-4A55-9E0D-2C8A5D6F1B44",

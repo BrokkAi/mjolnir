@@ -8,11 +8,14 @@ package tui
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 
+	"github.com/BrokkAi/mjolnir/go/internal/chat"
 	"github.com/BrokkAi/mjolnir/go/internal/client"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -69,7 +72,7 @@ func (d *SetupDialog) buildCacheKey(machineID string) (any, bool) {
 	if !setupValueHas(d.draft, "machines") || !setupValueHas(machines, machineID) {
 		return nil, false
 	}
-	return jsonvalue.Object{{Key: "machine", Value: setupValueGet(machines, machineID)}}, true
+	return jsonvalue.Object{{Key: "machine", Value: setupValueClone(setupValueGet(machines, machineID))}}, true
 }
 
 // buildCacheKeyIs is `self.build_cache_key(machine_id).as_ref() == Some(key)`.
@@ -101,7 +104,28 @@ func (d *SetupDialog) buildCacheFieldUserManaged(path []string) bool {
 // Discard its pending text rather than leaving an invalid, unfocusable field
 // blocking Save on another page.
 func (d *SetupDialog) reconcileHostOwnedFields() {
-	panic("unported: mj-tui/src/setup/previews.rs reconcile_host_owned_fields")
+	var owned [][]string
+	for _, path := range d.fields.paths() {
+		if d.buildCacheFieldUserManaged(path) {
+			owned = append(owned, path)
+		}
+	}
+	machines := map[string]struct{}{}
+	for _, path := range owned {
+		if field, ok := d.fields.remove(path); ok && field.input.text().Value() != field.applied {
+			machines[path[1]] = struct{}{}
+		}
+		if resolving, ok := d.pendingSave.(PendingSaveResolving); ok && slices.Equal(resolving.path, path) {
+			d.pendingSave = PendingSaveReady{}
+		}
+	}
+	if len(machines) > 0 {
+		notice := fmt.Sprintf(
+			"Discarded pending build-cache edits for %s: this machine's mbx installation owns its budgets and directory. Mjolnir does not modify them.",
+			strings.Join(slices.Sorted(maps.Keys(machines)), ", "),
+		)
+		d.notice = &notice
+	}
 }
 
 // buildCachePage is the machine whose build cache page is showing, with the
@@ -211,14 +235,108 @@ func (d *SetupDialog) buildCacheRowUnavailable() (string, bool) {
 // values on the target's host, unless the current settings are already
 // resolved or in flight.
 func (d *SetupDialog) previewBuildCacheAction() DashboardAction {
-	panic("unported: mj-tui/src/setup/previews.rs preview_build_cache_action")
+	machineID, key, ok := d.buildCachePage()
+	if !ok {
+		machineID, key, ok = d.buildCacheMachinePage()
+	}
+	if !ok {
+		return DashboardActionNone{}
+	}
+	if preview, found := d.buildCachePreviews[machineID]; found && setupValueEqual(preview.key, key) {
+		return DashboardActionNone{}
+	}
+	machine, err := setupValueMachine(setupValueGet(key, "machine"))
+	if err != nil {
+		// A draft that does not parse yet has nothing to resolve.
+		return DashboardActionNone{}
+	}
+	d.buildCachePreviews[machineID] = BuildCachePreviewState{
+		key:                 setupValueClone(key),
+		result:              BuildCachePreviewResultResolving{},
+		installMbxAvailable: false,
+	}
+	notice := "Resolving the build cache defaults on the machine…"
+	d.notice = &notice
+	return DashboardActionPreviewBuildCache{
+		Generation: d.generation,
+		Key:        key,
+		Machine:    machine,
+	}
 }
 
 // buildCacheAutomaticLabel is what the build cache page shows for a blank
 // field: the value its host resolves, shown bare in place of the
 // "automatic" placeholder.
 func (d *SetupDialog) buildCacheAutomaticLabel(field string) (string, bool) {
-	panic("unported: mj-tui/src/setup/previews.rs build_cache_automatic_label")
+	machineID, key, ok := d.buildCachePage()
+	if !ok || field == "tools_directory" {
+		return "", false
+	}
+	state, ok := d.buildCachePreviews[machineID]
+	if !ok || !setupValueEqual(state.key, key) {
+		return "", false
+	}
+	switch result := state.result.(type) {
+	case BuildCachePreviewResultReady:
+		if preview := result.value; preview != nil {
+			switch field {
+			case "enabled":
+				if _, turnedOff := preview.OffReason.(core.BuildCacheOffTurnedOff); turnedOff {
+					return chat.CheckboxMarker(false), true
+				}
+				return chat.CheckboxMarker(true), true
+			case "directory":
+				if preview.Directory != nil {
+					return *preview.Directory, true
+				}
+				return "Unknown", true
+			// Resolved sizes are shown in the same whole GB the field is
+			// edited in.
+			case "max_total_size":
+				switch limit := preview.MaxTotalSize.(type) {
+				case core.BuildCacheLimitSize:
+					return fmt.Sprintf("%s GB, mj setting", client.BuildCacheGigabytesLabel(limit.Value)), true
+				case core.BuildCacheLimitMjDefault:
+					return fmt.Sprintf("%s GB, mj default", client.BuildCacheGigabytesLabel(limit.Value)), true
+				case core.BuildCacheLimitHostConfiguration:
+					switch {
+					case limit.Value == nil:
+						return "Unknown, host mbx config", true
+					case *limit.Value == "none":
+						return "Unlimited, host mbx", true
+					default:
+						return fmt.Sprintf("%s GB, host mbx config", client.BuildCacheGigabytesLabel(*limit.Value)), true
+					}
+				case core.BuildCacheLimitMbxDefault:
+					if limit.Value == nil {
+						return "Unlimited, mbx default", true
+					}
+					return fmt.Sprintf("%s GB, mbx default", client.BuildCacheGigabytesLabel(*limit.Value)), true
+				default:
+					return "Unknown", true
+				}
+			default:
+				return "", false
+			}
+		}
+		// The checkbox keeps showing the machine's own setting while the
+		// other fields report how far the lookup got.
+		if field == "enabled" {
+			return "", false
+		}
+		return "Not available for this machine", true
+	case BuildCachePreviewResultResolving:
+		if field == "enabled" {
+			return "", false
+		}
+		return "Resolving…", true
+	case BuildCachePreviewResultFailed:
+		if field == "enabled" {
+			return "", false
+		}
+		return "Unknown", true
+	}
+	return "", false
 }
 
 func (d *SetupDialog) currentBuildCachePreview() *core.BuildCachePreview {
@@ -351,7 +469,21 @@ func setupParseDays(text string) *uint32 {
 // current archive window would reclaim, unless that value is already
 // measured or in flight.
 func (d *SetupDialog) previewArchiveSpaceAction() DashboardAction {
-	panic("unported: mj-tui/src/setup/previews.rs preview_archive_space_action")
+	olderThanDays, ok := d.archiveAfterDaysPage()
+	if !ok {
+		return DashboardActionNone{}
+	}
+	if d.archiveSpacePreview != nil && setupDaysEqual(d.archiveSpacePreview.key, olderThanDays) {
+		return DashboardActionNone{}
+	}
+	d.archiveSpacePreview = &ArchiveSpacePreviewState{
+		key:    olderThanDays,
+		result: ArchiveSpacePreviewResultResolving{},
+	}
+	return DashboardActionPreviewArchiveSpace{
+		Generation:    d.generation,
+		OlderThanDays: olderThanDays,
+	}
 }
 
 // archiveSpaceAutomaticLabel is what the SessionWiki page shows in the value
