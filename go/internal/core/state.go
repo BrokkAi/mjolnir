@@ -1101,6 +1101,37 @@ func stateIsFalse(value bool) bool { return !value }
 // AsStr is the persisted and wire spelling, matching the serde encoding.
 func (s SessionState) AsStr() string { return string(s) }
 
+// GoString is the derived Debug: the variant's name.
+func (s SessionState) GoString() string {
+	switch s {
+	case SessionStateProvisioning:
+		return "Provisioning"
+	case SessionStateStartupCleanup:
+		return "StartupCleanup"
+	case SessionStateRunning:
+		return "Running"
+	case SessionStateDisconnected:
+		return "Disconnected"
+	case SessionStateCheckpointing:
+		return "Checkpointing"
+	case SessionStateClosing:
+		return "Closing"
+	case SessionStateDestroying:
+		return "Destroying"
+	case SessionStateStopped:
+		return "Stopped"
+	case SessionStateParked:
+		return "Parked"
+	case SessionStateLost:
+		return "Lost"
+	case SessionStateError:
+		return "Error"
+	case SessionStateDestroyedWithDataLoss:
+		return "DestroyedWithDataLoss"
+	}
+	return string(s)
+}
+
 // SessionStateFromStored reads a stored spelling. Rows written before the
 // verb was renamed still say "archived".
 func SessionStateFromStored(value string) (SessionState, bool) {
