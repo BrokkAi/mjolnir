@@ -26,6 +26,34 @@ var (
 	fakeWorkerPath string
 )
 
+// testGlideEndpoint is the GLiDE endpoint a test process routes the default
+// classifier source to, set once (Rust TEST_GLIDE_ENDPOINT, a OnceLock).
+var testGlideEndpoint struct {
+	mu       sync.Mutex
+	endpoint *string
+}
+
+// SetTestGlideEndpoint routes the default classifier source of this test
+// process to endpoint. It panics when the endpoint was already set.
+func SetTestGlideEndpoint(endpoint string) {
+	testGlideEndpoint.mu.Lock()
+	defer testGlideEndpoint.mu.Unlock()
+	if testGlideEndpoint.endpoint != nil {
+		panic("set test GLiDE endpoint once")
+	}
+	testGlideEndpoint.endpoint = &endpoint
+}
+
+// TestGlideEndpoint is the endpoint SetTestGlideEndpoint set, if any.
+func TestGlideEndpoint() (string, bool) {
+	testGlideEndpoint.mu.Lock()
+	defer testGlideEndpoint.mu.Unlock()
+	if testGlideEndpoint.endpoint == nil {
+		return "", false
+	}
+	return *testGlideEndpoint.endpoint, true
+}
+
 // ReachTestHook stops at the named crash boundary when an isolated test asks
 // for it through MJ_TEST_HOOK; in the default build it does nothing.
 func ReachTestHook(name string) error {

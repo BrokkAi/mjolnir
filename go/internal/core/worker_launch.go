@@ -176,6 +176,11 @@ const SessionGitConfigIncludePath = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH"
 // distinguish a managed child whose historical handback tool is disabled.
 const SessionManagedSubagentEnv = "MJ_SESSION_MANAGED_SUBAGENT"
 
+// SessionRawLaunchRecordEnv is a controller-authored environment marker:
+// record a raw Git launch baseline (`mj/sessions/<session-id>/launch`)
+// before starting the harness if absent.
+const SessionRawLaunchRecordEnv = "MJ_SESSION_RAW_LAUNCH_RECORD"
+
 // SessionMessageMCPEnv is a controller-authored environment marker: the
 // controller staged the message-only `mj-agents` registration for this
 // top-level session. A worker grants that role only with this marker, so a

@@ -317,7 +317,7 @@ func TestIncompatibleSchemaIsRejectedBeforeRestoreMutatesTarget(t *testing.T) {
 	for _, schemaVersion := range []uint32{
 		1,
 		core.ArchiveSchemaVersion + 1,
-		core.ArchiveSchemaVersionNotificationStack + 1,
+		core.ArchiveSchemaVersionMailbox + 1,
 	} {
 		incompatible := filepath.Join(temp, fmt.Sprintf("incompatible-%d.hel.zip", schemaVersion))
 		copyArchiveWithSchema(t, spec.OutputPath, incompatible, schemaVersion)

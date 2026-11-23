@@ -33,9 +33,11 @@ package worker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -74,7 +76,7 @@ func (r microvmReplaceRootRecord) MarshalJSON() ([]byte, error) {
 	type plain microvmReplaceRootRecord
 	p := plain(r)
 	p.Labels = microvmNonNilMap(p.Labels)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // UnmarshalJSON requires every member, as serde does.
@@ -93,7 +95,19 @@ func microvmReplaceRootRecordPath(layout MicrovmLayout, name string) string {
 // microvmReadReplaceRootRecord is the record of name, or nil when there is
 // none.
 func microvmReadReplaceRootRecord(layout MicrovmLayout, name string) (*microvmReplaceRootRecord, error) {
-	panic("unported: mj-worker/src/microvm/replace_root.rs read_record")
+	path := microvmReplaceRootRecordPath(layout, name)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, microvmIOError(err))
+	}
+	var record microvmReplaceRootRecord
+	if err := microvmDecodeVersioned(data, path, "root replacement record", microvmReplaceRootRecordFormat, &record); err != nil {
+		return nil, err
+	}
+	return &record, nil
 }
 
 // MicrovmPinnedImages is the image ids that a staged replacement still
@@ -101,7 +115,21 @@ func microvmReadReplaceRootRecord(layout MicrovmLayout, name string) (*microvmRe
 // also holds while it writes the record, so a prune cannot miss a record
 // being written.
 func MicrovmPinnedImages(layout MicrovmLayout) (map[string]bool, error) {
-	panic("unported: mj-worker/src/microvm/replace_root.rs pinned_images")
+	pinned := map[string]bool{}
+	states, err := MicrovmVmStateList(layout)
+	if err != nil {
+		return nil, err
+	}
+	for _, state := range states {
+		record, err := microvmReadReplaceRootRecord(layout, state.Name)
+		if err != nil {
+			return nil, err
+		}
+		if record != nil {
+			pinned[record.ImageID] = true
+		}
+	}
+	return pinned, nil
 }
 
 func microvmNoSuchContainer(name string) error {
@@ -145,7 +173,102 @@ func MicrovmReplaceRootStage(layout MicrovmLayout, name string, operation string
 // microvmReplaceRootStageChecked is stage with the image check given;
 // tests, which have no mountable disk, give it a no-op.
 func microvmReplaceRootStageChecked(layout MicrovmLayout, name string, operation string, reference string, labels map[string]string, check func(layout MicrovmLayout, imageID string, user string, path string) error) (string, error) {
-	panic("unported: mj-worker/src/microvm/replace_root.rs stage_checked")
+	if err := MicrovmValidateName("container", name); err != nil {
+		return "", err
+	}
+	if err := microvmValidateOperation(operation); err != nil {
+		return "", err
+	}
+	if err := microvmValidateLabels(labels); err != nil {
+		return "", err
+	}
+	vmLock, err := layout.LockVM(name)
+	if err != nil {
+		return "", err
+	}
+	defer vmLock.Drop()
+	if err := microvmRefuseAbsent(layout, name, vmLock); err != nil {
+		return "", err
+	}
+	state, err := microvmReplaceRootReadState(layout, name)
+	if err != nil {
+		return "", err
+	}
+	id, ok, err := MicrovmImageLookup(layout, reference)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s: image not known", reference)
+	}
+	// Held while the record is written: a prune decides under this lock.
+	imageLock, err := layout.LockImage(id)
+	if err != nil {
+		return "", err
+	}
+	defer imageLock.Drop()
+	if !microvmIsFile(filepath.Join(layout.Image(id), "config.json")) {
+		return "", fmt.Errorf("%s: image not known", reference)
+	}
+	// Every stage, first or repeated, checks the image before anything is
+	// stopped or swapped: the swap cannot be undone by the controller, and a
+	// worker state that cannot be restored would strand the session.
+	path := microvmDefaultPath
+	for _, entry := range state.Env {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			path = value
+			break
+		}
+	}
+	if err := check(layout, id, state.User, path); err != nil {
+		return "", fmt.Errorf("%s cannot replace the root disk of container %s: %w", reference, name, err)
+	}
+	existing, err := microvmReadReplaceRootRecord(layout, name)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		if existing.Operation != operation {
+			return "", fmt.Errorf("container %s already has a root replacement in progress (operation %s); release it first", name, existing.Operation)
+		}
+		if existing.ImageID != id {
+			return "", fmt.Errorf("operation %s staged another image for container %s", operation, name)
+		}
+		return id, nil
+	}
+	newID, err := microvmRandomID()
+	if err != nil {
+		return "", err
+	}
+	record := microvmReplaceRootRecord{
+		Format:         microvmReplaceRootRecordFormat,
+		Operation:      operation,
+		ImageID:        id,
+		ImageReference: reference,
+		Labels:         labels,
+		NewID:          newID,
+	}
+	if err := MicrovmWriteJSONAtomic(microvmReplaceRootRecordPath(layout, name), record); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// microvmReplaceRootTakeOver gives state the identity the record names: the
+// replacement's id, image and labels.
+func microvmReplaceRootTakeOver(state MicrovmVmState, record microvmReplaceRootRecord) MicrovmVmState {
+	state.ID = record.NewID
+	state.ImageID = record.ImageID
+	state.ImageReference = record.ImageReference
+	labels := make(map[string]string, len(state.Labels)+len(record.Labels))
+	for key, value := range state.Labels {
+		labels[key] = value
+	}
+	for key, value := range record.Labels {
+		labels[key] = value
+	}
+	state.Labels = labels
+	return state
 }
 
 func microvmValidateOperation(operation string) error {
@@ -167,7 +290,14 @@ func microvmValidateOperation(operation string) error {
 // this id; showing the source there would send recovery to capture control
 // state from a half-swapped root.
 func MicrovmReplaceRootObserved(layout MicrovmLayout, name string, state MicrovmVmState) (MicrovmVmState, error) {
-	panic("unported: mj-worker/src/microvm/replace_root.rs observed")
+	record, err := microvmReadReplaceRootRecord(layout, name)
+	if err != nil {
+		return MicrovmVmState{}, err
+	}
+	if record != nil && state.ID != record.NewID && microvmExists(filepath.Join(layout.VM(name), microvmReplaceRootPrevious)) {
+		state = microvmReplaceRootTakeOver(state, *record)
+	}
+	return state, nil
 }
 
 // MicrovmResumeInterruptedLocked finishes a swap that a crash interrupted.
@@ -175,27 +305,190 @@ func MicrovmReplaceRootObserved(layout MicrovmLayout, name string, state Microvm
 // the same critical section, so no other `apply` can interleave between the
 // decision and the boot. Without a swap in progress this does nothing.
 func MicrovmResumeInterruptedLocked(layout MicrovmLayout, name string) error {
-	panic("unported: mj-worker/src/microvm/replace_root.rs resume_interrupted_locked")
+	state, err := MicrovmVmStateRead(layout, name)
+	if err != nil || state == nil {
+		return err
+	}
+	record, err := microvmReadReplaceRootRecord(layout, name)
+	if err != nil || record == nil {
+		return err
+	}
+	if state.ID != record.NewID && microvmExists(filepath.Join(layout.VM(name), microvmReplaceRootPrevious)) {
+		activity, err := MicrovmVMActivity(name)
+		if err != nil {
+			return err
+		}
+		if activity != MicrovmActivityStopped {
+			return fmt.Errorf("container %s is running with an interrupted root replacement", name)
+		}
+		if _, err := microvmReplaceRootApplyStopped(layout, name, record.Operation, microvmReflink); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MicrovmReplaceRootApply swaps the root disk of the stopped VM name.
 // Returns the VM's new id.
 func MicrovmReplaceRootApply(layout MicrovmLayout, name string, operation string) (string, error) {
-	panic("unported: mj-worker/src/microvm/replace_root.rs apply")
+	if err := MicrovmValidateName("container", name); err != nil {
+		return "", err
+	}
+	if err := microvmValidateOperation(operation); err != nil {
+		return "", err
+	}
+	if !MicrovmIsRoot() {
+		return "", errors.New("the microvm engine must run as root (use sudo -n)")
+	}
+	vmLock, err := layout.LockVM(name)
+	if err != nil {
+		return "", err
+	}
+	defer vmLock.Drop()
+	if err := microvmRefuseAbsent(layout, name, vmLock); err != nil {
+		return "", err
+	}
+	activity, err := MicrovmVMActivity(name)
+	if err != nil {
+		return "", err
+	}
+	if activity != MicrovmActivityStopped {
+		return "", fmt.Errorf("container %s is running; stop it before replacing its root disk", name)
+	}
+	return microvmReplaceRootApplyStopped(layout, name, operation, microvmReflink)
 }
 
 // microvmReplaceRootApplyStopped is apply after the checks that need the
 // host. clone copies an image's root disk to a new file; tests give it a
 // plain copy.
 func microvmReplaceRootApplyStopped(layout MicrovmLayout, name string, operation string, clone func(source string, destination string) error) (string, error) {
-	panic("unported: mj-worker/src/microvm/replace_root.rs apply_stopped")
+	state, err := microvmReplaceRootReadState(layout, name)
+	if err != nil {
+		return "", err
+	}
+	record, err := microvmReadReplaceRootRecord(layout, name)
+	if err != nil {
+		return "", err
+	}
+	if record == nil {
+		return "", fmt.Errorf("container %s has no staged root replacement", name)
+	}
+	if record.Operation != operation {
+		return "", fmt.Errorf("container %s stages operation %s, not %s", name, record.Operation, operation)
+	}
+	if state.ID == record.NewID {
+		return state.ID, nil
+	}
+	directory := layout.VM(name)
+	root := filepath.Join(directory, microvmReplaceRootRoot)
+	next := filepath.Join(directory, microvmReplaceRootNext)
+	previous := filepath.Join(directory, microvmReplaceRootPrevious)
+	if !microvmExists(previous) {
+		// The swap has not started. A half-written clone from an interrupted
+		// attempt is scratch.
+		if err := microvmRemoveIfPresent(next); err != nil {
+			return "", err
+		}
+		cloned := func() error {
+			imageLock, err := layout.LockImage(record.ImageID)
+			if err != nil {
+				return err
+			}
+			defer imageLock.Drop()
+			if !microvmIsFile(filepath.Join(layout.Image(record.ImageID), "config.json")) {
+				return fmt.Errorf("the staged image %s is gone; the staging record should have pinned it", record.ImageID)
+			}
+			return clone(MicrovmRootImage(layout, record.ImageID), next)
+		}()
+		if cloned != nil {
+			return "", cloned
+		}
+		if err := microvmSyncFile(next); err != nil {
+			return "", err
+		}
+		// The clone's directory entry must be durable before the old root
+		// moves: a recovery that finds `previous` skips the clone.
+		if err := microvmSyncDirectory(directory); err != nil {
+			return "", err
+		}
+		if err := os.Rename(root, previous); err != nil {
+			return "", fmt.Errorf("set aside %s: %w", root, microvmIOError(err))
+		}
+		// Durable before the replacement is installed: a recovery that finds
+		// no `previous` takes the installed clone for the original root.
+		if err := microvmSyncDirectory(directory); err != nil {
+			return "", err
+		}
+	}
+	// From here the old root disk is `previous` and `next` is complete; a
+	// second `apply` continues exactly here.
+	if microvmExists(next) {
+		if err := os.Rename(next, root); err != nil {
+			return "", fmt.Errorf("install %s: %w", root, microvmIOError(err))
+		}
+	}
+	if !microvmIsFile(root) {
+		return "", fmt.Errorf("container %s has no root disk after the swap; %s holds the old one", name, previous)
+	}
+	if err := microvmSyncDirectory(directory); err != nil {
+		return "", err
+	}
+	state = microvmReplaceRootTakeOver(state, *record)
+	if err := state.Write(layout); err != nil {
+		return "", err
+	}
+	return state.ID, nil
 }
 
 // MicrovmReplaceRootRelease ends the operation: it deletes the previous
 // root disk if the swap happened, and the record. A container that no
 // longer exists has nothing to release.
 func MicrovmReplaceRootRelease(layout MicrovmLayout, name string, operation string) error {
-	panic("unported: mj-worker/src/microvm/replace_root.rs release")
+	if err := MicrovmValidateName("container", name); err != nil {
+		return err
+	}
+	if err := microvmValidateOperation(operation); err != nil {
+		return err
+	}
+	vmLock, err := layout.LockVM(name)
+	if err != nil {
+		return err
+	}
+	defer vmLock.Drop()
+	state, err := MicrovmVmStateRead(layout, name)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return layout.ForgetVMLock(name, vmLock)
+	}
+	record, err := microvmReadReplaceRootRecord(layout, name)
+	if err != nil || record == nil {
+		return err
+	}
+	if record.Operation != operation {
+		return fmt.Errorf("container %s stages operation %s, not %s", name, record.Operation, operation)
+	}
+	directory := layout.VM(name)
+	previous := filepath.Join(directory, microvmReplaceRootPrevious)
+	if state.ID == record.NewID {
+		if err := microvmRemoveIfPresent(previous); err != nil {
+			return err
+		}
+	} else {
+		// Never swapped, or interrupted mid-swap; only the former may be
+		// released, because the old root disk is the only one in the latter.
+		if microvmExists(previous) {
+			return fmt.Errorf("the root replacement of container %s was interrupted; apply it again", name)
+		}
+		if err := microvmRemoveIfPresent(filepath.Join(directory, microvmReplaceRootNext)); err != nil {
+			return err
+		}
+	}
+	if err := microvmRemoveIfPresent(microvmReplaceRootRecordPath(layout, name)); err != nil {
+		return err
+	}
+	return microvmSyncDirectory(directory)
 }
 
 func microvmRemoveIfPresent(path string) error {

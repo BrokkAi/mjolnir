@@ -142,8 +142,9 @@ func (r *ImageResult) UnmarshalJSON(data []byte) error {
 type ImageStatus struct {
 	Platform string `json:"platform"`
 	Image    string `json:"image"`
-	// Current is nil when no configured builder can inspect this platform.
-	Current *bool `json:"current"`
+	// Current is nil when freshness could not be determined.
+	Current   *bool `json:"current"`
+	NoBuilder bool  `json:"no_builder,omitempty"`
 }
 
 func (s *ImageStatus) UnmarshalJSON(data []byte) error {

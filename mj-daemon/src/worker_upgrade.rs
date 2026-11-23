@@ -19,7 +19,8 @@ use tokio::task::JoinSet;
 use mj_controller::backoff::backoff_delay;
 use mj_controller::controller::{Controller, HarnessPreparationFailure, WorkerUpgradeOutcome};
 use mj_controller::recovery_gate::{
-    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryGate, observation_channel,
+    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryAttempt, RecoveryGate,
+    observation_channel,
 };
 use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
@@ -126,7 +127,8 @@ impl WorkerUpgradeCoordinator {
                         if !policy.due(&observation, Utc::now()) {
                             continue;
                         }
-                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
+                        // Preparation shares the session; the swap widens this admission (#1601).
+                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerPreparation).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
                         else {
                             continue;
                         };
@@ -180,24 +182,10 @@ impl WorkerUpgradeCoordinator {
                             // Keep the per-session slot through settlement: foreground
                             // lifecycle work cancels us and waits for this slot before
                             // changing placement or revision.
-                            let (applied_preparation_failure, admission) = if let Some(failure) = preparation_failure {
-                                let id = session_id.clone();
-                                let (settled, admission) = admission.run_blocking(move |cancelled| {
-                                    settle_preparation_failure(&id, &failure, &observed_updated_at, &cancelled)
-                                }).await;
-                                let notice = match settled {
-                                    Ok(Ok(notice)) => notice,
-                                    Ok(Err(error)) => {
-                                        tracing::warn!(%session_id, %error, "could not persist worker harness preparation failure");
-                                        None
-                                    }
-                                    Err(error) => {
-                                        tracing::error!(%session_id, %error, "worker harness failure settlement task failed");
-                                        None
-                                    }
-                                };
-                                (notice, admission)
-                            } else { (None, admission) };
+                            let (applied_preparation_failure, admission) = match preparation_failure {
+                                Some(failure) => settle_preparation_failure_exclusively(admission, session_id.clone(), failure, observed_updated_at).await,
+                                None => (None, admission),
+                            };
                             let result = WorkerUpgradeResult {
                                 session_id,
                                 outcome,
@@ -252,6 +240,41 @@ impl WorkerUpgradeCoordinator {
     pub fn try_result(&mut self) -> Option<WorkerUpgradeResult> {
         self.results.try_recv()
     }
+}
+
+/// Settle a harness-preparation failure under the attempt's own admission.
+/// Failing the session is a lifecycle write, so the admission is widened first:
+/// it waits for work admitted beside preparation and then shares the session
+/// with nothing. A lifecycle operation or handoff that takes the session first
+/// leaves the unusable worker for the next attempt.
+async fn settle_preparation_failure_exclusively(
+    admission: RecoveryAttempt,
+    session_id: String,
+    failure: HarnessPreparationFailure,
+    observed_updated_at: String,
+) -> (Option<String>, RecoveryAttempt) {
+    if let Err(refusal) = admission.widen_for_swap().await {
+        tracing::debug!(%session_id, holders = ?refusal.holders, "worker harness failure settlement stood down");
+        return (None, admission);
+    }
+    let id = session_id.clone();
+    let (settled, admission) = admission
+        .run_blocking(move |cancelled| {
+            settle_preparation_failure(&id, &failure, &observed_updated_at, &cancelled)
+        })
+        .await;
+    let notice = match settled {
+        Ok(Ok(notice)) => notice,
+        Ok(Err(error)) => {
+            tracing::warn!(%session_id, %error, "could not persist worker harness preparation failure");
+            None
+        }
+        Err(error) => {
+            tracing::error!(%session_id, %error, "worker harness failure settlement task failed");
+            None
+        }
+    };
+    (notice, admission)
 }
 
 /// Preparation is disposable; once failure settlement is accepted its short
@@ -791,5 +814,81 @@ mod tests {
         );
         drop(admission);
         assert!(!gate.is_busy(&session.id));
+    }
+
+    /// Failing the session is a lifecycle write: settlement after a failed
+    /// preparation waits for work admitted beside it, then holds the session
+    /// alone, and never cancels that work.
+    #[tokio::test]
+    async fn harness_failure_settlement_waits_for_work_beside_preparation() {
+        const CHILD: &str = "MJ_UPGRADE_WIDENED_SETTLEMENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                "worker_upgrade::tests::harness_failure_settlement_waits_for_work_beside_preparation",
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-widened-settlement-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        Config::default().save().unwrap();
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let session = session_record(SessionState::Running);
+        mj_controller::database::save_session(&session).unwrap();
+        let gate = Arc::new(RecoveryGate::default());
+        let upgrade = gate
+            .try_start(&session.id, BackgroundWork::WorkerPreparation)
+            .unwrap();
+        let delivery = gate
+            .try_start(&session.id, BackgroundWork::DelegationDelivery)
+            .unwrap();
+        let settling = mj_core::runtime::spawn(settle_preparation_failure_exclusively(
+            upgrade,
+            session.id.clone(),
+            HarnessPreparationFailure {
+                step: "prepare".into(),
+                error: "broken harness".into(),
+            },
+            session.updated_at.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Err(refusal) = gate.try_start(&session.id, BackgroundWork::QuotaScheduling)
+                    && refusal.holders.contains(&"worker upgrade")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("settlement claims the session alone");
+        assert!(!settling.is_finished());
+        assert!(!delivery.cancellation().load(Ordering::Acquire));
+        assert_eq!(
+            mj_controller::database::read_durable_session_record(&session.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SessionState::Running
+        );
+        drop(delivery);
+        // Nothing overtakes the pending settlement once the delivery ends.
+        assert!(
+            gate.try_start(&session.id, BackgroundWork::QuotaScheduling)
+                .is_err()
+        );
+        let (notice, admission) = settling.await.unwrap();
+        assert!(notice.unwrap().contains("broken harness"));
+        assert_eq!(admission.work(), BackgroundWork::WorkerReplacement);
+        assert_eq!(
+            mj_controller::database::read_durable_session_record(&session.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            SessionState::Error
+        );
     }
 }

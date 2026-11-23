@@ -16,7 +16,49 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
+
+// CapacityWindowSummary is a host's readings over a recent window. (Ported
+// from the Rust source after this package's base, for mj-client's runtime
+// feed.)
+type CapacityWindowSummary struct {
+	WindowSeconds      uint64   `json:"window_seconds"`
+	SampleCount        uint32   `json:"sample_count"`
+	CPUPercentAvg      *float64 `json:"cpu_percent_avg"`
+	CPUPercentMax      *uint8   `json:"cpu_percent_max"`
+	MemoryUsedBytesAvg uint64   `json:"memory_used_bytes_avg"`
+	MemoryUsedBytesMax uint64   `json:"memory_used_bytes_max"`
+}
+
+// MarshalJSON writes the average as serde writes an f64, with a decimal
+// point.
+func (s CapacityWindowSummary) MarshalJSON() ([]byte, error) {
+	var average json.RawMessage
+	if s.CPUPercentAvg != nil {
+		encoded, err := jsonvalue.Marshal(*s.CPUPercentAvg)
+		if err != nil {
+			return nil, err
+		}
+		average = encoded
+	} else {
+		average = json.RawMessage("null")
+	}
+	return json.Marshal(struct {
+		WindowSeconds      uint64          `json:"window_seconds"`
+		SampleCount        uint32          `json:"sample_count"`
+		CPUPercentAvg      json.RawMessage `json:"cpu_percent_avg"`
+		CPUPercentMax      *uint8          `json:"cpu_percent_max"`
+		MemoryUsedBytesAvg uint64          `json:"memory_used_bytes_avg"`
+		MemoryUsedBytesMax uint64          `json:"memory_used_bytes_max"`
+	}{s.WindowSeconds, s.SampleCount, average, s.CPUPercentMax, s.MemoryUsedBytesAvg, s.MemoryUsedBytesMax})
+}
+
+func (s *CapacityWindowSummary) UnmarshalJSON(data []byte) error {
+	type plain CapacityWindowSummary
+	return transcriptStrictDecode(data, (*plain)(s), false)
+}
 
 // CapacitySampleStaleAfterSeconds: a reading older than this stopped
 // tracking the host. The poller samples every 30 seconds, so three missed

@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -38,15 +40,109 @@ import (
 // Best effort by design: a breadcrumb must never be the reason a worker fails
 // to start.
 func RecordStartupStep(root string, step string) {
-	panic("unported: mj-worker/src/worker_runtime.rs record_startup_step")
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return
+	}
+	path := filepath.Join(root, core.WorkerStartupFile)
+	at := time.Now().UTC().Format(startupRecordTimeFormat)
+	var steps []any
+	if body, err := os.ReadFile(path); err == nil {
+		if record, err := jsonvalue.Parse(body); err == nil {
+			if object, ok := record.(jsonvalue.Object); ok {
+				if previous, ok := object.Get("steps"); ok {
+					if array, ok := previous.([]any); ok {
+						steps = array
+					}
+				}
+			}
+		}
+	}
+	// A worker that somehow restarted many times would otherwise grow this
+	// file without end.
+	if len(steps) >= 64 {
+		steps = steps[len(steps)-63:]
+	}
+	steps = append(steps, jsonvalue.Object{{Key: "step", Value: step}, {Key: "at", Value: at}})
+	startupProcessBirthOnce.Do(func() {
+		identity, err := core.ProcessBirthIdentity(uint32(os.Getpid()))
+		if err != nil {
+			core.DiagnosticStderr("Mjolnir: could not record process identity: %v", err)
+			return
+		}
+		startupProcessBirth = &identity
+	})
+	var processBirth any
+	if startupProcessBirth != nil {
+		processBirth = *startupProcessBirth
+	}
+	record := jsonvalue.Object{
+		{Key: "step", Value: step},
+		{Key: "at", Value: at},
+		{Key: "pid", Value: uint32(os.Getpid())},
+		{Key: "process_birth", Value: processBirth},
+		{Key: "version", Value: core.PackageVersion},
+		{Key: "steps", Value: steps},
+	}
+	body, err := workerRuntimeMarshalPretty(record)
+	if err != nil {
+		core.DiagnosticStderr("Mjolnir: could not serialize startup step %s: %v", step, err)
+		return
+	}
+	if err := core.AtomicWrite(path, body); err != nil {
+		core.DiagnosticStderr("Mjolnir: could not record startup step %s: %v", step, err)
+	}
 }
+
+// startupRecordTimeFormat is chrono's to_rfc3339_opts(Millis, true) for a
+// UTC time.
+const startupRecordTimeFormat = "2006-01-02T15:04:05.000Z07:00"
+
+// startupProcessBirth is the process identity recorded with every step,
+// computed once (Rust's OnceLock); nil when it could not be read.
+var (
+	startupProcessBirthOnce sync.Once
+	startupProcessBirth     *string
+)
 
 // RecordStartupFailure records the preparation error alongside the last
 // startup breadcrumb. The worker stays alive after this point, so its exit
 // record cannot carry the failure that the daemon needs to explain a failed
 // launch.
 func RecordStartupFailure(root string, step string, errorText string) {
-	panic("unported: mj-worker/src/worker_runtime.rs record_startup_failure")
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return
+	}
+	path := filepath.Join(root, core.WorkerStartupFile)
+	record := jsonvalue.Object{}
+	if body, err := os.ReadFile(path); err == nil {
+		if value, err := jsonvalue.Parse(body); err == nil {
+			if object, ok := value.(jsonvalue.Object); ok {
+				record = object
+			}
+		}
+	}
+	boundedError := errorText
+	count := 0
+	for index := range errorText {
+		if count == 8_192 {
+			boundedError = errorText[:index]
+			break
+		}
+		count++
+	}
+	record.Set("failure", jsonvalue.Object{
+		{Key: "step", Value: step},
+		{Key: "error", Value: boundedError},
+		{Key: "at", Value: time.Now().UTC().Format(startupRecordTimeFormat)},
+	})
+	body, err := workerRuntimeMarshalPretty(record)
+	if err != nil {
+		core.DiagnosticStderr("Mjolnir: could not serialize startup failure at %s: %v", step, err)
+		return
+	}
+	if err := core.AtomicWrite(path, body); err != nil {
+		core.DiagnosticStderr("Mjolnir: could not record startup failure at %s: %v", step, err)
+	}
 }
 
 const githubCLIBinEnv = "MJ_GITHUB_CLI_BIN"
@@ -306,7 +402,48 @@ func credentialEndpoint(config *core.WorkerLaunchConfig) (CredentialEndpoint, er
 }
 
 func resolveRelativeHarnessHome(config *core.WorkerLaunchConfig, base string) {
-	panic("unported: mj-worker/src/worker_runtime.rs resolve_relative_harness_home")
+	if config.Harness.NestedHome() {
+		if value, ok := config.Environment["XDG_DATA_HOME"]; ok && !filepath.IsAbs(value) {
+			config.Environment["XDG_DATA_HOME"] = filepath.Join(base, value)
+		}
+	}
+	key := config.Harness.HomeEnv()
+	if value, ok := config.Environment[key]; ok && !filepath.IsAbs(value) {
+		config.Environment[key] = filepath.Join(base, value)
+	}
+	if !filepath.IsAbs(config.HarnessHome) && config.HarnessHome != "" {
+		config.HarnessHome = filepath.Join(base, config.HarnessHome)
+	}
+	for _, key := range []string{"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"} {
+		if value, ok := config.Environment[key]; ok && !filepath.IsAbs(value) {
+			config.Environment[key] = filepath.Join(base, value)
+		}
+	}
+	if memory := config.ProjectMemory; memory != nil {
+		if memory.HistorySocket != nil && !filepath.IsAbs(*memory.HistorySocket) {
+			socket := filepath.Join(base, *memory.HistorySocket)
+			memory.HistorySocket = &socket
+		}
+		if !filepath.IsAbs(memory.Root) {
+			relativeRoot := memory.Root
+			memory.Root = filepath.Join(base, relativeRoot)
+			for index, directory := range config.AdditionalDirectories {
+				if directory == relativeRoot {
+					config.AdditionalDirectories[index] = memory.Root
+				}
+			}
+		}
+		if memory.BaselineRoot == "" {
+			parent := "."
+			if memory.Root != string(filepath.Separator) {
+				parent = filepath.Dir(memory.Root)
+			}
+			memory.BaselineRoot = filepath.Join(parent, ".hel-memory-baseline")
+		}
+		if !filepath.IsAbs(memory.BaselineRoot) {
+			memory.BaselineRoot = filepath.Join(base, memory.BaselineRoot)
+		}
+	}
 }
 
 func reviewerWorkspaceDirectories(config *core.WorkerLaunchConfig) []string {
@@ -382,4 +519,66 @@ func workerRuntimeDecodeStrict(data []byte, v any, required ...string) error {
 		}
 	}
 	return nil
+}
+
+// workerRuntimePathComponents is Rust's `Path::components` on Unix, as
+// text: the root, then each component, with repeated separators and interior
+// `.` dropped and a leading `.` kept.
+func workerRuntimePathComponents(path string) []string {
+	var components []string
+	if strings.HasPrefix(path, "/") {
+		components = append(components, "/")
+	}
+	for index, part := range strings.Split(path, "/") {
+		if part == "" || (part == "." && index > 0) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
+}
+
+// workerRuntimePathParent is Rust's `Path::parent`: the path without its
+// last component, absent for a root or an empty path.
+func workerRuntimePathParent(path string) (string, bool) {
+	components := workerRuntimePathComponents(path)
+	if len(components) == 0 || (len(components) == 1 && components[0] == "/") {
+		return "", false
+	}
+	components = components[:len(components)-1]
+	if len(components) > 0 && components[0] == "/" {
+		return "/" + strings.Join(components[1:], "/"), true
+	}
+	return strings.Join(components, "/"), true
+}
+
+// workerRuntimeFileName is Rust's `Path::file_name`: the last component
+// when it is a name, absent for a root, `.` or `..`.
+func workerRuntimeFileName(path string) (string, bool) {
+	components := workerRuntimePathComponents(path)
+	if len(components) == 0 {
+		return "", false
+	}
+	last := components[len(components)-1]
+	if last == "/" || last == "." || last == ".." {
+		return "", false
+	}
+	return last, true
+}
+
+// workerRuntimeStripPrefix is Rust's `Path::strip_prefix`: path relative to
+// base when base's components lead path's, compared by component.
+func workerRuntimeStripPrefix(path, base string) (string, bool) {
+	components := workerRuntimePathComponents(path)
+	prefix := workerRuntimePathComponents(base)
+	if len(prefix) > len(components) || !slices.Equal(components[:len(prefix)], prefix) {
+		return "", false
+	}
+	return strings.Join(components[len(prefix):], "/"), true
+}
+
+// workerRuntimePathEqual is Rust's `Path` equality, which compares
+// components: `/a/b/` equals `/a//b`, and `a/./b` equals `a/b`.
+func workerRuntimePathEqual(a, b string) bool {
+	return slices.Equal(workerRuntimePathComponents(a), workerRuntimePathComponents(b))
 }

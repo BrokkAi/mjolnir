@@ -6,6 +6,9 @@ package client
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,6 +39,31 @@ func DaemonProcessIsAlive(pid uint32) bool {
 		return true
 	}
 	return daemonNonChildIsAlive(pid)
+}
+
+// daemonConnectionRefused is io::ErrorKind::ConnectionRefused: nothing
+// listens at the address dialed.
+func daemonConnectionRefused(err error) bool {
+	return errors.Is(err, unix.ECONNREFUSED)
+}
+
+// daemonExitStatus formats a process exit as Rust's ExitStatus Display does
+// on Unix: "exit status: N", or "signal: N (SIGNAME)" with " (core dumped)"
+// when it dumped core.
+func daemonExitStatus(state *os.ProcessState) string {
+	status, ok := state.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() {
+		return fmt.Sprintf("exit status: %d", state.ExitCode())
+	}
+	signal := status.Signal()
+	text := fmt.Sprintf("signal: %d", int(signal))
+	if name := unix.SignalName(signal); name != "" {
+		text += " (" + name + ")"
+	}
+	if status.CoreDump() {
+		text += " (core dumped)"
+	}
+	return text
 }
 
 // ProcessIsAlive reports whether pid names a live process: kill(pid, 0) is

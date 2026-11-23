@@ -6,6 +6,10 @@ package client
 
 import (
 	"errors"
+	"fmt"
+	"runtime"
+	"slices"
+	"strings"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
@@ -74,7 +78,86 @@ func ResumeCompatibilityWithCheckout(
 	config *core.Config,
 	targetID string,
 ) (ResumePlan, error) {
-	panic("unported: mj-client/src/target.rs resume_compatibility_with_checkout")
+	target, ok := config.Targets[targetID]
+	if !ok {
+		return 0, fmt.Errorf("target %s is no longer configured", targetID)
+	}
+	projectDirectory, hasDirectory := checkout.ProjectDirectory()
+	if !hasDirectory {
+		if _, localBare := target.(core.TargetTemplateLocalBare); localBare {
+			return workspaceToRawCompatibility(session, config)
+		}
+		return ResumePlanInPlace, nil
+	}
+	directory := projectDirectory
+	// Only a worktree this session owns itself; a borrowed checkout is its
+	// owner's.
+	var worktree *core.ManagedWorktree
+	if managed, ok := checkout.(core.CheckoutManagedWorktree); ok {
+		worktree = managed.Worktree
+	}
+	if worktree == nil {
+		previous, ok := config.Targets[session.TargetTemplateID]
+		if !ok {
+			return 0, errors.New("the bare target this session last used is no longer configured")
+		}
+		_, previousLocal := previous.(core.TargetTemplateLocalBare)
+		_, targetLocal := target.(core.TargetTemplateLocalBare)
+		if core.IsBareProjectTarget(target) {
+			if previousLocal == targetLocal {
+				return ResumePlanInPlace, nil
+			}
+			return 0, fmt.Errorf("this session opens %s directly on its host; resume it on the same kind of bare target", directory)
+		}
+		if session.Project != nil && session.Project.PrimaryIsPlainDirectory() {
+			return 0, fmt.Errorf("%s is a directory project without a committed Git checkout; resume it on a local bare target", directory)
+		}
+		// A checkout on this machine can become an isolated workspace: the
+		// resume re-snapshots it against its own network remote. Whether the
+		// recorded directory really is a whole checkout with such a remote
+		// needs Git, so the conversion plan decides that, not the picker.
+		if previousLocal {
+			return ResumePlanRawToWorkspace, nil
+		}
+		return 0, fmt.Errorf("this session opens %s on an SSH host; resume it on a bare target there", directory)
+	}
+	resumeTarget, err := ManagedWorktreeTarget(target)
+	if err == nil {
+		if resumeTarget.SameLocation(worktree.Target) {
+			return ResumePlanInPlace, nil
+		}
+		return 0, fmt.Errorf("this session's working tree lives on %s; resume it there", managedWorktreeLocation(worktree.Target))
+	}
+	if _, local := worktree.Target.(core.ManagedWorktreeTargetLocal); !local {
+		return 0, fmt.Errorf("this session works directly in %s on %s; resume it on a bare target there",
+			directory, managedWorktreeLocation(worktree.Target))
+	}
+	// A whole managed worktree on this machine converts: the resume
+	// re-snapshots it against the owning checkout's network remote.
+	if targetPathEqual(worktree.WorktreeRoot, projectDirectory) {
+		return ResumePlanRawToWorkspace, nil
+	}
+	return 0, fmt.Errorf("this session opens %s, a subdirectory of its checkout; resume it on a bare target", directory)
+}
+
+// targetPathEqual is PathBuf equality: the same components, so repeated
+// separators, a trailing separator and inner `.` components do not count.
+func targetPathEqual(a, b string) bool {
+	components := func(path string) []string {
+		separator := func(r rune) bool { return r == '/' || (runtime.GOOS == "windows" && r == '\\') }
+		var parts []string
+		if path != "" && separator(rune(path[0])) {
+			parts = append(parts, "/")
+		}
+		for index, part := range strings.FieldsFunc(path, separator) {
+			if part == "." && !(index == 0 && parts == nil && strings.HasPrefix(path, ".")) {
+				continue
+			}
+			parts = append(parts, part)
+		}
+		return parts
+	}
+	return slices.Equal(components(a), components(b))
 }
 
 // bundleOnLocalBare is why a bundle session cannot resume on a local bare
@@ -85,7 +168,23 @@ const bundleOnLocalBare = "this session was created from a project bundle; a loc
 // workspace for a checkout on this machine. Only a single repository already
 // on this machine can become one.
 func workspaceToRawCompatibility(session *core.SessionRecord, config *core.Config) (ResumePlan, error) {
-	panic("unported: mj-client/src/target.rs workspace_to_raw_compatibility")
+	// A host checkout can share or clone later history. Keep cutoff sessions
+	// in their independent bundle workspace, just as they started at launch.
+	if session.Checkout != nil && session.Checkout.NoLaterHistory {
+		return ResumePlanInPlace, nil
+	}
+	bundle := session.ProjectBundle(config)
+	if bundle == nil {
+		return 0, errors.New(bundleOnLocalBare)
+	}
+	if len(bundle.Repositories) != 1 {
+		return 0, fmt.Errorf("this session's project has %d repositories; a local bare target holds one checkout — resume it on a container, SSH, or EC2 target",
+			len(bundle.Repositories))
+	}
+	if bundle.Repositories[0].Local == nil {
+		return 0, errors.New("this session's project came from GitHub; resume it on a container, SSH, or EC2 target")
+	}
+	return ResumePlanWorkspaceToRaw, nil
 }
 
 // managedWorktreeLocation is where a managed worktree's checkout physically

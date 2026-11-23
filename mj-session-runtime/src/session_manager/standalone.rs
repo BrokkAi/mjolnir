@@ -847,6 +847,15 @@ impl StandaloneSession {
             .await
     }
 
+    /// The command the worker's relay holds for a queued entry. Not tied to a
+    /// checkpoint cut; a caller that needs one proves it with a cut-bound read.
+    pub async fn read_queued_command(
+        &mut self,
+        command_id: String,
+    ) -> Result<Option<RelayCommand>> {
+        Ok(self.client.read_queued_command(command_id).await?.0)
+    }
+
     /// The worker-owned native-session-use evidence at a ready checkpoint barrier's cut.
     pub async fn read_checkpoint_native_use(
         &mut self,

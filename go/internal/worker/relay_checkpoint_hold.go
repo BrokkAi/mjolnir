@@ -41,6 +41,9 @@ package worker
 
 import (
 	"log/slog"
+	"maps"
+	"reflect"
+	"slices"
 
 	acpschema "github.com/BrokkAi/acp-go/schema"
 
@@ -114,8 +117,32 @@ func (r *DurableRelay) atCheckpointCut(barrierCommandID string, expected *core.R
 
 // checkpointMailbox is the mail the relay holds at the barrier's cut. A
 // non-empty refusal is the reason the cut cannot be read (Rust's inner Err).
+//
+// The mail this relay holds at a ready barrier's cut, for the checkpoint
+// that archives the cut. Events leased to a hook come back first, where
+// returning the lease would put them: the hook never confirmed that the
+// agent saw them. err is a frame-size failure.
 func (r *DurableRelay) checkpointMailbox(barrierCommandID string, cut *core.RelayCursor) (mailbox core.CanonicalMailbox, refusal string, err error) {
-	panic("unported: mj-worker/src/relay/checkpoint_hold.rs checkpoint_mailbox")
+	if !r.atCheckpointCut(barrierCommandID, cut) {
+		return core.CanonicalMailbox{}, "the relay is no longer at this checkpoint cut", nil
+	}
+	var pendingEvents []core.MailboxEvent
+	if lease := r.snapshot.MailboxHookLease; lease != nil {
+		pendingEvents = slices.Clone(lease.Events)
+	}
+	pendingEvents = append(pendingEvents, r.snapshot.PendingMailboxEvents...)
+	mailbox = core.CanonicalMailbox{
+		PendingEvents:      pendingEvents,
+		DeliveredEventKeys: maps.Clone(r.snapshot.DeliveredMailboxEventKeys),
+		PromptContexts:     maps.Clone(r.snapshot.MailboxPromptContexts),
+	}
+	// The answer travels in one relay frame, which the relay snapshot that
+	// holds these fields may exceed. Refuse with an answer rather than a
+	// frame the transport would drop.
+	if err := core.EnsureSerializedBudget(mailbox, core.MaxFrameBytes-core.RelayEventEnvelopeReserve, "checkpoint mailbox"); err != nil {
+		return core.CanonicalMailbox{}, "", err
+	}
+	return mailbox, "", nil
 }
 
 // spoilCheckpointCut marks the ready barrier's cut spoiled by background
@@ -186,8 +213,24 @@ func (r *DurableRelay) endCheckpointHoldFor(commandID *string, observation core.
 	return r.EndCheckpointHold()
 }
 
+// isCheckpointControl is whether the event belongs to a checkpoint barrier
+// or Close command. These are how the cut is made, completed and sealed, not
+// work that spoils it.
 func (r *DurableRelay) isCheckpointControl(commandID *string, observation core.RelayObservation) bool {
-	panic("unported: mj-worker/src/relay/checkpoint_hold.rs is_checkpoint_control")
+	var command core.RelayCommand
+	if queued, ok := observation.(core.RelayObservationCommandQueued); ok {
+		command = queued.Command
+	} else if commandID != nil {
+		if dispatch, ok := r.snapshot.Dispatches[*commandID]; ok {
+			command = dispatch.Command
+		}
+	}
+	switch command.(type) {
+	case core.RelayCommandBeginCheckpoint, core.RelayCommandCompleteCheckpoint,
+		core.RelayCommandReleaseCheckpoint, core.RelayCommandClose:
+		return true
+	}
+	return false
 }
 
 // settleHeldWrites journals the held writes once the barrier ended, or drops
@@ -243,8 +286,26 @@ func (r *DurableRelay) holdSessionUpdate(update acpschema.SessionUpdate) (*acpsc
 
 // sessionUpdateNeedsTheJournalNow is whether an update changes agent work: a
 // goal change, or output that opens a harness turn.
+//
+// The same decisions RecordSessionUpdate makes, asked before it makes them:
+// a goal change, a Codex goal that starts running, or Claude output that
+// opens a turn of the harness's own.
 func (r *DurableRelay) sessionUpdateNeedsTheJournalNow(update *acpschema.SessionUpdate) (bool, error) {
-	panic("unported: mj-worker/src/relay/checkpoint_hold.rs session_update_needs_the_journal_now")
+	goal := r.snapshot.Goal
+	if _, err := goal.Apply(update); err != nil {
+		return false, err
+	}
+	if !reflect.DeepEqual(goal, r.snapshot.Goal) {
+		return true, nil
+	}
+	claude := r.harnessTurns == HarnessTurnPolicyClaudeAdapter
+	if !claude || r.isClaudeStopAcknowledgement(update) {
+		return false, nil
+	}
+	if _, notice := r.noticeOutsideAnyTurn(update); notice {
+		return false, nil
+	}
+	return r.opensHarnessTurn(update), nil
 }
 
 func (r *DurableRelay) replayHeldWrites() error {

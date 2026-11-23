@@ -3,11 +3,32 @@
 package client
 
 import (
+	"errors"
+	"fmt"
+	"os"
+
 	"golang.org/x/sys/windows"
 )
 
 // windowsStillActive is STILL_ACTIVE, the exit code of a running process.
 const windowsStillActive = 259
+
+// daemonConnectionRefused is io::ErrorKind::ConnectionRefused: nothing
+// listens at the address dialed.
+func daemonConnectionRefused(err error) bool {
+	return errors.Is(err, windows.WSAECONNREFUSED)
+}
+
+// daemonExitStatus formats a process exit as Rust's ExitStatus Display does
+// on Windows: "exit code: N", in hexadecimal when the code is an NTSTATUS
+// with its high bit set.
+func daemonExitStatus(state *os.ProcessState) string {
+	code := uint32(state.ExitCode())
+	if code&0x80000000 != 0 {
+		return fmt.Sprintf("exit code: %#x", code)
+	}
+	return fmt.Sprintf("exit code: %d", code)
+}
 
 // DaemonProcessIsAlive reports whether a daemon that Mjolnir launched is
 // alive. Windows has no zombies to reap.

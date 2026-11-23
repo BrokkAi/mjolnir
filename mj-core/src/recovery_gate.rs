@@ -40,12 +40,18 @@ impl Drop for ForegroundHolder {
 }
 
 /// What a background admission is for. Background operations exclude each
-/// other and every connection lease; foreground lifecycle operations preempt
+/// other and every connection lease, except worker-upgrade preparation, which
+/// leaves the running worker alone; foreground lifecycle operations preempt
 /// each background holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundWork {
     /// Stops and replaces the worker, so it shares the session with nothing.
     WorkerReplacement,
+    /// Prepares a worker upgrade (managed harness, worker binary) without
+    /// touching the running worker or its connection, so other background
+    /// work runs beside it. The swap widens the same admission to
+    /// `WorkerReplacement` with [`RecoveryAttempt::widen_for_swap`].
+    WorkerPreparation,
     RelayRecovery,
     WorkerObservation,
     DelegationDelivery,
@@ -57,11 +63,26 @@ impl BackgroundWork {
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkerReplacement => "worker upgrade",
+            Self::WorkerPreparation => "worker upgrade preparation",
             Self::RelayRecovery => "relay recovery",
             Self::WorkerObservation => "worker readiness observation",
             Self::DelegationDelivery => "delegation delivery",
             Self::QuotaScheduling => "quota scheduling",
         }
+    }
+
+    /// Whether an admission of this kind may take the relay or a worker
+    /// permit. Upgrade preparation shares the session, so it may not.
+    pub fn acts_on_worker(self) -> bool {
+        self != Self::WorkerPreparation
+    }
+
+    /// Whether two kinds may hold one session at once. Only upgrade
+    /// preparation shares it, and never with another upgrade.
+    fn runs_beside(self, other: Self) -> bool {
+        let upgrade = |work| matches!(work, Self::WorkerPreparation | Self::WorkerReplacement);
+        (self == Self::WorkerPreparation && !upgrade(other))
+            || (other == Self::WorkerPreparation && !upgrade(self))
     }
 }
 
@@ -85,6 +106,16 @@ pub enum RefusalCause {
     Closed,
     DaemonDraining,
     SessionHeld,
+}
+
+impl Refusal {
+    fn draining() -> Self {
+        Self {
+            cause: RefusalCause::DaemonDraining,
+            holders: vec!["daemon handoff"],
+            worker_owned: false,
+        }
+    }
 }
 
 pub struct RecoveryGate {
@@ -137,7 +168,21 @@ struct Reservation {
 
 struct BackgroundHolder {
     work: BackgroundWork,
+    /// Upgrade preparation widening for its swap: work that cannot run beside
+    /// a swap is refused at once, while work already beside it finishes.
+    widening: bool,
     cancelled: Arc<AtomicBool>,
+}
+
+impl BackgroundHolder {
+    /// What newcomers must be able to run beside, and what refusals name.
+    fn claim(&self) -> BackgroundWork {
+        if self.widening {
+            BackgroundWork::WorkerReplacement
+        } else {
+            self.work
+        }
+    }
 }
 
 impl RecoveryGate {
@@ -255,11 +300,7 @@ impl RecoveryGate {
         _origin: LifecycleOrigin,
     ) -> Result<ForegroundAdmission, Refusal> {
         if crate::upgrade::is_draining() {
-            return Err(Refusal {
-                cause: RefusalCause::DaemonDraining,
-                holders: vec!["daemon handoff"],
-                worker_owned: false,
-            });
+            return Err(Refusal::draining());
         }
         let mut state = self
             .state
@@ -337,7 +378,7 @@ impl RecoveryGate {
                     .get(session_id)
                     .into_iter()
                     .flatten()
-                    .map(|holder| holder.work.label())
+                    .map(|holder| holder.claim().label())
                     .collect::<Vec<_>>();
                 if reservation.is_none() {
                     holders.extend(
@@ -400,17 +441,13 @@ impl RecoveryGate {
         kind: BackgroundWork,
     ) -> Result<RecoveryAttempt, Refusal> {
         if crate::upgrade::is_draining() {
-            return Err(Refusal {
-                cause: RefusalCause::DaemonDraining,
-                holders: vec!["daemon handoff"],
-                worker_owned: false,
-            });
+            return Err(Refusal::draining());
         }
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(refusal) = Self::session_refusal(&state, session_id, kind) {
+        if let Some(refusal) = Self::session_refusal(&state, session_id, kind, None) {
             return Err(refusal);
         }
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -420,6 +457,7 @@ impl RecoveryGate {
             .or_default()
             .push(BackgroundHolder {
                 work: kind,
+                widening: false,
                 cancelled: cancelled.clone(),
             });
         self.publish_busy(&state);
@@ -506,16 +544,29 @@ impl RecoveryGate {
             .unwrap_or_default()
     }
 
+    /// Why `kind` cannot hold `session_id` now. `except` is an admission that
+    /// already holds the session and is being widened; it never refuses itself.
     fn session_refusal(
         state: &RecoveryGateState,
         session_id: &str,
         kind: BackgroundWork,
+        except: Option<&Arc<AtomicBool>>,
     ) -> Option<Refusal> {
+        let others = || {
+            state
+                .busy
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .filter(move |holder| except.is_none_or(|own| !Arc::ptr_eq(&holder.cancelled, own)))
+        };
         // Replies finish the work a review accepted and the work a foreground
         // Move explicitly yields to while draining. Neither reservation can
         // defer these completions for the lifetime of the review/drain.
+        // Preparation never takes the relay, so another holder's lease does
+        // not keep it out.
         if state.closed
-            || state.leases.contains_key(session_id)
+            || (state.leases.contains_key(session_id) && kind.acts_on_worker())
             || state
                 .reservations
                 .get(session_id)
@@ -533,17 +584,10 @@ impl RecoveryGate {
                         kind != BackgroundWork::DelegationDelivery
                     }
                 })
-            || state
-                .busy
-                .get(session_id)
-                .is_some_and(|holders| !holders.is_empty())
+            || others().any(|holder| !kind.runs_beside(holder.claim()))
         {
-            let mut holders = state
-                .busy
-                .get(session_id)
-                .into_iter()
-                .flatten()
-                .map(|holder| holder.work.label())
+            let mut holders = others()
+                .map(|holder| holder.claim().label())
                 .collect::<Vec<_>>();
             holders.extend(
                 state
@@ -562,12 +606,7 @@ impl RecoveryGate {
                 .into_iter()
                 .flatten()
                 .any(|holder| holder.kind == ReservationKind::Foreground)
-                || state
-                    .busy
-                    .get(session_id)
-                    .into_iter()
-                    .flatten()
-                    .any(|holder| holder.work == BackgroundWork::WorkerReplacement);
+                || others().any(|holder| holder.work == BackgroundWork::WorkerReplacement);
             return Some(Refusal {
                 cause: if state.closed {
                     RefusalCause::Closed
@@ -602,7 +641,7 @@ impl RecoveryGate {
             .get(session_id)
             .into_iter()
             .flatten()
-            .map(|holder| holder.work.label())
+            .map(|holder| holder.claim().label())
             .collect::<Vec<_>>();
         holders.extend(
             reservations
@@ -654,6 +693,7 @@ impl RecoveryGate {
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
                 session_id,
                 kind,
+                None,
             );
             match refusal.map(|r| r.cause) {
                 None => return true,
@@ -681,6 +721,7 @@ impl RecoveryGate {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             session_id,
             BackgroundWork::WorkerObservation,
+            None,
         )
         .is_some();
         anyhow::ensure!(
@@ -754,6 +795,130 @@ struct RecoveryAdmission {
 impl RecoveryAttempt {
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.0.cancelled.clone()
+    }
+
+    /// This admission's holder in `state`, which exists for as long as the
+    /// admission lives.
+    fn holder<'a>(&self, state: &'a mut RecoveryGateState) -> Option<&'a mut BackgroundHolder> {
+        state
+            .busy
+            .get_mut(&self.0.session_id)
+            .into_iter()
+            .flatten()
+            .find(|holder| Arc::ptr_eq(&holder.cancelled, &self.0.cancelled))
+    }
+
+    /// The kind this admission holds the session for now.
+    pub fn work(&self) -> BackgroundWork {
+        let mut state = self
+            .0
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.holder(&mut state)
+            .expect("an admission holds its session slot for as long as it lives")
+            .work
+    }
+
+    /// Whether this admission may take the relay or a worker permit.
+    pub fn may_act_on_worker(&self) -> bool {
+        self.work().acts_on_worker()
+    }
+
+    /// Widen this upgrade-preparation admission for its worker swap, which
+    /// shares the session with nothing, by the same identity.
+    ///
+    /// From the first call, work that cannot run beside a swap is refused, so
+    /// the wait only shrinks; work already beside it finishes and is never
+    /// cancelled. It ends with a refusal when a lifecycle operation cancels
+    /// this admission, the gate closes, or a daemon handoff starts. Only
+    /// preparation widens: any other kind is refused, naming itself.
+    pub async fn widen_for_swap(&self) -> Result<(), Refusal> {
+        const SWAP: BackgroundWork = BackgroundWork::WorkerReplacement;
+        /// Newcomers are refused only while this wait lives.
+        struct Widening<'a>(&'a RecoveryAttempt);
+        impl Drop for Widening<'_> {
+            fn drop(&mut self) {
+                let gate = &self.0.0.gate;
+                let mut state = gate
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(holder) = self.0.holder(&mut state)
+                    && std::mem::take(&mut holder.widening)
+                {
+                    gate.publish_busy(&state);
+                }
+            }
+        }
+        let gate = &self.0.gate;
+        let mut changed = gate.subscribe();
+        let _widening = Widening(self);
+        loop {
+            {
+                let mut state = gate
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let session_id = &self.0.session_id;
+                // Only work admitted beside preparation is waited for; a
+                // reservation or a closed gate ends the widening.
+                let ends = if crate::upgrade::is_draining() {
+                    Some(Refusal::draining())
+                } else if self.0.cancelled.load(Ordering::Acquire) {
+                    Some(Refusal {
+                        cause: RefusalCause::SessionHeld,
+                        holders: vec!["cancellation"],
+                        worker_owned: false,
+                    })
+                } else if state.closed || state.reservations.contains_key(session_id) {
+                    RecoveryGate::session_refusal(&state, session_id, SWAP, Some(&self.0.cancelled))
+                } else {
+                    None
+                };
+                if let Some(refusal) = ends {
+                    return Err(refusal);
+                }
+                let waiting = RecoveryGate::session_refusal(
+                    &state,
+                    session_id,
+                    SWAP,
+                    Some(&self.0.cancelled),
+                )
+                .is_some();
+                let holder = self
+                    .holder(&mut state)
+                    .expect("an admission holds its session slot for as long as it lives");
+                match (holder.work, waiting) {
+                    (SWAP, _) => return Ok(()),
+                    (BackgroundWork::WorkerPreparation, false) => {
+                        holder.work = SWAP;
+                        holder.widening = false;
+                        gate.publish_busy(&state);
+                        return Ok(());
+                    }
+                    (BackgroundWork::WorkerPreparation, true) => {
+                        if !std::mem::replace(&mut holder.widening, true) {
+                            gate.publish_busy(&state);
+                        }
+                    }
+                    (other, _) => {
+                        return Err(Refusal {
+                            cause: RefusalCause::SessionHeld,
+                            holders: vec![other.label()],
+                            worker_owned: false,
+                        });
+                    }
+                }
+            }
+            tokio::select! {
+                result = changed.changed() => {
+                    result.expect("the gate outlives the admissions it publishes for");
+                }
+                () = wait_until_cancelled(&self.0.cancelled) => {}
+            }
+        }
     }
 
     /// Both the waiter and blocking executor own admission. Aborting the waiter
@@ -873,16 +1038,17 @@ impl SessionAdmission {
                         a.0.label
                     }
                     Self::Background(a) => {
-                        let holder = state
-                            .busy
-                            .get(session_id)
-                            .into_iter()
-                            .flatten()
-                            .find(|h| Arc::ptr_eq(&h.cancelled, &a.0.cancelled))
+                        let holder = a
+                            .holder(&mut state)
                             .ok_or_else(|| anyhow::anyhow!("relay lease admission has ended"))?;
                         anyhow::ensure!(
                             !holder.cancelled.load(Ordering::Acquire),
                             "{} was cancelled before taking its relay lease",
+                            holder.work.label()
+                        );
+                        anyhow::ensure!(
+                            holder.work.acts_on_worker(),
+                            "{} shares the session and cannot take its relay",
                             holder.work.label()
                         );
                         holder.work.label()
@@ -1455,5 +1621,114 @@ mod tests {
             panic!("a closed gate granted a foreground admission");
         };
         assert_eq!(refusal.cause, RefusalCause::Closed);
+    }
+
+    /// Wait until a newcomer on `session` is refused by a pending swap claim.
+    async fn swap_claimed(gate: &Arc<RecoveryGate>) -> Refusal {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Err(refusal) = gate.try_start("session", BackgroundWork::QuotaScheduling)
+                    && refusal.holders.contains(&"worker upgrade")
+                {
+                    break refusal;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a pending widening claims the swap")
+    }
+
+    // Hard-won: #1601: a worker upgrade held the session's exclusive slot through minutes of preparation, refusing child reports and recovery.
+    #[tokio::test]
+    async fn upgrade_preparation_shares_the_session_until_its_swap_widens_it() {
+        let gate = Arc::new(RecoveryGate::default());
+        let upgrade = gate
+            .try_start("session", BackgroundWork::WorkerPreparation)
+            .unwrap();
+        // A child report arrives while the upgrade downloads and stages.
+        let delivery = gate
+            .try_start("session", BackgroundWork::DelegationDelivery)
+            .expect("delivery runs beside upgrade preparation");
+        let lease = SessionAdmission::Background(delivery.clone())
+            .lease("session")
+            .await
+            .unwrap();
+        assert!(
+            gate.try_start("session", BackgroundWork::WorkerPreparation)
+                .is_err(),
+            "two upgrades never share a session"
+        );
+        assert!(!upgrade.may_act_on_worker());
+        assert!(
+            SessionAdmission::Background(upgrade.clone())
+                .lease("session")
+                .await
+                .is_err(),
+            "preparation never takes the relay"
+        );
+
+        // The swap waits for the work beside it and cancels nothing. Once it
+        // waits, refusals name the swap it claims.
+        let widening = crate::runtime::spawn({
+            let upgrade = upgrade.clone();
+            async move { upgrade.widen_for_swap().await }
+        });
+        let refusal = swap_claimed(&gate).await;
+        assert_eq!(
+            refusal.holders,
+            vec!["worker upgrade", "delegation delivery"]
+        );
+        assert!(!widening.is_finished());
+        assert!(!delivery.cancellation().load(Ordering::Acquire));
+        drop(lease);
+        drop(delivery);
+        // Before the widening wakes, the session is already closed to
+        // newcomers, so none can overtake the swap and the wait only shrinks.
+        let Err(refusal) = gate.try_start("session", BackgroundWork::QuotaScheduling) else {
+            panic!("a newcomer overtook the pending swap");
+        };
+        assert_eq!(refusal.holders, vec!["worker upgrade"]);
+        widening.await.unwrap().unwrap();
+        assert_eq!(upgrade.work(), BackgroundWork::WorkerReplacement);
+        assert!(upgrade.may_act_on_worker());
+        let Err(refusal) = gate.try_start("session", BackgroundWork::DelegationDelivery) else {
+            panic!("work was admitted beside a worker swap");
+        };
+        assert_eq!(refusal.holders, vec!["worker upgrade"]);
+        assert!(refusal.worker_owned);
+        drop(upgrade);
+
+        // A lifecycle operation ends a pending widening and takes the session.
+        let upgrade = gate
+            .try_start("session", BackgroundWork::WorkerPreparation)
+            .unwrap();
+        let delivery = gate
+            .try_start("session", BackgroundWork::DelegationDelivery)
+            .unwrap();
+        let widening = crate::runtime::spawn({
+            let upgrade = upgrade.clone();
+            async move { upgrade.widen_for_swap().await }
+        });
+        swap_claimed(&gate).await;
+        let lifecycle = crate::runtime::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.enter_foreground(
+                    "session",
+                    "suspend",
+                    LifecycleOrigin::Person,
+                    &AtomicBool::new(false),
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .unwrap()
+            }
+        });
+        assert!(widening.await.unwrap().is_err());
+        assert_eq!(upgrade.work(), BackgroundWork::WorkerPreparation);
+        drop(upgrade);
+        drop(delivery);
+        drop(lifecycle.await.unwrap());
     }
 }

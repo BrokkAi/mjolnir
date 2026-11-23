@@ -4,6 +4,11 @@
 
 package client
 
+import (
+	"os"
+	"syscall"
+)
+
 // ExecutableFileIdentity is a file, identified by what it is rather than by
 // what it is called.
 //
@@ -19,5 +24,13 @@ type ExecutableFileIdentity struct {
 // ExecutableFileIdentityOf is Rust's executable_file_identity: the identity
 // of the file at path, following symbolic links.
 func ExecutableFileIdentityOf(path string) (ExecutableFileIdentity, error) {
-	panic("unported: mj-client/src/executable.rs executable_file_identity")
+	info, err := os.Stat(path)
+	if err != nil {
+		return ExecutableFileIdentity{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ExecutableFileIdentity{}, &os.PathError{Op: "stat", Path: path, Err: syscall.EINVAL}
+	}
+	return ExecutableFileIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}, nil
 }

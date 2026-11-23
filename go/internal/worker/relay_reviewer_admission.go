@@ -6,6 +6,13 @@
 
 package worker
 
+import (
+	"errors"
+	"math"
+
+	"github.com/BrokkAi/mjolnir/go/internal/core"
+)
+
 // ReviewerAdmission is a reviewer lease. The primary relay owns admission.
 // Holding this lease, rather than sampling a role's status later, excludes
 // worker replacement throughout preparation, execution, and cleanup. No
@@ -17,7 +24,21 @@ type ReviewerAdmission struct {
 
 // reviewerAdmissionAcquire is ReviewerAdmission::acquire.
 func reviewerAdmissionAcquire(relay *RelayCell, label string) (*ReviewerAdmission, error) {
-	panic("unported: mj-worker/src/relay/reviewer_admission.rs acquire")
+	owner := relay.Lock()
+	defer owner.Unlock()
+	if owner.checkpointOnly ||
+		owner.snapshot.Execution == core.RelayExecutionStateClosed ||
+		owner.snapshot.CheckpointBarrier != nil ||
+		owner.pendingCheckpointBarrier() {
+		return nil, errors.New("worker is reserved for checkpoint or replacement; reviewer work was not admitted")
+	}
+	if owner.nextReviewerAdmission == math.MaxUint64 {
+		return nil, errors.New("reviewer admission IDs exhausted")
+	}
+	id := owner.nextReviewerAdmission + 1
+	owner.nextReviewerAdmission = id
+	owner.reviewerAdmissions[id] = label
+	return &ReviewerAdmission{relay: relay, id: id}, nil
 }
 
 // Release returns the lease (Rust's Drop).

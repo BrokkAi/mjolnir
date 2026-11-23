@@ -1010,9 +1010,25 @@ async fn restart_harness_in_place_response(
         let hook_home = endpoint.home.clone();
         match updated_harness {
             HarnessKind::Claude => {
+                let role = launch_config.subagent_mcp_role();
+                let capabilities = (launch_config.oracle, launch_config.orchestrators_enabled);
+                let subtle_subagents = launch_config.subtle_subagents;
+                let review_tools = launch_config.review_tools();
                 let available = match tokio::time::timeout(
                     LOCAL_PREPARATION_STEP_TIMEOUT,
                     mj_core::runtime::spawn_blocking(move || {
+                        // An in-place profile switch replaces these files with
+                        // the destination profile. Restore the worker-owned
+                        // servers and permissions before Claude reads them.
+                        super::subagents::configure_claude_subagent_mcp(
+                            &hook_root,
+                            &hook_session_id,
+                            &hook_home,
+                            role,
+                            capabilities,
+                            subtle_subagents,
+                            review_tools,
+                        )?;
                         super::subagents::configure_claude_mailbox_hook(
                             &hook_root,
                             &hook_session_id,
@@ -1024,27 +1040,38 @@ async fn restart_harness_in_place_response(
                 {
                     Ok(Ok(Ok(available))) => available,
                     Ok(Ok(Err(error))) => {
-                        tracing::warn!(
-                            session_id = %launch_config.session_id,
-                            error = format!("{error:#}"),
-                            "could not verify Claude mailbox hook during in-place harness restart"
-                        );
-                        false
+                        return RelayResponseEnvelope {
+                            request_id,
+                            protocol_version,
+                            body: compaction_error(
+                                RelayErrorCode::Internal,
+                                &format!(
+                                    "prepare Claude profile for in-place harness restart: {error:#}"
+                                ),
+                            ),
+                        };
                     }
                     Ok(Err(error)) => {
-                        tracing::warn!(
-                            session_id = %launch_config.session_id,
-                            error = %error,
-                            "Claude mailbox hook task failed during in-place harness restart"
-                        );
-                        false
+                        return RelayResponseEnvelope {
+                            request_id,
+                            protocol_version,
+                            body: compaction_error(
+                                RelayErrorCode::Internal,
+                                &format!(
+                                    "Claude profile task failed during in-place harness restart: {error}"
+                                ),
+                            ),
+                        };
                     }
                     Err(_) => {
-                        tracing::warn!(
-                            session_id = %launch_config.session_id,
-                            "Claude mailbox hook verification timed out during in-place harness restart"
-                        );
-                        false
+                        return RelayResponseEnvelope {
+                            request_id,
+                            protocol_version,
+                            body: compaction_error(
+                                RelayErrorCode::Internal,
+                                "Claude profile preparation timed out during in-place harness restart",
+                            ),
+                        };
                     }
                 };
                 (available, None)
@@ -5213,6 +5240,7 @@ mod preparation_tests {
         handler.await.unwrap().unwrap();
     }
 
+    // Hard-won: e2c147489: an in-place profile switch discarded Claude's agent and review tools.
     #[tokio::test]
     async fn restart_harness_in_place_does_not_overwrite_supervisor_spec_when_rejected() {
         let _ = mj_harness_install::login_environment::initialize_from_parent();
@@ -5327,6 +5355,10 @@ mod preparation_tests {
         // merges target_environment + MJ_KEEP_DIR while excluding disallowed keys and preserving
         // the raw launch.json payload.
         let (ok_tx, mut ok_rx) = mpsc::channel(4);
+        let dest_home = root.path().join("profile");
+        std::fs::create_dir_all(&dest_home).unwrap();
+        let profile_to_read = dest_home.clone();
+        let worker_root = root.path().to_owned();
         let acceptor = mj_core::runtime::spawn(async move {
             match ok_rx.recv().await {
                 Some(CommandRequest::ReloadLaunchConfig {
@@ -5335,14 +5367,38 @@ mod preparation_tests {
                     resolved,
                     ..
                 }) => {
+                    // Read what the replacement Claude process will read,
+                    // before acknowledging its startup.
+                    let config: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(profile_to_read.join(".claude.json")).unwrap(),
+                    )
+                    .unwrap();
+                    for server in ["mj-agents", "mj-review"] {
+                        assert_eq!(
+                            config["mcpServers"][server]["command"],
+                            serde_json::json!(worker_root.join("hel"))
+                        );
+                    }
+                    assert_eq!(config["mcpServers"]["mj-agents"]["alwaysLoad"], true);
+                    let settings: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(profile_to_read.join("settings.json")).unwrap(),
+                    )
+                    .unwrap();
+                    let allow = settings["permissions"]["allow"].as_array().unwrap();
+                    assert!(allow.contains(&serde_json::json!("Bash(rg)")));
+                    for tool in [
+                        "mcp__mj-agents__send_message",
+                        "mcp__mj-agents__spawn_worker",
+                        "mcp__mj-review__request_review",
+                    ] {
+                        assert!(allow.contains(&serde_json::json!(tool)), "missing {tool}");
+                    }
                     let _ = resolved.send(Ok(()));
                     Some((environment, supervisor_spec))
                 }
                 _ => None,
             }
         });
-        let dest_home = root.path().join("profile");
-        std::fs::create_dir_all(&dest_home).unwrap();
         let dest_cred_bytes = br#"{"claudeAiOauth":{"accessToken":"reloaded-tok"}}"#;
         let dest_marker =
             mj_core::config::harness_authentication_marker(HarnessKind::Claude, &dest_home);
@@ -5350,6 +5406,8 @@ mod preparation_tests {
         let mut updated_launch =
             super::super::relay_tests::launch_config(dest_home.to_str().unwrap());
         updated_launch.harness = HarnessKind::Claude;
+        updated_launch.subagents = serde_json::from_str(r#"{"mode":"mjolnir"}"#).unwrap();
+        updated_launch.review_trigger = mj_core::config::ReviewTrigger::Push;
         updated_launch.harness_home = dest_home.clone();
         updated_launch.environment.clear();
         updated_launch.environment.insert(
@@ -5372,6 +5430,43 @@ mod preparation_tests {
         updated_launch
             .environment
             .insert("EXCLUDED_SECRET".into(), "must-strip".into());
+        // A malformed destination profile must fail before restarting the
+        // bridge, and release its reservation so a repaired profile can retry.
+        std::fs::write(dest_home.join(".claude.json"), b"not json").unwrap();
+        let failed = restart_harness_in_place_response(
+            RelayRequestEnvelope {
+                request_id: "r-restart-bad-profile".into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::RestartHarnessInPlace {
+                    operation_id: "move-op-1".into(),
+                    expected_store_id: store_id.clone(),
+                    launch_config: Box::new(updated_launch.clone()),
+                },
+            },
+            Some(&ok_tx),
+            &relay,
+            &shared_credentials,
+            root.path(),
+        )
+        .await;
+        let RelayResponseBody::Error { error } = failed.body else {
+            panic!("malformed Claude configuration was accepted");
+        };
+        assert!(
+            error.message.contains("prepare Claude profile"),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&supervisor_path).unwrap(),
+            "original-supervisor-spec"
+        );
+        assert_eq!(shared_credentials.snapshot().await, initial_credentials);
+        std::fs::write(dest_home.join(".claude.json"), b"{}").unwrap();
+        std::fs::write(
+            dest_home.join("settings.json"),
+            br#"{"permissions":{"allow":["Bash(rg)"]}}"#,
+        )
+        .unwrap();
         relay.lock().unwrap().set_steering_supported(Some(true));
         let ok_response = restart_harness_in_place_response(
             RelayRequestEnvelope {

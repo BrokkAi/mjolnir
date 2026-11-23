@@ -331,14 +331,23 @@ func (h *JoinHandle[T]) Join(ctx context.Context) (T, error) {
 
 // Watch is tokio's watch channel: one current value whose readers are told
 // when it changes.
+//
+// Wake-up channels are made by the readers that wait on them, never by
+// SendReplace: a process-wide watch is shared by goroutines inside and
+// outside synctest bubbles, and a goroutine waits durably in a bubble only on
+// channels made inside it.
 type Watch[T any] struct {
-	mu      sync.Mutex
-	value   T
+	mu    sync.Mutex
+	value T
+	// changed is the channel Changed hands out until the next SendReplace;
+	// nil until a reader asks for it.
 	changed chan struct{}
+	// subscribers are the reader-owned channels handed out by Subscribe.
+	subscribers map[chan struct{}]struct{}
 }
 
 func NewWatch[T any](initial T) *Watch[T] {
-	return &Watch[T]{value: initial, changed: make(chan struct{})}
+	return &Watch[T]{value: initial}
 }
 
 // Borrow is the current value.
@@ -354,16 +363,45 @@ func (w *Watch[T]) SendReplace(value T) T {
 	defer w.mu.Unlock()
 	old := w.value
 	w.value = value
-	close(w.changed)
-	w.changed = make(chan struct{})
+	if w.changed != nil {
+		close(w.changed)
+		w.changed = nil
+	}
+	for subscriber := range w.subscribers {
+		close(subscriber)
+	}
+	w.subscribers = nil
 	return old
 }
 
-// Changed is closed at the next SendReplace after this call.
+// Changed is closed at the next SendReplace after this call. Readers share
+// it until then.
 func (w *Watch[T]) Changed() <-chan struct{} {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.changed == nil {
+		w.changed = make(chan struct{})
+	}
 	return w.changed
+}
+
+// Subscribe is Changed with a channel of the caller's own, closed at the next
+// SendReplace after this call; stop withdraws it. A reader of a process-wide
+// watch subscribes, so the channel it waits on was made by its own goroutine
+// and not by whichever goroutine asked first.
+func (w *Watch[T]) Subscribe() (changed <-chan struct{}, stop func()) {
+	subscriber := make(chan struct{})
+	w.mu.Lock()
+	if w.subscribers == nil {
+		w.subscribers = map[chan struct{}]struct{}{}
+	}
+	w.subscribers[subscriber] = struct{}{}
+	w.mu.Unlock()
+	return subscriber, func() {
+		w.mu.Lock()
+		delete(w.subscribers, subscriber)
+		w.mu.Unlock()
+	}
 }
 
 // Unbounded is tokio's unbounded mpsc channel: Send never blocks, and fails

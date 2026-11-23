@@ -208,7 +208,12 @@ pub const RELAY_GUARDIAN_REVIEW_PROTOCOL: u32 = 82;
 pub const RELAY_GUARDIAN_PROJECT_INSTRUCTIONS_PROTOCOL: u32 = 83;
 /// 84 adds worker-local Antigravity Stop-hook observations (`AntigravityStop`).
 pub const RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL: u32 = 84;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_ANTIGRAVITY_STOP_HOOK_PROTOCOL;
+/// 85 carried `ReadCheckpointQueuedPrompt` in 6f084d479, withdrawn before any
+/// release: a checkpoint reads a queued wake with `ReadQueuedCommand` instead.
+/// The version stays at 85 so it never goes back down, but no request is gated
+/// on it; the next capability takes 86, never 85.
+pub const RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL: u32 = 85;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_RETIRED_CHECKPOINT_QUEUED_PROMPT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

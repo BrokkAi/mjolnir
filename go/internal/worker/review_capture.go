@@ -9,11 +9,14 @@
 package worker
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -118,7 +121,171 @@ func (r PushCaptureRefusalGit) Unwrap() error { return r.Err }
 // reviewed commit within the branch's current merge-base boundary. Its
 // error is always a PushCaptureRefusal.
 func CapturePushableCommits(runner checkpoint.GitCommandRunner, root string, sessionStartHead string) (PushCapture, error) {
-	panic("unported: mj-worker/src/review/capture.rs capture_pushable_commits")
+	capture, err := capturePushableCommits(runner, root, sessionStartHead)
+	if err == nil {
+		return capture, nil
+	}
+	var refusal PushCaptureRefusal
+	if errors.As(err, &refusal) {
+		return PushCapture{}, refusal
+	}
+	return PushCapture{}, PushCaptureRefusalGit{Err: err}
+}
+
+func capturePushableCommits(runner checkpoint.GitCommandRunner, root string, sessionStartHead string) (PushCapture, error) {
+	status, err := checkedGit(runner, root, []string{"status", "--porcelain", "--untracked-files=no", "-z"})
+	if err != nil {
+		return PushCapture{}, err
+	}
+	entries := bytes.Split(status, []byte{0})
+	var files []string
+	for index := 0; index < len(entries); index++ {
+		entry := entries[index]
+		if len(entry) < 4 {
+			continue
+		}
+		files = append(files, captureLossy(entry[3:]))
+		// A rename or copy is followed by its original path.
+		if slices.ContainsFunc(entry[:2], func(b byte) bool { return b == 'R' || b == 'C' }) {
+			index++
+		}
+	}
+	if len(files) > 0 {
+		return PushCapture{}, PushCaptureRefusalDirtyTracked{Files: files}
+	}
+	resolved, err := resolveHead(runner, root)
+	if err != nil {
+		return PushCapture{}, err
+	}
+	if resolved == nil {
+		return PushCapture{}, PushCaptureRefusalNoHead{}
+	}
+	head := *resolved
+	var base PushBase = PushBaseRoot{}
+	if shared, err := mergeBase(runner, root, sessionStartHead, head); err != nil {
+		return PushCapture{}, err
+	} else if shared != nil {
+		base = PushBaseSessionStart{Commit: sessionStartHead}
+	}
+	branch, err := defaultBranch(runner, root)
+	if err != nil {
+		return PushCapture{}, err
+	}
+	if branch != nil {
+		mb, err := mergeBase(runner, root, head, *branch)
+		if err != nil {
+			return PushCapture{}, err
+		}
+		if mb != nil && *mb != head {
+			base = PushBaseMergeBase{DefaultBranch: *branch, Commit: *mb}
+		}
+	}
+	// Git filters the reviewed refs to HEAD's history within the boundary,
+	// then keeps the one that every other candidate leads to.
+	filters := []string{"--merged=" + head}
+	if boundary := base.BaseCommit(); boundary != nil {
+		filters = append(filters, "--contains="+*boundary)
+	}
+	eligible, err := reviewedRefs(runner, root, filters)
+	if err != nil {
+		return PushCapture{}, err
+	}
+	commit, err := selectReviewedAncestor(runner, root, &eligible)
+	if err != nil {
+		return PushCapture{}, err
+	}
+	if commit != nil {
+		base = PushBaseReviewPoint{Commit: *commit}
+	}
+	// Reviewed work merged with newer default-branch history: diff from Git's
+	// merge of the two, so the reviewer sees only resolutions and later edits.
+	var merged, pushReviewWarning *string
+	if mergeBaseBase, ok := base.(PushBaseMergeBase); ok {
+		eligible, err := reviewedRefs(runner, root, []string{"--merged=" + head, "--no-merged=" + mergeBaseBase.Commit})
+		if err != nil {
+			return PushCapture{}, err
+		}
+		reviewed, err := selectReviewedAncestor(runner, root, &eligible)
+		if err != nil {
+			return PushCapture{}, err
+		}
+		if reviewed != nil {
+			version, err := checkedGitText(runner, root, []string{"version"})
+			if err != nil {
+				return PushCapture{}, err
+			}
+			found, parsed := core.ParseGitVersion(version)
+			floor := core.MinimumGitVersion
+			if parsed && core.CompareGitVersions(found, floor) >= 0 {
+				tree, err := mergedReviewTree(runner, root, *reviewed, mergeBaseBase.Commit, head)
+				if err != nil {
+					return PushCapture{}, err
+				}
+				merged = &tree
+			} else {
+				trimmed := strings.TrimSpace(version)
+				warning := fmt.Sprintf(
+					"Pushed without review: Git %s in %s is older than %d.%d.%d or its version could not be read, so Mjolnir could not separate this merge's new changes from reviewed work. Upgrade Git to review merged work.",
+					strings.TrimPrefix(trimmed, "git version "), root, floor[0], floor[1], floor[2])
+				pushReviewWarning = &warning
+			}
+			base = PushBaseMergedReviewPoint{
+				Commit:        *reviewed,
+				MergeBase:     mergeBaseBase.Commit,
+				DefaultBranch: mergeBaseBase.DefaultBranch,
+			}
+		}
+	}
+	var mergedIn []string
+	if mergedBase, ok := base.(PushBaseMergedReviewPoint); ok {
+		mergedIn = []string{mergedBase.MergeBase}
+	}
+	current, err := checkedGitText(runner, root, []string{"rev-parse", "--verify", head + "^{tree}"})
+	if err != nil {
+		return PushCapture{}, err
+	}
+	var baseline string
+	switch commit := base.BaseCommit(); {
+	case merged != nil:
+		baseline = *merged
+	case pushReviewWarning != nil:
+		baseline = current
+	case commit != nil:
+		if baseline, err = checkedGitText(runner, root, []string{"rev-parse", "--verify", *commit + "^{tree}"}); err != nil {
+			return PushCapture{}, err
+		}
+	default:
+		if baseline, err = checkpoint.EmptyTreeID(runner, root); err != nil {
+			return PushCapture{}, err
+		}
+	}
+	patch, changed, err := captureDiff(runner, root, baseline, current)
+	if err != nil {
+		return PushCapture{}, err
+	}
+	delta := buildDelta(root, &baseline, current, patch, changed, mergedIn, nil)
+	if commit := base.BaseCommit(); commit != nil {
+		baseCommit := *commit
+		delta.BaseCommit = &baseCommit
+	}
+	delta.PushReviewWarning = pushReviewWarning
+	headCommit := head
+	delta.HeadCommit = &headCommit
+	var kind string
+	switch base := base.(type) {
+	case PushBaseReviewPoint:
+		kind = "review point"
+	case PushBaseMergeBase:
+		kind = "merge base with " + base.DefaultBranch
+	case PushBaseMergedReviewPoint:
+		kind = "review point merged with " + base.DefaultBranch
+	case PushBaseSessionStart:
+		kind = "session start"
+	case PushBaseRoot:
+		kind = "no shared history"
+	}
+	delta.BaseKind = &kind
+	return PushCapture{Delta: delta, Base: base, HeadCommit: head}, nil
 }
 
 // mergedReviewTree is the tree Git makes by merging the reviewed point with
@@ -130,19 +297,126 @@ func CapturePushableCommits(runner checkpoint.GitCommandRunner, root string, ses
 // diff would show nothing. Such paths are removed from the base, so the
 // reviewer sees each in full.
 func mergedReviewTree(runner checkpoint.GitCommandRunner, root, reviewed, mergeBaseCommit, head string) (string, error) {
-	panic("unported: mj-worker/src/review/capture.rs merged_review_tree")
+	output, err := captureRun(runner, root, []string{
+		"merge-tree", "--write-tree", "--allow-unrelated-histories", "--no-messages", "--name-only", "-z",
+		reviewed, mergeBaseCommit,
+	})
+	if err != nil {
+		return "", err
+	}
+	// Status 1 means conflicts; the tree is still written.
+	if output.Status != 0 && output.Status != 1 {
+		return "", fmt.Errorf("git merge-tree failed with status %d: %s", output.Status, captureLossy(output.Stderr))
+	}
+	// Paths are raw bytes: a file name need not be UTF-8.
+	var fields [][]byte
+	for _, field := range bytes.Split(output.Stdout, []byte{0}) {
+		if len(field) > 0 {
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return "", errors.New("git merge-tree printed no tree id")
+	}
+	tree, err := captureFromUTF8(fields[0])
+	if err != nil {
+		return "", err
+	}
+	var conflicted []string
+	for _, field := range fields[1:] {
+		path, err := core.FromGitBytes(field)
+		if err != nil {
+			return "", err
+		}
+		conflicted = append(conflicted, path)
+	}
+	slices.Sort(conflicted)
+	conflicted = slices.Compact(conflicted)
+	if len(conflicted) == 0 {
+		return tree, nil
+	}
+	mergedEntries, err := treeEntries(runner, root, tree, conflicted)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := treeEntries(runner, root, head, conflicted)
+	if err != nil {
+		return "", err
+	}
+	var hidden []string
+	for _, path := range conflicted {
+		inMerge, mergedHas := mergedEntries[path]
+		inHead, headHas := resolved[path]
+		if mergedHas == headHas && bytes.Equal(inMerge, inHead) {
+			hidden = append(hidden, path)
+		}
+	}
+	if len(hidden) == 0 {
+		return tree, nil
+	}
+	return checkpoint.TreeWithoutPaths(runner, root, tree, hidden)
 }
 
 // treeEntries is the mode and object of each of paths (sorted, as Rust's
 // BTreeSet) that treeIsh holds, keyed by path.
 func treeEntries(runner checkpoint.GitCommandRunner, root, treeIsh string, paths []string) (map[string][]byte, error) {
-	panic("unported: mj-worker/src/review/capture.rs tree_entries")
+	arguments := append([]string{"--literal-pathspecs", "ls-tree", "-r", "-z", treeIsh, "--"}, paths...)
+	output, err := runner.Run(root, &checkpoint.GitCommand{Arguments: arguments})
+	if err != nil {
+		return nil, err
+	}
+	if output.Status != 0 {
+		return nil, fmt.Errorf("git ls-tree failed with status %d: %s", output.Status, captureLossy(output.Stderr))
+	}
+	entries := map[string][]byte{}
+	for _, record := range bytes.Split(output.Stdout, []byte{0}) {
+		tab := bytes.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		path, err := core.FromGitBytes(record[tab+1:])
+		if err != nil {
+			return nil, err
+		}
+		entries[path] = slices.Clone(record[:tab])
+	}
+	return entries, nil
 }
 
 // defaultBranch is origin's default branch, or the first of the usual
 // default branches that exists; nil when there is none.
 func defaultBranch(runner checkpoint.GitCommandRunner, root string) (*string, error) {
-	panic("unported: mj-worker/src/review/capture.rs default_branch")
+	remote, err := captureRun(runner, root, []string{"symbolic-ref", "-q", "refs/remotes/origin/HEAD"})
+	if err != nil {
+		return nil, err
+	}
+	switch remote.Status {
+	case 0:
+		text, err := captureFromUTF8(remote.Stdout)
+		if err != nil {
+			return nil, err
+		}
+		branch := strings.TrimSpace(text)
+		return &branch, nil
+	case 1:
+	default:
+		return nil, fmt.Errorf("read origin's default branch: %s", captureLossy(remote.Stderr))
+	}
+	for _, branch := range []string{
+		"refs/remotes/origin/main",
+		"refs/remotes/origin/master",
+		"refs/heads/main",
+		"refs/heads/master",
+	} {
+		commit, err := resolveCommit(runner, root, branch)
+		if err != nil {
+			return nil, err
+		}
+		if commit != nil {
+			return &branch, nil
+		}
+	}
+	return nil, nil
 }
 
 // mergeBase is the best common ancestor of two commits, or nil when they
@@ -182,7 +456,35 @@ func checkedGit(runner checkpoint.GitCommandRunner, root string, args []string) 
 // which is what lets the agent move the base only to work a review has
 // seen. Returns the commit and tree.
 func SetReviewBase(runner checkpoint.GitCommandRunner, root string, revision string) (commit string, tree string, err error) {
-	panic("unported: mj-worker/src/review/capture.rs set_review_base")
+	if revision == "" || strings.HasPrefix(revision, "-") {
+		return "", "", fmt.Errorf("%s is not a commit; pass a commit hash from a review verdict", strconv.Quote(revision))
+	}
+	resolve := func(suffix string) (string, error) {
+		resolved, err := checkedGitText(runner, root, []string{"rev-parse", "--verify", "--quiet", revision + suffix})
+		if err != nil {
+			return "", fmt.Errorf("%s is not a commit in %s; pass a commit hash from a review verdict", revision, root)
+		}
+		return resolved, nil
+	}
+	if commit, err = resolve("^{commit}"); err != nil {
+		return "", "", err
+	}
+	if tree, err = resolve("^{tree}"); err != nil {
+		return "", "", err
+	}
+	recorded, err := checkedGitText(runner, root, []string{
+		"for-each-ref", "--format=%(refname)", "refs/mj/reviewed/" + tree, "refs/mj/overridden/" + tree,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	if recorded == "" {
+		return "", "", fmt.Errorf("commit %s was never reviewed or overridden in %s; call request_review first, then call set_baseline once the verdict is clean or you have overridden it", commit, root)
+	}
+	if err := RecordReviewBase(runner, root, tree, commit); err != nil {
+		return "", "", err
+	}
+	return commit, tree, nil
 }
 
 // RecordReviewBase records a clean review or an accepted explicit baseline
@@ -224,7 +526,29 @@ type ReviewedRefs struct {
 // reviewedRefs is the reviewed commits under refs/mj/reviewed/ that match
 // the given for-each-ref filters, including this worktree's selected base.
 func reviewedRefs(runner checkpoint.GitCommandRunner, root string, filters []string) (ReviewedRefs, error) {
-	panic("unported: mj-worker/src/review/capture.rs reviewed_refs")
+	selected, err := worktreeReviewBaseRef(runner, root)
+	if err != nil {
+		return ReviewedRefs{}, err
+	}
+	args := []string{"for-each-ref", "--format=%(objectname) %(refname)"}
+	args = append(args, filters...)
+	args = append(args, "refs/mj/reviewed/", selected)
+	listed, err := checkedGitText(runner, root, args)
+	if err != nil {
+		return ReviewedRefs{}, err
+	}
+	var refs ReviewedRefs
+	for _, line := range captureLines(listed) {
+		commit, name, ok := strings.Cut(line, " ")
+		if !ok {
+			return ReviewedRefs{}, errors.New("read the reviewed ref's name")
+		}
+		refs.commits = append(refs.commits, commit)
+		if name == selected {
+			refs.selected = &commit
+		}
+	}
+	return refs, nil
 }
 
 // selectReviewedAncestor advances when every candidate leads to one
@@ -247,7 +571,31 @@ func selectReviewedAncestor(runner checkpoint.GitCommandRunner, root string, can
 // LaterReviewBase is the newest reviewed commit after revision in HEAD's
 // history, with its tree; found is false when there is none.
 func LaterReviewBase(runner checkpoint.GitCommandRunner, root string, revision string) (commit string, tree string, found bool, err error) {
-	panic("unported: mj-worker/src/review/capture.rs later_review_base")
+	if revision == "" || strings.HasPrefix(revision, "-") {
+		return "", "", false, errors.New("invalid review commit")
+	}
+	if commit, err = checkedGitText(runner, root, []string{"rev-parse", "--verify", revision + "^{commit}"}); err != nil {
+		return "", "", false, err
+	}
+	head, err := checkedGitText(runner, root, []string{"rev-parse", "HEAD"})
+	if err != nil {
+		return "", "", false, err
+	}
+	later, err := reviewedRefs(runner, root, []string{"--contains=" + commit, "--merged=" + head})
+	if err != nil {
+		return "", "", false, err
+	}
+	candidate, err := selectReviewedAncestor(runner, root, &later)
+	if err != nil {
+		return "", "", false, err
+	}
+	if candidate == nil || *candidate == commit {
+		return "", "", false, nil
+	}
+	if tree, err = checkedGitText(runner, root, []string{"rev-parse", *candidate + "^{tree}"}); err != nil {
+		return "", "", false, err
+	}
+	return *candidate, tree, true, nil
 }
 
 func checkedGitText(runner checkpoint.GitCommandRunner, root string, args []string) (string, error) {
@@ -320,7 +668,50 @@ func captureRun(git checkpoint.GitCommandRunner, repository string, arguments []
 // per file, or `added\tdeleted\t\0old path\0new path\0` for a rename or copy,
 // with `-` for both counts on a binary file.
 func parseNumstat(output []byte) []core.FileLineChange {
-	panic("unported: mj-worker/src/review/capture.rs parse_numstat")
+	fields := bytes.Split(output, []byte{0})
+	var files []core.FileLineChange
+	for index := 0; index < len(fields); index++ {
+		record := fields[index]
+		if len(record) == 0 {
+			continue
+		}
+		parts := strings.SplitN(captureLossy(record), "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		added, deleted, path := parts[0], parts[1], parts[2]
+		binary := added == "-" && deleted == "-"
+		var oldPath *string
+		if path == "" {
+			if index+1 < len(fields) {
+				index++
+				old := captureLossy(fields[index])
+				oldPath = &old
+			}
+			if index+1 < len(fields) {
+				index++
+				path = captureLossy(fields[index])
+			}
+		}
+		files = append(files, core.FileLineChange{
+			Path:       path,
+			OldPath:    oldPath,
+			Insertions: captureCount(added),
+			Deletions:  captureCount(deleted),
+			Binary:     binary,
+		})
+	}
+	return files
+}
+
+// captureCount is a numstat count, or 0 for `-` or anything else that is not
+// a count (Rust: parse().unwrap_or(0)).
+func captureCount(text string) int {
+	count, err := strconv.ParseUint(strings.TrimPrefix(text, "+"), 10, strconv.IntSize-1)
+	if err != nil {
+		return 0
+	}
+	return int(count)
 }
 
 func sessionStartRef(runner checkpoint.GitCommandRunner, root, session string) (string, error) {
@@ -385,7 +776,38 @@ func LinkedWorktreeStart(runner checkpoint.GitCommandRunner, worktree, origin, s
 // later commits can be reviewed, and this review is refused instead of
 // reporting the session's earlier commits as reviewed.
 func ReviewStartHead(runner checkpoint.GitCommandRunner, root, session string) (*string, error) {
-	panic("unported: mj-worker/src/review/capture.rs review_start_head")
+	if start, err := SessionStartHead(runner, root, session); err != nil || start != nil {
+		return start, err
+	}
+	head, err := resolveHead(runner, root)
+	if err != nil || head == nil {
+		return nil, err
+	}
+	branch, err := defaultBranch(runner, root)
+	if err != nil {
+		return nil, err
+	}
+	if branch != nil {
+		base, err := mergeBase(runner, root, *head, *branch)
+		if err != nil {
+			return nil, err
+		}
+		if base != nil && *base != *head {
+			return base, nil
+		}
+	}
+	// An earlier review of HEAD's history bounds the work that follows it.
+	reviewed, err := reviewedRefs(runner, root, []string{"--merged=" + *head})
+	if err != nil {
+		return nil, err
+	}
+	if ancestor, err := selectReviewedAncestor(runner, root, &reviewed); err != nil || ancestor != nil {
+		return ancestor, err
+	}
+	if _, err := EnsureSessionStartHead(runner, root, session); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("No starting point was recorded for this session's work in %s, so its commits cannot be told apart from earlier history. Mjolnir now records the current commit as the start; a later review covers the commits made after it.", root)
 }
 
 // EnsureSessionStartHead preserves a recorded start, or starts coverage at
@@ -473,7 +895,36 @@ func (g *BoundedGit) CancellationGuard() *core.ProcessCancellationGuard {
 }
 
 func (g *BoundedGit) Run(repository string, command *checkpoint.GitCommand) (checkpoint.GitOutput, error) {
-	panic("unported: mj-worker/src/review/capture.rs BoundedGit::run")
+	spec := core.NewCommandSpec("git", command.Arguments).WithPurpose("prepare push review")
+	cwd := repository
+	spec.Cwd = &cwd
+	for _, pair := range checkpoint.NonInteractiveGitEnv {
+		spec.Env[pair[0]] = pair[1]
+	}
+	for _, pair := range command.Env {
+		spec.Env[pair[0]] = pair[1]
+	}
+	// The executor's pipe handler feeds input while it drains output, and
+	// gives up on it at the deadline like any other wait.
+	if len(command.Stdin) > 0 {
+		spec = spec.WithSensitiveStdin(slices.Clone(command.Stdin))
+	}
+	executor := g.executor.WithDeadline(g.timeout)
+	output, err := executor.Execute(&spec)
+	if err != nil {
+		if executor.IsCancelled() && !g.executor.IsCancelled() {
+			return checkpoint.GitOutput{}, &core.CommandTimedOut{Program: spec.Program, Purpose: spec.Purpose, Timeout: g.timeout}
+		}
+		return checkpoint.GitOutput{}, err
+	}
+	return checkpoint.GitOutput{Status: output.Status, Stdout: output.Stdout, Stderr: output.Stderr}, nil
+}
+
+// capturePathStartsWith is Rust's Path::starts_with: base's components are
+// the leading components of path.
+func capturePathStartsWith(path, base string) bool {
+	components, prefix := capturePathComponents(path), capturePathComponents(base)
+	return len(prefix) <= len(components) && slices.Equal(components[:len(prefix)], prefix)
 }
 
 // captureContainsPath is Vec<PathBuf>::contains: paths compared by

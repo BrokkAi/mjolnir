@@ -41,14 +41,15 @@ type BrowserTranscriptEntry struct {
 	// CommandID is the submission identity for replacing a client-local
 	// pending row.
 	CommandID *string `json:"command_id,omitempty"`
-	// StableID is the stable identity for multiple messages delivered at the
-	// same relay ordinal.
-	StableID     *string `json:"stable_id,omitempty"`
-	ID           uint64  `json:"id"`
-	UpdatedSeq   uint64  `json:"updated_seq"`
-	Role         string  `json:"role"`
-	Label        string  `json:"label"`
-	RecordedAtMs *int64  `json:"recorded_at_ms"`
+	// StableID is the stable identity for rows with a durable message or
+	// tool identity.
+	StableID          *string `json:"stable_id,omitempty"`
+	ToolDetailTrimmed bool    `json:"tool_detail_trimmed,omitempty"`
+	ID                uint64  `json:"id"`
+	UpdatedSeq        uint64  `json:"updated_seq"`
+	Role              string  `json:"role"`
+	Label             string  `json:"label"`
+	RecordedAtMs      *int64  `json:"recorded_at_ms"`
 	// ToolEndedAtMs is when a finished tool call ended. Nil for every other
 	// entry.
 	ToolEndedAtMs *int64 `json:"tool_ended_at_ms,omitempty"`

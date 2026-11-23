@@ -45,14 +45,18 @@ func subagentTestDecodeAction(t *testing.T, text string) SubagentToolAction {
 func TestRequestReviewPathPreservesLegacyEncoding(t *testing.T) {
 	old := `{"action":"request_review","params":{}}`
 	action := subagentTestDecodeAction(t, old)
-	if review, ok := action.(SubagentToolActionRequestReview); !ok || review.Path != nil {
+	if review, ok := action.(SubagentToolActionRequestReview); !ok || len(review.Paths) != 0 {
 		t.Fatalf("got %#v", action)
 	}
 	if got := string(subagentTestEncode(t, action)); got != old {
 		t.Fatalf("got %s", got)
 	}
-	path := "/worktree"
-	scoped := SubagentToolActionRequestReview{Path: &path}
+	// A request an older worker queued named one worktree.
+	queued := `{"action":"request_review","params":{"path":"/worktree"}}`
+	if got := subagentTestDecodeAction(t, queued); !reflect.DeepEqual(got, SubagentToolAction(SubagentToolActionRequestReview{Paths: []string{"/worktree"}})) {
+		t.Fatalf("got %#v", got)
+	}
+	scoped := SubagentToolActionRequestReview{Paths: []string{"/worktree", "/other"}}
 	decoded := subagentTestDecodeAction(t, string(subagentTestEncode(t, scoped)))
 	if !reflect.DeepEqual(decoded, SubagentToolAction(scoped)) {
 		t.Fatalf("got %#v", decoded)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"runtime"
 	"slices"
@@ -23,16 +24,43 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
-// QueueRestorePolicy is whether the destination worker owns dispatch
-// immediately, drops the queue, or waits for its controller to admit the
-// archived commands after readiness.
+// QueueRestorePolicy is who dispatches the archived queue and the archived
+// worker's pending mail.
+//
+// Pending mail joins the same dispatch decision as the queue: a restored
+// worker given a waking event starts a turn on its own, so mail the
+// controller must hold back (behind a Move's ownership commit, or behind a
+// fresh native session's handoff) is admitted by the controller with the
+// queue. Mail already claimed by a queued prompt travels with that prompt.
+// (The mail half is Rust commit 39722ace5, after this file's base.)
 type QueueRestorePolicy string
 
 const (
+	// QueueRestorePolicyRestore: the destination worker owns its queue and
+	// pending mail at once.
 	QueueRestorePolicyRestore QueueRestorePolicy = "restore"
+	// QueueRestorePolicyDiscard: drop the queue and the mail its prompts
+	// claimed; the destination worker owns pending mail at once.
 	QueueRestorePolicyDiscard QueueRestorePolicy = "discard"
-	QueueRestorePolicyDefer   QueueRestorePolicy = "defer"
+	// QueueRestorePolicyDefer: the controller admits the queue and pending
+	// mail after readiness. The mail a queued prompt claimed is bound to its
+	// command ID now, so it is there before that prompt can start.
+	QueueRestorePolicyDefer QueueRestorePolicy = "defer"
+	// QueueRestorePolicyDiscardDeferringMail: drop the queue and the mail
+	// its prompts claimed; the controller admits pending mail after
+	// readiness.
+	QueueRestorePolicyDiscardDeferringMail QueueRestorePolicy = "discard_deferring_mail"
 )
+
+// DefersMail reports whether the controller, not the restored worker,
+// admits pending mail.
+func (p QueueRestorePolicy) DefersMail() bool {
+	return p == QueueRestorePolicyDefer || p == QueueRestorePolicyDiscardDeferringMail
+}
+
+func (p QueueRestorePolicy) keepsQueue() bool {
+	return p == QueueRestorePolicyRestore || p == QueueRestorePolicyDefer
+}
 
 // UnmarshalJSON accepts only the snake_case variant names, as serde does.
 func (p *QueueRestorePolicy) UnmarshalJSON(data []byte) error {
@@ -41,11 +69,11 @@ func (p *QueueRestorePolicy) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	switch policy := QueueRestorePolicy(text); policy {
-	case QueueRestorePolicyRestore, QueueRestorePolicyDiscard, QueueRestorePolicyDefer:
+	case QueueRestorePolicyRestore, QueueRestorePolicyDiscard, QueueRestorePolicyDefer, QueueRestorePolicyDiscardDeferringMail:
 		*p = policy
 		return nil
 	}
-	return fmt.Errorf("unknown variant `%s`, expected one of `restore`, `discard`, `defer`", text)
+	return fmt.Errorf("unknown variant `%s`, expected one of `restore`, `discard`, `defer`, `discard_deferring_mail`", text)
 }
 
 // RelaySeedForRestore is the relay metadata needed to continue a verified
@@ -68,6 +96,18 @@ func RelaySeedForRestore(canonical *core.CanonicalSessionSnapshot, nativeContinu
 		seed.QueuedPrompts = append(seed.QueuedPrompts, canonical.QueuedPrompts...)
 	}
 	seed.NativeSessionUnused = nativeContinuity && !CurrentNativeSessionReceivedPrompt(canonical)
+	if archived := canonical.Mailbox; archived != nil {
+		mailbox := core.CanonicalMailbox{DeliveredEventKeys: maps.Clone(archived.DeliveredEventKeys)}
+		if !queuePolicy.DefersMail() {
+			mailbox.PendingEvents = slices.Clone(archived.PendingEvents)
+		}
+		if queuePolicy.keepsQueue() {
+			mailbox.PromptContexts = maps.Clone(archived.PromptContexts)
+		}
+		if !mailbox.IsEmpty() {
+			seed.Mailbox = &mailbox
+		}
+	}
 	if err := seed.Validate(); err != nil {
 		return core.RestoredRelaySeed{}, err
 	}

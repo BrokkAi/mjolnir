@@ -30,7 +30,7 @@ impl QueueRestorePolicy {
         matches!(self, Self::Defer | Self::DiscardDeferringMail)
     }
 
-    fn keeps_queue(self) -> bool {
+    pub fn keeps_queue(self) -> bool {
         matches!(self, Self::Restore | Self::Defer)
     }
 }

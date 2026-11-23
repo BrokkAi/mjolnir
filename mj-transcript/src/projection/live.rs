@@ -97,7 +97,7 @@ pub fn materialized_session_from_live_baseline(
             Ok(MaterializedQueuedPrompt {
                 command_id: queued.command_id.clone(),
                 kind,
-                content: queued_command_content(&queued.command)?,
+                content: queued_command_content(&queued.command_id, &queued.command)?,
                 queued_at_ms: queued.created_at_ms,
                 accepted_ordinal: queued.accepted_ordinal,
             })
@@ -111,7 +111,7 @@ pub fn materialized_session_from_live_baseline(
             created_at_ms: initial.created_at_ms,
             last_changed_at_ms: initial.created_at_ms,
             body: TranscriptBody::User {
-                content: queued_command_content(&initial.command)?,
+                content: queued_command_content(&initial.command_id, &initial.command)?,
             },
         }));
     }
