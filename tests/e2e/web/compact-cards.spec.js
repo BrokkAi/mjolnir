@@ -588,6 +588,47 @@ test('golden_viewer_dashboard', async ({ context }) => {
   assertGolden('viewer_dashboard', output.join('\n'));
 });
 
+test('nested child workspaces keep ancestor links and restore the previous scope', async ({ page }) => {
+  const agents = (id, options) => session(id, 'project', 'Project', {
+    attention: 'working', isIdle: false, activityDetails: { kind: 'turn' }, ...options,
+  });
+  await mount(page, [
+    agents('root', { title: 'Root', subagentSessionIds: ['orchestrator'] }),
+    agents('orchestrator', {
+      title: 'Orchestrator', subagentParentId: 'root',
+      subagentSessionIds: ['worker', 'reviewer'], reviewerSessionIds: ['reviewer'],
+    }),
+    agents('worker', { title: 'Worker', subagentParentId: 'orchestrator', subagentSessionIds: ['leaf'] }),
+    agents('reviewer', { title: 'Reviewer', subagentParentId: 'orchestrator' }),
+    agents('leaf', { title: 'Leaf', subagentParentId: 'worker' }),
+  ]);
+
+  const breadcrumb = page.locator('.virtual-workspace-breadcrumb');
+  await expect(card(page, 'orchestrator')).toHaveCount(0);
+  await card(page, 'root').click();
+  await page.locator('#subagents-button').click();
+  await expect(card(page, 'orchestrator')).toBeVisible();
+  await card(page, 'orchestrator').click();
+  await page.locator('#reviewers-button').click();
+  await expect(breadcrumb).toHaveText('Root › Reviewers · Orchestrator');
+  await expect(card(page, 'reviewer')).toBeVisible();
+  await page.getByRole('button', { name: 'Close Orchestrator reviewers workspace' }).click();
+  await expect(page).toHaveURL(/#subagents\/root\/orchestrator$/);
+
+  await page.locator('#subagents-button').click();
+  await expect(breadcrumb).toHaveText('Root › Orchestrator');
+  await card(page, 'worker').click();
+  await page.locator('#back').click();
+  await expect(page).toHaveURL(/#subagents\/orchestrator$/);
+  await card(page, 'worker').click();
+  await page.locator('#subagents-button').click();
+  await expect(breadcrumb).toHaveText('Root › Orchestrator › Worker');
+  await breadcrumb.getByRole('link', { name: 'Orchestrator' }).click();
+  await expect(page).toHaveURL(/#subagents\/orchestrator$/);
+  await breadcrumb.getByRole('link', { name: 'Root' }).click();
+  await expect(page).toHaveURL(/#conversation\/root$/);
+});
+
 // Hard-won: 6eb3146b8: an idle child with review work was hidden from its parent workspace.
 test('child workspace hides idle history while preserving active work and an opened conversation', async ({ page }) => {
   const parent = session('parent', 'project', 'Project', {

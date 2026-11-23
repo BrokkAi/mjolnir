@@ -2012,17 +2012,20 @@ pub fn clamp_container_size(
     }
 }
 
-/// The default selected for a new container target: its remembered host size,
-/// or 4 CPUs / 8 GiB, clamped to the latest host totals when available.
-pub fn default_container_size(
+/// Select the remembered host size, the target's configured size, or the
+/// baseline of 4 CPUs / 8 GiB. Clamp to the latest host totals when available.
+pub fn resolve_default_container_size(
+    template_default: Option<HostContainerSize>,
     remembered: Option<HostContainerSize>,
     limits: Option<HostContainerSize>,
 ) -> HostContainerSize {
     clamp_container_size(
-        remembered.unwrap_or(HostContainerSize {
-            cpus: BASELINE_CONTAINER_CPUS,
-            memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-        }),
+        remembered
+            .or(template_default)
+            .unwrap_or(HostContainerSize {
+                cpus: BASELINE_CONTAINER_CPUS,
+                memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
+            }),
         limits,
     )
 }

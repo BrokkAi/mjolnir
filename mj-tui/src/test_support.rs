@@ -37,6 +37,7 @@ impl DashboardState {
             targets
                 .into_iter()
                 .map(|target| RuntimeHostCapacity {
+                    last_1h: None,
                     reading: HostCapacityRow::new(&target, &Default::default(), &[]),
                     refreshing: false,
                     disk_total_bytes: None,
@@ -768,6 +769,7 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     let parent = running_session();
     let mut child = running_session();
     child.id = "child-session".into();
+    child.notifications_ignored = true;
     let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
         child_session_id: child.id.clone(),

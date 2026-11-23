@@ -369,7 +369,13 @@ impl DashboardState {
                 };
                 let limits =
                     limits.map(|(cpus, memory_bytes)| HostContainerSize { cpus, memory_bytes });
-                let size = default_container_size(previous, limits);
+                let size = resolve_default_container_size(
+                    target
+                        .container()
+                        .and_then(|c| c.default_host_container_size()),
+                    previous,
+                    limits,
+                );
                 *allocation = Some(SessionResourceAllocation::Container {
                     cpus: size.cpus,
                     memory_bytes: size.memory_bytes,

@@ -94,6 +94,8 @@ child sessions in the same target and filesystem:
   `task_type` and the parent delegates straightforward work. The user configures model/effort choices globally in Settings →
   Sub-agents; returns `child_session_id` at once, before the child has started
   running.
+- `list_targets` lists enabled targets, their default container sizes, and host
+  capacity when the parent has supervisors enabled.
 - `list_agents` — this parent's children and their status. An entry's `facts` hold
   what Mjolnir observed when the child finished (processes its agent left running,
   its working tree). Read them against the child's own report.

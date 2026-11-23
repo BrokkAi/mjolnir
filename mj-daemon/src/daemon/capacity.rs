@@ -13,6 +13,9 @@ use mj_client::runtime_feed::RuntimeHostCapacity;
 use mj_controller::targets::HostCapacityRow;
 use mj_core::snapshot_map::SharedSnapshot;
 use mj_core::targets::storage::TargetStorageView;
+use mj_core::targets::{
+    CapacityWindowSummary, DeploymentCapacityKind, DeploymentCapacityUsage, TargetCapacityState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerCapacityInput {
@@ -80,7 +83,115 @@ impl Drop for ContainerCapacityLease {
     }
 }
 
-type CapacityReadings = BTreeMap<String, mj_controller::targets::TargetCapacityState>;
+type CapacityReadings = BTreeMap<String, CapacityReading>;
+
+const SECONDS_PER_MINUTE: u64 = 60;
+const HISTORY_MINUTES: usize = 60;
+
+pub(crate) struct CapacityReading {
+    latest: TargetCapacityState,
+    minutes: [Option<MinuteCapacityBucket>; HISTORY_MINUTES],
+    newest_minute: u64,
+}
+
+impl Default for CapacityReading {
+    fn default() -> Self {
+        Self {
+            latest: TargetCapacityState::default(),
+            minutes: [const { None }; HISTORY_MINUTES],
+            newest_minute: 0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct MinuteCapacityBucket {
+    minute_epoch: u64,
+    first_sample: u64,
+    last_sample: u64,
+    sample_count: u32,
+    cpu_sum: u64,
+    cpu_count: u32,
+    cpu_max: Option<u8>,
+    mem_sum_bytes: u128,
+    mem_max_bytes: u64,
+}
+
+impl CapacityReading {
+    fn apply(
+        &mut self,
+        kind: DeploymentCapacityKind,
+        result: &Result<Option<DeploymentCapacityUsage>, String>,
+        sampled_at: u64,
+        generation: u64,
+    ) {
+        self.latest.apply(result, sampled_at, generation);
+        if kind != DeploymentCapacityKind::Host {
+            return;
+        }
+        let minute = sampled_at / SECONDS_PER_MINUTE;
+        let oldest_minute = self
+            .newest_minute
+            .max(minute)
+            .saturating_sub(HISTORY_MINUTES as u64 - 1);
+        if minute > self.newest_minute {
+            self.newest_minute = minute;
+            for slot in &mut self.minutes {
+                if slot
+                    .as_ref()
+                    .is_some_and(|bucket| bucket.minute_epoch < oldest_minute)
+                {
+                    *slot = None;
+                }
+            }
+        }
+        let Ok(Some(usage)) = result else { return };
+        if minute < oldest_minute {
+            return;
+        }
+        let memory = usage.host_memory().used_bytes;
+        // The 60 retained minute epochs have distinct slots, including when
+        // an epoch reading moves backwards within the window.
+        let slot = (minute % HISTORY_MINUTES as u64) as usize;
+        let bucket = self.minutes[slot].get_or_insert_with(|| MinuteCapacityBucket {
+            minute_epoch: minute,
+            first_sample: sampled_at,
+            last_sample: sampled_at,
+            ..Default::default()
+        });
+        bucket.first_sample = bucket.first_sample.min(sampled_at);
+        bucket.last_sample = bucket.last_sample.max(sampled_at);
+        bucket.sample_count += 1;
+        if let Some(cpu) = usage.cpu_percent {
+            bucket.cpu_sum += u64::from(cpu);
+            bucket.cpu_count += 1;
+            bucket.cpu_max = bucket.cpu_max.max(Some(cpu));
+        }
+        bucket.mem_sum_bytes += u128::from(memory);
+        bucket.mem_max_bytes = bucket.mem_max_bytes.max(memory);
+    }
+
+    fn summary(&self) -> Option<CapacityWindowSummary> {
+        let buckets = || self.minutes.iter().flatten();
+        let first = buckets().map(|bucket| bucket.first_sample).min()?;
+        let last = buckets().map(|bucket| bucket.last_sample).max()?;
+        let sample_count = buckets().map(|bucket| bucket.sample_count).sum();
+        let cpu_count: u32 = buckets().map(|bucket| bucket.cpu_count).sum();
+        let cpu_sum: u64 = buckets().map(|bucket| bucket.cpu_sum).sum();
+        let mem_sum: u128 = buckets().map(|bucket| bucket.mem_sum_bytes).sum();
+        Some(CapacityWindowSummary {
+            window_seconds: last - first + 1,
+            sample_count,
+            cpu_percent_avg: (cpu_count != 0).then(|| cpu_sum as f64 / f64::from(cpu_count)),
+            cpu_percent_max: buckets().filter_map(|bucket| bucket.cpu_max).max(),
+            memory_used_bytes_avg: (mem_sum / u128::from(sample_count)) as u64,
+            memory_used_bytes_max: buckets()
+                .map(|bucket| bucket.mem_max_bytes)
+                .max()
+                .unwrap_or(0),
+        })
+    }
+}
 
 /// Host rows are retained in runtime history, so build them at most once per
 /// input publication. These receivers track only what this projection has seen.
@@ -156,7 +267,7 @@ impl CapacityFeed {
             .iter()
             .find(|target| target.target_ids.iter().any(|id| id == target_id))?
             .clone();
-        let usage = self.states.borrow().get(&target.id)?.usage.clone()?;
+        let usage = self.states.borrow().get(&target.id)?.latest.usage.clone()?;
         Some((target, usage))
     }
 
@@ -211,10 +322,12 @@ fn project_host_rows(
         .targets
         .iter()
         .map(|target| {
-            let state = states.get(&target.id).unwrap_or(&empty);
+            let entry = states.get(&target.id);
+            let state = entry.map_or(&empty, |entry| &entry.latest);
             RuntimeHostCapacity {
                 reading: HostCapacityRow::new(target, state, storage),
                 refreshing: inputs.refreshing(state),
+                last_1h: entry.and_then(CapacityReading::summary),
                 disk_total_bytes: state
                     .usage
                     .as_ref()
@@ -724,7 +837,7 @@ impl ContainerCapacityProjection {
                         target.kind == mj_controller::targets::DeploymentCapacityKind::Host
                     })
                     .filter_map(|target| {
-                        let usage = states.get(&target.id)?.usage.as_ref()?;
+                        let usage = states.get(&target.id)?.latest.usage.as_ref()?;
                         Some((
                             target.id.clone(),
                             ContainerCapacityInput {
@@ -782,10 +895,7 @@ pub(super) fn spawn_capacity_service(
         targets: initial,
         refresh_generation: 0,
     });
-    let (states_tx, states_rx) = tokio::sync::watch::channel(BTreeMap::<
-        String,
-        mj_controller::targets::TargetCapacityState,
-    >::new());
+    let (states_tx, states_rx) = tokio::sync::watch::channel(CapacityReadings::new());
     let feed = CapacityFeed {
         targets: targets_tx.subscribe(),
         states: states_rx,
@@ -847,6 +957,7 @@ pub(super) fn spawn_capacity_service(
                             .entry(reading.target.id)
                             .or_default()
                             .apply(
+                                reading.target.kind,
                                 &reading.result,
                                 reading.sampled_at_epoch_seconds,
                                 reading.refresh_generation,
@@ -869,9 +980,7 @@ pub(super) fn spawn_capacity_service(
 fn refresh_probe_targets(
     state: &RuntimeState,
     targets_tx: &tokio::sync::watch::Sender<CapacityProbeSet>,
-    states_tx: &tokio::sync::watch::Sender<
-        BTreeMap<String, mj_controller::targets::TargetCapacityState>,
-    >,
+    states_tx: &tokio::sync::watch::Sender<CapacityReadings>,
     refresh_generation: Option<u64>,
 ) {
     let targets = state
@@ -922,6 +1031,67 @@ fn announce_full_hosts(state: &RuntimeState, announced: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_history_aggregates_samples_and_expires_whole_minute_buckets() {
+        let mut state = CapacityReading::default();
+        let record = |state: &mut CapacityReading, at, cpu_percent, memory_used_bytes| {
+            state.apply(
+                DeploymentCapacityKind::Host,
+                &Ok(Some(DeploymentCapacityUsage {
+                    ec2_instance_type: None,
+                    physical_memory: None,
+                    memory_pool: false,
+                    cpu_percent,
+                    memory_used_bytes,
+                    memory_total_bytes: 100,
+                    logical_cores: 4,
+                    disk_total_bytes: None,
+                    storage: Vec::new(),
+                })),
+                at,
+                0,
+            );
+        };
+        record(&mut state, 15, Some(20), 10);
+        assert_eq!(state.summary().unwrap().window_seconds, 1);
+        record(&mut state, 45, None, 20);
+        record(&mut state, 315, Some(50), 30);
+        assert_eq!(
+            state.summary().unwrap(),
+            CapacityWindowSummary {
+                window_seconds: 301,
+                sample_count: 3,
+                cpu_percent_avg: Some(35.0),
+                cpu_percent_max: Some(50),
+                memory_used_bytes_avg: 20,
+                memory_used_bytes_max: 30,
+            }
+        );
+        for minute in 6..=65 {
+            record(&mut state, minute * 60, Some(10), 9);
+        }
+        assert_eq!(state.minutes.iter().flatten().count(), 60);
+        assert_eq!(
+            state.summary().unwrap(),
+            CapacityWindowSummary {
+                window_seconds: 3541,
+                sample_count: 60,
+                cpu_percent_avg: Some(10.0),
+                cpu_percent_max: Some(10),
+                memory_used_bytes_avg: 9,
+                memory_used_bytes_max: 9,
+            }
+        );
+        state.apply(
+            DeploymentCapacityKind::Host,
+            &Err("probe failed".into()),
+            125 * 60,
+            0,
+        );
+        assert!(state.summary().is_none());
+        assert_eq!(state.latest.usage.unwrap().cpu_percent, Some(10));
+    }
 
     #[test]
     fn capacity_refusal_names_remaining_ram_and_never_promises_automatic_stop() {
@@ -1024,6 +1194,8 @@ mod tests {
             probe_error: None,
         };
         let usage = mj_controller::targets::DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(0),
             memory_used_bytes: 0,
@@ -1038,8 +1210,11 @@ mod tests {
         });
         let (_states, states) = tokio::sync::watch::channel(BTreeMap::from([(
             "local".to_owned(),
-            mj_controller::targets::TargetCapacityState {
-                usage: Some(usage),
+            CapacityReading {
+                latest: TargetCapacityState {
+                    usage: Some(usage),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )]));
@@ -1618,6 +1793,8 @@ mod tests {
             probe_error: None,
         };
         let usage = mj_controller::targets::DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(20),
             memory_used_bytes: 8 << 30,
@@ -1632,8 +1809,11 @@ mod tests {
         });
         let (latest, latest_rx) = tokio::sync::watch::channel(BTreeMap::from([(
             "local".to_owned(),
-            mj_controller::targets::TargetCapacityState {
-                usage: Some(usage),
+            CapacityReading {
+                latest: TargetCapacityState {
+                    usage: Some(usage),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )]));
@@ -1680,7 +1860,7 @@ mod tests {
         targets.send_modify(|inputs| inputs.refresh_generation = 1);
         let pending = state.runtime_publication().unwrap().metadata;
         assert!(pending.host_capacities[0].refreshing);
-        latest.send_modify(|states| states.get_mut("local").unwrap().answered_refresh = 1);
+        latest.send_modify(|states| states.get_mut("local").unwrap().latest.answered_refresh = 1);
         let finished = state.runtime_publication().unwrap().metadata;
         assert!(!finished.host_capacities[0].refreshing);
 
@@ -1758,6 +1938,7 @@ mod tests {
             readings
                 .get_mut("local")
                 .unwrap()
+                .latest
                 .usage
                 .as_mut()
                 .unwrap()

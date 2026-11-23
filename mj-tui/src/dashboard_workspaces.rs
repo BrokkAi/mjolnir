@@ -61,6 +61,21 @@ impl DashboardState {
         })
     }
 
+    pub(crate) fn subagent_workspace_chain(&self) -> Vec<ChildWorkspace> {
+        let mut chain = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut next = self.child_workspace.as_ref().cloned();
+        while let Some(workspace) = next {
+            if !seen.insert(workspace.parent_id.clone()) {
+                break;
+            }
+            next = self.child_workspace_for(&workspace.parent_id);
+            chain.push(workspace);
+        }
+        chain.reverse();
+        chain
+    }
+
     pub fn open_subagent_workspace(&mut self, parent_id: String) {
         self.open_child_workspace(parent_id, mj_core::subagent::SubagentKind::Worker);
     }

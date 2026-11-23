@@ -572,10 +572,10 @@ impl DashboardState {
             // clears the notice bar: the combined surface is quit with the
             // detach key, and a stray Escape must never take the whole screen
             // away.
-            // Inside a session's sub-agents, Escape on their list goes back
-            // to the parent, the same as the X on the workspace strip.
-            (KeyCode::Esc, _)
-                if self.focus == Focus::Sessions && self.child_workspace.is_some() =>
+            // In a child workspace, Escape and p return to the parent like
+            // the X on the workspace strip.
+            (KeyCode::Esc, _) | (KeyCode::Char('p'), false)
+                if plain && self.focus == Focus::Sessions && self.child_workspace.is_some() =>
             {
                 self.record_event_handled();
                 return DashboardAction::ExitSubagentWorkspace;
@@ -599,6 +599,15 @@ impl DashboardState {
         {
             self.record_event_handled();
             return action;
+        }
+        if plain
+            && self.focus == Focus::Sessions
+            && key.code == KeyCode::Right
+            && (crate::actions::spec(CommandId::OpenSubagents).available)(self)
+                == crate::actions::Availability::Ready
+        {
+            self.record_event_handled();
+            return self.dispatch_command(CommandId::OpenSubagents);
         }
         // List navigation, shared by visible lists. It comes before the
         // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.

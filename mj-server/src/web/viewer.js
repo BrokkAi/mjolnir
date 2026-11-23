@@ -1026,6 +1026,29 @@ function renderLaunchFailures() {
   document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards, ...inboxNoticeCards());
 }
 
+function childWorkspaceChain(parentId) {
+  const chain = [];
+  const seen = new Set();
+  for (let id = parentId; id && !seen.has(id);) {
+    seen.add(id);
+    const session = sessionById(id);
+    chain.push({ id, session });
+    id = session?.subagent_parent_id;
+  }
+  return chain.reverse();
+}
+
+function childWorkspaceKind(parent, childId) {
+  return parent?.reviewer_session_ids?.includes(childId) ? 'reviewer' : undefined;
+}
+
+function closeChildWorkspaceRoute(parentId) {
+  const parent = sessionById(parentId)?.subagent_parent_id;
+  if (!parent || parent === parentId) return { name: 'conversation', sessionId: parentId };
+  const childKind = childWorkspaceKind(sessionById(parent), parentId);
+  return { ...childWorkspaceRoute(parent, childKind), name: 'conversation', sessionId: parentId };
+}
+
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
   const workspaces = snapshot.workspaces || [];
@@ -1041,9 +1064,27 @@ function renderWorkspaces() {
     const close = el('button', 'virtual-workspace-close', '×');
     close.type = 'button';
     close.setAttribute('aria-label', `Close ${parent?.title || 'session'} ${reviewers ? 'reviewers' : 'sub-agent'} workspace`);
-    close.onclick = () => navigate({ name: 'conversation', sessionId: parentId });
-    const title = parent?.title || parentId;
-    subagentWorkspace.replaceChildren(el('span', '', reviewers ? `Reviewers · ${title}` : title), close);
+    close.onclick = () => navigate(closeChildWorkspaceRoute(parentId));
+    const chain = childWorkspaceChain(parentId);
+    const crumb = el('span', 'virtual-workspace-breadcrumb');
+    chain.forEach(({ id, session }, index) => {
+      const title = session?.title || id;
+      if (index > 0) crumb.append(el('span', '', ' › '));
+      const next = chain[index + 1];
+      if (!next) {
+        const label = el('span', '', reviewers ? `Reviewers · ${title}` : title);
+        label.setAttribute('aria-current', 'location');
+        crumb.append(label);
+        return;
+      }
+      const childKind = childWorkspaceKind(session, next.id);
+      const ancestor = el('a', '', childKind === 'reviewer' ? `Reviewers · ${title}` : title);
+      ancestor.href = routeHash(index === 0
+        ? { name: 'conversation', sessionId: id }
+        : childWorkspaceRoute(id, childKind));
+      crumb.append(ancestor);
+    });
+    subagentWorkspace.replaceChildren(crumb, close);
     return;
   }
   // Every snapshot re-renders the route, and Firefox for Android stacks a
@@ -1322,13 +1363,14 @@ function inboxCard(entry) {
 /// read from, so they cannot disagree.
 function inboxEntries() {
   const rows = [...viewerState.rows.values()].filter(row => {
+    if (row.notifications_ignored === true) return false;
     const stack = row.notification_card;
     if (stack) return !notificationDismissed(row);
     // Older daemons omit notification_card. New daemons publish null for
     // sessions with no card, while failures still come from attention.
     return row.verdict?.needs_person
       && (!Object.hasOwn(row, 'notification_card') || inboxSessionFailed(row))
-      && !isSubagentSession(row) && hasNotification(row);
+      && hasNotification(row);
   });
   const band = row => {
     const badge = inboxBadge(row);
@@ -10105,7 +10147,7 @@ function renderConversationHeader(session) {
     // including when the holder is a reviewer with no worker-child row.
     button.classList.toggle(
       'hidden',
-      !waiting && (total === 0 || Boolean(route.subagentParentId)),
+      !waiting && total === 0,
     );
   }
   // Reviewers stay reachable once any exist, so a finished review's
@@ -10118,7 +10160,7 @@ function renderConversationHeader(session) {
     button.title = `${reviewers.length} reviewer${reviewers.length === 1 ? '' : 's'}`;
     button.classList.toggle(
       'hidden',
-      reviewers.length === 0 || Boolean(route.subagentParentId),
+      reviewers.length === 0,
     );
   }
   syncConversationStatus();

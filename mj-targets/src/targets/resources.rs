@@ -40,6 +40,12 @@ awk -v arc_size="$arc_size" -v arc_min="$arc_min" '
     }
 ' "$memory_proc_root/meminfo"
 printf 'logical.cores=%s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
+dmi=/sys/devices/virtual/dmi/id
+if vendor=$(cat "$dmi/sys_vendor" 2>/dev/null) &&
+   [ "$(printf '%s' "$vendor" | awk '{sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print}')" = 'Amazon EC2' ] &&
+   product=$(cat "$dmi/product_name" 2>/dev/null) && [ -n "$product" ]; then
+    printf 'ec2.instance_type=%s\n' "$product"
+fi
 "#;
 
 pub(super) const AWS_ALLOCATED_CAPACITY_SCRIPT: &str = r#"
@@ -225,10 +231,20 @@ pub fn parse_host_capacity(output: &[u8], host: &str) -> Result<DeploymentCapaci
     let mut total = parse_required_u64(&values, "memory.max")?;
     let mut used = parse_required_u64(&values, "memory.current")?;
     let memory_pool = values.contains_key("microvm.info");
+    let mut physical_memory = None;
     if let Some(info) = values.get("microvm.info") {
+        physical_memory = Some(HostMemoryUsage {
+            used_bytes: used,
+            total_bytes: total,
+        });
         (used, total) = nitro_pool_memory(info)?;
     }
     Ok(DeploymentCapacityUsage {
+        ec2_instance_type: values
+            .get("ec2.instance_type")
+            .filter(|value| !value.is_empty())
+            .cloned(),
+        physical_memory,
         memory_pool,
         cpu_percent: Some(parse_percent(required_value(&values, "cpu.percent")?)?),
         memory_used_bytes: used,
@@ -243,6 +259,8 @@ pub fn parse_aws_allocated_capacity(output: &[u8], host: &str) -> Result<Deploym
     let values = parse_key_values(output);
     let memory_total_bytes = parse_required_u64(&values, "memory.total")?;
     Ok(DeploymentCapacityUsage {
+        ec2_instance_type: None,
+        physical_memory: None,
         memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
@@ -348,5 +366,22 @@ pub fn validate_resource_allocation(
             bail!(mj_core::state::BARE_TARGET_FIXED_RESOURCES)
         }
         _ => bail!("resource allocation does not match the selected target kind"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_capacity_accepts_optional_ec2_instance_type() {
+        let sample =
+            "memory.max=68719476736\nmemory.current=8589934592\ncpu.percent=20\nlogical.cores=16\n";
+        let legacy = parse_host_capacity(sample.as_bytes(), "remote").unwrap();
+        assert_eq!(legacy.ec2_instance_type, None);
+        let output = format!("{sample}ec2.instance_type= c8id.4xlarge \n");
+        let sampled = parse_host_capacity(output.as_bytes(), "remote").unwrap();
+        assert_eq!(sampled.ec2_instance_type.as_deref(), Some("c8id.4xlarge"));
+        assert_eq!(sampled.host_memory(), legacy.host_memory());
     }
 }

@@ -129,8 +129,12 @@ impl SessionUsageEstimate {
 #[serde(rename_all = "snake_case")]
 pub enum UsageAgentRole {
     Primary,
-    Subagent,
+    Orchestrator,
+    Subtle,
+    Straightforward,
+    Oracle,
     Reviewer,
+    Subagent,
     UnclassifiedSubagent,
 }
 
@@ -138,8 +142,12 @@ impl UsageAgentRole {
     pub fn label(self) -> &'static str {
         match self {
             Self::Primary => "Primary agents",
-            Self::Subagent => "Subagents",
+            Self::Orchestrator => "Orchestrators",
+            Self::Subtle => "Subtle subagents",
+            Self::Straightforward => "Straightforward subagents",
+            Self::Oracle => "Oracles",
             Self::Reviewer => "Reviewers",
+            Self::Subagent => "Other subagents",
             Self::UnclassifiedSubagent => "Unclassified subagents",
         }
     }

@@ -567,22 +567,6 @@ fn maintain(layout: &Layout, args: MaintainArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn parse_memory(text: &str) -> Result<u64> {
-    let lower = text.to_ascii_lowercase();
-    let (digits, factor) = match lower.trim_end_matches('b') {
-        value if value.ends_with('k') => (&value[..value.len() - 1], 1u64 << 10),
-        value if value.ends_with('m') => (&value[..value.len() - 1], 1u64 << 20),
-        value if value.ends_with('g') => (&value[..value.len() - 1], 1u64 << 30),
-        value => (value, 1),
-    };
-    let amount: u64 = digits.parse().with_context(|| {
-        format!("invalid --memory {text:?}: use a number with an optional b, k, m or g suffix")
-    })?;
-    amount
-        .checked_mul(factor)
-        .ok_or_else(|| anyhow!("--memory {text:?} is too large"))
-}
-
 fn parse_volume(text: &str) -> Result<VolumeArg> {
     let mut parts = text.splitn(3, ':');
     let name = parts.next().unwrap_or_default();
@@ -727,7 +711,7 @@ fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     let memory = args
         .memory
         .as_deref()
-        .map(parse_memory)
+        .map(mj_core::config::parse_container_memory)
         .transpose()?
         .ok_or_else(|| {
             anyhow!("--memory is required: a microVM's memory is reserved from the Nitro pool")

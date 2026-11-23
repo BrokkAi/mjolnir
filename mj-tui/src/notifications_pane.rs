@@ -487,9 +487,6 @@ impl DashboardState {
                 .served_attention
                 .keys()
                 .filter_map(|id| {
-                    if self.state.subagents.contains_key(id) {
-                        return None;
-                    }
                     let level = self.attention_level(id);
                     if !matches!(level, AttentionLevel::Waiting | AttentionLevel::Important) {
                         return None;
@@ -527,6 +524,9 @@ impl DashboardState {
         published: Option<std::sync::Arc<mj_client::runtime_feed::NotificationCard>>,
     ) -> Option<NotificationEntry> {
         let session = self.state.sessions.get(id)?;
+        if session.notifications_ignored {
+            return None;
+        }
         Some(NotificationEntry {
             session_id: id.to_owned(),
             level,

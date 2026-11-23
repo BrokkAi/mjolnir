@@ -368,7 +368,7 @@ impl Controller {
             oracle_choice: None,
             oracle: false,
             supervisors: false,
-            notifications_ignored: false,
+            notifications_ignored: true,
             project: parent.project.clone(),
             target_runtime: Some(match &parent.target_runtime {
                 Some(runtime) => runtime.clone(),
@@ -1463,6 +1463,11 @@ mod tests {
             ))
             .expect("depth-2 worker under supervisor should register");
         assert!(!d2.supervisor);
+
+        let stored = crate::database::load_state().unwrap();
+        assert!(stored.sessions[&sup.child_session_id].notifications_ignored);
+        assert!(stored.sessions[&d2.child_session_id].notifications_ignored);
+        assert!(!stored.sessions["primary-enabled"].notifications_ignored);
 
         // Depth-1 supervisor refuses depth-2 supervisor.
         assert!(
