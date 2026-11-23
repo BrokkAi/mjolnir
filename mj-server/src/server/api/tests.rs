@@ -9595,11 +9595,12 @@ async fn dashboard_routes_enforce_terminal_auth_and_mutations_refuse_drain() {
             r#"{"layout":{"root":{"kind":"pane","id":1},"focus":1,"sessions":{}}}"#,
             true,
         ),
+        // Container settings admits the save in the runtime after validation.
         (
             "PUT",
             "/sessions/session-1/container-settings",
             r#"{"resource_allocation":null,"mounts":[],"mount_history":[]}"#,
-            true,
+            false,
         ),
     ];
     let request = |method, path, body, header, value: &str| {
@@ -9614,7 +9615,7 @@ async fn dashboard_routes_enforce_terminal_auth_and_mutations_refuse_drain() {
         )
     };
     backend.upgrade_gate.begin_draining();
-    for (method, path, body, mutation) in terminal_routes {
+    for (method, path, body, checks_admission) in terminal_routes {
         for (header, value) in [
             (AUTHORIZATION, "Bearer test-api-token"),
             (COOKIE, cookie.as_str()),
@@ -9622,7 +9623,7 @@ async fn dashboard_routes_enforce_terminal_auth_and_mutations_refuse_drain() {
             let response = request(method, path, body, header, value).await.unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
         }
-        if mutation {
+        if checks_admission {
             let response = request(
                 method,
                 path,

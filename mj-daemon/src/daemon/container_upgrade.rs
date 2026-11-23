@@ -28,35 +28,64 @@ impl RuntimeState {
     ) -> Result<Option<ContainerUpgradePreview>> {
         self.validate_container_settings_size(&session_id, settings.resource_allocation.as_ref())
             .await?;
-        let preview = mj_core::runtime::spawn_blocking(move || {
+        let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
+        let cancel_preparation = executor.cancel_on_drop();
+        let prepare_id = session_id.clone();
+        let (settings, plan) = mj_core::runtime::spawn_blocking(move || -> Result<_> {
             ensure!(
-                !mj_controller::controller::move_session::move_owns_session(&session_id),
+                !mj_controller::controller::move_session::move_owns_session(&prepare_id),
                 "session is moving; change container settings after Move finishes"
             );
-            let mut controller = Controller::load()?;
-            if let Some(plan) = controller.plan_container_settings_replacement(
-                &session_id,
+            let controller = Controller::load()?;
+            let plan = controller.plan_container_settings_replacement(
+                &prepare_id,
                 "preview",
                 &settings,
-                &ProcessExecutor,
-            )? {
-                return Ok(Some(plan.settings_preview(&session_id, settings)));
-            }
-            controller.update_session_container_settings(
-                &session_id,
-                settings.resource_allocation,
-                settings.mounts,
-                settings.mount_history,
-                &ProcessExecutor,
+                &executor,
             )?;
-            Ok(None)
+            if plan.is_none() {
+                controller.validate_session_container_settings(
+                    &prepare_id,
+                    settings.resource_allocation.as_ref(),
+                    &settings.mounts,
+                    &executor,
+                )?;
+            }
+            Ok((settings, plan))
         })
         .await
-        .context("container settings task panicked")??;
-        if preview.is_none() {
-            self.reload_controller().await?;
+        .context("container settings preparation task panicked")??;
+        drop(cancel_preparation);
+        if let Some(plan) = plan {
+            return Ok(Some(plan.settings_preview(&session_id, settings)));
         }
-        Ok(preview)
+
+        // Host checks can be cancelled with the request. Once we accept the
+        // local save, finish its publication even if the requester leaves.
+        let admission =
+            mj_controller::upgrade::activity_unless_draining("save deferred container settings")?;
+        let state = self.clone();
+        mj_core::runtime::spawn(async move {
+            let _admission = admission;
+            mj_core::runtime::spawn_blocking(move || {
+                ensure!(
+                    !mj_controller::controller::move_session::move_owns_session(&session_id),
+                    "session is moving; change container settings after Move finishes"
+                );
+                Controller::load()?.save_validated_session_container_settings(
+                    &session_id,
+                    settings.resource_allocation,
+                    settings.mounts,
+                    settings.mount_history,
+                )
+            })
+            .await
+            .context("container settings persistence task panicked")??;
+            state.reload_controller().await
+        })
+        .await
+        .context("container settings save task panicked")??;
+        Ok(None)
     }
 
     pub async fn preview_container_upgrade(

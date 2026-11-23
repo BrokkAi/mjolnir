@@ -5149,30 +5149,24 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             let reference =
                 new_command_id("container-settings").map_err(|_| viewer_unavailable())?;
-            let admission = mj_controller::upgrade::activity_unless_draining("container settings")
-                .map_err(|_| ApiFailure::handoff())?;
             let settings = ContainerSettingsChange {
                 resource_allocation,
                 mounts,
                 mount_history: None,
             };
-            // Complete reload/publication even when the requester leaves.
-            join_viewer_task(
-                mj_core::runtime::spawn(async move {
-                    let _admission = admission;
-                    exports
-                        .set_container_settings(session_id, settings)
-                        .await
-                        .map_err(|error| {
-                            if let Some(refusal) = Refusal::of(&error) {
-                                return ActionOutcome::Refused(refusal);
-                            }
-                            tracing::warn!(%reference, %error, "container settings request failed");
-                            ActionOutcome::Failed { reference }
-                        })
-                })
-                .await,
-            )
+            match exports.set_container_settings(session_id, settings).await {
+                Ok(preview) => Ok(Ok(preview)),
+                Err(error) => {
+                    if let Some(refusal) = Refusal::of(&error) {
+                        if refusal.code() == Some(mj_core::upgrade::HANDOFF_REFUSAL_CODE) {
+                            return Err(ApiFailure::handoff());
+                        }
+                        return Ok(Err(ActionOutcome::Refused(refusal)));
+                    }
+                    tracing::warn!(%reference, %error, "container settings request failed");
+                    Ok(Err(ActionOutcome::Failed { reference }))
+                }
+            }
         })
     }
 

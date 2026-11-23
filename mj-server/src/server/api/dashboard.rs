@@ -561,13 +561,9 @@ async fn set_session_container_settings(
     Json(settings): Json<ContainerSettingsRequest>,
 ) -> Result<Json<ContainerSettingsResponse>, ApiFailure> {
     require_terminal(&state, &headers)?;
-    let backend = dashboard_backend(&state);
-    run_admitted_mutation(&state, "container settings", async move {
-        Ok(Json(
-            backend?
-                .set_session_container_settings(session_id, settings)
-                .await?,
-        ))
-    })
-    .await
+    Ok(Json(
+        dashboard_backend(&state)?
+            .set_session_container_settings(session_id, settings)
+            .await?,
+    ))
 }

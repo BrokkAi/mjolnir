@@ -1571,7 +1571,7 @@ impl Controller {
         Ok(true)
     }
 
-    fn validate_session_container_settings(
+    pub fn validate_session_container_settings(
         &self,
         session_id: &str,
         resource_allocation: Option<&SessionResourceAllocation>,
@@ -1615,8 +1615,7 @@ impl Controller {
 
     /// Record the per-session container size overrides and attached
     /// directories. Nothing is applied to a running container: the values are
-    /// read the next time the session's container is created. The daemon
-    /// caller holds upgrade admission through validation and publication.
+    /// read the next time the session's container is created.
     pub fn update_session_container_settings(
         &mut self,
         session_id: &str,
@@ -1631,6 +1630,34 @@ impl Controller {
             &additional_mounts,
             executor,
         )?;
+        let _admission =
+            crate::upgrade::activity_unless_draining("save deferred container settings")?;
+        self.save_validated_session_container_settings(
+            session_id,
+            resource_allocation,
+            additional_mounts,
+            mount_history,
+        )
+    }
+
+    /// Persist settings after validation. The caller holds upgrade admission.
+    pub fn save_validated_session_container_settings(
+        &mut self,
+        session_id: &str,
+        resource_allocation: Option<SessionResourceAllocation>,
+        additional_mounts: Vec<targets::AdditionalMount>,
+        mount_history: Option<Vec<std::path::PathBuf>>,
+    ) -> Result<()> {
+        let record = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let host = self
+            .config
+            .targets
+            .get(&record.target_template_id)
+            .and_then(mj_core::config::mount_history_host);
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,
@@ -1638,25 +1665,15 @@ impl Controller {
             &additional_mounts,
             &updated_at,
         )?;
-        if let Some(host) = self
-            .config
-            .targets
-            .get(
-                &self.state.sessions[session_id]
-                    .target_template_id
-                    .to_owned(),
-            )
-            .and_then(mj_core::config::mount_history_host)
-        {
-            let host = host.to_owned();
+        if let Some(host) = host {
             // The dialog owns the suggestion list, so forgetting a directory
             // there has to survive the mounts being remembered right after.
             if let Some(history) = mount_history {
-                crate::database::replace_mount_history(&host, &history)?;
-                self.state.mount_history.insert(host.clone(), history);
+                crate::database::replace_mount_history(host, &history)?;
+                self.state.mount_history.insert(host.to_owned(), history);
             }
-            crate::database::remember_mount_sources(&host, &additional_mounts)?;
-            self.state.remember_mount_sources(&host, &additional_mounts);
+            crate::database::remember_mount_sources(host, &additional_mounts)?;
+            self.state.remember_mount_sources(host, &additional_mounts);
         }
         let record = self
             .state

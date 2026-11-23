@@ -18473,3 +18473,185 @@ async fn terminal_dashboard_routes_round_trip_and_reads_continue_during_drain() 
     shutdown.cancel();
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn container_settings_late_admission_refuses_both_http_paths_without_writing() {
+    let Some(_writer) = startup_prompt_test_store(
+        "container_settings_late_admission_refuses_both_http_paths_without_writing",
+    ) else {
+        return;
+    };
+    let mut config = Config::default();
+    config.targets.insert(
+        "container".into(),
+        mj_core::config::TargetTemplate::LocalPodman {
+            container: serde_json::from_value(serde_json::json!({})).unwrap(),
+        },
+    );
+    config.save().unwrap();
+    let workspace = mj_controller::database::create_workspace("Container settings").unwrap();
+    let mut session =
+        runtime_test_session("settings-session", &workspace.id, SessionState::Stopped);
+    session.target_template_id = "container".into();
+    mj_controller::database::save_session(&session).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let state = test_runtime_state_loading_the_store();
+    let (_http, shutdown, server) = start_test_dashboard_http_api_on(state, listener).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let allocation = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 << 30,
+    };
+    let terminal = client
+        .put(format!(
+            "{base_url}/api/v1/sessions/{}/container-settings",
+            session.id
+        ))
+        .json(&mj_client::http::ContainerSettingsRequest {
+            resource_allocation: Some(allocation.clone()),
+            mounts: Vec::new(),
+            mount_history: vec![PathBuf::from("/refused/mount")],
+        });
+    let web = client.post(format!("{base_url}/api/v1/actions")).json(
+        &crate::server::ControllerAction::SetContainerSettings {
+            session_id: session.id.clone(),
+            resource_allocation: Some(allocation),
+            mounts: Vec::new(),
+        },
+    );
+    let gate = mj_controller::upgrade::gate();
+    gate.begin_draining();
+    for request in [terminal, web] {
+        let response = request
+            .bearer_auth("direct-test-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(response.headers()[crate::server::UPGRADE_HEADER], "pending");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "daemon_handoff");
+        let stored =
+            mj_controller::database::load_state_from(&mj_controller::database::database_path())
+                .unwrap();
+        assert_eq!(stored.sessions[&session.id].resource_allocation, None);
+        assert_eq!(stored.sessions[&session.id].updated_at, session.updated_at);
+        assert!(stored.mount_history.is_empty());
+    }
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn container_settings_mount_probe_is_cancellable_without_upgrade_admission() {
+    let Some(_writer) = startup_prompt_test_store(
+        "container_settings_mount_probe_is_cancellable_without_upgrade_admission",
+    ) else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let started = root.path().join("started");
+    let script = root.path().join("proxy.sh");
+    fs::write(
+        &script,
+        format!(
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            mj_core::targets::posix_quote(&started.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.targets.insert(
+        "container".into(),
+        mj_core::config::TargetTemplate::SshPodman {
+            ssh: mj_core::config::SshConnection {
+                host: "container-settings-cancellation.invalid".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![
+                    "-o".into(),
+                    format!(
+                        "ProxyCommand=sh {}",
+                        mj_core::targets::posix_quote(&script.to_string_lossy())
+                    ),
+                    "-o".into(),
+                    "ControlMaster=no".into(),
+                    "-o".into(),
+                    "ControlPath=none".into(),
+                ],
+            },
+            container: serde_json::from_value(serde_json::json!({})).unwrap(),
+        },
+    );
+    config.save().unwrap();
+    let workspace = mj_controller::database::create_workspace("Container probe").unwrap();
+    let mut session = runtime_test_session("settings-probe", &workspace.id, SessionState::Stopped);
+    session.target_template_id = "container".into();
+    mj_controller::database::save_session(&session).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let (http, shutdown, server) = start_test_dashboard_http_api(state).await;
+    let id = session.id.clone();
+    let request = mj_core::runtime::spawn(async move {
+        http.set_session_container_settings(
+            id,
+            None,
+            vec![mj_core::targets::AdditionalMount {
+                source: "/remote/settings-source".into(),
+                destination: "/settings".into(),
+                access: mj_core::targets::MountAccess::Ro,
+            }],
+            Vec::new(),
+        )
+        .await
+    });
+    let pid = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(&started)
+                && let Ok(pid) = pid.parse::<u32>()
+            {
+                break pid;
+            }
+            assert!(
+                !request.is_finished(),
+                "mount validation finished before reaching SSH"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("OpenSSH proxy never started");
+    assert!(daemon_process_is_alive(pid));
+    let gate = mj_controller::upgrade::gate();
+    let blockers = gate.blockers();
+    assert!(
+        blockers.is_empty(),
+        "mount probe held upgrade admission: {:?}",
+        blockers.iter().map(ToString::to_string).collect::<Vec<_>>()
+    );
+    assert!(
+        gate.try_close(),
+        "the in-flight SSH probe blocked the handoff"
+    );
+
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while daemon_process_is_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("disconnect left the mount probe's SSH proxy alive");
+    let stored =
+        mj_controller::database::load_state_from(&mj_controller::database::database_path())
+            .unwrap();
+    assert!(stored.sessions[&session.id].additional_mounts.is_empty());
+    assert!(stored.mount_history.is_empty());
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+}
