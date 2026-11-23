@@ -16803,12 +16803,8 @@ async fn adoption_discovery_stops_its_subprocess_on_disconnect_and_handoff() {
         let line = tokio::time::timeout(Duration::from_secs(5), response.chunk())
             .await
             .unwrap()
-            .unwrap()
             .unwrap();
-        assert!(matches!(
-            serde_json::from_slice::<mj_client::http::AdoptionEvent>(&line).unwrap(),
-            mj_client::http::AdoptionEvent::Failed { .. }
-        ));
+        assert!(line.is_none(), "handoff must close the adoption stream");
     }
     drop(response);
     tokio::time::timeout(Duration::from_secs(5), async {

@@ -29,32 +29,32 @@ impl TerminalStreams for RuntimeState {
         shutdown: CancellationToken,
         upgrade_gate: Arc<mj_core::upgrade::Gate>,
     ) -> TerminalStream {
-        let cancel = shutdown.child_token();
-        let cancelled = Arc::new(AtomicBool::new(false));
         let control = AdoptionCancellation {
-            token: cancel.clone(),
-            processes: cancelled.clone(),
+            token: shutdown.child_token(),
+            processes: Arc::new(AtomicBool::new(false)),
         };
         let (tx, rx) = mpsc::channel(1);
         let work_control = control.clone();
         mj_core::runtime::spawn(async move {
-            let stop = async {
-                tokio::select! {
-                    _ = shutdown.cancelled() => {}
-                    _ = upgrade_gate.wait_until_draining() => {}
-                }
-                work_control.cancel();
-            };
+            let stop = work_control.cancel_when_stopping(&upgrade_gate);
             let work = self.stream_adoption(request, tx, &work_control);
             tokio::pin!(work);
             tokio::select! {
-                _ = &mut work => {}
+                biased;
                 _ = stop => work.await,
+                _ = &mut work => {}
             }
         });
-        Box::pin(stream::unfold((rx, control), |(mut rx, guard)| async {
-            rx.recv().await.map(|line| (line, (rx, guard)))
-        }))
+        Box::pin(stream::unfold(
+            (rx, AdoptionStreamGuard(control)),
+            |(mut rx, guard)| async {
+                tokio::select! {
+                    biased;
+                    _ = guard.0.token.cancelled() => None,
+                    line = rx.recv() => line.map(|line| (line, (rx, guard))),
+                }
+            },
+        ))
     }
 
     fn terminal_open_login(
@@ -184,7 +184,7 @@ impl RuntimeState {
             tokio::select! {
                 biased;
                 _ = guard.0.cancellation.cancelled() => None,
-                frame = rx.recv() => frame.map(|frame| (ndjson_line(&frame, (), None), (rx, guard))),
+                frame = rx.recv() => frame.map(|frame| (ndjson_line(&frame, None), (rx, guard))),
             }
         });
         Ok((id, Box::pin(stream)))
@@ -232,12 +232,13 @@ impl RuntimeState {
                     waiting_open = false;
                     if let Ok(publication) = publication {
                         refresh_runtime_controller(&self).await;
-                        let line = ndjson_line(
+                        send_adoption_result(
+                            &output,
+                            &cancellation.token,
                             &AdoptionEvent::Installed { session_id: request.session_id.clone() },
                             publication.admission,
                             Some(publication.acknowledged),
-                        );
-                        let _ = output.send(line).await;
+                        ).await;
                     }
                 }
                 result = waiting.changed(), if waiting_open => {
@@ -266,7 +267,7 @@ impl RuntimeState {
                                 None
                             }
                         };
-                        let line = ndjson_line(&AdoptionEvent::Waiting { blockers, destroy_command }, (), None);
+                        let line = ndjson_line(&AdoptionEvent::Waiting { blockers, destroy_command }, None);
                         tokio::select! {
                             _ = cancellation.token.cancelled() => {}
                             _ = output.send(line) => {}
@@ -285,7 +286,7 @@ impl RuntimeState {
                 error: format!("{error:#}"),
             },
         };
-        let _ = output.send(ndjson_line(&event, admission, None)).await;
+        send_adoption_result(&output, &cancellation.token, &event, admission, None).await;
     }
 }
 
@@ -309,35 +310,68 @@ impl AdoptionCancellation {
         self.processes.store(true, Ordering::Release);
         self.token.cancel();
     }
-}
 
-impl Drop for AdoptionCancellation {
-    fn drop(&mut self) {
+    async fn cancel_when_stopping(&self, upgrade_gate: &mj_core::upgrade::Gate) {
+        tokio::select! {
+            _ = self.token.cancelled() => {}
+            _ = upgrade_gate.wait_until_draining() => {}
+        }
         self.cancel();
     }
 }
 
-/// Keep admission in Hyper's write queue through delivery or disconnect.
-/// Releasing the Installed frame also lets the accepted attachment continue.
-fn ndjson_line<T: Send + 'static>(
-    event: &impl serde::Serialize,
+struct AdoptionStreamGuard(AdoptionCancellation);
+
+impl Drop for AdoptionStreamGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+// Hyper can stop polling the body while its socket is backpressured. The
+// sender holds admission until the bytes leave Hyper's write queue or drain
+// cancels the delivery, even when the body itself is no longer being polled.
+async fn send_adoption_result<T>(
+    output: &mpsc::Sender<std::io::Result<TerminalBytes>>,
+    cancellation: &CancellationToken,
+    event: &AdoptionEvent,
     admission: T,
     acknowledged: Option<oneshot::Sender<()>>,
-) -> std::io::Result<TerminalBytes> {
-    struct Acknowledge(Option<oneshot::Sender<()>>);
-    impl Drop for Acknowledge {
-        fn drop(&mut self) {
-            if let Some(sender) = self.0.take() {
-                let _ = sender.send(());
+) {
+    let delivery = (admission, Acknowledge(acknowledged));
+    let (on_drop, released) = oneshot::channel();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {}
+        _ = async {
+            if output.send(ndjson_line(event, Some(on_drop))).await.is_ok() {
+                let _ = released.await;
             }
+        } => {}
+    }
+    // The accepted controller can continue attachment once delivery ends.
+    drop(delivery);
+}
+
+struct Acknowledge(Option<oneshot::Sender<()>>);
+
+impl Drop for Acknowledge {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
         }
     }
-    struct Line<T> {
+}
+
+fn ndjson_line(
+    event: &impl serde::Serialize,
+    acknowledged: Option<oneshot::Sender<()>>,
+) -> std::io::Result<TerminalBytes> {
+    struct Line {
         bytes: Vec<u8>,
-        _admission: T,
         _acknowledged: Acknowledge,
     }
-    impl<T> AsRef<[u8]> for Line<T> {
+    impl AsRef<[u8]> for Line {
         fn as_ref(&self) -> &[u8] {
             &self.bytes
         }
@@ -347,7 +381,6 @@ fn ndjson_line<T: Send + 'static>(
     bytes.push(b'\n');
     Ok(TerminalBytes::from_owner(Line {
         bytes,
-        _admission: admission,
         _acknowledged: acknowledged,
     }))
 }
@@ -381,28 +414,69 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn installed_acknowledges_after_the_last_delivery_buffer_releases_admission() {
+    #[tokio::test]
+    async fn installed_acknowledges_after_the_last_delivery_buffer_releases_admission() {
         let gate = Arc::new(mj_core::upgrade::Gate::default());
         let admission = gate.enter_unless_draining("adoption install").unwrap();
+        let (output, mut rx) = mpsc::channel(1);
         let (ack, mut delivered) = oneshot::channel();
-        let encoded = ndjson_line(
-            &AdoptionEvent::Installed {
-                session_id: "worker".into(),
-            },
-            admission,
-            Some(ack),
-        )
-        .unwrap();
+        let event = AdoptionEvent::Installed {
+            session_id: "worker".into(),
+        };
+        let cancellation = CancellationToken::new();
+        let delivery = send_adoption_result(&output, &cancellation, &event, admission, Some(ack));
+        tokio::pin!(delivery);
+        assert!(futures::poll!(&mut delivery).is_pending());
+
+        let encoded = rx.try_recv().unwrap().unwrap();
         let pending_write = encoded.clone();
         drop(encoded);
-        assert!(matches!(
-            delivered.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert!(!gate.try_close());
+        assert!(futures::poll!(&mut delivery).is_pending());
+        assert!(delivered.try_recv().is_err());
         drop(pending_write);
+
+        delivery.await;
         delivered.try_recv().unwrap();
         assert!(gate.try_close());
+    }
+
+    #[tokio::test]
+    async fn adoption_drain_releases_installed_admission_without_a_reader() {
+        for fill_queue_first in [true, false] {
+            let gate = Arc::new(mj_core::upgrade::Gate::default());
+            let admission = gate.enter_unless_draining("adoption install").unwrap();
+            let control = AdoptionCancellation {
+                token: CancellationToken::new(),
+                processes: Arc::new(AtomicBool::new(false)),
+            };
+            let (output, rx) = mpsc::channel(1);
+            if fill_queue_first {
+                output
+                    .try_send(Ok(TerminalBytes::from_static(b"waiting")))
+                    .unwrap();
+            }
+            let (ack, delivered) = oneshot::channel();
+            let event = AdoptionEvent::Installed {
+                session_id: "worker".into(),
+            };
+            let delivery =
+                send_adoption_result(&output, &control.token, &event, admission, Some(ack));
+            tokio::pin!(delivery);
+            assert!(futures::poll!(&mut delivery).is_pending());
+            assert_eq!(rx.len(), 1);
+            assert_eq!(gate.active_labels(), ["adoption install"]);
+
+            gate.begin_draining();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                control.cancel_when_stopping(&gate).await;
+                delivery.await;
+                delivered.await.unwrap();
+            })
+            .await
+            .expect("draining must release installation without a polling reader");
+            assert!(control.processes.load(Ordering::Acquire));
+            assert_eq!(rx.len(), 1, "the response body remained unpolled");
+            assert!(gate.try_close());
+        }
     }
 }
