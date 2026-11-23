@@ -2918,7 +2918,8 @@ fn tool_call_update_then_resent_tool_call_survives_the_projection() {
             update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "call-1",
                 ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::v1::schema::ToolCallStatus::Completed),
+                    .status(ToolCallStatus::Completed)
+                    .raw_output(json!("preserved result")),
             ))),
         },
     );
@@ -2941,6 +2942,8 @@ fn tool_call_update_then_resent_tool_call_survives_the_projection() {
         panic!("the item stayed a tool item");
     };
     assert_eq!(call.value()["title"], json!("shell (retried)"));
+    assert_eq!(call.typed_status(), ToolCallStatus::Completed);
+    assert_eq!(call.value()["rawOutput"], json!("preserved result"));
 }
 
 /// A tool call whose only content is a terminal reference, the shape
@@ -4195,5 +4198,160 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
             apply_observation(&mut session, RelayObservation::SessionRestarted);
             assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
         }
+    }
+}
+
+#[test]
+fn foreground_tool_projection_retires_only_the_ending_turn() {
+    let prompt_result = RelayCommandOutcome::Prompt {
+        stop_reason: "end_turn".into(),
+        usage: None,
+        diagnostic: None,
+        work_facts: None,
+    };
+    for boundary in [
+        RelayObservation::CommandCompleted {
+            command_id: "running".into(),
+            command: Some(RelayCommandKind::Prompt),
+            barrier_command_id: None,
+            outcome: prompt_result,
+        },
+        RelayObservation::CommandInterrupted {
+            command_id: "running".into(),
+            command: RelayCommandKind::Prompt,
+            reason: None,
+            continuation_id: None,
+            message: "Interrupted".into(),
+        },
+        RelayObservation::CommandRejected {
+            command_id: "running".into(),
+            command: RelayCommandKind::Prompt,
+            reason: None,
+            message: "Rejected".into(),
+        },
+        RelayObservation::CommandCompleted {
+            command_id: "clear".into(),
+            command: Some(RelayCommandKind::ClearContext),
+            barrier_command_id: None,
+            outcome: RelayCommandOutcome::ContextCleared {
+                native_session_id: "other".into(),
+                memory: None,
+            },
+        },
+        RelayObservation::Closed,
+        RelayObservation::SessionRestarted,
+        RelayObservation::HarnessTurnSettled {
+            prompt_in_flight: false,
+            autonomous: None,
+            origin: None,
+        },
+    ] {
+        let mut session = MaterializedSession::empty("tool-projection");
+        let announce = |id: &str| RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCall(ToolCall::new(
+                id.to_owned(),
+                "Build",
+            ))),
+        };
+        apply_observation(&mut session, announce("historical-unowned"));
+        if matches!(
+            boundary,
+            RelayObservation::SessionRestarted | RelayObservation::HarnessTurnSettled { .. }
+        ) {
+            apply_observation(
+                &mut session,
+                RelayObservation::HarnessTurnStarted { started_at_ms: 1 },
+            );
+        } else {
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandQueued {
+                    command_id: "running".into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::Text(TextContent::new("Build"))],
+                    },
+                    created_at_ms: 100,
+                    insert_at_front: false,
+                },
+            );
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandStarted {
+                    command_id: "running".into(),
+                    started_at_ms: 100,
+                },
+            );
+        }
+        apply_observation(&mut session, announce("foreground"));
+        apply_observation(&mut session, fallback_terminal_tool("detached", "Build"));
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandRejected {
+                command_id: "never-started".into(),
+                command: RelayCommandKind::Prompt,
+                reason: None,
+                message: "cancelled before start".into(),
+            },
+        );
+        let row = |session: &MaterializedSession, id: &str| {
+            let stable_id = crate::tool_item_id(id);
+            session
+                .transcript
+                .iter()
+                .find(|item| item.stable_id == stable_id)
+                .unwrap()
+                .clone()
+        };
+        let status = |item: &TranscriptItem| {
+            let TranscriptBody::Tool { call, .. } = &item.body else {
+                panic!("expected tool")
+            };
+            call.typed_status()
+        };
+        let before = row(&session, "foreground");
+        assert_eq!(status(&before), ToolCallStatus::Pending);
+        apply_observation(&mut session, boundary);
+        let settled = row(&session, "foreground");
+        assert_eq!(status(&settled), ToolCallStatus::Failed);
+        assert_eq!(settled.created_at_ms, before.created_at_ms);
+        assert_eq!(settled.position, before.position);
+        assert!(settled.last_changed_at_ms > before.last_changed_at_ms);
+        assert_eq!(
+            status(&row(&session, "historical-unowned")),
+            ToolCallStatus::Pending
+        );
+        let fallback_id = mj_core::acp::fallback_terminal_tool_call_id("detached");
+        assert_eq!(
+            status(&row(&session, &fallback_id)),
+            ToolCallStatus::InProgress
+        );
+
+        let update = |fields| RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "foreground",
+                fields,
+            ))),
+        };
+        apply_observation(&mut session, announce("foreground"));
+        apply_observation(
+            &mut session,
+            update(ToolCallUpdateFields::new().status(ToolCallStatus::InProgress)),
+        );
+        assert_eq!(row(&session, "foreground"), settled);
+
+        apply_observation(
+            &mut session,
+            update(
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .raw_output(json!("Done")),
+            ),
+        );
+        let updated = row(&session, "foreground");
+        assert_eq!(status(&updated), ToolCallStatus::Completed);
+        let TranscriptBody::Tool { call, .. } = &updated.body else {
+            panic!("expected tool")
+        };
+        assert_eq!(call.value()["rawOutput"], json!("Done"));
     }
 }

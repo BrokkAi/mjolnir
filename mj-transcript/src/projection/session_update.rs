@@ -23,11 +23,41 @@ pub(super) fn project_session_update(
         // CommandStarted is the controller's canonical local user message.
         SessionUpdate::UserMessageChunk(_) => {}
         SessionUpdate::ToolCall(call) => {
+            let stable_id = crate::tool_item_id(&call.tool_call_id);
+            if tool_status_is_open(call.status)
+                && index.get(&stable_id).is_some_and(|item| {
+                    matches!(&item.body, TranscriptBody::Tool { call, .. }
+                        if !tool_status_is_open(call.typed_status()))
+                })
+            {
+                // A repeated announcement may revise details, but omitted
+                // fields and the stale status cannot erase a recorded result.
+                let mut fields = ToolCallUpdateFields::new()
+                    .status(call.status)
+                    .title(call.title.clone());
+                fields.kind = (call.kind != ToolKind::default()).then_some(call.kind);
+                fields.name = call.name.clone();
+                fields.content = (!call.content.is_empty()).then(|| call.content.clone());
+                fields.locations = (!call.locations.is_empty()).then(|| call.locations.clone());
+                fields.raw_input = call.raw_input.clone();
+                fields.raw_output = call.raw_output.clone();
+                let update = agent_client_protocol::v1::schema::ToolCallUpdate::new(
+                    call.tool_call_id.clone(),
+                    fields,
+                )
+                .meta(call.meta.clone());
+                return project_session_update(
+                    current,
+                    index,
+                    event,
+                    &SessionUpdate::ToolCallUpdate(update),
+                    mutation,
+                );
+            }
             close_streams(index, mutation, event.recorded_at_ms);
             if fallback_terminal_already_claimed(index, call)? {
                 return Ok(());
             }
-            let stable_id = crate::tool_item_id(&call.tool_call_id);
             // Agents re-send a whole `tool_call` for an id they already
             // reported, both when they revise a call and when a resumed
             // session replays its history. Merge into the existing item so the
@@ -96,7 +126,6 @@ pub(super) fn project_session_update(
                 );
                 return Ok(());
             };
-            close_streams(index, mutation, event.recorded_at_ms);
             let TranscriptBody::Tool {
                 call, presentation, ..
             } = &mut item.body
@@ -109,26 +138,45 @@ pub(super) fn project_session_update(
             let mut materialized_call: ToolCall = call.decode().with_context(|| {
                 format!("parse materialized ACP tool call {}", update.tool_call_id)
             })?;
-            let presentation_changed = crate::transcript::tool_call_update_changes_presentation(
-                &materialized_call,
-                &update.fields,
-            );
-            materialized_call.update(update.fields.clone());
-            if presentation_changed
-                || presentation.as_ref().is_none_or(|p| {
-                    p.summary_version < crate::transcript::TOOL_SUMMARY_VERSION
-                        || (p.output_line_count.is_some()
-                            && matches!(
-                                materialized_call.status,
-                                ToolCallStatus::Pending | ToolCallStatus::InProgress
-                            ))
-                })
-            {
-                *presentation = Some(Box::new(tool_call_presentation(&materialized_call)));
+            let mut fields = update.fields.clone();
+            let stale_status = !tool_status_is_open(materialized_call.status)
+                && fields.status.is_some_and(tool_status_is_open);
+            if stale_status {
+                fields.status = None;
             }
-            *call = serde_json::to_value(materialized_call)?.into();
-            item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
+            if !stale_status || fields != ToolCallUpdateFields::default() {
+                let presentation_changed = crate::transcript::tool_call_update_changes_presentation(
+                    &materialized_call,
+                    &fields,
+                );
+                let previous = stale_status.then(|| materialized_call.clone());
+                materialized_call.update(fields);
+                if previous.as_ref() != Some(&materialized_call) {
+                    if presentation_changed
+                        || presentation.as_ref().is_none_or(|p| {
+                            p.summary_version < crate::transcript::TOOL_SUMMARY_VERSION
+                                || (p.output_line_count.is_some()
+                                    && matches!(
+                                        materialized_call.status,
+                                        ToolCallStatus::Pending | ToolCallStatus::InProgress
+                                    ))
+                        })
+                    {
+                        *presentation = Some(Box::new(tool_call_presentation(&materialized_call)));
+                    }
+                    *call = serde_json::to_value(materialized_call)?.into();
+                }
+            }
             apply_terminal_metadata(&mut item, update.meta.as_ref());
+            if stale_status
+                && index
+                    .get(&stable_id)
+                    .is_some_and(|old| old.body == item.body)
+            {
+                return Ok(());
+            }
+            close_streams(index, mutation, event.recorded_at_ms);
+            item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
             attach_terminal_outputs(current, index, mutation, &mut item);
             consume_fallback_terminal_tools(index, mutation, &mut item, false)?;
             finalize_fallback_terminal_tool(&mut item)?;
@@ -386,6 +434,26 @@ pub(super) fn close_stream_kind(
             _ => unreachable!(),
         }
         closed.last_changed_at_ms = closed.last_changed_at_ms.max(changed_at_ms);
+        upsert(mutation, closed);
+    }
+}
+
+pub(super) fn settle_foreground_tools(
+    index: &ProjectionIndex,
+    mutation: &mut MaterializedSessionMutation,
+    start: Option<u64>,
+    event: &RelayEvent,
+) {
+    let Some(start) = start.filter(|start| *start < event.ordinal) else {
+        return;
+    };
+    for item in index.open_tools_in_turn(start, event.ordinal) {
+        let mut closed = TranscriptItem::clone(item);
+        let TranscriptBody::Tool { call, .. } = &mut closed.body else {
+            unreachable!("only tool rows are indexed");
+        };
+        call.edit(|value| value["status"] = Value::String("failed".into()));
+        closed.last_changed_at_ms = closed.last_changed_at_ms.max(event.recorded_at_ms);
         upsert(mutation, closed);
     }
 }

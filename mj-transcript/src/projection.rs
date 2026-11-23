@@ -20,7 +20,7 @@ use std::sync::Arc;
 use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v1::schema::{
     ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate,
-    TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdateFields,
+    TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -61,6 +61,10 @@ pub struct ProjectionIndex {
     transcript_positions: HashMap<String, usize>,
     open_agent_streams: BTreeSet<(u64, String)>,
     open_thought_streams: BTreeSet<(u64, String)>,
+    turn_boundaries: BTreeMap<u64, String>,
+    // Position keys let a boundary name its owning turn interval. The actor
+    // window reloads unsettled items together with their owning turn ranges.
+    open_foreground_tools: BTreeSet<(u64, String)>,
     terminal_referrers: HashMap<String, BTreeSet<String>>,
 }
 
@@ -171,6 +175,8 @@ impl ProjectionIndex {
             transcript_positions: HashMap::with_capacity(current.transcript.len()),
             open_agent_streams: BTreeSet::new(),
             open_thought_streams: BTreeSet::new(),
+            turn_boundaries: BTreeMap::new(),
+            open_foreground_tools: BTreeSet::new(),
             terminal_referrers: HashMap::new(),
         };
         for (position, item) in current.transcript.iter().enumerate() {
@@ -196,6 +202,19 @@ impl ProjectionIndex {
 
     fn insert_at(&mut self, item: Arc<TranscriptItem>, position: usize) {
         let stream = (item.position, item.stable_id.clone());
+        if item.is_turn_start()
+            || item
+                .stable_id
+                .starts_with(crate::transcript::SESSION_RESTART_ITEM_PREFIX)
+            || item
+                .stable_id
+                .starts_with(mj_core::archive::CONTEXT_BOUNDARY_PREFIX)
+            || matches!(&item.body, TranscriptBody::System { text }
+                if text == observation::CLEARING_CONTEXT_TEXT && item.stable_id == format!("system:{}", item.position))
+        {
+            self.turn_boundaries
+                .insert(item.position, item.stable_id.clone());
+        }
         match &item.body {
             TranscriptBody::Agent {
                 streaming: true, ..
@@ -212,6 +231,14 @@ impl ProjectionIndex {
                 terminal_refs,
                 ..
             } => {
+                if !call.is_fallback()
+                    && matches!(
+                        call.raw_status().unwrap_or("pending"),
+                        "pending" | "in_progress"
+                    )
+                {
+                    self.open_foreground_tools.insert(stream);
+                }
                 let mut terminal_ids = call.terminal_ids().to_vec();
                 terminal_ids.extend(terminal_refs.iter().cloned());
                 for terminal_id in terminal_ids {
@@ -235,6 +262,14 @@ impl ProjectionIndex {
         let stream = (item.position, item.stable_id.clone());
         self.open_agent_streams.remove(&stream);
         self.open_thought_streams.remove(&stream);
+        self.open_foreground_tools.remove(&stream);
+        if self
+            .turn_boundaries
+            .get(&item.position)
+            .is_some_and(|id| id == stable_id)
+        {
+            self.turn_boundaries.remove(&item.position);
+        }
         if let TranscriptBody::Tool {
             call,
             terminal_refs,
@@ -284,6 +319,59 @@ impl ProjectionIndex {
             .filter_map(|(_, stable_id)| self.transcript.get(stable_id))
     }
 
+    fn open_tools_in_turn(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> impl Iterator<Item = &Arc<TranscriptItem>> {
+        self.open_foreground_tools
+            .range((start, String::new())..(end, String::new()))
+            .filter_map(|(_, id)| self.get(id))
+    }
+
+    fn prompt_start(&self, turn: &MaterializedTurn) -> u64 {
+        turn.steered_into
+            .as_ref()
+            .and_then(|id| self.get(&format!("user:{id}")))
+            .map_or(turn.turn_start_position, |item| item.position)
+    }
+
+    fn running_turn_start(&self, current: &MaterializedSession) -> Option<u64> {
+        if let Some(turn) = &current.active_turn {
+            return Some(self.prompt_start(turn));
+        }
+        let MaterializedExecutionState::Running { started_at_ms } = current.execution else {
+            return None;
+        };
+        let (&start, id) = self.turn_boundaries.last_key_value()?;
+        // A native goal can continue after its prompt outcome. The original
+        // running clock still identifies that prompt's start.
+        if let Some(outcome) = &current.last_turn_outcome
+            && outcome.turn_start_position == Some(start)
+        {
+            return self
+                .get(&format!("user:{}", outcome.command_id))
+                .or_else(|| {
+                    self.get(&format!(
+                        "{}{id}",
+                        crate::transcript::HARNESS_TURN_ITEM_PREFIX,
+                        id = outcome.command_id
+                    ))
+                })
+                .filter(|item| item.created_at_ms == started_at_ms)
+                .map(|item| item.position);
+        }
+        // Only a stand-alone harness turn can be Running without a prompt.
+        // An already completed marker remains after its owner is gone.
+        (id.strip_prefix(crate::transcript::HARNESS_TURN_ITEM_PREFIX)
+            .and_then(|ordinal| ordinal.parse::<u64>().ok())
+            == Some(start)
+            && !current.last_turn_outcome.as_ref().is_some_and(|turn| {
+                turn.turn_start_position.is_some() && turn.completed_ordinal > start
+            }))
+        .then_some(start)
+    }
+
     pub fn terminal_referrers(
         &self,
         terminal_id: &str,
@@ -294,6 +382,10 @@ impl ProjectionIndex {
             .flatten()
             .filter_map(|stable_id| self.transcript.get(stable_id))
     }
+}
+
+fn tool_status_is_open(status: ToolCallStatus) -> bool {
+    matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
 }
 
 /// Derive the minimal mutation for exactly the next relay event. This clones

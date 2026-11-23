@@ -29,6 +29,8 @@ pub fn queued_command_content(command_id: &str, command: &RelayCommand) -> Resul
         .map_err(Into::into)
 }
 
+pub(super) const CLEARING_CONTEXT_TEXT: &str = "Clearing context…";
+
 fn project_steered_prompt(
     current: &MaterializedSession,
     index: &ProjectionIndex,
@@ -234,7 +236,7 @@ pub(super) fn project_observation(
                 mutation.execution = Some(MaterializedExecutionState::Running {
                     started_at_ms: *created_at_ms,
                 });
-                push_system(mutation, event, "Clearing context…");
+                push_system(mutation, event, CLEARING_CONTEXT_TEXT);
             }
             // Every command that carries a prompt starts a user turn, so the
             // transcript shows what the harness was told. Mjolnir's own
@@ -403,6 +405,7 @@ pub(super) fn project_observation(
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
                 mj_core::relay::RelayCommandOutcome::ContextCleared { .. } => {
+                    settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
                     mutation.clear_turn_outcome = true;
                     mutation.clear_mailbox = true;
                     close_streams(index, mutation, event.recorded_at_ms);
@@ -443,6 +446,10 @@ pub(super) fn project_observation(
                     let native_running =
                         current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
                     if !native_running {
+                        let start = current.active_turn.as_ref()
+                            .filter(|turn| turn.belongs_to(command_id))
+                            .map(|turn| index.prompt_start(turn));
+                        settle_foreground_tools(index, mutation, start, event);
                         close_streams(index, mutation, event.recorded_at_ms);
                         mutation.execution = Some(MaterializedExecutionState::Idle);
                     }
@@ -492,6 +499,7 @@ pub(super) fn project_observation(
                     }
                 }
                 mj_core::relay::RelayCommandOutcome::Closed => {
+                    settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
                     close_streams(index, mutation, event.recorded_at_ms);
                     mutation.execution = Some(MaterializedExecutionState::Closed);
                 }
@@ -619,6 +627,8 @@ pub(super) fn project_observation(
                     ..
                 }
             );
+            let start = active.map(|turn| index.prompt_start(turn));
+            settle_foreground_tools(index, mutation, start, event);
             if (active.is_some() || (current.active_turn.is_none() && prompt_was_started))
                 && (bridge_stopped
                     || !current
@@ -868,6 +878,7 @@ pub(super) fn project_observation(
                 MaterializedExecutionState::Running { .. }
             ) && current.active_turn.is_none()
             {
+                settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
                 push_system_with_id(
                     mutation,
                     event,
@@ -918,6 +929,11 @@ pub(super) fn project_observation(
             // Running for it, and so does this: the prompt's own result closes
             // the streams and stops the clock.
             if !prompt_in_flight {
+                let start = autonomous
+                    .as_ref()
+                    .map(|turn| turn.start_ordinal)
+                    .or_else(|| index.running_turn_start(current));
+                settle_foreground_tools(index, mutation, start, event);
                 if let Some(turn) = autonomous {
                     let start = turn.start_ordinal;
                     let command_id = mj_core::continuation::harness_turn_id(start);
@@ -998,10 +1014,14 @@ pub(super) fn project_observation(
         RelayObservation::MailboxHookLeaseCreated { .. }
         | RelayObservation::MailboxHookLeaseReturned { .. } => {}
         RelayObservation::Closing => {
+            // The Closing state drops the autonomous turn clock. Retire its
+            // open calls while the starting marker is still identifiable.
+            settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
             close_streams(index, mutation, event.recorded_at_ms);
             mutation.execution = Some(MaterializedExecutionState::Closing);
         }
         RelayObservation::Closed => {
+            settle_foreground_tools(index, mutation, index.running_turn_start(current), event);
             close_streams(index, mutation, event.recorded_at_ms);
             mutation.execution = Some(MaterializedExecutionState::Closed);
         }
