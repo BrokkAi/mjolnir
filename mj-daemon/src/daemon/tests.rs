@@ -4260,7 +4260,7 @@ async fn force_destruction_preemption_times_out_without_destroying() {
 /// however long it takes in total.
 #[tokio::test(start_paused = true)]
 async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
-    let state = test_runtime_state();
+    let state = create_watchdog_test_runtime(Some(mj_core::subagent::SubagentKind::Reviewer));
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             |_state, _session_id, _cancelled, _session_admission| async move {
@@ -4297,6 +4297,26 @@ fn assert_create_progress(state: &Arc<RuntimeState>, bound: Duration) {
         check_progress(state, bound),
         views::LifecycleStallProgress::Running(_)
     ));
+}
+
+fn create_watchdog_test_runtime(
+    kind: Option<mj_core::subagent::SubagentKind>,
+) -> Arc<RuntimeState> {
+    let mut controller = empty_test_controller().unwrap();
+    let session = runtime_test_session("session-1", "workspace", SessionState::Provisioning);
+    if let Some(kind) = kind {
+        let mut relation = runtime_test_subagent(&session.id, "parent");
+        relation.kind = kind;
+        controller
+            .state
+            .subagents
+            .insert(session.id.clone(), relation.into());
+    }
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+    test_runtime_state_with(controller)
 }
 
 /// A running Create with no work of its own, for the stall tests.
@@ -4600,12 +4620,14 @@ async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
 // Hard-won: 9c928ddc2: a stalled Create only failed the reviewer start and kept running with its lifecycle admission held, which blocks daemon handoff.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
-    let state = test_runtime_state();
+    let state = create_watchdog_test_runtime(Some(mj_core::subagent::SubagentKind::Reviewer));
     let cancel_seen = Arc::new(AtomicBool::new(false));
+    let (admitted, started) = tokio::sync::oneshot::channel();
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let cancel_seen = cancel_seen.clone();
-            |_state, _session_id, cancelled, _session_admission| async move {
+            move |_state, _session_id, cancelled, _session_admission| async move {
+                admitted.send(()).unwrap();
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
@@ -4615,7 +4637,13 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
         })
         .await
         .unwrap();
-    tokio::task::yield_now().await;
+    started.await.unwrap();
+    assert!(
+        state.owner().lifecycle["session-1"]
+            .progress
+            .stall_progress_changed
+            .is_some()
+    );
     let executor = DaemonStageReportingExecutor::new(
         RefusingExecutor("a stage notification"),
         state.clone(),
@@ -4638,6 +4666,43 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     let error = outcome.unwrap_err().to_string();
     assert!(error.contains("stalled in: Sync"), "{error}");
     assert!(cancel_seen.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_primary_or_worker_create_can_run_a_stage_past_the_stall_bound() {
+    for kind in [None, Some(mj_core::subagent::SubagentKind::Worker)] {
+        let state = create_watchdog_test_runtime(kind);
+        let (admitted, started) = tokio::sync::oneshot::channel();
+        let (finish, running) = tokio::sync::oneshot::channel();
+        let result = state
+            .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+                move |_, _, cancelled, _| async move {
+                    admitted.send(()).unwrap();
+                    running.await.unwrap();
+                    assert!(!cancelled.load(Ordering::Acquire));
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .await
+            .unwrap();
+        started.await.unwrap();
+        assert!(
+            state.owner().lifecycle["session-1"]
+                .progress
+                .stall_progress_changed
+                .is_none()
+        );
+        let executor = DaemonStageReportingExecutor::new(
+            RefusingExecutor("a stage notification"),
+            state.clone(),
+            "session-1".into(),
+        );
+        executor.stage_started(ProvisionStage::Syncing);
+        tokio::time::sleep(LIFECYCLE_STALL_BOUND * 2).await;
+        executor.stage_finished(ProvisionStage::Syncing);
+        finish.send(()).unwrap();
+        RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    }
 }
 
 /// A background image download belongs to the daemon, not to a session, so

@@ -700,11 +700,17 @@ impl RuntimeState {
                             LIFECYCLE_STALL_BOUND.as_secs() / 60,
                         ),
                         Some(stream) => format!("{stream} moved no bytes for {} s", idle.as_secs()),
-                        None => format!(
-                            "no stage started or finished for {} s (stalled in: {})",
-                            idle.as_secs(),
-                            stages.join(" + "),
-                        ),
+                        None => {
+                            let stage = if stages.is_empty() {
+                                "between stages".to_owned()
+                            } else {
+                                stages.join(" + ")
+                            };
+                            format!(
+                                "no stage started or finished for {} s (stalled in: {stage})",
+                                idle.as_secs(),
+                            )
+                        }
                     };
                     return Some(format!(
                         "{} stalled for {session_id}: {detail}",
