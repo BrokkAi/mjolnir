@@ -2500,7 +2500,7 @@ impl DurableRelay {
             },
         )?;
         if finishes_turn && !self.snapshot.goal.running() {
-            self.finish_turn_activity()?;
+            self.persist_activity_transition()?;
         }
         if classifier_handoff {
             // The running classifier ended the tracked turn. Keep independently
@@ -2538,7 +2538,7 @@ impl DurableRelay {
         )?;
         self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
-            self.finish_turn_activity()?;
+            self.persist_activity_transition()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
             self.promote_held_claude_turn()?;
         }
@@ -2620,7 +2620,7 @@ impl DurableRelay {
         };
         self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
-            self.finish_turn_activity()?;
+            self.persist_activity_transition()?;
             self.return_boundary_steer_after_turn_end(command_id)?;
             self.promote_held_claude_turn()?;
         }
