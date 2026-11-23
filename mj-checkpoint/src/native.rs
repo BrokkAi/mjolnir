@@ -2,6 +2,7 @@
 
 pub mod antigravity;
 pub mod muse;
+pub mod opencode;
 
 use std::path::{Path, PathBuf};
 

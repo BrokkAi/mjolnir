@@ -4,21 +4,29 @@ use chrono::{DateTime, Utc};
 use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, strip_hidden_prompt_context};
 use mj_core::state::{MaterializedExecutionState, MaterializedSession};
 use mj_core::transcript::{TranscriptBody, TranscriptItem};
-use sessionwiki::adapters::{Adapter, ClaudeCode, Codex, GrokBuild, KimiCode, Muse};
+use sessionwiki::adapters::{
+    Adapter, Antigravity, ClaudeCode, Codex, Dsh, GrokBuild, KimiCode, Muse,
+};
 use sessionwiki::model::{Role, Session};
 use sha2::{Digest, Sha256};
 
 use super::*;
 
-pub(super) fn import_adapter(harness: HarnessKind) -> Option<Box<dyn Adapter>> {
-    Some(match harness {
+pub(super) fn import_adapter(harness: HarnessKind, home: Option<&Path>) -> Box<dyn Adapter> {
+    match harness {
         HarnessKind::Claude => Box::new(ClaudeCode::default()),
         HarnessKind::Codex => Box::new(Codex::default()),
         HarnessKind::Kimi => Box::new(KimiCode::default()),
         HarnessKind::Grok => Box::new(GrokBuild::default()),
         HarnessKind::Muse => Box::new(Muse::default()),
-        HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode => return None,
-    })
+        HarnessKind::Antigravity => {
+            Box::new(home.map_or_else(Antigravity::cli, Antigravity::cli_in_home))
+        }
+        HarnessKind::Dsh => Box::new(home.map_or_else(Dsh::acp_default, Dsh::in_home)),
+        HarnessKind::OpenCode => {
+            sessionwiki::adapters::by_name("opencode").expect("SessionWiki includes OpenCode")
+        }
+    }
 }
 
 pub fn read_claude_transcript(path: &Path) -> Result<ClaudeTranscript> {
@@ -65,24 +73,32 @@ pub(super) fn read_muse_transcript(path: &Path, original_key: &Path) -> Result<C
     Ok(transcript)
 }
 
-fn read_projection(harness: HarnessKind, key: &Path, source: &Path) -> Result<ClaudeTranscript> {
-    let adapter = import_adapter(harness).context("native harness does not support import")?;
-    let session = adapter
-        .parse(key)
-        .with_context(|| format!("read {} session {}", harness.display_name(), key.display()))?;
+pub(super) fn read_projection(
+    harness: HarnessKind,
+    key: &Path,
+    source: &Path,
+) -> Result<ClaudeTranscript> {
+    let adapter = import_adapter(harness, None);
+    let session = if harness == HarnessKind::OpenCode && opencode::database_key(key).is_some() {
+        opencode::parse_database(adapter.as_ref(), key)
+    } else {
+        adapter.parse(key)
+    }
+    .with_context(|| format!("read {} session {}", harness.display_name(), key.display()))?;
+    if matches!(
+        harness,
+        HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode
+    ) {
+        ensure!(!session.subagent, "native session belongs to a sub-agent");
+    }
     project_session(session, source)
 }
 
 fn project_session(session: Session, source: &Path) -> Result<ClaudeTranscript> {
     let cwd = session
         .raw_cwd
-        .filter(|cwd| !cwd.trim().is_empty())
-        .map(PathBuf::from)
-        .context("native session has no recorded working directory")?;
-    ensure!(
-        cwd.is_absolute(),
-        "native session working directory is not absolute"
-    );
+        .and_then(native::absolute_native_cwd)
+        .context("native session has no absolute recorded working directory")?;
 
     let mut dialogue = Vec::new();
     if session.compacted_prefix {
