@@ -285,6 +285,98 @@ async fn prompt(commands: &mpsc::Sender<CommandRequest>, text: &str) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn grok_native_session_config_has_one_effort_selector_and_uses_its_wire_id() {
+    let root = tempfile::tempdir().unwrap();
+    let recording = root.path().join("grok-opens.jsonl");
+    std::fs::write(
+        &recording,
+        include_str!("testdata/project-memory/grok-opens.jsonl"),
+    )
+    .unwrap();
+    let script = root.path().join("grok.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+with open(sys.argv[1]) as recording:
+    replies = {entry['method']: entry['result'] for entry in map(json.loads, recording)}
+options = replies['session/new']['configOptions']
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'method' not in request or 'id' not in request:
+        continue
+    method = request['method']
+    if method == 'session/set_config_option':
+        params = request['params']
+        assert params['sessionId'] == replies['session/new']['sessionId'], params
+        assert params['configId'] == 'reasoning_effort', params
+        assert params['value'] in ('medium', 'low'), params
+        effort = next(option for option in options if option['id'] == 'reasoning_effort')
+        effort['currentValue'] = params['value']
+        result = {'configOptions': options}
+    else:
+        result = replies[method]
+    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+"#,
+    )
+    .unwrap();
+    let mut spec = launch(root.path(), script, AcceptedSessionConfig::default());
+    spec.harness = HarnessKind::Grok;
+    spec.resume_session = None;
+    spec.args.push(recording.to_string_lossy().into_owned());
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = mj_core::runtime::spawn(run(spec, requests, events_tx));
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::SessionConfigured { config_options } => {
+                let ids: Vec<_> = config_options
+                    .iter()
+                    .map(|option| option.id.to_string())
+                    .collect();
+                assert_eq!(ids, ["model", "reasoning_effort"]);
+                break;
+            }
+            RuntimeEvent::Stopped => panic!("Grok stopped before configuration completed"),
+            _ => {}
+        }
+    }
+    for (key, wanted) in [("reasoning_effort", "medium"), ("effort", "low")] {
+        commands
+            .send(CommandRequest::SetConfig {
+                request_id: key.into(),
+                key: key.into(),
+                value: wanted.into(),
+            })
+            .await
+            .unwrap();
+        loop {
+            match next(&mut events).await {
+                RuntimeEvent::ConfigApplied {
+                    request_id,
+                    value,
+                    config_options,
+                    ..
+                } => {
+                    assert_eq!(request_id, key);
+                    assert_eq!(value, wanted);
+                    assert_eq!(
+                        surface::config_current_value(&config_options, "effort").as_deref(),
+                        Some(wanted)
+                    );
+                    break;
+                }
+                RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+                RuntimeEvent::Stopped => panic!("Grok stopped before applying {key}"),
+                _ => {}
+            }
+        }
+    }
+    drop(commands);
+    runtime.await.unwrap().unwrap();
+}
+
 // Hard-won: 21f785d: an effort response replaced the accepted picker model with a transcript ID.
 #[tokio::test]
 async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_prompt() {
