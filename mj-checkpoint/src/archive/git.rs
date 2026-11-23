@@ -3488,6 +3488,8 @@ pub struct DiffStatFile {
     pub binary: bool,
 }
 
+// Bound summary JSON and the web Changed Files DOM for checkouts like the
+// brokkbench checkout with 424,715 untracked files (#1083). The total stays exact.
 const UNTRACKED_DIFFSTAT_LIMIT: usize = 500;
 // Git normally writes refreshed stat metadata to the real index during diff.
 const SESSION_DIFF_CONFIG: [&str; 2] = ["-c", "diff.autoRefreshIndex=false"];
@@ -3653,6 +3655,7 @@ fn session_patch(
             "--no-ext-diff",
             "--no-textconv",
             "--no-color",
+            "--ignore-submodules=none",
             base,
             "--",
         ]
@@ -3693,6 +3696,7 @@ fn summarize_session_diff(
                 "--no-ext-diff",
                 "--no-textconv",
                 "--no-color",
+                "--ignore-submodules=none",
                 "--no-renames",
                 &result.base,
                 "--",

@@ -3197,6 +3197,74 @@ fn a_session_diff_from_a_subdirectory_covers_the_checkout_without_writing_object
 }
 
 #[test]
+fn a_session_diff_includes_submodule_pointer_changes_despite_git_ignore_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = temp.path().join("upstream");
+    initialize_repository(&origin);
+    commit_file(&origin, "source.txt", b"first\n", "first");
+    let first = git_line(&origin, &["rev-parse", "HEAD"]);
+    commit_file(&origin, "source.txt", b"second\n", "second");
+    let second = git_line(&origin, &["rev-parse", "HEAD"]);
+
+    let root = temp.path().join("parent");
+    initialize_repository(&root);
+    git(
+        &root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--",
+            origin.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    git(&root.join("vendor"), &["checkout", "--detach", &first]);
+    git(&root, &["add", "--", "vendor"]);
+    git(&root, &["commit", "-qm", "record initial submodule"]);
+    let base = git_line(&root, &["rev-parse", "HEAD"]);
+    git(&root.join("vendor"), &["checkout", "--detach", &second]);
+    git(&root, &["add", "--", "vendor"]);
+    git(&root, &["commit", "-qm", "advance submodule"]);
+    let before = object_files(&root);
+
+    for setting in ["diff.ignoreSubmodules", "submodule.vendor.ignore"] {
+        git(&root, &["config", setting, "all"]);
+
+        let summary = session_diff_details(&SystemGit, &root, Some(&base), None, &[]).unwrap();
+        assert!(summary.diff.contains("vendor |"), "{setting}: {summary:?}");
+        assert_eq!(
+            summary.tracked_files,
+            [DiffStatFile {
+                path: "vendor".into(),
+                insertions: Some(1),
+                deletions: Some(1),
+                binary: false,
+            }],
+            "{setting}"
+        );
+        let selected =
+            session_diff_details(&SystemGit, &root, Some(&base), None, &["vendor".into()])
+                .unwrap()
+                .diff;
+        assert!(
+            selected.contains(&format!("-Subproject commit {first}")),
+            "{selected}"
+        );
+        assert!(
+            selected.contains(&format!("+Subproject commit {second}")),
+            "{selected}"
+        );
+        let exported = session_diff_patch(&SystemGit, &root, Some(&base), None).unwrap();
+        assert_eq!(exported, selected, "{setting}");
+        assert_eq!(object_files(&root), before, "{setting}");
+
+        git(&root, &["config", "--unset", setting]);
+    }
+}
+
+#[test]
 fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_base() {
     let repository = tempfile::tempdir().unwrap();
     let root = repository.path();
