@@ -202,6 +202,11 @@ func TestWorktreeCountsThousandsOfDirtyPathsExactlyAndShowsEight(t *testing.T) {
 }
 
 func TestADirectoryThatIsNotARepositoryIsUnavailableNotClean(t *testing.T) {
+	// The reason is Git's own message, which Git translates; the assertion
+	// below is about the English one, so ask Git for English whatever the
+	// host's locale is. runGit itself keeps the user's locale, as in Rust.
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("LANGUAGE", "en")
 	observed := readWorktree(context.Background(), &ObserverChildren{}, "git", t.TempDir())
 	if observed.Value != nil {
 		t.Fatalf("reported %+v for a directory outside any repository", *observed.Value)
