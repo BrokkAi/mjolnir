@@ -109,6 +109,48 @@ func (d *bridgeDriver) markAgentRequest(sessionID string) {
 	d.agentOutputCount.mark()
 }
 
+// observeRequest records each request the agent makes in wire order, on the
+// connection's reader, before its handler starts. Rust's handlers do this on
+// the dispatch loop, which handles no later message until they return, so a
+// prompt's response that follows a question already counts the question as
+// the agent's output. acp-go runs every handler in its own goroutine; marking
+// there would let the response settle first and report a turn that asked a
+// question as unanswered (#970, #1265).
+func (d *bridgeDriver) observeRequest(method string, params json.RawMessage) {
+	var typed any
+	switch method {
+	case "session/request_permission":
+		// Rust marks a permission request inside the task it spawns.
+		return
+	case "terminal/create":
+		typed = &schema.CreateTerminalRequest{}
+	case "terminal/output":
+		typed = &schema.TerminalOutputRequest{}
+	case "terminal/wait_for_exit":
+		typed = &schema.WaitForTerminalExitRequest{}
+	case "terminal/kill":
+		typed = &schema.KillTerminalRequest{}
+	case "terminal/release":
+		typed = &schema.ReleaseTerminalRequest{}
+	default:
+		// The catch-all (extRequest) answers every other request.
+		sessionID, _ := sessionIDParam(params)
+		d.markAgentRequest(sessionID)
+		d.spec.StepClock.BeginClientWork()
+		return
+	}
+	// A typed request whose params do not decode reaches no handler in Rust
+	// and marks nothing.
+	if json.Unmarshal(params, typed) != nil {
+		return
+	}
+	sessionID, _ := sessionIDParam(params)
+	d.markAgentRequest(sessionID)
+	if method == "terminal/create" {
+		d.spec.StepClock.BeginClientWork()
+	}
+}
+
 func driveWithTerminals(ctx context.Context, transport ByteStreams, spec LaunchSpec, requests <-chan CommandRequest, events chan<- core.RuntimeEvent, opened *Shared[*OpenedSession], sessionOpen BridgeSessionOpen, owned BridgeOwned) (SessionRestart, error) {
 	bridgeCtx, endBridge := context.WithCancel(ctx)
 	defer endBridge()
@@ -167,7 +209,8 @@ func driveWithTerminals(ctx context.Context, transport ByteStreams, spec LaunchS
 		nativeAgents:       NewShared(NativeAgentRouter{}),
 	}
 	boundary := newResponseTap(transport)
-	connection := acp.Connect(boundary.incoming(), boundary.outgoing(), driver.handle, driver.notify)
+	connection := acp.Connect(boundary.incoming(), boundary.outgoing(), driver.handle, driver.notify,
+		acp.WithRequestObserver(driver.observeRequest))
 	type driven struct {
 		restart SessionRestart
 		err     error
@@ -256,7 +299,6 @@ func (d *bridgeDriver) handle(ctx context.Context, method string, params json.Ra
 		if err := decode(&request); err != nil {
 			return nil, err
 		}
-		d.markAgentRequest(string(request.SessionID))
 		terminalID := string(request.TerminalID)
 		snapshot, ok := d.terminals.Output(terminalID)
 		if !ok {
@@ -273,7 +315,6 @@ func (d *bridgeDriver) handle(ctx context.Context, method string, params json.Ra
 		if err := decode(&request); err != nil {
 			return nil, err
 		}
-		d.markAgentRequest(string(request.SessionID))
 		terminalID := string(request.TerminalID)
 		exit, ok := d.terminals.ExitReceiver(terminalID)
 		if !ok {
@@ -288,7 +329,6 @@ func (d *bridgeDriver) handle(ctx context.Context, method string, params json.Ra
 		if err := decode(&request); err != nil {
 			return nil, err
 		}
-		d.markAgentRequest(string(request.SessionID))
 		terminalID := string(request.TerminalID)
 		// The terminal stays valid: output and wait_for_exit still answer for
 		// it until the agent releases it.
@@ -301,7 +341,6 @@ func (d *bridgeDriver) handle(ctx context.Context, method string, params json.Ra
 		if err := decode(&request); err != nil {
 			return nil, err
 		}
-		d.markAgentRequest(string(request.SessionID))
 		terminalID := string(request.TerminalID)
 		supervisor, ok := d.terminals.Release(terminalID)
 		if !ok {
@@ -732,8 +771,7 @@ func (d *bridgeDriver) planReview(ctx context.Context, request *schema.RequestPe
 
 func (d *bridgeDriver) createTerminal(request schema.CreateTerminalRequest) (any, error) {
 	spec := d.spec
-	d.markAgentRequest(string(request.SessionID))
-	spec.StepClock.BeginClientWork()
+	// observeRequest marked the request in wire order.
 	startedAtMs := core.EpochMillis()
 	environment := maps.Clone(spec.Environment)
 	if environment == nil {
@@ -845,13 +883,8 @@ func sessionIDParam(params json.RawMessage) (string, bool) {
 // method-not-found answer for everything else.
 func (d *bridgeDriver) extRequest(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	spec := d.spec
-	spec.ACPActivity.Mark()
+	// observeRequest marked the request in wire order.
 	sessionID, hasSessionID := sessionIDParam(params)
-	if !(hasSessionID && d.isChild(sessionID)) {
-		spec.TurnContext.MarkParentActivity()
-	}
-	d.agentOutputCount.mark()
-	spec.StepClock.BeginClientWork()
 	child := ""
 	if hasSessionID && d.isChild(sessionID) {
 		child = sessionID
