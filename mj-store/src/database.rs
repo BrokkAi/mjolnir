@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 151;
+const SCHEMA_VERSION: i64 = 152;
 
 pub mod web_push;
 pub use web_push::*;
@@ -89,6 +89,7 @@ pub use native_agents::*;
 mod materialized;
 pub use materialized::*;
 mod mounts;
+pub mod tool_details;
 pub use mounts::*;
 mod turn_reviews;
 pub use turn_reviews::*;

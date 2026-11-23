@@ -108,14 +108,8 @@ pub(crate) fn enrich_settled_tool(body: &mut TranscriptBody) {
     presentation.source = PackedText::default();
 }
 
-/// Reduce a tool call to what a reader still needs, once a verified checkpoint
-/// holds the whole of it.
-///
-/// Tool output is where a projection's bytes are: on one measured session,
-/// 561 MB of 635 MiB. Behind a checkpoint nothing reads it — the checkpoint
-/// archive carries the complete transcript, and restoring it brings the output
-/// back — so what stays here is what the transcript still shows: which tool
-/// ran, on what, with what result, and how many lines each edit changed.
+/// Keep the visible tool summary and the identities needed to attach a late
+/// terminal result. The caller is responsible for persisting the full body.
 ///
 /// Returns whether anything changed, so a caller can skip the write.
 pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
@@ -149,8 +143,16 @@ pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
     };
     presentation.source = PackedText::default();
     presentation.detail_trimmed = true;
+    for id in call
+        .terminal_ids()
+        .iter()
+        .chain(terminal_outputs.iter().map(|record| &record.terminal_id))
+    {
+        if !terminal_refs.contains(id) {
+            terminal_refs.push(id.clone());
+        }
+    }
     terminal_outputs.clear();
-    terminal_refs.clear();
     call.edit(|value| {
         let Some(object) = value.as_object_mut() else {
             return;

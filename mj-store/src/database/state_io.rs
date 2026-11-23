@@ -460,15 +460,78 @@ pub(super) fn write_materialized_session(
                 .transpose()?,
         ],
     )?;
+    // Repair and restore can reinstall the exact compact summary from an archive.
+    // Keep that row unchanged so its already-persisted full detail remains reachable.
+    let mut matched_spills = BTreeSet::new();
+    let session_id = &materialized.session_id;
+    let contains_spills: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+         WHERE session_id = ?1 AND detail_offset IS NOT NULL)",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if contains_spills {
+        let mut matches_spill = tx.prepare(
+            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+             WHERE session_id = ?1 AND stable_id = ?2 AND detail_offset IS NOT NULL
+               AND position = ?3 AND latest_content_event_ordinal IS ?4
+               AND created_at_ms = ?5 AND last_changed_at_ms = ?6 AND body_json = ?7)",
+        )?;
+        for item in materialized
+            .transcript
+            .iter()
+            .filter(|item| item.body.detail_trimmed())
+        {
+            if matches_spill.query_row(
+                params![
+                    session_id,
+                    item.stable_id,
+                    item.position,
+                    item.latest_content_event_ordinal,
+                    item.created_at_ms,
+                    item.last_changed_at_ms,
+                    serde_json::to_string(&item.body)?
+                ],
+                |row| row.get::<_, bool>(0),
+            )? {
+                matched_spills.insert(item.stable_id.as_str());
+            }
+        }
+    }
     tx.execute(
-        "DELETE FROM materialized_transcript_items WHERE session_id = ?1",
-        [materialized.session_id.as_str()],
+        "DELETE FROM materialized_transcript_items WHERE session_id = ?1
+         AND stable_id NOT IN (SELECT value FROM json_each(?2))",
+        params![session_id, serde_json::to_string(&matched_spills)?],
     )?;
     for item in &materialized.transcript {
-        upsert_transcript_item(tx, &materialized.session_id, item)?;
+        if !matched_spills.contains(item.stable_id.as_str()) {
+            upsert_transcript_item(tx, session_id, item)?;
+        }
     }
     replace_materialized_queue(tx, &materialized.session_id, &materialized.queued_prompts)?;
     Ok(())
+}
+
+fn transcript_storage_metadata(
+    body: &TranscriptBody,
+    position: u64,
+    latest_content_event_ordinal: Option<u64>,
+) -> (&'static str, bool, u64) {
+    let settled = match body {
+        TranscriptBody::Agent { streaming, .. } | TranscriptBody::Thought { streaming, .. } => {
+            !streaming
+        }
+        TranscriptBody::Tool { call, .. } => !matches!(
+            call.raw_status().unwrap_or("pending"),
+            "pending" | "in_progress"
+        ),
+        _ => true,
+    };
+    (
+        body.role().storage_kind(),
+        settled,
+        latest_content_event_ordinal.unwrap_or(position),
+    )
 }
 
 pub(super) fn upsert_transcript_item(
@@ -476,6 +539,8 @@ pub(super) fn upsert_transcript_item(
     session_id: &str,
     item: &TranscriptItem,
 ) -> Result<()> {
+    let (item_kind, settled, update_ordinal) =
+        transcript_storage_metadata(&item.body, item.position, item.latest_content_event_ordinal);
     let existing = tx
         .query_row(
             "SELECT position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms
@@ -521,7 +586,9 @@ pub(super) fn upsert_transcript_item(
         }
         tx.execute(
             "UPDATE materialized_transcript_items
-             SET latest_content_event_ordinal = ?3, last_changed_at_ms = ?4, body_json = ?5
+             SET latest_content_event_ordinal = ?3, last_changed_at_ms = ?4, body_json = ?5,
+                 item_kind = ?6, settled = ?7, update_ordinal = ?8,
+                 detail_offset = NULL, detail_len = NULL
              WHERE session_id = ?1 AND stable_id = ?2",
             params![
                 session_id,
@@ -529,14 +596,17 @@ pub(super) fn upsert_transcript_item(
                 item.latest_content_event_ordinal,
                 item.last_changed_at_ms,
                 serde_json::to_string(&item.body)?,
+                item_kind,
+                settled,
+                update_ordinal,
             ],
         )?;
     } else {
         tx.execute(
             "INSERT INTO materialized_transcript_items(
                  session_id, stable_id, position, latest_content_event_ordinal,
-                 created_at_ms, last_changed_at_ms, body_json
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                 created_at_ms, last_changed_at_ms, body_json, item_kind, settled, update_ordinal
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 session_id,
                 item.stable_id,
@@ -545,6 +615,9 @@ pub(super) fn upsert_transcript_item(
                 item.created_at_ms,
                 item.last_changed_at_ms,
                 serde_json::to_string(&item.body)?,
+                item_kind,
+                settled,
+                update_ordinal,
             ],
         )?;
     }

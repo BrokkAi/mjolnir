@@ -4306,3 +4306,50 @@ fn push_stored_object(pack: &mut Vec<u8>, typ: u8, body: &[u8]) {
     std::io::Write::write_all(&mut encoder, body).unwrap();
     pack.extend(encoder.finish().unwrap());
 }
+
+#[test]
+fn older_archives_without_terminal_detail_metadata_still_restore_full_output() {
+    use mj_core::archive::CanonicalTerminalOutput;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy.hel.zip");
+    let mut legacy = input();
+    let output = "terminal log line\n".repeat(8 * 1024);
+    legacy
+        .canonical_session
+        .transcript
+        .push(CanonicalTranscriptItem {
+            stable_id: "terminal:legacy".into(),
+            position: 3,
+            latest_content_event_ordinal: None,
+            created_at_ms: 104,
+            last_changed_at_ms: 104,
+            body: CanonicalTranscriptBody::TerminalOutput {
+                record: CanonicalTerminalOutput {
+                    terminal_id: "legacy".into(),
+                    output: output.clone(),
+                    truncated: false,
+                    exit_code: Some(1),
+                    signal: None,
+                },
+                output_line_count: None,
+                first_error_line: None,
+                detail_trimmed: false,
+            },
+        });
+    write_archive_atomic(&path, &legacy).unwrap();
+    let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+    let raw: serde_json::Value =
+        serde_json::from_reader(zip.by_name("canonical/session.json").unwrap()).unwrap();
+    let old_body = &raw["transcript"][2]["body"];
+    assert_eq!(old_body["record"]["output"], output);
+    for field in ["output_line_count", "first_error_line", "detail_trimmed"] {
+        assert!(old_body.get(field).is_none(), "{field}");
+    }
+
+    let archive = verify_archive_streaming(&path).unwrap();
+    assert_eq!(
+        archive.canonical_session.transcript[2],
+        legacy.canonical_session.transcript[2]
+    );
+}

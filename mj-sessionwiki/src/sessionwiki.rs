@@ -324,7 +324,7 @@ impl MjolnirAdapter {
                     );
                     continue;
                 }
-                CanonicalTranscriptBody::TerminalOutput { record } => {
+                CanonicalTranscriptBody::TerminalOutput { record, .. } => {
                     index.terminals.standalone(record);
                     continue;
                 }

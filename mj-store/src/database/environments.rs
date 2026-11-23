@@ -1050,6 +1050,7 @@ mod tests {
         connection.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE sessions SET harness_kind='removed-harness' WHERE session_id='33333333333333333333333333333333';
             PRAGMA ignore_check_constraints=OFF;").unwrap();
         super::super::schema::drop_environment_schema(&connection);
+        super::super::schema::restore_pre152_transcript_layout(&connection);
         connection.execute_batch("DELETE FROM schema_migrations WHERE version>=122;
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;

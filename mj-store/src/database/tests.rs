@@ -616,6 +616,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 65);
+    schema::restore_pre152_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -688,6 +689,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 53);
+    schema::restore_pre152_transcript_layout(&connection);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -787,6 +789,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     schema::restore_github_v84_schema(&connection);
     schema::restore_pre101_subagent_preference(&connection);
     schema::restore_review_state_schema(&connection, 46);
+    schema::restore_pre152_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -5332,6 +5335,7 @@ fn review_state_migration_moves_the_open_review_and_findings_into_lists() {
 
     let connection = rusqlite::Connection::open(&database).unwrap();
     schema::restore_pre145_review_columns(&connection);
+    schema::restore_pre152_transcript_layout(&connection);
     connection
         .execute_batch(
             "DELETE FROM schema_migrations WHERE version >= 145;
@@ -7129,6 +7133,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
     schema::restore_review_state_schema(&raw, 43);
+    schema::restore_pre152_transcript_layout(&raw);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -8147,6 +8152,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     schema::restore_github_v84_schema(&raw);
     schema::restore_pre101_subagent_preference(&raw);
     schema::restore_review_state_schema(&raw, 52);
+    schema::restore_pre152_transcript_layout(&raw);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema
@@ -8764,6 +8770,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
         ).unwrap();
     }
     schema::drop_environment_schema(&connection);
+    schema::restore_pre152_transcript_layout(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN no_github_credentials;
@@ -9415,4 +9422,81 @@ fn closing_one_of_two_open_reviews_finishes_only_that_review() {
         )
         .unwrap();
     assert_eq!(other_handback, None, "A's report did not reach review-c");
+}
+
+#[test]
+fn interrupted_spill_leaves_inline_body_and_retry_commits_durable_detail() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let session_id = "session-1";
+    save_session_to(&path, &session(session_id, "project-1")).unwrap();
+    let mut projection = MaterializedSession::empty(session_id);
+    projection.applied_event_ordinal = 10;
+    projection.applied_event_digest = event_digest(10);
+    let item = tool_item(4, "source.rs", "old\n", "new\n");
+    projection.transcript = vec![Arc::clone(&item)];
+    save_materialized_session_to(&path, &projection).unwrap();
+    let connection = open(&path).unwrap();
+    connection.execute_batch(
+        "CREATE TRIGGER stop_spill BEFORE UPDATE OF detail_offset ON materialized_transcript_items
+         WHEN NEW.detail_offset IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'interrupted after append'); END;"
+    ).unwrap();
+
+    let failure = spill_and_trim_settled_tools_through_from(&path, session_id, 10).unwrap_err();
+    assert!(format!("{failure:#}").contains("interrupted after append"));
+    let detail_path = directory.path().join("tool-details/session-1.mjtd");
+    let orphan_len = std::fs::metadata(&detail_path).unwrap().len();
+    assert!(orphan_len > 0);
+    assert_eq!(
+        read_stored_tool_detail_from(&path, session_id, &item).unwrap(),
+        None
+    );
+    assert_eq!(
+        load_materialized_session_from(&path, session_id)
+            .unwrap()
+            .unwrap()
+            .transcript
+            .as_slice(),
+        std::slice::from_ref(&item)
+    );
+
+    connection.execute_batch("DROP TRIGGER stop_spill").unwrap();
+    assert_eq!(
+        spill_and_trim_settled_tools_through_from(&path, session_id, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        read_stored_tool_detail_from(&path, session_id, &item).unwrap(),
+        Some(item.body.clone())
+    );
+    let offset: u64 = connection.query_row(
+        "SELECT detail_offset FROM materialized_transcript_items WHERE session_id = ?1 AND stable_id = ?2",
+        params![session_id, item.stable_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(offset, orphan_len);
+
+    let compact = load_materialized_session_from(&path, session_id)
+        .unwrap()
+        .unwrap();
+    save_materialized_session_to(&path, &compact).unwrap();
+    assert_eq!(
+        read_stored_tool_detail_from(&path, session_id, &item).unwrap(),
+        Some(item.body.clone())
+    );
+    connection
+        .execute_batch(
+            "CREATE TRIGGER stop_delete BEFORE DELETE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'interrupted delete'); END;",
+        )
+        .unwrap();
+    assert!(delete_session_from(&path, session_id).is_err());
+    assert!(detail_path.is_file());
+    connection
+        .execute_batch("DROP TRIGGER stop_delete")
+        .unwrap();
+    delete_session_from(&path, session_id).unwrap();
+    assert!(!detail_path.exists());
 }

@@ -419,8 +419,16 @@ fn canonical_item_owned(item: TranscriptItem) -> CanonicalTranscriptItem {
             terminal_refs,
             presentation: presentation.map(|boxed| *boxed),
         },
-        TranscriptBody::TerminalOutput { record, .. } => CanonicalTranscriptBody::TerminalOutput {
+        TranscriptBody::TerminalOutput {
+            record,
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
+        } => CanonicalTranscriptBody::TerminalOutput {
             record: canonical_terminal_output(&record),
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
         },
         TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan },
         TranscriptBody::PlanProposal { proposal_id, plan } => {
@@ -468,8 +476,16 @@ fn canonical_item_shared(item: &TranscriptItem) -> CanonicalTranscriptItem {
             terminal_refs: terminal_refs.clone(),
             presentation: presentation.as_deref().cloned(),
         },
-        TranscriptBody::TerminalOutput { record, .. } => CanonicalTranscriptBody::TerminalOutput {
+        TranscriptBody::TerminalOutput {
+            record,
+            output_line_count,
+            first_error_line,
+            detail_trimmed,
+        } => CanonicalTranscriptBody::TerminalOutput {
             record: canonical_terminal_output(record),
+            output_line_count: *output_line_count,
+            first_error_line: first_error_line.clone(),
+            detail_trimmed: *detail_trimmed,
         },
         TranscriptBody::Plan { plan } => CanonicalTranscriptBody::Plan { plan: plan.clone() },
         TranscriptBody::PlanProposal { proposal_id, plan } => {
@@ -529,9 +545,17 @@ pub fn materialized_session_from_canonical(
                     terminal_refs: terminal_refs.clone(),
                     presentation: presentation.clone().map(Box::new),
                 },
-                CanonicalTranscriptBody::TerminalOutput { record } => {
-                    TranscriptBody::terminal_output(materialized_terminal_output(record))
-                }
+                CanonicalTranscriptBody::TerminalOutput {
+                    record,
+                    output_line_count,
+                    first_error_line,
+                    detail_trimmed,
+                } => TranscriptBody::TerminalOutput {
+                    record: materialized_terminal_output(record),
+                    output_line_count: *output_line_count,
+                    first_error_line: first_error_line.clone(),
+                    detail_trimmed: *detail_trimmed,
+                },
                 CanonicalTranscriptBody::Plan { plan } => {
                     TranscriptBody::Plan { plan: plan.clone() }
                 }

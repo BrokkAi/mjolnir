@@ -4329,3 +4329,152 @@ async fn checkpoint_report_notices_are_deduplicated_in_the_relay_transcript() {
         .unwrap();
     assert_eq!(notices(&relay.sync_snapshot().await.unwrap()).len(), 3);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn suspended_archive_serializes_compact_tool_and_terminal_bodies() {
+    use mj_core::relay::RelayObservation;
+    use mj_core::transcript::{TerminalOutputRecord, TranscriptBody};
+
+    if !in_close_cut_child(
+        "suspended_archive_serializes_compact_tool_and_terminal_bodies",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let data_dir = mj_core::config::data_dir();
+    let relay_root = data_dir.join("relay");
+    std::fs::create_dir_all(&relay_root).unwrap();
+    let mut relay =
+        mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    for observation in [
+        RelayObservation::SessionOpened {
+            native_session_id: "native-session".into(),
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+            resumed: true,
+        },
+        RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        },
+    ] {
+        relay.record_observation(observation).unwrap();
+    }
+    let mut full_body_bytes = 0;
+    for turn in 1..=2 {
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: turn,
+            })
+            .unwrap();
+        let output = "tool output\n".repeat(8 * 1024);
+        let patch = (0..8192)
+            .map(|line| format!("changed line {line:04}\n"))
+            .collect::<String>();
+        let raw_input = "i".repeat(64 * 1024);
+        let tool = serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": format!("edit-{turn}"),
+            "title": "Edit", "kind": "edit", "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": output}},
+                {"type": "diff", "path": "notes.txt", "newText": patch},
+            ],
+            "rawInput": raw_input,
+        });
+        full_body_bytes += serde_json::to_vec(&tool).unwrap().len();
+        relay
+            .record_session_update(serde_json::from_value(tool).unwrap())
+            .unwrap();
+        let terminal_id = format!("unclaimed-{turn}");
+        let output = "one\n".repeat(64 * 1024);
+        let terminal = TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: terminal_id.clone(),
+            output: output.clone().into(),
+            truncated: false,
+            exit_code: Some(1),
+            signal: None,
+        });
+        full_body_bytes += serde_json::to_vec(&terminal).unwrap().len();
+        relay
+            .record_observation(RelayObservation::TerminalOutput {
+                terminal_id,
+                output,
+                truncated: false,
+                exit_code: Some(1),
+                signal: None,
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                autonomous: None,
+                origin: None,
+                prompt_in_flight: false,
+            })
+            .unwrap();
+    }
+    drop(relay);
+
+    let (mut controller, channels, handle) = close_cut_controller(SessionState::Running).await;
+    wait_until_the_actor_serves_again(&handle).await;
+    let archive_directory = data_dir.join("fresh-checkpoints");
+    std::fs::create_dir_all(&archive_directory).unwrap();
+    let executor = RestartCheckpointExecutor {
+        archive_directory,
+        ..Default::default()
+    };
+    let admission = crate::controller::test_support::session_admission(LATCH_RELAY_SESSION);
+    let result = controller
+        .suspend_session_managed_controlled(
+            &admission,
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            &mj_core::suspend_consent::SuspendConsent::default(),
+            None,
+        )
+        .await;
+    channels.shutdown.shutdown().await.unwrap();
+    result.unwrap();
+
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Stopped);
+    let checkpoint = record.checkpoint.as_ref().unwrap();
+    let verified = verify_archive_streaming(&checkpoint.archive_path).unwrap();
+    let restored = mj_transcript::projection::materialized_session_from_canonical(
+        LATCH_RELAY_SESSION,
+        &verified.canonical_session,
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .transcript
+            .iter()
+            .filter(|item| item.body.detail_trimmed())
+            .count(),
+        4
+    );
+    let mut archive =
+        zip::ZipArchive::new(std::fs::File::open(&checkpoint.archive_path).unwrap()).unwrap();
+    let canonical_bytes = archive.by_name("canonical/session.json").unwrap().size();
+    assert!(
+        canonical_bytes * 5 < full_body_bytes as u64,
+        "{canonical_bytes} of {full_body_bytes}"
+    );
+    let database = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    let body_bytes: u64 = database.query_row(
+        "SELECT sum(length(CAST(body_json AS BLOB))) FROM materialized_transcript_items WHERE session_id = ?1",
+        [LATCH_RELAY_SESSION], |row| row.get(0),
+    ).unwrap();
+    assert!(
+        body_bytes * 5 < full_body_bytes as u64,
+        "{body_bytes} of {full_body_bytes}"
+    );
+
+    let details = data_dir
+        .join("tool-details")
+        .join(format!("{LATCH_RELAY_SESSION}.mjtd"));
+    assert!(details.exists());
+    crate::database::delete_session(LATCH_RELAY_SESSION).unwrap();
+    assert!(!details.exists());
+}

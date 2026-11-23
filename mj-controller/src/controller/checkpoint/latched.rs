@@ -549,19 +549,22 @@ impl Controller {
             .checkpoint_ready
             .clone()
             .context("relay reported a checkpoint barrier without its ready cursor")?;
-        // The live view is windowed. An archive must contain the complete
-        // durable conversation at the verified checkpoint cut.
-        let materialized = if barrier.window.omitted_items > 0 {
-            let session_id = barrier.materialized.session_id.clone();
-            mj_core::runtime::spawn_blocking(move || {
-                crate::database::load_materialized_session(&session_id)?
-                    .context("checkpoint durable projection disappeared")
-            })
-            .await
-            .context("checkpoint history load task failed")??
-        } else {
-            barrier.materialized
-        };
+        // Read the complete, compacted projection at the barrier. A live
+        // window may still hold full copies of rows spilled by startup backfill.
+        let projection_id = barrier.materialized.session_id.clone();
+        let materialized = mj_core::runtime::spawn_blocking(move || {
+            if let Err(error) = crate::database::compact_materialized_transcript_all_through(
+                &projection_id,
+                cursor.ordinal,
+            ) {
+                tracing::warn!(session_id = %projection_id, error = %format!("{error:#}"),
+                    "could not spill settled tool details before checkpoint");
+            }
+            crate::database::load_materialized_session(&projection_id)?
+                .context("checkpoint durable projection disappeared")
+        })
+        .await
+        .context("checkpoint history load task failed")??;
         let expected_ordinal = materialized.applied_event_ordinal;
         let expected_digest = materialized.applied_event_digest.clone();
         ensure!(

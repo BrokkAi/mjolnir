@@ -66,6 +66,7 @@ pub struct ProjectionIndex {
 
 pub struct HistoricalReferences {
     pub ids: Vec<String>,
+    pub terminals: BTreeSet<String>,
 }
 
 /// Explicit references that may address rows older than a live window. Keep
@@ -76,31 +77,33 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<HistoricalReferenc
     for event in events {
         match &event.observation {
             RelayObservation::SessionUpdate { update } => {
-                let value = match update.as_ref() {
+                let content = match update.as_ref() {
                     SessionUpdate::ToolCall(call) => {
                         ids.insert(crate::tool_item_id(&call.tool_call_id));
-                        Some(serde_json::to_value(call)?)
+                        call.content.as_slice()
                     }
                     SessionUpdate::ToolCallUpdate(update) => {
                         ids.insert(crate::tool_item_id(&update.tool_call_id));
-                        Some(serde_json::to_value(&update.fields)?)
+                        update.fields.content.as_deref().unwrap_or_default()
                     }
                     SessionUpdate::AgentMessageChunk(chunk) => {
                         if let Some(id) = &chunk.message_id {
                             ids.insert(format!("agent:{id}"));
                         }
-                        None
+                        &[]
                     }
                     SessionUpdate::AgentThoughtChunk(chunk) => {
                         if let Some(id) = &chunk.message_id {
                             ids.insert(format!("thought:{id}"));
                         }
-                        None
+                        &[]
                     }
-                    _ => None,
+                    _ => &[],
                 };
-                if let Some(value) = value {
-                    terminals.extend(tool_call_terminal_ids(&value));
+                for block in content {
+                    if let ToolCallContent::Terminal(terminal) = block {
+                        terminals.insert(terminal.terminal_id.0.to_string());
+                    }
                 }
             }
             RelayObservation::TerminalOutput { terminal_id, .. } => {
@@ -157,6 +160,7 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<HistoricalReferenc
     }
     Ok(HistoricalReferences {
         ids: ids.into_iter().collect(),
+        terminals,
     })
 }
 
@@ -280,7 +284,10 @@ impl ProjectionIndex {
             .filter_map(|(_, stable_id)| self.transcript.get(stable_id))
     }
 
-    fn terminal_referrers(&self, terminal_id: &str) -> impl Iterator<Item = &Arc<TranscriptItem>> {
+    pub fn terminal_referrers(
+        &self,
+        terminal_id: &str,
+    ) -> impl Iterator<Item = &Arc<TranscriptItem>> {
         self.terminal_referrers
             .get(terminal_id)
             .into_iter()

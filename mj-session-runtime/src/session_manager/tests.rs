@@ -4825,3 +4825,214 @@ async fn wait_for_session_ready_wakes_on_registration_and_fails_on_removal_or_sh
         "unexpected shutdown error: {err:#}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_end_spills_bulk_details_and_late_updates_recover_full_inputs() {
+    use mj_core::relay::RelayObservation;
+    use mj_core::transcript::TranscriptBody;
+
+    const CHILD: &str = "MJ_TEST_TURN_END_TOOL_DETAIL_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "turn_end_spills_bulk_details_and_late_updates_recover_full_inputs",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "1.0.0").unwrap(),
+    ));
+    let (client, peer) = relay_ack_race_peer(relay.clone(), None);
+    let mut connection =
+        StandaloneSession::connect_inner(&leased_relay_target(root.path()), Some(client), None)
+            .await
+            .unwrap();
+    let start = |relay: &mut mj_worker::relay::DurableRelay| {
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: mj_core::clock::epoch_millis(),
+            })
+            .unwrap();
+    };
+    let settle = || {
+        relay
+            .lock()
+            .unwrap()
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                autonomous: None,
+                origin: None,
+                prompt_in_flight: false,
+            })
+            .unwrap()
+    };
+    let load = || {
+        crate::database::load_materialized_session(LEASED_RELAY_SESSION)
+            .unwrap()
+            .unwrap()
+    };
+    let body_bytes = |projection: &MaterializedSession| {
+        projection
+            .transcript
+            .iter()
+            .map(|item| serde_json::to_vec(&item.body).unwrap().len())
+            .sum::<usize>()
+    };
+    let tool_item = |projection: &MaterializedSession, id: &str| {
+        projection
+            .transcript
+            .iter()
+            .find(|item| item.stable_id == id)
+            .unwrap()
+            .clone()
+    };
+    let detail = |item: &mj_core::transcript::TranscriptItem| {
+        crate::database::read_stored_tool_detail(LEASED_RELAY_SESSION, item).unwrap()
+    };
+    let output = "large tool output\n".repeat(8 * 1024);
+    let patch = (0..8192)
+        .map(|i| format!("+changed line {i:05}\n"))
+        .collect::<String>();
+    let input = "x".repeat(64 * 1024);
+    {
+        let mut relay = relay.lock().unwrap();
+        start(&mut relay);
+        for (id, status) in [("finished", "completed"), ("background", "in_progress")] {
+            relay
+                .record_session_update(
+                    serde_json::from_value(serde_json::json!({
+                        "sessionUpdate": "tool_call", "toolCallId": id, "title": "Edit",
+                        "kind": "edit", "status": status, "rawInput": {"source": input},
+                        "content": [
+                            {"type": "content", "content": {"type": "text", "text": output}},
+                            {"type": "diff", "path": "notes.txt", "newText": patch},
+                            {"type": "terminal", "terminalId": format!("{id}-terminal")}
+                        ]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        relay
+            .record_observation(RelayObservation::TerminalOutput {
+                terminal_id: "parked".into(),
+                output: "one\n".repeat(64 * 1024),
+                exit_code: Some(1),
+                signal: None,
+                truncated: false,
+            })
+            .unwrap();
+    }
+    connection.sync_in_place().await.unwrap();
+    let before = load();
+    let full_finished = tool_item(&before, "tool:finished");
+    assert!(body_bytes(&before) > 700 * 1024);
+    settle();
+    connection.sync_in_place().await.unwrap();
+
+    let first_idle = load();
+    let finished = tool_item(&first_idle, "tool:finished");
+    assert!(finished.body.detail_trimmed());
+    assert!(
+        tool_item(&connection.materialized, "tool:finished")
+            .body
+            .detail_trimmed()
+    );
+    assert_eq!(detail(&finished), Some(full_finished.body.clone()));
+    for id in ["tool:background", "terminal:parked"] {
+        let item = tool_item(&first_idle, id);
+        assert_eq!(item, tool_item(&before, id));
+        assert_eq!(detail(&item), None);
+    }
+
+    {
+        let mut relay = relay.lock().unwrap();
+        start(&mut relay);
+        for update in [
+            serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "finished", "title": "Late title"}),
+            serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "background", "status": "failed"}),
+        ] {
+            relay
+                .record_session_update(serde_json::from_value(update).unwrap())
+                .unwrap();
+        }
+    }
+    connection.sync_in_place().await.unwrap();
+    let updated = tool_item(&load(), "tool:finished");
+    assert!(!updated.body.detail_trimmed());
+    assert_eq!(
+        detail(&updated),
+        None,
+        "the upsert must invalidate the old pointer"
+    );
+    let TranscriptBody::Tool { call, .. } = &updated.body else {
+        panic!("expected tool")
+    };
+    assert_eq!(call.value()["title"], "Late title");
+    assert_eq!(call.value()["rawInput"]["source"], input);
+    assert_eq!(call.value()["content"][0]["content"]["text"], output);
+
+    settle();
+    connection.sync_in_place().await.unwrap();
+    let after = load();
+    assert!(body_bytes(&after) * 5 < body_bytes(&before));
+    let finished = tool_item(&after, "tool:finished");
+    assert!(finished.body.detail_trimmed());
+    assert_eq!(detail(&finished), Some(updated.body.clone()));
+    let parked = tool_item(&after, "terminal:parked");
+    assert!(parked.body.detail_trimmed());
+    assert_eq!(
+        detail(&parked),
+        Some(tool_item(&before, "terminal:parked").body.clone())
+    );
+
+    let full_canonical = mj_transcript::projection::canonical_session_from_materialized_owned({
+        let mut idle = before;
+        idle.execution = mj_core::state::MaterializedExecutionState::Idle;
+        idle
+    })
+    .unwrap();
+    let compact_canonical =
+        mj_transcript::projection::canonical_session_from_materialized_owned(after).unwrap();
+    assert!(
+        serde_json::to_vec(&compact_canonical).unwrap().len() * 5
+            < serde_json::to_vec(&full_canonical).unwrap().len()
+    );
+    let restored = mj_transcript::projection::materialized_session_from_canonical(
+        LEASED_RELAY_SESSION,
+        &compact_canonical,
+    )
+    .unwrap();
+    assert_eq!(tool_item(&restored, "terminal:parked"), parked);
+
+    relay
+        .lock()
+        .unwrap()
+        .record_observation(RelayObservation::TerminalOutput {
+            terminal_id: "finished-terminal".into(),
+            output: "late error\n".repeat(8 * 1024),
+            truncated: false,
+            exit_code: Some(23),
+            signal: None,
+        })
+        .unwrap();
+    connection.sync_in_place().await.unwrap();
+    let newly_trimmed = tool_item(&load(), "tool:finished");
+    let TranscriptBody::Tool {
+        call,
+        terminal_outputs,
+        ..
+    } = detail(&newly_trimmed).unwrap()
+    else {
+        panic!("expected full tool");
+    };
+    assert_eq!(call.value()["rawInput"]["source"], input);
+    assert_eq!(terminal_outputs[0].exit_code, Some(23));
+    assert!(terminal_outputs[0].output.text().len() > 64 * 1024);
+
+    drop(connection);
+    peer.await.unwrap();
+}

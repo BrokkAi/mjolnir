@@ -155,7 +155,7 @@ impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
                     terminal_refs,
                     ..
                 } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
-                crate::archive::CanonicalTranscriptBody::TerminalOutput { record } => {
+                crate::archive::CanonicalTranscriptBody::TerminalOutput { record, .. } => {
                     outputs.standalone(record);
                 }
                 _ => {}
@@ -440,6 +440,30 @@ pub enum TranscriptBody {
 }
 
 impl TranscriptBody {
+    pub fn role(&self) -> TranscriptRole {
+        match self {
+            Self::User { .. } => TranscriptRole::User,
+            Self::Agent { .. } => TranscriptRole::Agent,
+            Self::Message { .. } => TranscriptRole::Message,
+            Self::Thought { .. } => TranscriptRole::Thought,
+            Self::Tool { .. } => TranscriptRole::Tool,
+            Self::TerminalOutput { .. } => TranscriptRole::Terminal,
+            Self::Plan { .. } => TranscriptRole::Plan,
+            Self::PlanProposal { .. } => TranscriptRole::PlanProposal,
+            Self::System { .. } => TranscriptRole::System,
+        }
+    }
+
+    pub fn detail_trimmed(&self) -> bool {
+        match self {
+            Self::Tool { presentation, .. } => presentation
+                .as_ref()
+                .is_some_and(|value| value.detail_trimmed),
+            Self::TerminalOutput { detail_trimmed, .. } => *detail_trimmed,
+            _ => false,
+        }
+    }
+
     pub fn terminal_output(record: TerminalOutputRecord) -> Self {
         Self::TerminalOutput {
             record,
@@ -1164,18 +1188,7 @@ impl TranscriptRole {
 }
 
 pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
-    let role = match body {
-        TranscriptBody::User { .. } => TranscriptRole::User,
-        TranscriptBody::Agent { .. } => TranscriptRole::Agent,
-        TranscriptBody::Message { .. } => TranscriptRole::Message,
-        TranscriptBody::Thought { .. } => TranscriptRole::Thought,
-        TranscriptBody::Tool { .. } => TranscriptRole::Tool,
-        TranscriptBody::TerminalOutput { .. } => TranscriptRole::Terminal,
-        TranscriptBody::Plan { .. } => TranscriptRole::Plan,
-        TranscriptBody::PlanProposal { .. } => TranscriptRole::PlanProposal,
-        TranscriptBody::System { .. } => TranscriptRole::System,
-    };
-    role.as_str()
+    body.role().as_str()
 }
 
 pub fn message_item_id(event_key: &str) -> String {
