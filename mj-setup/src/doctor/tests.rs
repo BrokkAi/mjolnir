@@ -2424,3 +2424,39 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         &String::from_utf8(rendered).unwrap(),
     );
 }
+
+#[test]
+fn golden_doctor_retired_harness_sessions() {
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+    use mj_store::database::{self, test_fixtures};
+
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_DOCTOR";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "golden_doctor_retired_harness_sessions",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "retired-harness-doctor")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    assert!(retired_harness_sessions_check().is_none());
+    let _writer = database::install_isolated_test_writer();
+    let mut session = test_fixtures::checkpoint_test_session("retired-session");
+    session.target_template_id = "remote-podman".into();
+    database::save_session(&session).unwrap();
+    assert!(retired_harness_sessions_check().is_none());
+    test_fixtures::retire_test_harness(&session.id).unwrap();
+
+    let mut rendered = Vec::new();
+    render_human(&[retired_harness_sessions_check().unwrap()], &mut rendered).unwrap();
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-retired-harness-sessions",
+        std::str::from_utf8(&rendered).unwrap(),
+    );
+}
