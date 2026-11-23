@@ -2974,11 +2974,88 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
     ) -> Result<DestroyOutcome> {
+        if !self.state.sessions.contains_key(session_id)
+            && crate::database::load_retired_harness_session(session_id)?.is_some()
+        {
+            self.destroy_retired_harness_session(session_id, executor, branch)?;
+            return Ok(DestroyOutcome::default());
+        }
         self.force_destroy_session_with(
             session_id,
             executor,
             branch,
             crate::database::delete_session,
+        )
+    }
+
+    fn destroy_retired_harness_session(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        branch: BranchDisposition,
+    ) -> Result<()> {
+        use crate::worker_lifecycle::{WorkerPermit, require, run_blocking};
+        run_blocking(
+            session_id,
+            "destroy retired-harness session",
+            executor,
+            || {
+                let order = crate::database::retired_harness_destroy_order(session_id)?;
+                let owner = require(session_id)?;
+                let (gate, _) = owner.admission().gate_and_session();
+                for id in order {
+                    let permit = if id == session_id {
+                        owner.clone()
+                    } else {
+                        let admission = futures::executor::block_on(gate.enter_foreground(
+                            &id,
+                            "destroy retired-harness descendant",
+                            crate::recovery_gate::LifecycleOrigin::Person,
+                            &std::sync::atomic::AtomicBool::new(false),
+                            executor,
+                        ))?;
+                        WorkerPermit::acquire(&id, &admission)?
+                    };
+                    permit
+                        .scope_blocking(|| -> Result<()> {
+                            if crate::database::load_retired_harness_session(&id)?.is_none() {
+                                return Ok(());
+                            }
+                            for environment in crate::database::worker_environments(&id)? {
+                                if environment.owner_session_id == id
+                                    && environment.phase
+                                        != crate::database::EnvironmentPhase::Reclaimed
+                                {
+                                    super::environment::retire_owned_environment(
+                                        environment,
+                                        &self.config,
+                                        executor,
+                                        if id == session_id { branch } else { BranchDisposition::Keep },
+                                        CheckoutDisposition::Remove,
+                                    )?;
+                                }
+                            }
+                            super::environment::stop_borrower(&id, &self.config, executor)?;
+                            let checkpoint = crate::database::load_session_checkpoint(&id)?;
+                            super::checkpoint::remove_session_checkpoint_archives(
+                                &mj_core::config::sessions_dir(),
+                                &id,
+                                checkpoint.as_ref(),
+                            )?;
+                            mj_core::attachment::AttachmentStore::controller(&id)?
+                                .remove_session_data()
+                                .context("remove retired-harness session image attachments")?;
+                            crate::database::delete_retired_harness_session(&id)?;
+                            Ok(())
+                        })
+                        .with_context(|| {
+                            mj_core::refusal::Refusal::precondition(format!(
+                                "Cleanup of retired-harness session {id} is incomplete. Retry with `mj destroy --session {session_id}`."
+                            ))
+                        })?;
+                }
+                Ok(())
+            },
         )
     }
 

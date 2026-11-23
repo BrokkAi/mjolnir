@@ -2258,12 +2258,16 @@ pub(super) fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
     let connection = open(path)?;
     mj_core::config::validate_id("session", session_id)?;
     connection.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
+    remove_deleted_session_tool_details(path, session_id);
+    Ok(())
+}
+
+pub(super) fn remove_deleted_session_tool_details(path: &Path, session_id: &str) {
     if let Err(error) =
         tool_details::remove_session_tool_details(tool_details::data_dir_from(path), session_id)
     {
         tracing::warn!(session_id, error = %format!("{error:#}"), "session deleted but its tool detail file could not be removed");
     }
-    Ok(())
 }
 
 /// Overwrite the unsent chat input carried across a detach. Unlike the read

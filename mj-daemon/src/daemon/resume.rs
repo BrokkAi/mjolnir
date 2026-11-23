@@ -675,8 +675,13 @@ impl RuntimeState {
             }
         })
         .await?;
-        self.stop_subagents(children, LifecycleKind::StopSubagent, None)
-            .await?;
+        self.stop_subagents(
+            children,
+            LifecycleKind::StopSubagent,
+            None,
+            DestroyRequest::Accepted,
+        )
+        .await?;
         let exists = blocking({
             let session_id = session_id.clone();
             move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
@@ -855,8 +860,13 @@ impl RuntimeState {
     /// review is over and retries this with backoff; a child already gone is
     /// the caller's business, not an error here.
     pub(crate) async fn destroy_reviewer_child(self: &Arc<Self>, child: String) -> Result<()> {
-        self.stop_subagents(vec![child], LifecycleKind::StopSubagent, None)
-            .await
+        self.stop_subagents(
+            vec![child],
+            LifecycleKind::StopSubagent,
+            None,
+            DestroyRequest::Accepted,
+        )
+        .await
     }
 
     /// Destroy a parent's sub-agents, each with its own subtree, all at once.
@@ -871,6 +881,7 @@ impl RuntimeState {
         children: Vec<String>,
         kind: LifecycleKind,
         requested_session_id: Option<&str>,
+        request: DestroyRequest,
     ) -> Result<()> {
         use futures::stream::StreamExt as _;
 
@@ -892,6 +903,7 @@ impl RuntimeState {
                         BranchDisposition::Keep,
                         kind,
                         requested,
+                        request,
                     )
                     .await
                     .with_context(|| format!("stop sub-agent {child_id}"))
@@ -917,6 +929,7 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
         requested_session_id: String,
+        request: DestroyRequest,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             let started = self
@@ -926,9 +939,7 @@ impl RuntimeState {
                     kind,
                     requested_session_id,
                     false,
-                    // This teardown continues its already accepted parent
-                    // close/review; it is not a new automatic policy attempt.
-                    DestroyRequest::Accepted,
+                    request,
                 )
                 .await?;
             Self::wait_lifecycle_result(started.result).await?;
@@ -945,8 +956,11 @@ impl RuntimeState {
         index: bool,
         request: DestroyRequest,
     ) -> Result<StartedLifecycle> {
-        let key =
-            serde_json::to_string(&(kind.label(), matches!(branch, BranchDisposition::Delete)))?;
+        let key = serde_json::to_string(&(
+            kind.label(),
+            matches!(branch, BranchDisposition::Delete),
+            matches!(request, DestroyRequest::Recovery),
+        ))?;
         if let Some(started) = self.join_lifecycle(&session_id, kind, &key)? {
             return Ok(started);
         }
@@ -966,41 +980,71 @@ impl RuntimeState {
                 Some(acceptance),
                 move |state, session_id, cancelled, _session_admission| async move {
                     let _accepted_work = accepted_work;
-                    let children = blocking({
-                        let session_id = session_id.clone();
-                        move || {
-                            let mut children =
-                                mj_controller::database::begin_session_destroy(&session_id)?;
-                            if kind == LifecycleKind::StopSubagent {
-                                let peers = mj_controller::database::bound_environment_member_ids(
-                                    &session_id,
-                                )?;
-                                children.retain(|id| peers.contains(id));
-                            }
-                            Ok(children)
-                        }
-                    })
-                    .await?;
-                    accepted.send_replace(Some(Ok(())));
-                    if index {
-                        state.index_before_destroy(&session_id).await;
-                    }
-                    state
-                        .stop_subagents(children, kind, Some(&requested_session_id))
-                        .await?;
-
-                    let exists = blocking({
+                    let retired = blocking({
                         let session_id = session_id.clone();
                         move || {
                             Ok(
-                                mj_controller::database::read_durable_session_record(&session_id)?
+                                mj_controller::database::load_retired_harness_session(&session_id)?
                                     .is_some(),
                             )
                         }
                     })
                     .await?;
-                    if !exists {
+                    if retired
+                        && (matches!(request, DestroyRequest::Recovery)
+                            || kind != LifecycleKind::ForceDestroy)
+                    {
+                        accepted.send_replace(Some(Ok(())));
                         return Ok(DaemonLifecycleResult::Done);
+                    }
+                    if retired {
+                        accepted.send_replace(Some(Ok(())));
+                    } else {
+                        let children = blocking({
+                            let session_id = session_id.clone();
+                            move || {
+                                let mut children =
+                                    mj_controller::database::begin_session_destroy(&session_id)?;
+                                if kind == LifecycleKind::StopSubagent {
+                                    let peers =
+                                        mj_controller::database::bound_environment_member_ids(
+                                            &session_id,
+                                        )?;
+                                    children.retain(|id| peers.contains(id));
+                                }
+                                Ok(children)
+                            }
+                        })
+                        .await?;
+                        accepted.send_replace(Some(Ok(())));
+                        if index {
+                            state.index_before_destroy(&session_id).await;
+                        }
+                        state
+                            .stop_subagents(
+                                children,
+                                kind,
+                                Some(&requested_session_id),
+                                if matches!(request, DestroyRequest::Recovery) {
+                                    request
+                                } else {
+                                    DestroyRequest::Accepted
+                                },
+                            )
+                            .await?;
+                        let exists = blocking({
+                            let session_id = session_id.clone();
+                            move || {
+                                Ok(mj_controller::database::read_durable_session_record(
+                                    &session_id,
+                                )?
+                                .is_some())
+                            }
+                        })
+                        .await?;
+                        if !exists {
+                            return Ok(DaemonLifecycleResult::Done);
+                        }
                     }
 
                     blocking({

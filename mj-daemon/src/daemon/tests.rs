@@ -8787,7 +8787,7 @@ esac
             let (teardown_moves, close_operations) =
                 mj_controller::database::load_move_recovery().unwrap();
             let owners = teardown
-                .recover_moves(teardown_moves, &close_operations)
+                .recover_moves(teardown_moves, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(!owners.moves.contains(id));
@@ -8883,7 +8883,7 @@ esac
             let cancelled = test_runtime_state_loading_the_store();
             // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
             let owners = cancelled
-                .recover_moves(operations, &close_operations)
+                .recover_moves(operations, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(owners.moves.contains(id));
@@ -8944,7 +8944,7 @@ esac
             let (operations, close_operations) =
                 mj_controller::database::load_move_recovery().unwrap();
             let owned = state
-                .recover_moves(operations, &close_operations)
+                .recover_moves(operations, &close_operations, &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(
@@ -9181,7 +9181,7 @@ esac
                     BTreeSet::new()
                 };
                 let owners = recovering
-                    .recover_moves(vec![completed.clone()], &close_ids)
+                    .recover_moves(vec![completed.clone()], &close_ids, &BTreeSet::new())
                     .await
                     .unwrap();
                 assert!(!owners.moves.contains(&id));
@@ -17751,4 +17751,65 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
     assert_eq!(saved.state, SessionState::Parked);
     assert_eq!(saved.target, record.target);
     assert!(!start_marker.exists());
+}
+
+#[tokio::test]
+async fn retired_harness_requires_explicit_destroy() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_DESTROY";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "retired_harness_requires_explicit_destroy",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "retired-harness-destroy")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let mut session = test_fixtures::checkpoint_test_session("retired-destroy");
+    session.state = SessionState::Destroying;
+    database::save_session(&session).unwrap();
+    test_fixtures::retire_test_harness(&session.id).unwrap();
+    let mut state = test_runtime_state_loading_the_store();
+    Arc::get_mut(&mut state).unwrap().committed =
+        Some(database::subscribe_committed_state().unwrap());
+
+    let snapshots = state.subscribe_browser_views().unwrap();
+    {
+        let snapshot = snapshots.borrow();
+        assert!(snapshot.sessions.get(&session.id).is_none());
+        assert!(snapshot.retired_session_ids.contains(&session.id));
+    }
+
+    state.recover_destruction(session.id.clone()).await.unwrap();
+    let retained = database::load_retired_harness_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.owned_environment.unwrap().phase,
+        database::EnvironmentPhase::Active
+    );
+
+    let started = state
+        .admit_session_lifecycle(SessionLifecycleRequest::DestroyStopped {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(started.result)
+        .await
+        .unwrap();
+    assert!(
+        database::load_retired_harness_session(&session.id)
+            .unwrap()
+            .is_none()
+    );
+    state.browser_views(None).unwrap();
+    assert!(!snapshots.borrow().retired_session_ids.contains(&session.id));
 }

@@ -721,12 +721,17 @@ fn validate_action_against(
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
         | ControllerAction::Suspend { session_id, .. }
-        | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::CancelContainerUpgrade { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
+        }
+        ControllerAction::Destroy { session_id } => {
+            validate_public_id(session_id)?;
+            if !snapshot.retired_session_ids.contains(session_id) {
+                require_session_record(snapshot, session_id)?;
+            }
         }
         ControllerAction::Rename { session_id, title } => {
             validate_public_id(session_id)?;

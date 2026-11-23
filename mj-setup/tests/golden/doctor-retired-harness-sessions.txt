@@ -1,0 +1,2 @@
+warning Retired-harness sessions: Found 1 retired-harness session. retired-session (legacy-test-harness, target remote-podman, owns an active environment)
+  remediation: Use `mj destroy --session retired-session` to remove the selected session and its owned environment. To look for orphan workers, run `mj recover scan`.

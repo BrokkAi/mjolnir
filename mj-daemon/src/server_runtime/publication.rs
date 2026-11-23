@@ -97,6 +97,9 @@ impl ViewerPublication {
         self.move_recoveries = move_recoveries;
         snapshot.notices.clone_from(&browser.notices);
         snapshot
+            .retired_session_ids
+            .clone_from(&browser.retired_session_ids);
+        snapshot
     }
 
     /// Update only metadata named by the daemon's persistent-map differences.

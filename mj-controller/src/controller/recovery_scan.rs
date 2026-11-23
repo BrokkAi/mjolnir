@@ -770,6 +770,9 @@ impl Controller {
                     executor.notify_notice("Worker stopped. Files were retained because complete shared-environment ownership is unavailable.");
                     return Ok(());
                 }
+                if crate::database::load_retired_harness_session(session_id)?.is_some() {
+                    crate::database::retired_harness_destroy_order(session_id)?;
+                }
                 for environment in owned {
                     super::environment::retire_owned_environment(
                         environment,
@@ -779,6 +782,7 @@ impl Controller {
                         super::CheckoutDisposition::Remove,
                     )?;
                 }
+                crate::database::delete_reclaimed_retired_harness_session(session_id)?;
                 Ok(())
             },
         )
@@ -2016,11 +2020,16 @@ mod tests {
         );
     }
 
-    /// Answers the container listing the scan runs and fails everything else,
-    /// which is what a container with no worker in it does to the ownership
-    /// probe.
+    /// Emulates discovery of a container with no readable worker marker.
     struct ListingExecutor {
         listing: String,
+        teardown: Option<ContainerTeardown>,
+    }
+
+    #[derive(Default)]
+    struct ContainerTeardown {
+        allow_remove: bool,
+        removed: std::sync::atomic::AtomicBool,
     }
 
     impl CommandExecutor for ListingExecutor {
@@ -2056,6 +2065,28 @@ mod tests {
                     stderr: Vec::new(),
                 });
             }
+            if let Some(teardown) = &self.teardown {
+                if command.args.iter().any(|arg| arg == "mj-remove-container") {
+                    if !teardown.allow_remove {
+                        bail!("host unavailable during container removal");
+                    }
+                    teardown
+                        .removed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if command.program == "sh" {
+                    let present = command
+                        .args
+                        .iter()
+                        .any(|arg| arg == "mj-confirm-podman-absent")
+                        && !teardown.removed.load(std::sync::atomic::Ordering::Relaxed);
+                    return Ok(CommandOutput {
+                        status: i32::from(present),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
             Ok(CommandOutput {
                 status: 1,
                 stdout: Vec::new(),
@@ -2088,7 +2119,13 @@ mod tests {
         .unwrap();
         let mut state = State::default();
         state.sessions.insert(record.id.clone(), record);
-        (Controller { config, state }, ListingExecutor { listing })
+        (
+            Controller { config, state },
+            ListingExecutor {
+                listing,
+                teardown: None,
+            },
+        )
     }
 
     fn errored_podman_session(session_id: &str) -> SessionRecord {
@@ -2119,9 +2156,83 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(test_name(module_path!(), name))
             .env("MJ_TEST_MOVE_OWNERSHIP_SCAN", "1")
+            .env("MJ_INSTANCE", "move-ownership-scan")
             .isolated_store(directory.path())
             .run();
         false
+    }
+
+    #[test]
+    fn retired_harness_destroy_retries_teardown_and_recovery_settles_its_row() {
+        const TEST: &str = "retired_harness_destroy_retries_teardown_and_recovery_settles_its_row";
+        if !isolated_scan(TEST) {
+            return;
+        }
+        use crate::database::{self, EnvironmentPhase};
+        let _writer = database::install_isolated_test_writer();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut session = errored_podman_session(session_id);
+        session.target = Some(Box::new(TargetLocator::LocalPodman {
+            container_id: targets::resource_name(session_id).unwrap(),
+            workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+            borrowed_from: None,
+        }));
+        let (mut controller, mut executor) = podman_scan_controller(session.clone());
+        controller.state.sessions.remove(session_id);
+
+        for orphan in [false, true] {
+            database::save_session(&session).unwrap();
+            database::test_fixtures::retire_test_harness(session_id).unwrap();
+            executor.teardown = Some(ContainerTeardown::default());
+            let destroy = |controller: &mut Controller, executor: &ListingExecutor| {
+                crate::controller::test_support::worker_test_scope(session_id, || {
+                    if orphan {
+                        controller
+                            .destroy_orphan_worker(session_id, "local", session_id, true, executor)
+                    } else {
+                        controller
+                            .force_destroy_session(
+                                session_id,
+                                executor,
+                                super::super::BranchDisposition::Keep,
+                            )
+                            .map(|_| ())
+                    }
+                })
+            };
+            let error = destroy(&mut controller, &executor).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("host unavailable"),
+                "{error:#}"
+            );
+            let retained = database::load_retired_harness_session(session_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                retained.owned_environment.unwrap().phase,
+                EnvironmentPhase::Retiring
+            );
+            executor.teardown.as_mut().unwrap().allow_remove = true;
+            destroy(&mut controller, &executor).unwrap();
+            assert!(
+                executor
+                    .teardown
+                    .as_ref()
+                    .unwrap()
+                    .removed
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            assert!(
+                database::load_retired_harness_session(session_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                database::worker_environments(session_id)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     // Hard-won: 75136459: recovery missed a container after its errored session stopped naming it
