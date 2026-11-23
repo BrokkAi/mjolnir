@@ -9,6 +9,8 @@ require (
 	github.com/charmbracelet/ultraviolet v0.0.0-20261008173134-6b8d4baf91b4
 	github.com/charmbracelet/x/ansi v0.11.9
 	charm.land/lipgloss/v2 v2.1.1
+	github.com/ebitengine/purego v0.11.3
+	github.com/gen2brain/malgo v0.11.28
 	github.com/klauspost/compress v1.20.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
