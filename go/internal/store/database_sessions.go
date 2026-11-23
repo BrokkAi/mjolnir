@@ -201,7 +201,7 @@ func loadSubagentReportFrom(path string, childSessionID string) (core.SubagentRe
 
 // loadSubagentReportWith is a child's recorded report, or nil when nothing
 // is recorded for it.
-func loadSubagentReportWith(connection sqlConnection, childSessionID string) (*core.SubagentReport, error) {
+func loadSubagentReportWith(connection Queryer, childSessionID string) (*core.SubagentReport, error) {
 	panic("unported: mj-store/src/database/sessions.rs load_subagent_report_with")
 }
 
@@ -215,9 +215,8 @@ func recordSubagentReportDirTo(path string, childSessionID string, reportDir str
 	panic("unported: mj-store/src/database/sessions.rs record_subagent_report_dir_to")
 }
 
-func recordSubagentReportDirWith(connection sqlConnection, childSessionID string, reportDir string) error {
-	_, err := connection.ExecContext(context.Background(),
-		`INSERT INTO subagent_handbacks(child_session_id, report_dir)
+func recordSubagentReportDirWith(connection Queryer, childSessionID string, reportDir string) error {
+	_, err := connection.Exec(`INSERT INTO subagent_handbacks(child_session_id, report_dir)
          SELECT ?1, ?2 WHERE EXISTS (
              SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
          )
@@ -325,7 +324,7 @@ func EnqueueAdoptedSession[G any](ctx context.Context, expected core.SessionReco
 	panic("unported: mj-store/src/database/sessions.rs enqueue_adopted_session")
 }
 
-func installAdoptedSessionWith(connection sqlWriteConnection, expected core.SessionRecord, cut *AdoptionCut, updatedAt string) (core.SessionRecord, error) {
+func installAdoptedSessionWith(connection *Connection, expected core.SessionRecord, cut *AdoptionCut, updatedAt string) (core.SessionRecord, error) {
 	panic("unported: mj-store/src/database/sessions.rs install_adopted_session_with")
 }
 
@@ -336,7 +335,7 @@ func EnqueueAdoptionConnected[G any](ctx context.Context, expected core.SessionR
 	panic("unported: mj-store/src/database/sessions.rs enqueue_adoption_connected")
 }
 
-func publishAdoptionConnectedWith(connection sqlWriteConnection, expected *core.SessionRecord, nativeSessionID *string, updatedAt string) (core.SessionRecord, error) {
+func publishAdoptionConnectedWith(connection *Connection, expected *core.SessionRecord, nativeSessionID *string, updatedAt string) (core.SessionRecord, error) {
 	panic("unported: mj-store/src/database/sessions.rs publish_adoption_connected_with")
 }
 
@@ -346,7 +345,7 @@ func RefuseAdoptionIfCurrent(expected *core.SessionRecord, detail string, update
 	panic("unported: mj-store/src/database/sessions.rs refuse_adoption_if_current")
 }
 
-func refuseAdoptionWith(connection sqlWriteConnection, expected *core.SessionRecord, detail string, updatedAt string) (core.SessionRecord, error) {
+func refuseAdoptionWith(connection *Connection, expected *core.SessionRecord, detail string, updatedAt string) (core.SessionRecord, error) {
 	panic("unported: mj-store/src/database/sessions.rs refuse_adoption_with")
 }
 
@@ -524,7 +523,7 @@ func SetSessionACPTitleAtProjection(sessionID string, appliedOrdinal uint64, app
 	panic("unported: mj-store/src/database/sessions.rs set_session_acp_title_at_projection")
 }
 
-func setSessionACPTitleAtProjectionWith(connection sqlConnection, sessionID string, appliedOrdinal uint64, appliedDigest string, title *string) error {
+func setSessionACPTitleAtProjectionWith(connection Queryer, sessionID string, appliedOrdinal uint64, appliedDigest string, title *string) error {
 	panic("unported: mj-store/src/database/sessions.rs set_session_acp_title_at_projection_with")
 }
 

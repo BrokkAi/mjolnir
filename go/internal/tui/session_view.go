@@ -250,7 +250,7 @@ func (d *DashboardState) sessionFactsInputs() [7]uint64 {
 	return [7]uint64{
 		d.state.Revision(),
 		d.sessionDetails.Revision(),
-		d.sessionReviews.Revision(),
+		d.sessionReviewsField.Revision(),
 		d.servedAttention.Revision(),
 		d.notificationDismissals.Revision(),
 		d.sessionOperations.Revision(),
@@ -268,7 +268,7 @@ func (d *DashboardState) sessionFacts() *SessionFacts {
 }
 
 func (d *DashboardState) cpuRollupsInputs() [2]uint64 {
-	return [2]uint64{d.state.Revision(), d.sessionCpu.Revision()}
+	return [2]uint64{d.state.Revision(), d.sessionCPU.Revision()}
 }
 
 // cpuRollups derives the rollups again only when an input changed. The

@@ -6,7 +6,6 @@
 package store
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -143,9 +142,8 @@ func HasPendingMutatingDelegations(parent string) (bool, error) {
 	panic("unported: mj-store/src/database/delegation.rs has_pending_mutating_delegations")
 }
 
-func hasPendingMutatingDelegationsWith(connection Connection, parent string) (bool, error) {
-	rows, err := connection.QueryContext(context.Background(),
-		`SELECT prepared_json FROM delegation_effects
+func hasPendingMutatingDelegationsWith(connection Queryer, parent string) (bool, error) {
+	rows, err := connection.Query(`SELECT prepared_json FROM delegation_effects
          WHERE parent_session_id=?1 AND result_json IS NULL`, parent)
 	if err != nil {
 		return false, err
@@ -215,14 +213,14 @@ func UntoldFailedDeliveries(parent string, notices []FailedDeliveryNotice) ([]Fa
 // window that pruning lets older messages back into), so the latest report
 // need not list a failure that an earlier one did. The oracle's report path
 // never showed delivery lines, so an oracle report told no failure.
-func untoldFailedDeliveriesWith(connection Connection, parent string, notices []FailedDeliveryNotice) ([]FailedDeliveryNotice, error) {
+func untoldFailedDeliveriesWith(connection Queryer, parent string, notices []FailedDeliveryNotice) ([]FailedDeliveryNotice, error) {
 	panic("unported: mj-store/src/database/delegation.rs untold_failed_deliveries_with")
 }
 
 // failuresListedInReports is the failed requests that child's reports to
 // parent listed as failed; false when the parent has nothing to be told of
 // its messages to child.
-func failuresListedInReports(connection Connection, parent, child string) (map[string]struct{}, bool, error) {
+func failuresListedInReports(connection Queryer, parent, child string) (map[string]struct{}, bool, error) {
 	panic("unported: mj-store/src/database/delegation.rs failures_listed_in_reports")
 }
 
@@ -249,7 +247,7 @@ func FinishesToldByFoldedMarkers(parent string, candidates []FoldedMarkerCandida
 // whose detail is `Message <id>: <error>`. The marker's own report row, which
 // listed that delivery as failed, says so; what the parent's queue shows now
 // does not.
-func toldByFoldedMarker(connection Connection, parent, child string, reported, finish *core.SubagentFinishIdentity) (bool, error) {
+func toldByFoldedMarker(connection Queryer, parent, child string, reported, finish *core.SubagentFinishIdentity) (bool, error) {
 	panic("unported: mj-store/src/database/delegation.rs told_by_folded_marker")
 }
 

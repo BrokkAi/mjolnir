@@ -5,7 +5,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -64,14 +63,14 @@ func SaveMoveOutcome(operation *core.MoveOperation, lastError *string, failClosi
 	panic("unported: mj-store/src/database/session_move.rs save_move_outcome")
 }
 
-func saveMoveOutcomeWith(connection *sql.Conn, operation *core.MoveOperation, lastError *string, failClosingSource bool) error {
+func saveMoveOutcomeWith(connection *Connection, operation *core.MoveOperation, lastError *string, failClosingSource bool) error {
 	panic("unported: mj-store/src/database/session_move.rs save_move_outcome_with")
 }
 
 // saveMoveOperationWith writes the intent in the caller's transaction, or in
-// its own when connection is a *sql.Conn outside one (Rust checks
+// its own when connection is a *Connection outside one (Rust checks
 // is_autocommit).
-func saveMoveOperationWith(connection Connection, operation *core.MoveOperation) error {
+func saveMoveOperationWith(connection Queryer, operation *core.MoveOperation) error {
 	panic("unported: mj-store/src/database/session_move.rs save_move_operation_with")
 }
 
@@ -96,10 +95,9 @@ func moveHoldsSubagentGate(operation *core.MoveOperation) bool {
 	return operation.InPlace && operation.IsActive()
 }
 
-func loadMoveOperationWith(connection Connection, sessionID string) (*core.MoveOperation, error) {
+func loadMoveOperationWith(connection Queryer, sessionID string) (*core.MoveOperation, error) {
 	var text string
-	err := connection.QueryRowContext(context.Background(),
-		"SELECT operation_json FROM session_moves WHERE session_id=?1", sessionID).Scan(&text)
+	err := connection.QueryRow("SELECT operation_json FROM session_moves WHERE session_id=?1", sessionID).Scan(&text)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -112,7 +110,7 @@ func loadMoveOperationWith(connection Connection, sessionID string) (*core.MoveO
 // resolveCancelledMoveForCloseWith releases only the cancelled Move's restore
 // authority. Placement ownership has already been settled; do not adopt or
 // recreate it while resolving.
-func resolveCancelledMoveForCloseWith(connection Connection, sessionID, operationID, updatedAt string) error {
+func resolveCancelledMoveForCloseWith(connection Queryer, sessionID, operationID, updatedAt string) error {
 	panic("unported: mj-store/src/database/session_move.rs resolve_cancelled_move_for_close_with")
 }
 
@@ -127,7 +125,7 @@ func resolveCancelledMoveForCloseWith(connection Connection, sessionID, operatio
 // names a removed harness cannot be acted on, so all readers treat the row as
 // absent with a warning rather than failing the operation that asked, whether
 // that is daemon startup, a stop, a checkpoint, or a new move.
-func decodeMoveOperation(connection Connection, sessionID, text string) *core.MoveOperation {
+func decodeMoveOperation(connection Queryer, sessionID, text string) *core.MoveOperation {
 	normalized, err := normalizeStoredMove(connection, sessionID, text)
 	if err == nil {
 		var operation core.MoveOperation
@@ -144,7 +142,7 @@ func decodeMoveOperation(connection Connection, sessionID, text string) *core.Mo
 // selection, its preparation receipt, and the rollback snapshot. Translate
 // those stored fields at the reader boundary so strict public requests keep
 // one policy.
-func normalizeStoredMove(connection Connection, sessionID, text string) (string, error) {
+func normalizeStoredMove(connection Queryer, sessionID, text string) (string, error) {
 	panic("unported: mj-store/src/database/session_move.rs normalize_stored_move")
 }
 
@@ -226,7 +224,7 @@ func LoadMoveRecovery() ([]core.MoveOperation, map[string]struct{}, error) {
 	panic("unported: mj-store/src/database/session_move.rs load_move_recovery")
 }
 
-func loadMoveOperationsWith(connection Connection) ([]core.MoveOperation, error) {
+func loadMoveOperationsWith(connection Queryer) ([]core.MoveOperation, error) {
 	panic("unported: mj-store/src/database/session_move.rs load_move_operations_with")
 }
 
@@ -253,7 +251,7 @@ func ReapFinishedMoveIntents() (int, error) {
 	panic("unported: mj-store/src/database/session_move.rs reap_finished_move_intents")
 }
 
-func reapFinishedMoveIntentsWith(connection Connection) (int, error) {
+func reapFinishedMoveIntentsWith(connection Queryer) (int, error) {
 	panic("unported: mj-store/src/database/session_move.rs reap_finished_move_intents_with")
 }
 

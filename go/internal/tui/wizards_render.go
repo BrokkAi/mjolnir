@@ -94,7 +94,7 @@ func stepCounter[W WizardDraft](position int, total int, targetHidden bool, wiza
 		}
 		return 0
 	}
-	profileHidden := wizard.profileStepSkipped()
+	profileHidden := wizard.ProfileStepSkipped()
 	reviewHidden := profileHidden && targetHidden
 	skipped := count(profileHidden) + count(targetHidden) + count(reviewHidden)
 	before := count(profileHidden && position > 1) + count(targetHidden && position > 2)

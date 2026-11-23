@@ -1387,7 +1387,7 @@ type DashboardState struct {
 	state           Tracked[core.StateState]
 	quotas          map[string]client.ProfileQuota
 	quotaRefreshing map[string]struct{}
-	sessionDetails  Tracked[map[string]SessionDetail]
+	sessionDetails  Tracked[map[string]*SessionDetail]
 	// unreachableSessions are sessions whose relay worker the controller
 	// currently cannot reach. Their summary band renders red so an
 	// unreachable target is obvious at a glance.
@@ -1414,7 +1414,7 @@ type DashboardState struct {
 	// records in the same runtime frame.
 	containerUpgradeSessions map[string]struct{}
 	failedLaunchRetries      map[string]struct{}
-	sessionOperations        Tracked[map[string]SessionOperationDisplay]
+	sessionOperations        Tracked[map[string]*SessionOperationDisplay]
 	// standbyPrompts are the real composers parked in front of sessions that
 	// are not attached yet: a Starting/Resuming transition or an in-flight
 	// attach. Keyed per session so each draft stays with its row; the
@@ -1483,7 +1483,7 @@ type DashboardState struct {
 	// like capacityDetails. Keyboard commands use this geometry to anchor
 	// the details dropdown.
 	capacityDisksAreas []*uv.Rectangle
-	quotaSelection     *QuotaRow
+	quotaSelection     QuotaRow
 	// quotaExpanded is a sorted set of expanded pools.
 	quotaExpanded  []PoolKey
 	quotaProviders ProviderDiscovery
@@ -1711,7 +1711,7 @@ type WorkspaceViewState struct {
 	targetsScroll             int
 	quotaScroll               int
 	capacityIndex             int
-	quotaSelection            *QuotaRow
+	quotaSelection            QuotaRow
 	paneSizes                 PaneSizes
 	conversationLayout        core.ConversationLayout
 	collapsedProjectKeys      map[string]struct{}

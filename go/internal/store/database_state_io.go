@@ -3,7 +3,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,25 +10,6 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
-
-// sqlConnection is the query surface a rusqlite `&Connection` gives the
-// store's functions. *sql.DB, *sql.Conn and *sql.Tx all satisfy it, so a
-// function that reads or writes through a connection also runs inside a
-// caller's transaction, as Rust's `Transaction` deref to `Connection` allows.
-// (Declared by store-1 for its files; the merge may unify it with another
-// group's connection type.)
-type sqlConnection interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-// sqlWriteConnection is a connection a function opens its own transaction on
-// (rusqlite's `&mut Connection`). *sql.DB and *sql.Conn satisfy it.
-type sqlWriteConnection interface {
-	sqlConnection
-	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
-}
 
 // sessionInterns is scoped to a load/publication: no cache retains deleted
 // sessions.
@@ -108,7 +88,7 @@ func LoadStateFrom(path string) (core.StateState, error) {
 	panic("unported: mj-store/src/database/state_io.rs load_state_from")
 }
 
-func loadStateWith(connection sqlConnection) (core.StateState, error) {
+func loadStateWith(connection Queryer) (core.StateState, error) {
 	panic("unported: mj-store/src/database/state_io.rs load_state_with")
 }
 
@@ -120,7 +100,7 @@ func LoadMountHistory() (map[string][]string, error) {
 	panic("unported: mj-store/src/database/state_io.rs load_mount_history")
 }
 
-func readMountHistory(connection sqlConnection) (map[string][]string, error) {
+func readMountHistory(connection Queryer) (map[string][]string, error) {
 	panic("unported: mj-store/src/database/state_io.rs read_mount_history")
 }
 
@@ -265,15 +245,15 @@ func insertTarget(tx *sql.Tx, sessionID string, target core.TargetLocator) error
 	panic("unported: mj-store/src/database/state_io.rs insert_target")
 }
 
-func loadTargets(connection sqlConnection, state *core.StateState) error {
+func loadTargets(connection Queryer, state *core.StateState) error {
 	return loadTargetsSelected(connection, state, nil)
 }
 
-func loadTargetsSelected(connection sqlConnection, state *core.StateState, id *string) error {
+func loadTargetsSelected(connection Queryer, state *core.StateState, id *string) error {
 	panic("unported: mj-store/src/database/state_io.rs load_targets_selected")
 }
 
-func readTargets(connection sqlConnection, id *string) (map[string]core.TargetLocator, error) {
+func readTargets(connection Queryer, id *string) (map[string]core.TargetLocator, error) {
 	panic("unported: mj-store/src/database/state_io.rs read_targets")
 }
 
@@ -295,19 +275,19 @@ func replaceMounts(tx *sql.Tx, sessionID string, mounts []core.AdditionalMount) 
 	panic("unported: mj-store/src/database/state_io.rs replace_mounts")
 }
 
-func loadMounts(connection sqlConnection, state *core.StateState) error {
+func loadMounts(connection Queryer, state *core.StateState) error {
 	return loadMountsSelected(connection, state, nil)
 }
 
-func loadMountsSelected(connection sqlConnection, state *core.StateState, id *string) error {
+func loadMountsSelected(connection Queryer, state *core.StateState, id *string) error {
 	panic("unported: mj-store/src/database/state_io.rs load_mounts_selected")
 }
 
-func loadCheckpoints(connection sqlConnection, state *core.StateState) error {
+func loadCheckpoints(connection Queryer, state *core.StateState) error {
 	return loadCheckpointsSelected(connection, state, nil)
 }
 
-func loadCheckpointsSelected(connection sqlConnection, state *core.StateState, id *string) error {
+func loadCheckpointsSelected(connection Queryer, state *core.StateState, id *string) error {
 	panic("unported: mj-store/src/database/state_io.rs load_checkpoints_selected")
 }
 
@@ -352,11 +332,11 @@ func ReadDurableSessionRecord(id string) (*core.SessionRecord, error) {
 	panic("unported: mj-store/src/database/state_io.rs read_durable_session_record")
 }
 
-func loadSessionWith(connection sqlConnection, id string) (*core.SessionRecord, error) {
+func loadSessionWith(connection Queryer, id string) (*core.SessionRecord, error) {
 	return loadSessionInternedWith(connection, id, &sessionInterns{})
 }
 
-func loadSessionInternedWith(connection sqlConnection, id string, interns *sessionInterns) (*core.SessionRecord, error) {
+func loadSessionInternedWith(connection Queryer, id string, interns *sessionInterns) (*core.SessionRecord, error) {
 	panic("unported: mj-store/src/database/state_io.rs load_session_interned_with")
 }
 

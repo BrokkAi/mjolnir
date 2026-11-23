@@ -5,7 +5,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 
@@ -16,11 +15,11 @@ func PushSubscribe(subscription Subscription) error {
 	panic("unported: mj-store/src/database/web_push.rs push_subscribe")
 }
 
-func pushSubscribeWith(db *sql.Conn, subscription Subscription) error {
+func pushSubscribeWith(db *Connection, subscription Subscription) error {
 	panic("unported: mj-store/src/database/web_push.rs push_subscribe_with")
 }
 
-func pushSubscribeIn(db Connection, subscription Subscription) error {
+func pushSubscribeIn(db Queryer, subscription Subscription) error {
 	panic("unported: mj-store/src/database/web_push.rs push_subscribe_in")
 }
 
@@ -28,7 +27,7 @@ func PushRenew(oldEndpoint string, subscription Subscription) error {
 	panic("unported: mj-store/src/database/web_push.rs push_renew")
 }
 
-func pushRenewWith(db *sql.Conn, oldEndpoint string, subscription Subscription) error {
+func pushRenewWith(db *Connection, oldEndpoint string, subscription Subscription) error {
 	panic("unported: mj-store/src/database/web_push.rs push_renew_with")
 }
 
@@ -36,8 +35,8 @@ func PushUnsubscribe(endpoint string) error {
 	panic("unported: mj-store/src/database/web_push.rs push_unsubscribe")
 }
 
-func pushUnsubscribeWith(db Connection, endpoint string) error {
-	_, err := db.ExecContext(context.Background(), "DELETE FROM push_devices WHERE endpoint=?1", endpoint)
+func pushUnsubscribeWith(db Queryer, endpoint string) error {
+	_, err := db.Exec("DELETE FROM push_devices WHERE endpoint=?1", endpoint)
 	return err
 }
 
@@ -48,7 +47,7 @@ func AlertEventsSince(after *uint64) (uint64, []client.AlertEvent, error) {
 	panic("unported: mj-store/src/database/web_push.rs alert_events_since")
 }
 
-func alertEventsSinceWith(db *sql.Conn, after *uint64) (uint64, []client.AlertEvent, error) {
+func alertEventsSinceWith(db *Connection, after *uint64) (uint64, []client.AlertEvent, error) {
 	panic("unported: mj-store/src/database/web_push.rs alert_events_since_with")
 }
 
@@ -77,7 +76,7 @@ func PushReconcile(runtime *client.RuntimeProjection) ([]PushDelivery, *int64, b
 	panic("unported: mj-store/src/database/web_push.rs push_reconcile")
 }
 
-func pushReconcileWith(db *sql.Conn, runtime *client.RuntimeProjection, now int64, observe bool) ([]PushDelivery, *int64, error) {
+func pushReconcileWith(db *Connection, runtime *client.RuntimeProjection, now int64, observe bool) ([]PushDelivery, *int64, error) {
 	panic("unported: mj-store/src/database/web_push.rs push_reconcile_with")
 }
 
@@ -89,7 +88,7 @@ func PushTest(endpoint string) error {
 	panic("unported: mj-store/src/database/web_push.rs push_test")
 }
 
-func pushTestWith(db *sql.Conn, endpoint string) error {
+func pushTestWith(db *Connection, endpoint string) error {
 	panic("unported: mj-store/src/database/web_push.rs push_test_with")
 }
 
@@ -128,7 +127,7 @@ func pushClaimIn(tx *sql.Tx, runtime *client.RuntimeProjection, entries map[stri
 	panic("unported: mj-store/src/database/web_push.rs push_claim_in")
 }
 
-func pushEntryText(db Connection, runtime *client.RuntimeProjection, entry *PushEntry) (*string, error) {
+func pushEntryText(db Queryer, runtime *client.RuntimeProjection, entry *PushEntry) (*string, error) {
 	panic("unported: mj-store/src/database/web_push.rs push_entry_text")
 }
 
@@ -136,12 +135,11 @@ func PushRecover() error {
 	panic("unported: mj-store/src/database/web_push.rs push_recover")
 }
 
-func pushRecoverWith(db Connection) error {
+func pushRecoverWith(db Queryer) error {
 	// Only service startup, under the daemon's store ownership, recovers
 	// flight reservations. Remote acceptance may be unknown; receipts never
 	// reset.
-	_, err := db.ExecContext(context.Background(),
-		"UPDATE push_entry_deliveries SET accepted=0,flight_session=NULL WHERE accepted=3")
+	_, err := db.Exec("UPDATE push_entry_deliveries SET accepted=0,flight_session=NULL WHERE accepted=3")
 	return err
 }
 
@@ -151,13 +149,12 @@ func PushResult(subscription Subscription, enrollment, identity string, status *
 	panic("unported: mj-store/src/database/web_push.rs push_result")
 }
 
-func applyPushResultWith(db *sql.Conn, subscription Subscription, enrollment, identity string, status *uint16, retryAt int64, failure *string) error {
+func applyPushResultWith(db *Connection, subscription Subscription, enrollment, identity string, status *uint16, retryAt int64, failure *string) error {
 	panic("unported: mj-store/src/database/web_push.rs apply_push_result_with")
 }
 
-func pushResultWith(db Connection, endpoint, identity string, accepted bool, retryAt int64, failure *string) error {
-	_, err := db.ExecContext(context.Background(),
-		"UPDATE push_entry_deliveries SET accepted=?3,flight_session=NULL,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND identity=?2 AND accepted IN (0,3)",
+func pushResultWith(db Queryer, endpoint, identity string, accepted bool, retryAt int64, failure *string) error {
+	_, err := db.Exec("UPDATE push_entry_deliveries SET accepted=?3,flight_session=NULL,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND identity=?2 AND accepted IN (0,3)",
 		endpoint, identity, accepted, retryAt, failure)
 	return err
 }

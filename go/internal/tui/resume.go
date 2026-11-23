@@ -889,9 +889,11 @@ func (d *DashboardState) RebuildResumeRows() {
 	panic("unported: mj-tui/src/resume.rs DashboardState::rebuild_resume_rows")
 }
 
-// Rust's DashboardState::resume_rows() getter (the rows the open dialog
-// shows; empty when no dialog is open) is not declared: in Go it would
-// collide with the resumeRows field, which callers read directly.
+// resumeRows are the rows the open dialog shows; empty when no dialog is
+// open. lib.rs's field of the same name is resumeRowsField in Go.
+func (d *DashboardState) resumeRows() []ResumeRow {
+	return d.resumeRowsField
+}
 
 // NeedsFastTick reports whether anything on screen animates on its own and
 // so needs a redraw faster than the one-second clock: loading dialogs,
@@ -1090,7 +1092,7 @@ func (d *DashboardState) settleResumeFocus() {
 // take the focus. Asking a disabled list for it would leave the box holding
 // the keyboard instead.
 func (d *DashboardState) resumeFocusOutsideSearch() ResumeFocus {
-	if len(d.resumeRows) == 0 {
+	if len(d.resumeRows()) == 0 {
 		return ResumeFocusTabs
 	}
 	return ResumeFocusSessions

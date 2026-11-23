@@ -6,7 +6,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -170,7 +169,7 @@ type EnvironmentWorker struct {
 	Runtime          *core.TargetRuntimeSettings
 }
 
-func readEnvironment(connection Connection, id string) (*EnvironmentRecord, error) {
+func readEnvironment(connection Queryer, id string) (*EnvironmentRecord, error) {
 	panic("unported: mj-store/src/database/environments.rs read_environment")
 }
 
@@ -185,10 +184,9 @@ func SessionEnvironmentOwner(sessionID string) (*string, error) {
 	panic("unported: mj-store/src/database/environments.rs session_environment_owner")
 }
 
-func sessionEnvironmentOwnerWith(connection Connection, sessionID string) (*string, error) {
+func sessionEnvironmentOwnerWith(connection Queryer, sessionID string) (*string, error) {
 	var owner string
-	err := connection.QueryRowContext(context.Background(),
-		environmentOwnerQuery+" WHERE b.session_id = ?1", sessionID).Scan(new(string), &owner)
+	err := connection.QueryRow(environmentOwnerQuery+" WHERE b.session_id = ?1", sessionID).Scan(new(string), &owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -210,7 +208,7 @@ func EnvironmentWorkers(environmentID string) ([]EnvironmentWorker, error) {
 	panic("unported: mj-store/src/database/environments.rs environment_workers")
 }
 
-func readEnvironmentWorkers(connection Connection, environmentID string) ([]EnvironmentWorker, error) {
+func readEnvironmentWorkers(connection Queryer, environmentID string) ([]EnvironmentWorker, error) {
 	panic("unported: mj-store/src/database/environments.rs read_environment_workers")
 }
 
@@ -351,7 +349,7 @@ func PreparedMoveEnvironment(operationID string) (*EnvironmentRecord, error) {
 // recordPreparedMoveEnvironment: legacy prepared destinations reserve
 // cleanup independently of the Move row. Initialize once; only the physical
 // owner advances its cleanup identity.
-func recordPreparedMoveEnvironment(connection Connection, operation *core.MoveOperation) error {
+func recordPreparedMoveEnvironment(connection Queryer, operation *core.MoveOperation) error {
 	panic("unported: mj-store/src/database/environments.rs record_prepared_move_environment")
 }
 

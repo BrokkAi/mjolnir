@@ -78,7 +78,7 @@ func (d *DashboardState) WelcomeChecked(errors []string) {
 func (d *DashboardState) WelcomeNotNeeded() {
 	d.pendingWelcome = nil
 	if _, welcome := d.mode.(ModeWelcome); welcome {
-		d.cancelModal()
+		d.CancelModal()
 	}
 }
 

@@ -22,8 +22,8 @@ type ContainerEditor struct {
 	// row and the other session dialogs do, not its id.
 	sessionName string
 	cpus        chat.TextInput
-	// limits is the host's (CPUs, memory bytes); nil when unknown.
-	limits *[2]uint64
+	// limits is the host's CPUs and memory bytes; nil when unknown.
+	limits *HostLimits
 	// originalAllocation is the allocation the session had when the editor
 	// opened; nil for none.
 	originalAllocation core.SessionResourceAllocation

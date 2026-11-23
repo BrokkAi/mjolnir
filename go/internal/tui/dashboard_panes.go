@@ -8,13 +8,6 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
-// supportPaneMaximize is one (pane, enabled) pair of the argument to
-// DashboardState.setPaneMaximizeEnabled (Rust's `[(SupportPane, bool); 4]`).
-type supportPaneMaximize struct {
-	pane    SupportPane
-	enabled bool
-}
-
 func (d *DashboardState) paneSizeMut(pane SupportPane) *core.PaneSize {
 	switch pane {
 	case SupportPaneSessions:
@@ -95,33 +88,31 @@ func (d *DashboardState) restoreWorkspacePaneSizes(sizes core.PaneSizes) {
 	d.reconcilePaneSizes(nil)
 }
 
-// dashboardPanesPaneMaximizeEnabled is Rust's
-// DashboardState::pane_maximize_enabled. The Go name carries the module
-// prefix because the method collides with lib.rs's `pane_maximize_enabled`
-// field.
-func (d *DashboardState) dashboardPanesPaneMaximizeEnabled(pane SupportPane) bool {
+// paneMaximizeEnabled is Rust's DashboardState::pane_maximize_enabled. lib.rs's
+// field of the same name is paneMaximizeEnabledField in Go.
+func (d *DashboardState) paneMaximizeEnabled(pane SupportPane) bool {
 	switch pane {
 	case SupportPaneSessions:
-		return d.paneMaximizeEnabled[0]
+		return d.paneMaximizeEnabledField[0]
 	case SupportPaneTargets:
-		return d.paneMaximizeEnabled[1]
+		return d.paneMaximizeEnabledField[1]
 	case SupportPaneQuota:
-		return d.paneMaximizeEnabled[2]
+		return d.paneMaximizeEnabledField[2]
 	case SupportPaneNotifications:
 		return d.notifications.maximizeEnabled
 	}
 	panic(fmt.Sprintf("unknown support pane %v", pane))
 }
 
-func (d *DashboardState) setPaneMaximizeEnabled(enabled [4]supportPaneMaximize) {
+func (d *DashboardState) setPaneMaximizeEnabled(enabled [4]supportPaneEnabled) {
 	for _, setting := range enabled {
 		switch setting.pane {
 		case SupportPaneSessions:
-			d.paneMaximizeEnabled[0] = setting.enabled
+			d.paneMaximizeEnabledField[0] = setting.enabled
 		case SupportPaneTargets:
-			d.paneMaximizeEnabled[1] = setting.enabled
+			d.paneMaximizeEnabledField[1] = setting.enabled
 		case SupportPaneQuota:
-			d.paneMaximizeEnabled[2] = setting.enabled
+			d.paneMaximizeEnabledField[2] = setting.enabled
 		case SupportPaneNotifications:
 			d.notifications.maximizeEnabled = setting.enabled
 		}
@@ -153,7 +144,7 @@ func (d *DashboardState) CycleFocusedPaneSize() {
 		return
 	}
 	next := d.PaneSize(pane).Cycled()
-	if next == core.PaneSizeMaximized && !d.dashboardPanesPaneMaximizeEnabled(pane) {
+	if next == core.PaneSizeMaximized && !d.paneMaximizeEnabled(pane) {
 		next = next.Cycled()
 	}
 	d.SetPaneSize(pane, next)

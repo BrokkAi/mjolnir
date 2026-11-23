@@ -3,7 +3,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -57,11 +56,11 @@ func loadMaterializedSessionSummaryFrom(path string, sessionID string) (*core.Ma
 // readMaterializedUnreadOrdinals reads the summary's ordinal facts without
 // deserializing transcript bodies: the agent messages' latest content
 // ordinals, then the interruption event ordinals.
-func readMaterializedUnreadOrdinals(connection sqlConnection, sessionID string) ([]uint64, []uint64, error) {
+func readMaterializedUnreadOrdinals(connection Queryer, sessionID string) ([]uint64, []uint64, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_materialized_unread_ordinals")
 }
 
-func readLatestUnreadEventOrdinal(connection sqlConnection, sessionID string) (*uint64, error) {
+func readLatestUnreadEventOrdinal(connection Queryer, sessionID string) (*uint64, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_latest_unread_event_ordinal")
 }
 
@@ -69,21 +68,21 @@ func readLatestUnreadEventOrdinal(connection sqlConnection, sessionID string) (*
 // where a session's provisional title comes from. It sits at the head of the
 // transcript, so a projection loaded as a tail cannot find it by scanning;
 // this reads it directly. It returns the item's position and text.
-func firstMaterializedUserMessage(connection sqlConnection, sessionID string) (uint64, string, bool, error) {
+func firstMaterializedUserMessage(connection Queryer, sessionID string) (uint64, string, bool, error) {
 	return materializedUserMessage(connection, sessionID, true)
 }
 
-func lastMaterializedUserMessage(connection sqlConnection, sessionID string) (uint64, string, bool, error) {
+func lastMaterializedUserMessage(connection Queryer, sessionID string) (uint64, string, bool, error) {
 	return materializedUserMessage(connection, sessionID, false)
 }
 
-func materializedUserMessage(connection sqlConnection, sessionID string, oldestFirst bool) (uint64, string, bool, error) {
+func materializedUserMessage(connection Queryer, sessionID string, oldestFirst bool) (uint64, string, bool, error) {
 	panic("unported: mj-store/src/database/materialized.rs materialized_user_message")
 }
 
 // lastMaterializedContextBoundary is where the newest /clear boundary sits,
 // if the session has one.
-func lastMaterializedContextBoundary(connection sqlConnection, sessionID string) (*uint64, error) {
+func lastMaterializedContextBoundary(connection Queryer, sessionID string) (*uint64, error) {
 	panic("unported: mj-store/src/database/materialized.rs last_materialized_context_boundary")
 }
 
@@ -103,7 +102,7 @@ func turnStartSQL() string {
 // or the marker for a turn the harness started on its own. This is the
 // recovery boundary; it reads a position only, scanning back from the newest
 // item.
-func lastMaterializedTurnStart(connection sqlConnection, sessionID string) (*uint64, error) {
+func lastMaterializedTurnStart(connection Queryer, sessionID string) (*uint64, error) {
 	panic("unported: mj-store/src/database/materialized.rs last_materialized_turn_start")
 }
 
@@ -114,7 +113,7 @@ func lastMaterializedTurnStart(connection sqlConnection, sessionID string) (*uin
 // message in the transcript after the turn it answered has ended — a resume
 // notice is one — and reading everything after the turn's start would return
 // that notice as the turn's answer.
-func lastMaterializedAgentMessageWithin(connection sqlConnection, sessionID string, afterPosition uint64, throughPosition uint64) (*string, error) {
+func lastMaterializedAgentMessageWithin(connection Queryer, sessionID string, afterPosition uint64, throughPosition uint64) (*string, error) {
 	_, text, ok, err := lastMaterializedAgentMessageIn(connection, sessionID, afterPosition, &throughPosition, nil)
 	if err != nil || !ok {
 		return nil, err
@@ -122,11 +121,11 @@ func lastMaterializedAgentMessageWithin(connection sqlConnection, sessionID stri
 	return &text, nil
 }
 
-func lastMaterializedAgentMessageIn(connection sqlConnection, sessionID string, afterPosition uint64, throughPosition *uint64, throughOrdinal *uint64) (uint64, string, bool, error) {
+func lastMaterializedAgentMessageIn(connection Queryer, sessionID string, afterPosition uint64, throughPosition *uint64, throughOrdinal *uint64) (uint64, string, bool, error) {
 	panic("unported: mj-store/src/database/materialized.rs last_materialized_agent_message_in")
 }
 
-func lastMaterializedAgentItemIn(connection sqlConnection, sessionID string, afterPosition uint64, throughPosition *uint64, throughOrdinal *uint64) (*core.TranscriptItem, error) {
+func lastMaterializedAgentItemIn(connection Queryer, sessionID string, afterPosition uint64, throughPosition *uint64, throughOrdinal *uint64) (*core.TranscriptItem, error) {
 	panic("unported: mj-store/src/database/materialized.rs last_materialized_agent_item_in")
 }
 
@@ -169,7 +168,7 @@ func LoadMaterializedAgentItemThrough(sessionID string, through uint64) (*core.T
 // completed at through, bounded to that turn: a turn that left no text has
 // none, never an earlier turn's. Every reader of a notification entry without
 // a message id asks this.
-func MaterializedAgentItemThrough(connection sqlConnection, sessionID string, through uint64) (*core.TranscriptItem, error) {
+func MaterializedAgentItemThrough(connection Queryer, sessionID string, through uint64) (*core.TranscriptItem, error) {
 	panic("unported: mj-store/src/database/materialized.rs materialized_agent_item_through")
 }
 
@@ -192,7 +191,7 @@ func loadMaterializedTurnOutcomeFrom(path string, sessionID string) (*Materializ
 
 // readMaterializedTurnState: turn observation does not need configuration,
 // forms, or transcript bodies.
-func readMaterializedTurnState(connection sqlConnection, sessionID string) (*MaterializedTurnState, error) {
+func readMaterializedTurnState(connection Queryer, sessionID string) (*MaterializedTurnState, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_materialized_turn_state")
 }
 
@@ -251,7 +250,7 @@ func LoadMaterializedTranscriptFiltered(sessionID string, afterSeq uint64, limit
 // hydrateTerminalOutputs joins parked output for presentation without
 // changing stored bodies or page boundaries. An item it changes is replaced
 // by a changed copy (Rust's Arc::make_mut), so shared items stay unchanged.
-func hydrateTerminalOutputs(connection sqlConnection, sessionID string, items []*core.TranscriptItem) error {
+func hydrateTerminalOutputs(connection Queryer, sessionID string, items []*core.TranscriptItem) error {
 	panic("unported: mj-store/src/database/materialized.rs hydrate_terminal_outputs")
 }
 
@@ -419,7 +418,7 @@ func BackfillToolDetailsBatch(sessionID string, frontier uint64, after *ToolDeta
 	return batch.next, nil
 }
 
-func spillToolDetailBatch(connection sqlWriteConnection, dataDir string, sessionID string, frontier uint64, after *ToolDetailCursor, batchSize int) (spilledToolBatch, error) {
+func spillToolDetailBatch(connection *Connection, dataDir string, sessionID string, frontier uint64, after *ToolDetailCursor, batchSize int) (spilledToolBatch, error) {
 	panic("unported: mj-store/src/database/materialized.rs spill_tool_detail_batch")
 }
 
@@ -437,7 +436,7 @@ func LoadToolCallDetailFrom(path string, sessionID string, stableID string) (cor
 // referenced by a full tool detail, resolving their .mjtd cold frames when
 // spilled independently. A non-nil reason is Rust's inner Err: the detail is
 // unavailable for that reason.
-func hydrateFullToolTerminalOutputs(connection sqlConnection, dataDir string, sessionID string, stableID string, body *core.TranscriptBody) (*string, error) {
+func hydrateFullToolTerminalOutputs(connection Queryer, dataDir string, sessionID string, stableID string, body *core.TranscriptBody) (*string, error) {
 	panic("unported: mj-store/src/database/materialized.rs hydrate_full_tool_terminal_outputs")
 }
 
@@ -497,7 +496,7 @@ func loadTranscriptHistoryFrom(path string, sessionID string, before *core.Trans
 	panic("unported: mj-store/src/database/materialized.rs load_transcript_history_from")
 }
 
-func readTranscriptRange(connection sqlConnection, sessionID string, start uint64, before *core.TranscriptCursor, limit *int) ([]*core.TranscriptItem, error) {
+func readTranscriptRange(connection Queryer, sessionID string, start uint64, before *core.TranscriptCursor, limit *int) ([]*core.TranscriptItem, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_transcript_range")
 }
 
@@ -633,7 +632,7 @@ type materializedSessionFields struct {
 	lastTurnOutcome     *core.MaterializedTurnOutcome
 }
 
-func readMaterializedSessionFields(connection sqlConnection, sessionID string) (*materializedSessionFields, error) {
+func readMaterializedSessionFields(connection Queryer, sessionID string) (*materializedSessionFields, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_materialized_session_fields")
 }
 
@@ -641,11 +640,11 @@ func readMaterializedSessionFields(connection sqlConnection, sessionID string) (
 // non-nil limit reads only that many items from the end, walking the
 // materialized_transcript_position index backwards so the read costs the rows
 // it returns.
-func readMaterializedTranscript(connection sqlConnection, sessionID string, limit *int) ([]*core.TranscriptItem, error) {
+func readMaterializedTranscript(connection Queryer, sessionID string, limit *int) ([]*core.TranscriptItem, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_materialized_transcript")
 }
 
-func readMaterializedQueuedPrompts(connection sqlConnection, sessionID string) ([]core.MaterializedQueuedPrompt, error) {
+func readMaterializedQueuedPrompts(connection Queryer, sessionID string) ([]core.MaterializedQueuedPrompt, error) {
 	panic("unported: mj-store/src/database/materialized.rs read_materialized_queued_prompts")
 }
 
@@ -735,8 +734,7 @@ func (p *ProjectionPage) Apply(eventOrdinal uint64, previousEventDigest string, 
 // its relay page. A checkpoint can retire the actor immediately after this
 // commit.
 func (p *ProjectionPage) SetResolvedTitle(title *string) error {
-	_, err := p.transaction.ExecContext(context.Background(),
-		`UPDATE sessions SET acp_session_title = ?2
+	_, err := p.transaction.Exec(`UPDATE sessions SET acp_session_title = ?2
              WHERE session_id = ?1 AND acp_session_title IS NOT ?2`,
 		p.sessionID, title)
 	return err
@@ -763,7 +761,7 @@ func applyProjectionPageTo[T any](path string, sessionID string, fill func(*Proj
 	panic("unported: mj-store/src/database/materialized.rs apply_projection_page_to")
 }
 
-func applyProjectionPageWith[T any](connection sqlWriteConnection, sessionID string, fill func(*ProjectionPage) (T, error)) (T, error) {
+func applyProjectionPageWith[T any](connection *Connection, sessionID string, fill func(*ProjectionPage) (T, error)) (T, error) {
 	panic("unported: mj-store/src/database/materialized.rs apply_projection_page_with")
 }
 

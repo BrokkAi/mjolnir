@@ -12,7 +12,6 @@
 package store
 
 import (
-	"database/sql"
 	"sync"
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
@@ -35,7 +34,7 @@ var pending = struct {
 // observeConnection gives every writable connection the same observer. The
 // collector is active only inside an accepted writer job and only for that
 // job's database path.
-func observeConnection(connection *sql.Conn, path string) error {
+func observeConnection(connection *Connection, path string) error {
 	panic("unported: mj-store/src/database/committed.rs observe_connection")
 }
 
@@ -83,19 +82,19 @@ func (t *CommittedTurn) Equal(other *CommittedTurn) bool {
 // committedTurnRead is CommittedTurn::read: the session's turn record, nil
 // when it has no projection row. previous is the published record, whose
 // failed message is reused while the failed turn is unchanged.
-func committedTurnRead(connection Connection, id string, previous *CommittedTurn) (*CommittedTurn, error) {
+func committedTurnRead(connection Queryer, id string, previous *CommittedTurn) (*CommittedTurn, error) {
 	panic("unported: mj-store/src/database/committed.rs CommittedTurn::read")
 }
 
 // committedStateBootstrap is CommittedState::bootstrap: every published
 // record, read from one snapshot when the writer starts.
-func committedStateBootstrap(connection *sql.Conn) (*CommittedState, error) {
+func committedStateBootstrap(connection *Connection) (*CommittedState, error) {
 	panic("unported: mj-store/src/database/committed.rs CommittedState::bootstrap")
 }
 
 // finishOperation reads all changed records from one committed WAL snapshot.
 // The caller owns the sole write lane, so no later job can overtake this
 // publication. Nil when nothing published changed.
-func finishOperation(connection *sql.Conn, previous *CommittedState) (*CommittedState, error) {
+func finishOperation(connection *Connection, previous *CommittedState) (*CommittedState, error) {
 	panic("unported: mj-store/src/database/committed.rs finish_operation")
 }

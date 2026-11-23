@@ -6,17 +6,15 @@
 // full forward path.
 //
 // Every step that runs its own BEGIN IMMEDIATE ... COMMIT batch, or opens a
-// transaction, takes the *sql.Conn it must stay on.
+// transaction, takes the *Connection it must stay on.
 
 package store
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
 )
 
-func migrateToBaseline(connection *sql.Conn) error {
+func migrateToBaseline(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_to_baseline")
 }
 
@@ -24,14 +22,13 @@ func migrateToBaseline(connection *sql.Conn) error {
 // reject every newer revision. Later compatible migrations retain the floor;
 // breaking ones raise it to their revision in the same transaction as their
 // schema and ledger changes.
-func migrateCompatibilityMetadata(connection *sql.Conn) error {
-	ctx := context.Background()
-	transaction, err := connection.BeginTx(ctx, nil)
+func migrateCompatibilityMetadata(connection *Connection) error {
+	transaction, err := connection.Begin()
 	if err != nil {
 		return err
 	}
 	defer transaction.Rollback()
-	if _, err := transaction.ExecContext(ctx, `CREATE TABLE schema_compatibility (
+	if _, err := transaction.Exec(`CREATE TABLE schema_compatibility (
              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
              minimum_compatible_version INTEGER NOT NULL CHECK(minimum_compatible_version >= 30)
          ) STRICT;
@@ -47,7 +44,7 @@ func migrateCompatibilityMetadata(connection *sql.Conn) error {
 // migrateSubagentSessions is a breaking migration: older controllers do not
 // understand that a child borrows its parent's target and could destroy
 // shared resources.
-func migrateSubagentSessions(connection *sql.Conn) error {
+func migrateSubagentSessions(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_subagent_sessions")
 }
 
@@ -62,14 +59,13 @@ func migrateSubagentSessions(connection *sql.Conn) error {
 // would need another breaking migration that rewrote or deleted those rows,
 // so it is left in place. Never rewrite this migration; give any later
 // schema change a new revision.
-func migrateZcodeHarnessKind(connection *sql.Conn) error {
+func migrateZcodeHarnessKind(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_zcode_harness_kind")
 }
 
-func tableHasColumn(connection Connection, table, column string) (bool, error) {
+func tableHasColumn(connection Queryer, table, column string) (bool, error) {
 	var present bool
-	err := connection.QueryRowContext(context.Background(),
-		`SELECT EXISTS(
+	err := connection.QueryRow(`SELECT EXISTS(
                  SELECT 1 FROM pragma_table_info(?1)
                  WHERE name = ?2
              )`,
@@ -77,7 +73,7 @@ func tableHasColumn(connection Connection, table, column string) (bool, error) {
 	return present, err
 }
 
-func ensureWorkspaceSchema(connection *sql.Conn) error {
+func ensureWorkspaceSchema(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs ensure_workspace_schema")
 }
 
@@ -87,9 +83,8 @@ func ensureWorkspaceSchema(connection *sql.Conn) error {
 // frontier is a cursor every client has; a draft is text one viewer typed and
 // did not send, and it expires. Keeping them apart means the phone's
 // retention policy cannot reach a terminal client's cursor.
-func ensureClientSessionStateSchema(connection *sql.Conn) error {
-	_, err := connection.ExecContext(context.Background(),
-		`CREATE TABLE IF NOT EXISTS client_session_state (
+func ensureClientSessionStateSchema(connection *Connection) error {
+	_, err := connection.Exec(`CREATE TABLE IF NOT EXISTS client_session_state (
              client_id TEXT NOT NULL CHECK(length(trim(client_id)) > 0),
              workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
              session_id TEXT NOT NULL REFERENCES session_contexts(session_id) ON DELETE CASCADE,
@@ -105,14 +100,14 @@ func ensureClientSessionStateSchema(connection *sql.Conn) error {
 // ensureSessionContainerOverrideColumns adds the per-session container size
 // overrides. They are additive columns, so databases written before the
 // dashboard could edit them open unchanged.
-func ensureSessionContainerOverrideColumns(connection *sql.Conn) error {
+func ensureSessionContainerOverrideColumns(connection *Connection) error {
 	for _, column := range []string{"container_cpus", "container_memory"} {
 		present, err := tableHasColumn(connection, "sessions", column)
 		if err != nil {
 			return err
 		}
 		if !present {
-			if _, err := connection.ExecContext(context.Background(), fmt.Sprintf(`BEGIN IMMEDIATE;
+			if _, err := connection.Exec(fmt.Sprintf(`BEGIN IMMEDIATE;
                  ALTER TABLE sessions ADD COLUMN %s TEXT;
                  COMMIT;`, column)); err != nil {
 				return err
@@ -129,7 +124,7 @@ func ensureSessionContainerOverrideColumns(connection *sql.Conn) error {
 // alone. A database rebuilt by another build's ladder — or by a test that
 // rewinds user_version — can already carry some of these, and a bare ALTER
 // TABLE would then fail the whole open.
-func migrateTurnOutcomeColumns(connection *sql.Conn) error {
+func migrateTurnOutcomeColumns(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_turn_outcome_columns")
 }
 
@@ -137,35 +132,35 @@ func migrateTurnOutcomeColumns(connection *sql.Conn) error {
 // an additive column, so a database written before the mount editors offered
 // the option opens unchanged and its mounts keep the copy-on-write overlay
 // they were provisioned with.
-func ensureSessionMountReadOnlyColumn(connection *sql.Conn) error {
+func ensureSessionMountReadOnlyColumn(connection *Connection) error {
 	present, err := tableHasColumn(connection, "session_mounts", "read_only")
 	if err != nil || present {
 		return err
 	}
-	_, err = connection.ExecContext(context.Background(), `BEGIN IMMEDIATE;
+	_, err = connection.Exec(`BEGIN IMMEDIATE;
              ALTER TABLE session_mounts ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
              COMMIT;`)
 	return err
 }
 
-func ensureMaterializedElicitationColumn(connection *sql.Conn) error {
+func ensureMaterializedElicitationColumn(connection *Connection) error {
 	present, err := tableHasColumn(connection, "materialized_sessions", "pending_elicitations_json")
 	if err != nil || present {
 		return err
 	}
-	_, err = connection.ExecContext(context.Background(), `BEGIN IMMEDIATE;
+	_, err = connection.Exec(`BEGIN IMMEDIATE;
              ALTER TABLE materialized_sessions
                  ADD COLUMN pending_elicitations_json TEXT NOT NULL DEFAULT '[]';
              COMMIT;`)
 	return err
 }
 
-func ensureManagedWorktreeColumn(connection *sql.Conn) error {
+func ensureManagedWorktreeColumn(connection *Connection) error {
 	present, err := tableHasColumn(connection, "sessions", "managed_worktree")
 	if err != nil || present {
 		return err
 	}
-	_, err = connection.ExecContext(context.Background(), `BEGIN IMMEDIATE;
+	_, err = connection.Exec(`BEGIN IMMEDIATE;
              ALTER TABLE sessions ADD COLUMN managed_worktree TEXT;
              COMMIT;`)
 	return err
@@ -174,11 +169,11 @@ func ensureManagedWorktreeColumn(connection *sql.Conn) error {
 // ensureRelayProjectionSchema completes the relay half of the colliding v6
 // migration for databases first opened by master, whose v6 contained only
 // managed_worktree.
-func ensureRelayProjectionSchema(connection *sql.Conn) error {
+func ensureRelayProjectionSchema(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs ensure_relay_projection_schema")
 }
 
-func migrateDestroyingSessionState(connection *sql.Conn) error {
+func migrateDestroyingSessionState(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_destroying_session_state")
 }
 
@@ -187,19 +182,19 @@ func migrateDestroyingSessionState(connection *sql.Conn) error {
 // wider harness list. Foreign keys are disabled only around the rebuild
 // transaction; every child continues to reference the replacement table by
 // the same name.
-func migrateGrokHarnessKind(connection *sql.Conn) error {
+func migrateGrokHarnessKind(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_grok_harness_kind")
 }
 
-func migrateStoppedSessionState(connection *sql.Conn) error {
+func migrateStoppedSessionState(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_stopped_session_state")
 }
 
-func migrateMuseHarnessKind(connection *sql.Conn) error {
+func migrateMuseHarnessKind(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_muse_harness_kind")
 }
 
-func migrateDeepseekHarnessKind(connection *sql.Conn) error {
+func migrateDeepseekHarnessKind(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs migrate_deepseek_harness_kind")
 }
 
@@ -207,21 +202,21 @@ func migrateDeepseekHarnessKind(connection *sql.Conn) error {
 // Added as a structural guard rather than a new schema version so databases
 // written by either development line converge, matching
 // ensureManagedWorktreeColumn.
-func ensureSessionDraftInputColumn(connection *sql.Conn) error {
+func ensureSessionDraftInputColumn(connection *Connection) error {
 	present, err := tableHasColumn(connection, "sessions", "draft_input")
 	if err != nil || present {
 		return err
 	}
-	_, err = connection.ExecContext(context.Background(), `BEGIN IMMEDIATE;
+	_, err = connection.Exec(`BEGIN IMMEDIATE;
              ALTER TABLE sessions ADD COLUMN draft_input TEXT NOT NULL DEFAULT '';
              COMMIT;`)
 	return err
 }
 
-func ensureProjectionDigestColumn(connection *sql.Conn) error {
+func ensureProjectionDigestColumn(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs ensure_projection_digest_column")
 }
 
-func ensureAPIEventsSchema(connection *sql.Conn) error {
+func ensureAPIEventsSchema(connection *Connection) error {
 	panic("unported: mj-store/src/database/legacy_schema.rs ensure_api_events_schema")
 }

@@ -3,7 +3,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"math"
@@ -12,11 +11,11 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
-func recordChildAccounting(connection Connection, child *core.SubagentRecord, category *string) error {
+func recordChildAccounting(connection Queryer, child *core.SubagentRecord, category *string) error {
 	panic("unported: mj-store/src/database/usage.rs record_child_accounting")
 }
 
-func recordTurnSelection(connection Connection, session, command string, configuration *core.SessionConfiguration) error {
+func recordTurnSelection(connection Queryer, session, command string, configuration *core.SessionConfiguration) error {
 	panic("unported: mj-store/src/database/usage.rs record_turn_selection")
 }
 
@@ -24,10 +23,9 @@ func LoadSessionUsage(sessionID string, afterSeq uint64, limit int) (*core.Usage
 	return loadSessionUsageFrom(DatabasePath(), sessionID, afterSeq, limit)
 }
 
-func contextExists(connection Connection, session string) (bool, error) {
+func contextExists(connection Queryer, session string) (bool, error) {
 	var exists bool
-	err := connection.QueryRowContext(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM session_contexts WHERE session_id=?1)", session).Scan(&exists)
+	err := connection.QueryRow("SELECT EXISTS(SELECT 1 FROM session_contexts WHERE session_id=?1)", session).Scan(&exists)
 	return exists, err
 }
 
@@ -35,10 +33,9 @@ func loadSessionUsageFrom(path, sessionID string, afterSeq uint64, limit int) (*
 	panic("unported: mj-store/src/database/usage.rs load_session_usage_from")
 }
 
-func selectionFor(connection Connection, session, command string) (core.UsageSelection, error) {
+func selectionFor(connection Queryer, session, command string) (core.UsageSelection, error) {
 	var selection core.UsageSelection
-	err := connection.QueryRowContext(context.Background(),
-		"SELECT model, effort FROM session_turn_selections WHERE session_id=?1 AND command_id=?2",
+	err := connection.QueryRow("SELECT model, effort FROM session_turn_selections WHERE session_id=?1 AND command_id=?2",
 		session, command).Scan(&selection.Model, &selection.Effort)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.UsageSelection{}, nil
@@ -137,7 +134,7 @@ func attribute(usage *core.TokenUsage, selected core.UsageSelection, groups *usa
 	panic("unported: mj-store/src/database/usage.rs attribute")
 }
 
-func sessionSummary(connection Connection, session string) (core.UsageSummary, error) {
+func sessionSummary(connection Queryer, session string) (core.UsageSummary, error) {
 	panic("unported: mj-store/src/database/usage.rs session_summary")
 }
 
@@ -207,7 +204,7 @@ func LoadRecentPlacementsSinceFrom(path string, sinceEpochSeconds int64) ([]Rece
 	panic("unported: mj-store/src/database/usage.rs load_recent_placements_since_from")
 }
 
-func recentPlacementsSince(connection Connection, sinceEpochSeconds int64) ([]RecentPlacementRow, error) {
+func recentPlacementsSince(connection Queryer, sinceEpochSeconds int64) ([]RecentPlacementRow, error) {
 	panic("unported: mj-store/src/database/usage.rs recent_placements_since")
 }
 
@@ -222,6 +219,6 @@ func LoadCategoryBurnObservationsFrom(path string, minSamples, maxPerCategory in
 	panic("unported: mj-store/src/database/usage.rs load_category_burn_observations_from")
 }
 
-func categoryBurnObservations(connection Connection, minSamples, maxPerCategory int) (map[string]CategoryBurnObservation, error) {
+func categoryBurnObservations(connection Queryer, minSamples, maxPerCategory int) (map[string]CategoryBurnObservation, error) {
 	panic("unported: mj-store/src/database/usage.rs category_burn_observations")
 }

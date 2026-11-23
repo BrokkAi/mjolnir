@@ -9,8 +9,6 @@ package store
 
 import (
 	"bytes"
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,22 +23,6 @@ import (
 )
 
 const schemaVersion int64 = 153
-
-// Connection is rusqlite's Connection as the store's functions take it: one
-// SQLite connection, or a transaction open on one (a rusqlite Transaction
-// dereferences to its Connection, so a Rust function taking &Connection
-// accepts both). *sql.Conn and *sql.Tx satisfy it.
-//
-// A function that opens its own transaction takes *sql.Conn instead (Rust's
-// &mut Connection, or an unchecked_transaction on &Connection, which cannot
-// nest), and one that must run inside its caller's transaction takes *sql.Tx
-// (Rust's &Transaction).
-type Connection interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
-}
 
 // TestSession is a fully populated stopped session record for tests.
 func TestSession(id, bundle string) core.SessionRecord {

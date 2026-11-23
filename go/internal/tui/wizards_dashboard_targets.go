@@ -20,13 +20,6 @@ type SandboxOffer struct {
 	alternative *int
 }
 
-// wizardProfile is one profile a wizard offers and its harness: Rust's
-// `(&String, HarnessKind)` pairs from compatible_profiles.
-type wizardProfile struct {
-	id   string
-	kind core.HarnessKind
-}
-
 func (d *DashboardState) sandboxOffer(wizard WizardDraft) *SandboxOffer {
 	panic("unported: mj-tui/src/wizards/dashboard/targets.rs DashboardState::sandbox_offer")
 }
@@ -74,7 +67,7 @@ func (d *DashboardState) targetRow(target int) int {
 // resumeWizardProfiles is the profiles the resume wizard offers. A record's
 // resume is limited to the profiles compatible with it; an archived session
 // has no record, so every enabled profile can carry its summary.
-func (d *DashboardState) resumeWizardProfiles(wizard *ResumeWizard) []wizardProfile {
+func (d *DashboardState) resumeWizardProfiles(wizard *ResumeWizard) []CompatibleProfile {
 	panic("unported: mj-tui/src/wizards/dashboard/targets.rs DashboardState::resume_wizard_profiles")
 }
 
@@ -140,8 +133,8 @@ func (d *DashboardState) prepareTarget(targetIndex int, previous core.SessionRes
 }
 
 // hostLimits is the logical cores and total memory of the host that runs
-// targetID, when its capacity reading has arrived.
-func (d *DashboardState) hostLimits(targetID string) (cpus uint64, memoryBytes uint64, ok bool) {
+// targetID, when its capacity reading has arrived; nil before then.
+func (d *DashboardState) hostLimits(targetID string) *HostLimits {
 	panic("unported: mj-tui/src/wizards/dashboard/targets.rs DashboardState::host_limits")
 }
 

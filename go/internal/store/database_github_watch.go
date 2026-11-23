@@ -360,7 +360,7 @@ func scanGithubHistoryFrom[D any, S transcript.HistorySink[D]](path string, sess
 // githubHistoryRows fetches row bodies by rowid for the scan's last pass
 // (the Rows type local to scan_github_history_from in Rust).
 type githubHistoryRows struct {
-	connection sqlConnection
+	connection Queryer
 	check      func() error
 }
 
