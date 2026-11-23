@@ -382,4 +382,64 @@ mod tests {
         assert!(format!("{error:#}").contains("remote unavailable"));
         assert_eq!(executor.requests.get(), 1);
     }
+
+    #[test]
+    fn preflight_normalizes_local_ssh_and_https_github_urls_to_one_form() {
+        let local_repo = committed_repository();
+        test_git(
+            local_repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:BrokkAi/mjolnir.git",
+            ],
+        );
+        let mut config = resume_compatibility_config();
+        config.bundles.insert(
+            "bundle".into(),
+            ProjectBundle {
+                primary_repo: "mjolnir".into(),
+                repositories: vec![
+                    ProjectRepository {
+                        id: "mjolnir".into(),
+                        github: None,
+                        local: Some(local_repo.path().to_path_buf()),
+                        destination: "mjolnir".into(),
+                        git_ref: None,
+                        mbx_namespace: None,
+                    },
+                    ProjectRepository {
+                        id: "sessionwiki".into(),
+                        github: Some("https://github.com/jbellis/sessionwiki".into()),
+                        local: None,
+                        destination: "sessionwiki".into(),
+                        git_ref: None,
+                        mbx_namespace: None,
+                    },
+                ],
+            },
+        );
+        let executor = RemoteExecutor::default();
+        let result = config_only_controller(config)
+            .preflight_new_session("bundle", "podman", None, &executor)
+            .unwrap();
+        assert_eq!(result.remote_repositories.len(), 2);
+        assert_eq!(
+            result.remote_repositories[0].fetch_url,
+            "https://github.com/BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            result.remote_repositories[0].push_urls,
+            ["https://github.com/BrokkAi/mjolnir.git"]
+        );
+        assert_eq!(
+            result.remote_repositories[1].fetch_url,
+            "https://github.com/jbellis/sessionwiki.git"
+        );
+        assert_eq!(
+            result.remote_repositories[1].push_urls,
+            ["https://github.com/jbellis/sessionwiki.git"]
+        );
+    }
 }

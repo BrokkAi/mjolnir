@@ -542,8 +542,7 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 #[test]
 fn directory_discovery_keeps_the_saved_transport_for_an_existing_identity() {
     let mut config = Config::default();
-    let saved =
-        create_quick_bundle_in_config(&mut config, "ssh://git@github.com/BrokkAi/hel.git").unwrap();
+    let saved = create_quick_bundle_in_config(&mut config, "BrokkAi/hel").unwrap();
     let before = config.clone();
     let discovered = add_project_sources(
         &mut config,
@@ -553,6 +552,18 @@ fn directory_discovery_keeps_the_saved_transport_for_an_existing_identity() {
     .unwrap();
     assert_eq!(discovered, saved);
     assert_eq!(config, before);
+
+    let custom_ssh =
+        create_quick_bundle_in_config(&mut config, "ssh://git@git.example/BrokkAi/hel.git")
+            .unwrap();
+    assert_eq!(
+        config.bundles[&custom_ssh]
+            .primary()
+            .unwrap()
+            .github
+            .as_deref(),
+        Some("ssh://git@git.example/BrokkAi/hel.git")
+    );
 }
 
 // Hard-won: 85ee0a63d: matching a network identity silently reused a different SSH login.
@@ -644,7 +655,7 @@ fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     assert!(
         resolved
             .push_urls
-            .contains(&"git@github.com:feature-owner/app.git".to_owned())
+            .contains(&"https://github.com/feature-owner/app.git".to_owned())
     );
 }
 

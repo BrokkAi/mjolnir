@@ -1558,7 +1558,13 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
         if matches!(source, std::borrow::Cow::Owned(_)) {
             tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
         }
-        (Some(source.into_owned()), None)
+        (
+            Some(mj_core::remote_git::normalize_project_source(
+                &source,
+                mj_core::remote_git::Shorthand::Allowed,
+            )),
+            None,
+        )
     };
     Ok(ProjectRepository {
         id: id.to_owned(),
@@ -1688,7 +1694,12 @@ fn fetch_source_commit(
                     "https://github.com/{}/{}.git",
                     github.owner, github.repository
                 )
-            } else if github.spelling == mj_core::remote_git::GithubSpelling::Shorthand {
+            } else if matches!(
+                github.spelling,
+                mj_core::remote_git::GithubSpelling::Shorthand
+                    | mj_core::remote_git::GithubSpelling::Scp
+                    | mj_core::remote_git::GithubSpelling::Ssh
+            ) {
                 format!("git@github.com:{}/{}.git", github.owner, github.repository)
             } else {
                 expanded

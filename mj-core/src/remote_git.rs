@@ -90,6 +90,19 @@ pub struct NetworkGitSource {
     pub push_urls: Vec<String>,
 }
 
+impl NetworkGitSource {
+    pub fn normalize(&mut self) {
+        self.fetch_url = normalize_network_url(&self.fetch_url, Shorthand::Rejected);
+        let mut seen = std::collections::HashSet::new();
+        self.push_urls = self
+            .push_urls
+            .iter()
+            .map(|url| normalize_network_url(url, Shorthand::Rejected))
+            .filter(|url| seen.insert(url.clone()))
+            .collect();
+    }
+}
+
 /// Resolve a configured repository without contacting its server.
 ///
 /// GitHub's `owner/repository` shorthand is expanded to the HTTPS clone URL.
@@ -472,12 +485,15 @@ pub fn display_url(url: &str) -> String {
 }
 
 pub fn expand_github_source(source: &str) -> Result<String> {
+    let canonical = canonical_github_https_url(source, Shorthand::Allowed);
     let source = source.trim();
     let shorthand = !source.contains("://")
         && !source.contains('@')
         && !source.contains(':')
         && source.contains('/');
-    let expanded = if shorthand {
+    let expanded = if let Some(canonical) = canonical {
+        canonical
+    } else if shorthand {
         let (owner, repository) = github_owner_repo(source)
             .with_context(|| format!("invalid GitHub owner/repository {source:?}"))?;
         format!("https://github.com/{owner}/{repository}.git")
@@ -491,6 +507,33 @@ pub fn expand_github_source(source: &str) -> Result<String> {
         )
     })?;
     Ok(expanded)
+}
+
+pub fn canonical_github_https_url(source: &str, shorthand: Shorthand) -> Option<String> {
+    let remote = parse_github_remote(source, shorthand)?;
+    remote.is_default_endpoint().then(|| {
+        format!(
+            "https://github.com/{}/{}.git",
+            remote.owner, remote.repository
+        )
+    })
+}
+
+pub fn normalize_network_url(source: &str, shorthand: Shorthand) -> String {
+    canonical_github_https_url(source, shorthand).unwrap_or_else(|| source.trim().to_owned())
+}
+
+pub fn normalize_project_source(source: &str, shorthand: Shorthand) -> String {
+    match parse_github_remote(source, shorthand).filter(|remote| remote.is_default_endpoint()) {
+        Some(remote) if remote.spelling == GithubSpelling::Shorthand => {
+            format!("{}/{}", remote.owner, remote.repository)
+        }
+        Some(remote) => format!(
+            "https://github.com/{}/{}.git",
+            remote.owner, remote.repository
+        ),
+        None => source.trim().to_owned(),
+    }
 }
 
 /// Whether [`parse_github_remote`] accepts a bare `owner/repository`.
@@ -819,6 +862,43 @@ fn sanitize_diagnostic(text: &str, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_sources_normalize_without_collapsing_alternate_routes() {
+        assert_eq!(
+            expand_github_source("git@github.com:BrokkAi/mjolnir.git").unwrap(),
+            "https://github.com/BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            normalize_project_source("https://github.com/BrokkAi/mjolnir", Shorthand::Allowed),
+            "https://github.com/BrokkAi/mjolnir.git"
+        );
+        assert_eq!(
+            normalize_project_source("BrokkAi/mjolnir.git", Shorthand::Allowed),
+            "BrokkAi/mjolnir"
+        );
+        let mut source = NetworkGitSource {
+            fetch_url: "git@github.com:BrokkAi/mjolnir.git".into(),
+            push_urls: vec![
+                "https://github.com/BrokkAi/mjolnir".into(),
+                "git@github.com:BrokkAi/mjolnir.git".into(),
+                "ssh://git@ssh.github.com:443/BrokkAi/mjolnir.git".into(),
+                "ssh://git@github.com:22/BrokkAi/mjolnir.git".into(),
+                "https://git.example/repo".into(),
+            ],
+        };
+        source.normalize();
+        assert_eq!(source.fetch_url, "https://github.com/BrokkAi/mjolnir.git");
+        assert_eq!(
+            source.push_urls,
+            vec![
+                "https://github.com/BrokkAi/mjolnir.git",
+                "ssh://git@ssh.github.com:443/BrokkAi/mjolnir.git",
+                "ssh://git@github.com:22/BrokkAi/mjolnir.git",
+                "https://git.example/repo"
+            ]
+        );
+    }
 
     #[test]
     fn github_shorthand_expands_to_https() {

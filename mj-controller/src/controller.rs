@@ -559,13 +559,15 @@ fn interpret_network_source(
     if matches!(source, std::borrow::Cow::Owned(_)) {
         tracing::warn!("{}", mj_core::remote_git::HTTP_USERINFO_REMOVED);
     }
-    let identity = RepositoryIdentity::from_remote_with(&source, shorthand)
+    let normalized = mj_core::remote_git::normalize_project_source(&source, shorthand);
+    let identity = RepositoryIdentity::from_remote_with(&normalized, shorthand)
         .context("Git source has no repository identity")?;
     Ok(InterpretedRepositorySource {
-        display_name: display_url(&source),
-        name: mj_core::remote_git::project_source_name(&source).unwrap_or_else(|| identity.name()),
+        display_name: display_url(&normalized),
+        name: mj_core::remote_git::project_source_name(&normalized)
+            .unwrap_or_else(|| identity.name()),
         identity,
-        kind: RepositorySourceKind::Network(source.into_owned()),
+        kind: RepositorySourceKind::Network(normalized),
     })
 }
 

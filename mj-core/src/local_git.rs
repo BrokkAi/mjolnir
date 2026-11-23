@@ -557,7 +557,10 @@ pub fn discover_project_source(
     };
     let source = crate::remote_git::project_source(&url, crate::remote_git::Shorthand::Rejected)?;
     let stripped = matches!(source, std::borrow::Cow::Owned(_));
-    Ok((source.into_owned(), stripped))
+    Ok((
+        crate::remote_git::normalize_network_url(&source, crate::remote_git::Shorthand::Rejected),
+        stripped,
+    ))
 }
 
 fn default_fetch_remote(remotes: &[String]) -> Result<String> {
@@ -661,10 +664,12 @@ fn resolve_local_repository_with_remote(
             )
         })?;
     }
-    Ok(NetworkGitSource {
+    let mut source = NetworkGitSource {
         fetch_url,
         push_urls,
-    })
+    };
+    source.normalize();
+    Ok(source)
 }
 
 fn git_command(path: &Path, args: impl IntoIterator<Item = impl Into<String>>) -> CommandSpec {

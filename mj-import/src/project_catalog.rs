@@ -492,6 +492,7 @@ impl Catalog {
         let mut view = database::read_project_catalog()?;
         for saved in &mut view.projects {
             for source in saved.project.network_sources.values_mut() {
+                source.normalize();
                 source.fetch_url = mj_core::remote_git::display_url(&source.fetch_url);
                 source.push_urls = source
                     .push_urls
