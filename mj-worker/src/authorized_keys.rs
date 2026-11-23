@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use tempfile::NamedTempFile;
 
 /// Comment prefix identifying a Mjolnir Move transfer key.
@@ -270,7 +270,7 @@ fn set_file_mode_0600(file: &File, path: &Path) -> Result<()> {
 
 /// Exclusive `flock`-backed file lock that releases on drop.
 struct ExclusiveFileLock {
-    file: File,
+    _file: File,
     _path: PathBuf,
 }
 
@@ -296,11 +296,11 @@ impl ExclusiveFileLock {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                bail!("flock {} failed: {err}", path.display());
+                anyhow::bail!("flock {} failed: {err}", path.display());
             }
         }
         Ok(Self {
-            file,
+            _file: file,
             _path: path.to_path_buf(),
         })
     }
@@ -311,9 +311,9 @@ impl Drop for ExclusiveFileLock {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            // SAFETY: `self.file` is still open until after `drop` finishes.
+            // SAFETY: `self._file` is still open until after `drop` finishes.
             unsafe {
-                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
             }
         }
     }
