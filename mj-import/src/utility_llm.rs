@@ -155,7 +155,6 @@ impl UtilityLlmRuntime {
         };
         let mut candidates = Vec::new();
         let mut reasons = Vec::new();
-        let mut missing_credentials = Vec::new();
         let mut failure: Option<UtilityResolveKind> = None;
         let mut record_failure = |kind: UtilityResolveKind| {
             failure = Some(match failure {
@@ -177,7 +176,8 @@ impl UtilityLlmRuntime {
             let backend = match backend {
                 Ok(Some(backend)) => backend,
                 Ok(None) => {
-                    missing_credentials.push(format!("{profile_id}: credentials are unavailable"));
+                    record_failure(UtilityResolveKind::NoUtilityModel);
+                    reasons.push(format!("{profile_id}: credentials are unavailable"));
                     continue;
                 }
                 Err(error) => {
@@ -238,14 +238,8 @@ impl UtilityLlmRuntime {
         }
         candidates.sort_by(candidate_order);
         if candidates.is_empty() {
-            let kind = match failure {
-                Some(kind) => kind,
-                None if !missing_credentials.is_empty() => UtilityResolveKind::NoUtilityModel,
-                None => UtilityResolveKind::SelectionFailed,
-            };
-            reasons.extend(missing_credentials);
             return Err(UtilityResolveError {
-                kind,
+                kind: failure.unwrap_or(UtilityResolveKind::SelectionFailed),
                 detail: format!("no usable utility model: {}", reasons.join("; ")),
             }
             .into());
@@ -1101,6 +1095,10 @@ mod tests {
             );
             config.profiles.insert(id.into(), profile);
         }
+        config.profiles.insert(
+            "unauthenticated".into(),
+            HarnessProfile::new(HarnessKind::Kimi, root.path().join("unauthenticated")),
+        );
 
         let report = ProfileQuota {
             paid_credits: None,
@@ -1130,19 +1128,24 @@ mod tests {
         for (ids, expected) in [
             (
                 &["exhausted", "unsupported", "broken"][..],
-                DaemonGuardianFailure::UtilitySelectionFailed,
+                Some(DaemonGuardianFailure::UtilitySelectionFailed),
             ),
             (
+                &["exhausted", "unauthenticated"][..],
+                Some(DaemonGuardianFailure::UtilitySelectionFailed),
+            ),
+            (&["unauthenticated"][..], None),
+            (
                 &["exhausted"][..],
-                DaemonGuardianFailure::UtilityQuotaExhausted,
+                Some(DaemonGuardianFailure::UtilityQuotaExhausted),
             ),
             (
                 &["unsupported"][..],
-                DaemonGuardianFailure::UtilityNoSupportedModel,
+                Some(DaemonGuardianFailure::UtilityNoSupportedModel),
             ),
             (
                 &["broken"][..],
-                DaemonGuardianFailure::UtilityDiscoveryFailed,
+                Some(DaemonGuardianFailure::UtilityDiscoveryFailed),
             ),
         ] {
             let mut config = config.clone();
@@ -1159,6 +1162,13 @@ mod tests {
                 assert!(error.to_string().contains("SECRET_DATA"), "{error:#}");
             }
             let outcome = guardian_selection_failure(error);
+            let Some(expected) = expected else {
+                assert!(
+                    matches!(outcome, GuardianUtilityOutcome::NoUtilityModel { .. }),
+                    "expected ACP fallback for missing credentials alone, received {outcome:?}"
+                );
+                continue;
+            };
             let GuardianUtilityOutcome::Failed { error } = outcome else {
                 panic!("expected a Guardian failure, received {outcome:?}");
             };
