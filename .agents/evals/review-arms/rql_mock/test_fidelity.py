@@ -522,14 +522,15 @@ class TerraOutput(unittest.TestCase):
                 "coverage": {"complete": True, "open": []}, "excluded": [],
             }).encode()
 
-        good, bad = answer(operand), answer({**operand, "extra": True})
+        good, bad, missing = answer(operand), answer({**operand, "extra": True}), None
         # Normalizes cleanly but fails answer validation with three errors.
         staged = json.dumps({
             "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": operand}}],
             "coverage": {"complete": True, "open": [{"reason": 3}, {"reason": 4}]}, "excluded": [],
         }).encode()
         errors_named = {bad: "written evidence must contain only site and verbatim",
-                        staged: "coverage.complete must be true exactly when coverage.open is empty"}
+                        staged: "coverage.complete must be true exactly when coverage.open is empty",
+                        missing: "output.json was not written"}
         orphan = "c" * 40
         model_usage = fidelity_live.model_usage
         sessions, checks, destroyed = {}, [], []
@@ -556,7 +557,12 @@ class TerraOutput(unittest.TestCase):
             if operation == "put-file":
                 return b""
             if operation == "fetch":
-                return schedule[int(sid[0]) - 1][len(turns) - 1]
+                if "--ls" in args:
+                    return json.dumps({"path": args[3], "entries": []}).encode()
+                payload = schedule[int(sid[0]) - 1][len(turns) - 1]
+                if payload is missing:
+                    raise RuntimeError("mj fetch failed: output.json does not exist on the session's target")
+                return payload
             self.assertEqual(operation, "destroy")
             destroyed.append(sid)
             return json.dumps({"session_id": sid, "accepted": True}).encode()
@@ -617,7 +623,15 @@ class TerraOutput(unittest.TestCase):
             ):
                 stack.enter_context(patch.object(target, name, new=fake))
             # Hard-won: 2da79e863: fixing normalization exposed more validation errors and counted as a stall
-            for schedule in (((bad, good),), ((bad, staged, good),), ((bad, bad), (good,)), ((bad, bad), (bad, bad))):
+            # Hard-won: 1a919b31c: Terra withheld output.json instead of enumerating, crashing turn 1 without repair
+            for schedule in (
+                ((bad, good),),
+                ((missing, good),),
+                ((bad, staged, good),),
+                ((bad, bad), (good,)),
+                ((missing, missing), (good,)),
+                ((bad, bad), (bad, bad)),
+            ):
                 with self.subTest(rounds=[len(turns) for turns in schedule]), TemporaryDirectory() as root:
                     sessions.clear()
                     checks.clear()
