@@ -182,15 +182,6 @@ pub(super) struct ReadReceiptPersisted {
     pub(super) reply: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
 }
 
-pub(super) struct BundleCreated {
-    pub(super) result: std::result::Result<
-        mj_controller::controller::QuickBundleCreation,
-        mj_controller::controller::QuickBundleFailure,
-    >,
-    pub(super) reply:
-        tokio::sync::oneshot::Sender<std::result::Result<String, crate::server::BundleFailure>>,
-}
-
 pub(super) struct MovePrepared {
     pub(super) result:
         std::result::Result<mj_core::state::MovePreparation, Option<mj_core::refusal::Refusal>>,

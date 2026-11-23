@@ -72,7 +72,7 @@ impl RuntimeState {
             .clone()
     }
 
-    pub(super) fn cancel_workspace_close(&self, workspace_id: &str) -> Result<()> {
+    pub(crate) fn cancel_workspace_close(&self, workspace_id: &str) -> Result<()> {
         let closes = self
             .workspace_closes
             .lock()

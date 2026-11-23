@@ -2174,12 +2174,7 @@ async fn the_daemon_rejects_a_client_one_protocol_behind_before_dispatch() {
             protocol_version: PROTOCOL_VERSION - 1,
             request_id: 43,
             token: metadata.token,
-            action: DaemonAction::PersistReadReceipt {
-                client_id: "client-a".into(),
-                workspace_id: "workspace-a".into(),
-                session_id: "session-a".into(),
-                through: 7,
-            },
+            action: DaemonAction::Configuration,
         },
     )
     .await
@@ -2481,8 +2476,8 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
 // Hard-won: 848b4781f: direct CLI removal saved config before failing without the daemon database writer.
 #[cfg(unix)]
 #[tokio::test]
-async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_feed() {
-    const NAME: &str = "remove_project_rpc_removes_missing_directory_from_config_and_runtime_feed";
+async fn remove_project_http_removes_missing_directory_from_config_and_runtime_feed() {
+    const NAME: &str = "remove_project_http_removes_missing_directory_from_config_and_runtime_feed";
     const CHILD: &str = "MJ_TEST_REMOVE_MISSING_PROJECT_RPC";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
@@ -2559,24 +2554,9 @@ async fn remove_project_rpc_removes_missing_directory_from_config_and_runtime_fe
             .contains_key(bundle_id)
     );
 
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server_state = state.clone();
-    let server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(
-            stream,
-            test_metadata(address),
-            server_state,
-            CancellationToken::new(),
-        )
-        .await
-    });
-    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
-        .await
-        .unwrap();
-    client.remove_project(bundle_id.into()).await.unwrap();
-    drop(client);
+    let (http, shutdown, server) = start_test_http_api(state.clone()).await;
+    http.remove_project(bundle_id.into()).await.unwrap();
+    shutdown.cancel();
     server.await.unwrap().unwrap();
 
     let cursor = replica.cursor.clone();
@@ -4816,10 +4796,17 @@ fn insert_starting_session(state: &Arc<RuntimeState>, draft: &str) {
 }
 
 fn startup_prompt_test_store(name: &str) -> Option<mj_controller::database::DatabaseWriterOwner> {
+    isolated_test_store(module_path!(), name)
+}
+
+pub(crate) fn isolated_test_store(
+    module: &str,
+    name: &str,
+) -> Option<mj_controller::database::DatabaseWriterOwner> {
     if std::env::var_os("MJ_TEST_DURABLE_STARTUP").is_none() {
         let root = tempfile::tempdir().unwrap();
         mj_controller::controller::test_support::IsolatedTest::new(
-            mj_controller::controller::test_support::test_name(module_path!(), name),
+            mj_controller::controller::test_support::test_name(module, name),
         )
         .env("MJ_TEST_DURABLE_STARTUP", "1")
         .isolated_store(root.path())
@@ -7168,6 +7155,46 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     );
 }
 
+pub(crate) async fn start_test_http_api(
+    state: Arc<RuntimeState>,
+) -> (
+    mj_client::http::HttpDaemonClient,
+    CancellationToken,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let remote = spawn_remote_session_manager().unwrap();
+    let (updates, delegation_updates) = mj_controller::session_manager::delegation_channel();
+    let shutdown = CancellationToken::new();
+    let (services, delegation) = super::delegation::spawn(
+        state.clone(),
+        remote.control.clone(),
+        delegation_updates,
+        shutdown.clone(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let token = "direct-test-token";
+    let (_options, task) = crate::server_runtime::start_api(
+        listener,
+        token.into(),
+        shutdown.clone(),
+        remote.control.clone(),
+        state,
+        services,
+    )
+    .await
+    .unwrap();
+    let server = mj_core::runtime::spawn(async move {
+        let _remote = remote;
+        let _updates = updates;
+        let result = task.await?;
+        delegation.await??;
+        result
+    });
+    let http = mj_client::http::HttpDaemonClient::new(format!("http://{address}"), token).unwrap();
+    (http, shutdown, server)
+}
+
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
 pub(crate) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
@@ -8100,20 +8127,7 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     drop(admission);
     // An unrelated workspace's resume must not prevent this close.
     let _other_resume = state.workspace_resume_gate("other").read_owned().await;
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    assert!(matches!(
-        handle_action(
-            DaemonAction::DeleteWorkspace {
-                workspace_id: workspace.id.clone(),
-            },
-            &metadata,
-            &state,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap(),
-        DaemonReply::Done
-    ));
+    state.close_workspace(workspace.id.clone()).await.unwrap();
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[&history.id].state, SessionState::Stopped);
     assert!(stored.sessions[&history.id].draft_input.is_empty());
@@ -8163,33 +8177,15 @@ async fn workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_dele
     }
     let _writer = mj_controller::database::install_isolated_test_writer();
     let state = test_runtime_state_loading_the_store();
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    let cancellation = CancellationToken::new();
-    let DaemonReply::Workspace(workspace) = handle_action(
-        DaemonAction::CreateWorkspace {
-            name: "Before".into(),
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .unwrap() else {
-        panic!("create did not return the workspace");
-    };
+    let (http, shutdown, server) = start_test_http_api(state.clone()).await;
+    let workspace = http.create_workspace("Before".into()).await.unwrap();
     assert_eq!(state.workspaces().borrow()[0].id, workspace.id);
 
-    handle_action(
-        DaemonAction::RenameWorkspace {
-            workspace_id: workspace.id.clone(),
-            name: "After".into(),
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .unwrap();
+    http.rename_workspace(workspace.id.clone(), "After".into())
+        .await
+        .unwrap();
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
     assert_eq!(state.workspaces().borrow()[0].name, "After");
     assert_eq!(
         state
@@ -8418,10 +8414,12 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         .unwrap();
     drop(started);
     let cancellable_baseline = cancellable_acceptance.receiver_count();
+    let (http, shutdown, server) = start_test_http_api(state.clone()).await;
+    let http = Arc::new(http);
     let mut closing = mj_core::runtime::spawn({
-        let state = state.clone();
+        let http = http.clone();
         let id = workspace.id.clone();
-        async move { state.close_workspace(id).await }
+        async move { http.close_workspace(id).await }
     });
     // A fresh stop already sets its close marker. Only an additional acceptance
     // receiver proves that the workspace close has joined that existing stop.
@@ -8435,7 +8433,9 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             }
         }) => joined.expect("the workspace close never joined both stops"),
     }
-    state.cancel_workspace_close(&workspace.id).unwrap();
+    http.cancel_workspace_close(workspace.id.clone())
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
             .owner()
@@ -8459,7 +8459,10 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
         .unwrap()
         .unwrap_err();
     assert_eq!(
-        format!("{error:#}"),
+        error
+            .downcast_ref::<mj_client::http::HttpApiError>()
+            .unwrap()
+            .message,
         "Workspace deletion cancelled; workspace and drafts retained. Completed suspensions were not undone."
     );
     assert!(
@@ -8474,6 +8477,8 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             .len(),
         1
     );
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
 }
 
 // Hard-won: 1b13e4a69: reopening a dashboard before the config refresh restored a stale sidebar size.
@@ -15585,19 +15590,6 @@ async fn daemon_api_exchange() {
         DaemonAction::CheckProjectDirectories {
             paths: vec![project.clone(), server_root.as_path().join("absent")],
         },
-        DaemonAction::CompletePath {
-            host: mj_core::path_completion::CompletionHost::Local,
-            // Typed with this host's separator: on Windows the root is a
-            // verbatim `\\?\` path, which reads `/` as part of a name.
-            prefix: server_root.join("server-").display().to_string(),
-            kind: mj_core::path_completion::CompletionKind::Directories,
-        },
-        DaemonAction::DiscoverProjects {
-            request: mj_core::project_picker::ProjectDiscoveryRequest::Directory {
-                path: server_root.as_path().to_string_lossy().into_owned(),
-                filter: String::new(),
-            },
-        },
         DaemonAction::ResolveSetupPath {
             machine: mj_core::config::Machine::Local { build_cache: None },
             source: project.clone(),
@@ -15621,17 +15613,6 @@ async fn daemon_api_exchange() {
         DaemonAction::ValidateProjectDirectory {
             target_id: "local".into(),
             directory: project.clone(),
-        },
-        DaemonAction::PreflightNewSession {
-            request: NewSessionPreflightRequest {
-                profile_id: "agent".into(),
-                workspace_id: String::new(),
-                bundle_id: String::new(),
-                target_id: "local".into(),
-                project_directory: Some(project.clone()),
-                additional_mounts: Vec::new(),
-                remote_repairs: Vec::new(),
-            },
         },
         DaemonAction::ResolveContainerPath {
             target_id: "missing".into(),
@@ -15773,6 +15754,11 @@ fn remove_host_docker(value: &mut serde_json::Value) {
 #[cfg(unix)]
 #[tokio::test]
 async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
+    let Some(_writer) =
+        startup_prompt_test_store("superseded_machine_completion_closes_connection_and_reaps_ssh")
+    else {
+        return;
+    };
     let root = tempfile::tempdir().unwrap();
     let started = root.path().join("started");
     let script = root.path().join("proxy.sh");
@@ -15784,19 +15770,7 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
         ),
     )
     .unwrap();
-    let state = test_runtime_state();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let metadata = test_metadata(listener.local_addr().unwrap());
-    let server_metadata = metadata.clone();
-    let shutdown = CancellationToken::new();
-    let server_shutdown = shutdown.clone();
-    let mut server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(stream, server_metadata, state, server_shutdown)
-            .await
-            .unwrap();
-    });
-    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    let (http, shutdown, server) = start_test_http_api(test_runtime_state()).await;
     let machine = mj_core::config::Machine::Ssh {
         ssh: mj_core::config::SshConnection {
             host: "machine-cancellation.invalid".into(),
@@ -15817,21 +15791,14 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
         workspace_prefix: "work".into(),
         build_cache: None,
     };
-    write_frame(
-        &mut stream,
-        &RequestEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: 1,
-            token: metadata.token,
-            action: DaemonAction::CompletePath {
-                host: mj_core::path_completion::CompletionHost::Machine(Box::new(machine)),
-                prefix: "~/projects".into(),
-                kind: mj_core::path_completion::CompletionKind::Directories,
-            },
-        },
-    )
-    .await
-    .unwrap();
+    let request = mj_core::runtime::spawn(async move {
+        http.complete_path(
+            mj_core::path_completion::CompletionHost::Machine(Box::new(machine)),
+            "~/projects".into(),
+            mj_core::path_completion::CompletionKind::Directories,
+        )
+        .await
+    });
     let started_result = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(pid) = fs::read_to_string(&started)
@@ -15843,21 +15810,18 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
         }
     })
     .await;
-    // Always cancel/reap before a failed assertion can abandon the fixture.
-    drop(stream);
-    match tokio::time::timeout(Duration::from_secs(30), &mut server).await {
-        Ok(result) => result.unwrap(),
-        Err(_) => {
-            shutdown.cancel();
-            server.await.unwrap();
-            panic!("connection closure did not cancel completion");
-        }
-    }
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
     let pid = started_result.expect("OpenSSH proxy never started");
-    assert!(
-        !daemon_process_is_alive(pid),
-        "superseded completion left its SSH proxy alive"
-    );
+    let reaped = tokio::time::timeout(Duration::from_secs(30), async {
+        while daemon_process_is_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    shutdown.cancel();
+    server.await.unwrap().unwrap();
+    reaped.expect("superseded completion left its SSH proxy alive");
 }
 
 #[cfg(unix)]
@@ -18214,7 +18178,7 @@ async fn close_of_parked_owning_child_rolls_back_after_checkpoint_only_start_fai
     assert!(!start_marker.exists());
 }
 
-fn seed_legacy_detached_draft(
+pub(crate) fn seed_legacy_detached_draft(
     workspace_id: &str,
     session_id: Option<&str>,
     source: &str,
@@ -18229,123 +18193,6 @@ fn seed_legacy_detached_draft(
         rusqlite::params![workspace_id, session_id, source, owner_pid, text],
     )?;
     Ok(())
-}
-
-#[tokio::test]
-async fn workspace_draft_rpc_lists_previews_recovers_and_discards() {
-    const NAME: &str = "workspace_draft_rpc_lists_previews_recovers_and_discards";
-    let Some(_writer) = startup_prompt_test_store(NAME) else {
-        return;
-    };
-    let workspace = mj_controller::database::create_workspace("Draft RPC").unwrap();
-    let mut session = runtime_test_session("draft-session", &workspace.id, SessionState::Stopped);
-    session.draft_input = "inherited seed".into();
-    mj_controller::database::save_session(&session).unwrap();
-    let text = format!(
-        r#"mjolnir-chat-draft-v1:{{"text":"some\n   readable {}"}}"#,
-        "界".repeat(210)
-    );
-    mj_controller::database::save_terminal_draft(
-        &session.id,
-        "other terminal",
-        std::process::id(),
-        7,
-        mj_core::storage::DetachedSessionDraft {
-            text: text.clone(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let state = test_runtime_state_loading_the_store();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let metadata = test_metadata(listener.local_addr().unwrap());
-    let server_metadata = metadata.clone();
-    let server = mj_core::runtime::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        serve_client(stream, server_metadata, state, CancellationToken::new()).await
-    });
-    let mut client = mj_client::daemon::DaemonClient::connect(metadata)
-        .await
-        .unwrap();
-    let groups = client.list_workspace_drafts().await.unwrap();
-    let draft = &groups[0].drafts[0];
-    assert_eq!(draft.session_title.as_deref(), Some(session.listed_title()));
-    assert!(draft.preview.starts_with("some readable 界"));
-    assert_eq!(draft.preview.chars().count(), 201);
-    assert!(draft.preview.ends_with('…'));
-    let snapshot = super::guards::workspace_snapshot(&workspace.id).unwrap();
-    assert_eq!(snapshot.drafts[0].preview, draft.preview);
-
-    let recovered = client.recover_draft(draft.id.clone()).await.unwrap();
-    assert_eq!(recovered, (session.id.clone(), text.clone(), Some(7)));
-    assert_eq!(
-        client.recover_draft(draft.id.clone()).await.unwrap(),
-        recovered
-    );
-    assert_eq!(
-        mj_controller::database::load_state().unwrap().sessions[&session.id].draft_input,
-        "inherited seed",
-    );
-
-    client
-        .persist_terminal_draft(
-            "receiving terminal".into(),
-            session.id.clone(),
-            std::process::id(),
-            1,
-            mj_core::storage::DetachedSessionDraft {
-                text,
-                retired_drafts: vec![mj_core::storage::RetiredDetachedDraft {
-                    draft_id: draft.id.clone(),
-                    revision: recovered.2,
-                }],
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(client.recover_draft(draft.id.clone()).await.is_err());
-    let transferred = client.list_workspace_drafts().await.unwrap();
-    assert_eq!(transferred[0].drafts.len(), 1);
-    assert_eq!(transferred[0].drafts[0].source, "receiving terminal");
-    assert_eq!(transferred[0].drafts[0].preview, draft.preview);
-    assert_eq!(
-        client
-            .discard_drafts(
-                workspace.id.clone(),
-                Some(transferred[0].drafts[0].id.clone())
-            )
-            .await
-            .unwrap(),
-        1
-    );
-
-    for text in ["single discard", "bulk 1", "bulk 2"] {
-        seed_legacy_detached_draft(&workspace.id, None, "legacy", None, text).unwrap();
-    }
-    let drafts = mj_controller::database::list_detached_drafts(&workspace.id).unwrap();
-    let id = drafts
-        .iter()
-        .find(|draft| draft.text == "single discard")
-        .unwrap()
-        .id
-        .clone();
-    for (draft_id, expected) in [(Some(id), 1), (None, 2)] {
-        assert_eq!(
-            client
-                .discard_drafts(workspace.id.clone(), draft_id)
-                .await
-                .unwrap(),
-            expected
-        );
-    }
-    assert!(
-        mj_controller::database::list_detached_drafts(&workspace.id)
-            .unwrap()
-            .is_empty()
-    );
-    drop(client);
-    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]

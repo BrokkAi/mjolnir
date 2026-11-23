@@ -83,7 +83,29 @@ pub(super) fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot
     })
 }
 
-pub(super) fn draft_preview(
+impl RuntimeState {
+    pub(crate) async fn list_workspace_drafts(&self) -> Result<Vec<WorkspaceDrafts>> {
+        let drafts = blocking(mj_controller::database::list_all_detached_drafts).await?;
+        let mut grouped: Vec<WorkspaceDrafts> = Vec::new();
+        let sessions = self.session_records();
+        for draft in drafts {
+            let workspace_id = draft.workspace_id.clone();
+            let preview = draft_preview(draft, &sessions);
+            match grouped.last_mut() {
+                Some(group) if group.workspace_id == workspace_id => {
+                    group.drafts.push(preview);
+                }
+                _ => grouped.push(WorkspaceDrafts {
+                    workspace_id,
+                    drafts: vec![preview],
+                }),
+            }
+        }
+        Ok(grouped)
+    }
+}
+
+fn draft_preview(
     draft: mj_core::workspace::DetachedDraft,
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
 ) -> DraftPreview {

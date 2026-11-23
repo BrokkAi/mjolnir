@@ -156,9 +156,16 @@ pub(crate) async fn apply_dashboard_action(
             // The daemon reads Git in the environment its sessions inherit.
             let updates = context.dashboard_io_tx.clone();
             mj_core::runtime::spawn(async move {
-                let result = async { daemon::connect_or_start().await?.git_identity().await }
-                    .await
-                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                let result = async {
+                    daemon::connect_or_start()
+                        .await?
+                        .http()
+                        .await?
+                        .git_identity()
+                        .await
+                }
+                .await
+                .map_err(|e: anyhow::Error| format!("{e:#}"));
                 report(
                     "reading the Git identity",
                     &updates,
@@ -174,6 +181,8 @@ pub(crate) async fn apply_dashboard_action(
                 super::io::SAVE_ACK_TIMEOUT,
                 async move {
                     daemon::connect_or_start()
+                        .await?
+                        .http()
                         .await?
                         .set_git_identity(name, email)
                         .await
@@ -770,7 +779,7 @@ pub(crate) async fn apply_dashboard_action(
                             result: history,
                         })
                         .map_err(|_| anyhow::anyhow!("dashboard closed during project refresh"))?;
-                    let mut daemon = daemon::connect_or_start().await?;
+                    let daemon = daemon::connect_or_start().await?.http().await?;
                     let mut view = daemon.project_catalog(true, retry).await?;
                     while matches!(
                         view.status,
@@ -1133,16 +1142,17 @@ pub(crate) async fn apply_dashboard_action(
             context: picker_context,
             request,
         } => {
-            let (cancelled, _) = spawn_cancellable_io_with_token(
+            let cancelled = super::io::spawn_cancellable_http(
                 context.critical_operations.clone(),
                 "finding projects",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::DiscoverProjects { request },
-                    cancelled,
-                )? {
-                    MachineReply::ProjectDiscovery(result) => Ok(result),
-                    reply => anyhow::bail!("unexpected discovery reply: {reply:?}"),
+                async move {
+                    daemon::connect_or_start()
+                        .await?
+                        .http()
+                        .await?
+                        .discover_projects(&request)
+                        .await
                 },
                 move |result| DashboardIoUpdate::ProjectDiscovery {
                     context: picker_context,
@@ -1154,20 +1164,17 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::CompletePath { host, kind, prefix } => {
             let input_context = context.dashboard.path_input_context();
             let prefix_for_work = prefix.clone();
-            let (cancelled, _) = spawn_cancellable_io_with_token(
+            let cancelled = super::io::spawn_cancellable_http(
                 context.critical_operations.clone(),
                 "completing path",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| match super::io::machine_request(
-                    MachineAction::CompletePath {
-                        host,
-                        prefix: prefix_for_work,
-                        kind,
-                    },
-                    cancelled,
-                )? {
-                    MachineReply::PathCompletion(result) => Ok(result),
-                    reply => anyhow::bail!("unexpected completion reply: {reply:?}"),
+                async move {
+                    daemon::connect_or_start()
+                        .await?
+                        .http()
+                        .await?
+                        .complete_path(host, prefix_for_work, kind)
+                        .await
                 },
                 move |result| DashboardIoUpdate::PathCompletions {
                     context: input_context,
@@ -1593,7 +1600,8 @@ pub(crate) async fn apply_dashboard_action(
                     let session_id = session_id.clone();
                     mj_core::runtime::block_on(async move {
                         let mut daemon = daemon::connect_or_start().await?;
-                        let preparation = daemon.prepare_move_session(selection).await?;
+                        let preparation =
+                            daemon.http().await?.prepare_move_session(selection).await?;
                         report(
                             "binding move prompt origin",
                             &prepared_updates,
@@ -1810,6 +1818,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
         let result = async {
             let mut daemon = daemon::connect_or_start().await?;
             daemon
+                .http()
+                .await?
                 .prepare_move_session(MoveSelection {
                     oracle,
                     oracle_choice,
@@ -1934,18 +1944,18 @@ pub(crate) fn start_create_session_preflight(
     let generation = context.dashboard.session_preflight_generation();
     context.cancel_session_preflight();
     context.dashboard.begin_remote_session_preflight(generation);
-    let (cancelled, _) = spawn_cancellable_io_with_token(
+    let cancelled = super::io::spawn_cancellable_http(
         context.critical_operations.clone(),
         "resolving session repositories",
         context.dashboard_io_tx.clone(),
-        move |cancelled| match super::io::machine_request(
-            MachineAction::PreflightNewSession { request },
-            cancelled,
-        )? {
-            MachineReply::NewSessionPreflight(result) => {
-                Ok(super::io::RemotePreflightOutcome::from(result))
-            }
-            reply => anyhow::bail!("unexpected new-session preflight reply: {reply:?}"),
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .http()
+                .await?
+                .preflight_new_session(&request)
+                .await
+                .map(super::io::RemotePreflightOutcome::from)
         },
         move |result| DashboardIoUpdate::RemotePreflight {
             generation,

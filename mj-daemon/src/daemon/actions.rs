@@ -17,12 +17,9 @@ pub(super) async fn handle_action(
         | DaemonAction::TestTarget { .. }
         | DaemonAction::DiscoverSetup { .. }
         | DaemonAction::ProfileLoginStatuses
-        | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::SuspendPreflight { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
-        | DaemonAction::CompletePath { .. }
         | DaemonAction::CheckProjectDirectories { .. }
-        | DaemonAction::DiscoverProjects { .. }
         | DaemonAction::ResolveContainerPath { .. }
         | DaemonAction::ResolveSetupPath { .. }
         | DaemonAction::ValidateMountSource { .. }
@@ -193,20 +190,6 @@ pub(super) async fn handle_action(
         }
         // Git runs in the daemon's environment, which is the one its
         // sessions inherit; a client's environment may differ.
-        DaemonAction::GitIdentity => {
-            mj_core::runtime::spawn_blocking(mj_controller::controller::controller_git_identity)
-                .await
-                .context("Git identity read panicked")?
-                .map(DaemonReply::GitIdentity)
-        }
-        DaemonAction::SetGitIdentity { name, email } => {
-            mj_core::runtime::spawn_blocking(move || {
-                mj_controller::controller::set_controller_git_identity(&name, &email)
-            })
-            .await
-            .context("Git identity save panicked")?
-            .map(DaemonReply::GitIdentity)
-        }
         DaemonAction::SubagentOptions {
             profile,
             model,
@@ -249,68 +232,6 @@ pub(super) async fn handle_action(
             );
             Ok(DaemonReply::WebListeners(processes))
         }
-        DaemonAction::ListWorkspaces => {
-            state.prune_dead_clients();
-            state.refresh_workspaces().await?;
-            let workspaces = state.workspaces().borrow().clone();
-            Ok(DaemonReply::Workspaces(
-                workspaces
-                    .into_iter()
-                    .map(|workspace| WorkspaceListing { workspace })
-                    .collect(),
-            ))
-        }
-        DaemonAction::ListWorkspaceDrafts => {
-            let drafts = blocking(mj_controller::database::list_all_detached_drafts).await?;
-            let mut grouped: Vec<WorkspaceDrafts> = Vec::new();
-            let sessions = state.session_records();
-            for draft in drafts {
-                let workspace_id = draft.workspace_id.clone();
-                let preview = super::guards::draft_preview(draft, &sessions);
-                match grouped.last_mut() {
-                    Some(group) if group.workspace_id == workspace_id => {
-                        group.drafts.push(preview);
-                    }
-                    _ => grouped.push(WorkspaceDrafts {
-                        workspace_id,
-                        drafts: vec![preview],
-                    }),
-                }
-            }
-            Ok(DaemonReply::WorkspaceDrafts(grouped))
-        }
-        DaemonAction::CreateWorkspace { name } => {
-            // Two setup selectors can both have observed an empty workspace
-            // list. The daemon operation is create-or-get so both attach to
-            // the same normalized name instead of leaking a SQLite conflict.
-            let workspace =
-                blocking(move || mj_controller::database::create_or_get_workspace(&name)).await?;
-            refresh_runtime_workspaces(state).await?;
-            Ok(DaemonReply::Workspace(workspace))
-        }
-        DaemonAction::RenameWorkspace { workspace_id, name } => {
-            blocking(move || mj_controller::database::rename_workspace(&workspace_id, &name))
-                .await?;
-            refresh_runtime_workspaces(state).await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::TouchWorkspace { workspace_id } => {
-            blocking(move || mj_controller::database::touch_workspace(&workspace_id)).await?;
-            refresh_runtime_workspaces(state).await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::CloseWorkspace { workspace_id } => {
-            state.close_workspace(workspace_id).await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::CancelWorkspaceClose { workspace_id } => {
-            state.cancel_workspace_close(&workspace_id)?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::DeleteWorkspace { workspace_id } => {
-            state.close_workspace(workspace_id).await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::Attach { client_id } => {
             state.attachments().insert(
                 client_id,
@@ -328,43 +249,6 @@ pub(super) async fn handle_action(
         DaemonAction::DismissNotification { session_id, target } => {
             let ordinal = state.dismiss_notification(session_id, target).await?;
             Ok(DaemonReply::Ordinal(ordinal))
-        }
-        DaemonAction::PersistReadReceipt {
-            client_id,
-            workspace_id,
-            session_id,
-            through,
-        } => {
-            let frontier = blocking(move || {
-                mj_controller::database::persist_read_receipt(
-                    &client_id,
-                    &workspace_id,
-                    &session_id,
-                    through,
-                )
-            })
-            .await?;
-            Ok(DaemonReply::Ordinal(frontier))
-        }
-        DaemonAction::PersistTerminalDraft {
-            client_id,
-            session_id,
-            owner_pid,
-            revision,
-            draft,
-        } => {
-            blocking(move || {
-                mj_controller::database::save_terminal_draft(
-                    &session_id,
-                    &client_id,
-                    owner_pid,
-                    revision,
-                    draft,
-                )
-                .map(|_| ())
-            })
-            .await?;
-            Ok(DaemonReply::Done)
         }
         DaemonAction::RecordAbandonedPrompt {
             session_id,
@@ -546,38 +430,6 @@ pub(super) async fn handle_action(
         }
         DaemonAction::CheckpointSession { .. } => {
             anyhow::bail!(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE)
-        }
-        DaemonAction::ProjectCatalog { refresh, retry } => Ok(DaemonReply::ProjectCatalog(
-            state.project_catalog(refresh, retry).await?,
-        )),
-        DaemonAction::CreateProject { sources } => {
-            let created = state.create_bundle_from_sources(sources, false).await?;
-            let id = created.bundle_id;
-            let bundle = created
-                .config
-                .bundles
-                .get(&id)
-                .context("created project is missing")?
-                .clone();
-            let project = blocking(move || {
-                mj_controller::project_catalog::snapshot(
-                    &bundle,
-                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-                    false,
-                )
-            })
-            .await?;
-            Ok(DaemonReply::ProjectCreated(
-                mj_core::project_catalog::SavedProject {
-                    bundle_id: id,
-                    name: project.name(),
-                    project,
-                },
-            ))
-        }
-        DaemonAction::RemoveProject { bundle_id } => {
-            state.remove_project(bundle_id).await?;
-            Ok(DaemonReply::Done)
         }
         DaemonAction::SessionTextSearch { query } => Ok(DaemonReply::SessionTextMatches(
             state.session_text_search(query).await?,
@@ -1118,9 +970,6 @@ pub(super) async fn handle_action(
             state.resume_session(request).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::PrepareMoveSession(selection) => Ok(DaemonReply::MovePreparation(Box::new(
-            state.prepare_move_session(selection).await?,
-        ))),
         DaemonAction::MoveSession(request) => {
             Ok(DaemonReply::MoveOutcome(state.move_session(request).await?))
         }
@@ -1201,25 +1050,6 @@ pub(super) async fn handle_action(
             state.cancel_lifecycle_with_intent(&session_id).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::RecoverDraft { draft_id } => {
-            let draft =
-                blocking(move || mj_controller::database::read_detached_draft(&draft_id)).await?;
-            Ok(DaemonReply::RecoveredDraft {
-                session_id: draft.session_id,
-                text: draft.text,
-                revision: draft.revision,
-            })
-        }
-        DaemonAction::DiscardDrafts {
-            workspace_id,
-            draft_id,
-        } => {
-            let count = blocking(move || {
-                mj_controller::database::discard_detached_drafts(&workspace_id, draft_id.as_deref())
-            })
-            .await?;
-            Ok(DaemonReply::Count(count))
-        }
         DaemonAction::Stop => {
             if cancellation.is_cancelled() {
                 return Ok(DaemonReply::Done);
@@ -1250,11 +1080,6 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::InterruptAll { .. }) {
         return mj_controller::upgrade::activity("interrupt session work").map(Some);
     }
-    if let DaemonAction::PreflightNewSession { request } = action
-        && !request.remote_repairs.is_empty()
-    {
-        return mj_controller::upgrade::activity("new-session preflight remote repairs").map(Some);
-    }
     if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
         return mj_controller::upgrade::activity("spinner style setting").map(Some);
     }
@@ -1263,9 +1088,6 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return mj_controller::upgrade::activity("sidebar size setting").map(Some);
-    }
-    if matches!(action, DaemonAction::RemoveProject { .. }) {
-        return mj_controller::upgrade::activity("project removal").map(Some);
     }
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return mj_controller::upgrade::activity("operator away setting").map(Some);
@@ -1300,7 +1122,6 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::SessionTail { .. }
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
-            | DaemonAction::ProjectCatalog { .. }
             | DaemonAction::ImportSession { .. }
             // Read-only and repeatable; the client reports an interrupted run.
             | DaemonAction::RunDoctor

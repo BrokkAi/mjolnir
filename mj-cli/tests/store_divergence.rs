@@ -174,6 +174,9 @@ fn daemon_survives_compatible_migration_then_exits_on_an_incompatible_one() {
                 .await
                 .unwrap();
             let workspace = client
+                .http()
+                .await
+                .unwrap()
                 .create_workspace("compatible migration".into())
                 .await
                 .unwrap();

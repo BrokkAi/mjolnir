@@ -477,30 +477,32 @@ pub struct RecoveredDraft {
 
 /// Read the recoverable draft. Its source stays visible until a terminal
 /// commits its destination draft and retires the source in the same save.
-pub fn read_detached_draft(draft_id: &str) -> Result<RecoveredDraft> {
+pub fn read_detached_draft(draft_id: &str) -> Result<Option<RecoveredDraft>> {
     read_detached_draft_at(&database_path(), draft_id)
 }
 
-pub(super) fn read_detached_draft_at(path: &Path, draft_id: &str) -> Result<RecoveredDraft> {
+pub(super) fn read_detached_draft_at(
+    path: &Path,
+    draft_id: &str,
+) -> Result<Option<RecoveredDraft>> {
     let connection = open_reader(path)?;
-    let (session_id, text, revision, session_exists): (Option<String>, String, Option<i64>, bool) =
-        connection
-            .query_row(
-                "SELECT draft.session_id, draft.text, draft.revision,
-                    EXISTS(SELECT 1 FROM sessions WHERE session_id = draft.session_id)
+    connection
+        .query_row(
+            "SELECT draft.session_id, draft.text, draft.revision
                FROM detached_drafts AS draft
-              WHERE draft.draft_id = ?1 AND recovered_at IS NULL AND text <> ''",
-                [draft_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .with_context(|| format!("find recoverable draft {draft_id:?}"))?;
-    let session_id = session_id.context("draft is not associated with a session")?;
-    ensure!(session_exists, "draft session no longer exists");
-    Ok(RecoveredDraft {
-        session_id,
-        text,
-        revision,
-    })
+               JOIN sessions AS session ON session.session_id = draft.session_id
+              WHERE draft.draft_id = ?1 AND draft.recovered_at IS NULL AND draft.text <> ''",
+            [draft_id],
+            |row| {
+                Ok(RecoveredDraft {
+                    session_id: row.get(0)?,
+                    text: row.get(1)?,
+                    revision: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .with_context(|| format!("find recoverable draft {draft_id:?}"))
 }
 
 pub fn discard_detached_drafts(workspace_id: &str, draft_id: Option<&str>) -> Result<usize> {

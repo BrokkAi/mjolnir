@@ -23,8 +23,8 @@ use mj_core::subagent::{ReportState, bounded_report};
 use mj_controller::quota::ProfileQuota;
 
 use crate::server::api::{
-    BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
-    TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
+    ApiFailure, BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus,
+    SubagentBackend, TranscriptPage, TurnSpan, TurnState, TurnSummary, UploadBody,
 };
 use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::runtime_feed::RuntimeProjection;
@@ -266,6 +266,24 @@ pub trait ExportRuntime: Send + Sync {
     /// returned to callers. Test backends without a daemon have no feed.
     fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn close_workspace(self: Arc<Self>, _id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { bail!("workspace close is unavailable") })
+    }
+
+    fn cancel_workspace_close(&self, _id: &str) -> Result<()> {
+        bail!("workspace close cancellation is unavailable")
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        Box::pin(async { bail!("terminal drafts are unavailable") })
+    }
+
+    fn remove_project(&self, _id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("project removal is unavailable") })
     }
 
     fn session_working_context(
@@ -592,6 +610,24 @@ impl ExportRuntime for RuntimeState {
 
     fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(RuntimeState::refresh_workspaces(self))
+    }
+
+    fn close_workspace(self: Arc<Self>, id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move { RuntimeState::close_workspace(&self, id).await })
+    }
+
+    fn cancel_workspace_close(&self, id: &str) -> Result<()> {
+        RuntimeState::cancel_workspace_close(self, id)
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        Box::pin(RuntimeState::list_workspace_drafts(self))
+    }
+
+    fn remove_project(&self, id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(RuntimeState::remove_project(self, id))
     }
 
     fn session_working_context(
@@ -4509,6 +4545,36 @@ impl SubagentBackend for ApiBackend {
             self.exports.refresh_workspaces().await?;
             Ok(workspace)
         })
+    }
+
+    fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
+        self.exports.refresh_workspaces()
+    }
+
+    fn close_workspace(&self, id: String) -> BoxFuture<'_, std::result::Result<(), ApiFailure>> {
+        Box::pin(async move {
+            self.exports
+                .clone()
+                .close_workspace(id)
+                .await
+                .map_err(|error| ApiFailure::conflict(format!("{error:#}")))
+        })
+    }
+
+    fn cancel_workspace_close(&self, id: &str) -> std::result::Result<(), ApiFailure> {
+        self.exports
+            .cancel_workspace_close(id)
+            .map_err(|error| ApiFailure::conflict(format!("{error:#}")))
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        self.exports.list_workspace_drafts()
+    }
+
+    fn remove_project(&self, id: String) -> BoxFuture<'_, Result<()>> {
+        self.exports.remove_project(id)
     }
 
     fn profile_config(

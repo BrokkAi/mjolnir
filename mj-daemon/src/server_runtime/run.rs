@@ -172,8 +172,6 @@ pub(crate) async fn start_api(
             tokio::sync::mpsc::unbounded_channel::<PhoneActionStarted>();
         let (receipt_done_tx, mut receipt_done_rx) =
             tokio::sync::mpsc::unbounded_channel::<ReadReceiptPersisted>();
-        let (bundle_done_tx, mut bundle_done_rx) =
-            tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut archive_jobs = tokio::task::JoinSet::new();
@@ -607,61 +605,45 @@ pub(crate) async fn start_api(
                     }
                 }
                 bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
-                    let Some(crate::server::BundleRequest { source, exact_sources, discovered, reply }) = bundle else {
+                    let Some(crate::server::BundleRequest {
+                        source, exact_sources, discovered, include_project, admission, reply
+                    }) = bundle else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
                         break;
                     };
-                    // Repository canonicalization and config persistence both
-                    // touch the filesystem. Keep them off this loop, and
-                    // report a panic as a failed request rather than dropping
-                    // the browser's reply.
-                    let done = bundle_done_tx.clone();
                     let daemon_runtime = daemon_runtime.clone();
-                    let Ok(upgrade_task) = mj_controller::upgrade::activity("bundle creation") else { continue };
                     bundle_jobs.spawn(async move {
-                        let _upgrade_task = upgrade_task;
+                        let _admission = admission;
                         let result = match exact_sources {
                             Some(sources) => daemon_runtime.create_bundle_from_sources(sources, false).await,
                             None if discovered => daemon_runtime.create_bundle_from_sources(vec![source], true).await,
                             None => daemon_runtime.create_quick_bundle(source).await,
                         };
-                        if let Err(error) = done.send(BundleCreated { result, reply }) {
-                            tracing::debug!(%error, "bundle creation finished after the server stopped");
+                        let answer = match result {
+                            Ok(created) => {
+                                let project = if include_project {
+                                    match saved_project(&created).await {
+                                        Ok(project) => Some(project),
+                                        Err(error) => {
+                                            tracing::warn!(%error, "created bundle snapshot failed");
+                                            let _ = reply.send(Err(crate::server::BundleFailure::Controller));
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                                Ok(crate::server::CreateBundleResponse {
+                                    bundle_id: created.bundle_id,
+                                    project,
+                                })
+                            }
+                            Err(error) => Err(bundle_failure(error)),
+                        };
+                        if reply.send(answer).is_err() {
+                            tracing::debug!("bundle creation reply dropped after client disconnect");
                         }
                     });
-                }
-                bundle_done = bundle_done_rx.recv() => {
-                    let Some(BundleCreated { result, reply }) = bundle_done else {
-                        failure = feed_stopped(termination.is_cancelled(), "the bundle creation pipeline stopped while the phone server was running");
-                        break;
-                    };
-                    match result {
-                        Ok(created) => {
-                            let bundle_id = created.bundle_id;
-                            if reply.send(Ok(bundle_id)).is_err() {
-                                tracing::debug!("bundle creation reply dropped after client disconnect");
-                            }
-                        }
-                        Err(error) => {
-                            let failure = match error {
-                                mj_controller::controller::QuickBundleFailure::InvalidSource(
-                                    detail,
-                                ) => {
-                                    tracing::debug!(error = %detail, "phone bundle source was invalid");
-                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::InvalidSource, crate::server::BundleFailure::Refused)
-                                }
-                                mj_controller::controller::QuickBundleFailure::Persistence(
-                                    detail,
-                                ) => {
-                                    tracing::warn!(error = %detail, "phone bundle creation failed");
-                                    Refusal::of(&detail).map_or(crate::server::BundleFailure::Controller, crate::server::BundleFailure::Refused)
-                                }
-                            };
-                            if reply.send(Err(failure)).is_err() {
-                                tracing::debug!("bundle creation failure reply dropped after client disconnect");
-                            }
-                        }
-                    }
                 }
                 bundle_job = bundle_jobs.join_next(), if !bundle_jobs.is_empty() => {
                     if let Some(Err(error)) = bundle_job {
@@ -683,7 +665,7 @@ pub(crate) async fn start_api(
                         target_id,
                         project_directory,
                         mut reply,
-                        remote_repairs,
+                        remote_repairs, admission, direct,
                     } = match preflight {
                         crate::server::PreflightRequest::New(request) => request,
                         crate::server::PreflightRequest::Resume(request) => {
@@ -724,16 +706,8 @@ pub(crate) async fn start_api(
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
                     let task_termination = termination.clone();
-                    // Disposable reads are cancelled with the server during
-                    // handoff. Only confirmed Git repairs mutate machine state.
-                    let upgrade_task = if remote_repairs.is_empty() {
-                        None
-                    } else {
-                        let Ok(work) = mj_controller::upgrade::activity("new-session preflight remote repairs") else { continue };
-                        Some(work)
-                    };
                     preflight_jobs.spawn(async move {
-                        let _upgrade_task = upgrade_task;
+                        let _admission = admission;
                         let cancelled = Arc::new(AtomicBool::new(false));
                         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
                         let mut blocking = mj_core::runtime::spawn_blocking(move || {
@@ -743,7 +717,9 @@ pub(crate) async fn start_api(
                                 additional_mounts, bundle_id, target_id, project_directory,
                                 remote_repairs, profile_id, workspace_id,
                             }, executor).map_err(|error| {
-                                if error.downcast_ref::<InvalidNewMount>().is_some() {
+                                if direct {
+                                    PreflightFailure::Terminal(format!("{error:#}"))
+                                } else if error.downcast_ref::<InvalidNewMount>().is_some() {
                                     PreflightFailure::InvalidMount
                                 } else if project_validation {
                                     PreflightFailure::Validation
@@ -755,7 +731,7 @@ pub(crate) async fn start_api(
                         let answer = tokio::select! {
                             biased;
                             _ = task_termination.cancelled() => None,
-                            _ = reply.closed() => None,
+                            _ = reply.closed(), if _admission.is_none() => None,
                             answer = &mut blocking => Some(answer),
                         };
                         let Some(answer) = answer else {
@@ -788,7 +764,7 @@ pub(crate) async fn start_api(
                     }
                 }
                 preparation = move_preparation_rx.recv() => {
-                    let Some(MovePreparationRequest { selection, reply }) = preparation else {
+                    let Some(MovePreparationRequest { selection, direct, reply }) = preparation else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering move preparation requests");
                         break;
                     };
@@ -804,7 +780,10 @@ pub(crate) async fn start_api(
                         let result = daemon_runtime
                             .prepare_move_session(selection)
                             .await
-                            .map_err(|error| { tracing::debug!(%error, "move preparation rejected"); mj_core::refusal::Refusal::of(&error) });
+                            .map_err(|error| {
+                                tracing::debug!(%error, "move preparation rejected");
+                                Refusal::of(&error).or_else(|| direct.then(|| Refusal::precondition(format!("{error:#}"))))
+                            });
                         if let Err(error) = done.send(MovePrepared { result, reply }) {
                             tracing::debug!(%error, "move preparation finished after the server stopped");
                         }
@@ -1447,5 +1426,47 @@ impl ViewerServer {
 impl Drop for ViewerServer {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+async fn saved_project(
+    created: &mj_controller::controller::QuickBundleCreation,
+) -> Result<mj_core::project_catalog::SavedProject> {
+    let bundle_id = created.bundle_id.clone();
+    let bundle = created
+        .config
+        .bundles
+        .get(&bundle_id)
+        .context("created project is missing")?
+        .clone();
+    let project = mj_core::runtime::spawn_blocking(move || {
+        mj_controller::project_catalog::snapshot(
+            &bundle,
+            &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+            false,
+        )
+    })
+    .await??;
+    Ok(mj_core::project_catalog::SavedProject {
+        bundle_id,
+        name: project.name(),
+        project,
+    })
+}
+
+fn bundle_failure(
+    error: mj_controller::controller::QuickBundleFailure,
+) -> crate::server::BundleFailure {
+    use crate::server::BundleFailure;
+    use mj_controller::controller::QuickBundleFailure;
+    match error {
+        QuickBundleFailure::InvalidSource(detail) => {
+            tracing::debug!(error = %detail, "phone bundle source was invalid");
+            Refusal::of(&detail).map_or(BundleFailure::InvalidSource, BundleFailure::Refused)
+        }
+        QuickBundleFailure::Persistence(detail) => {
+            tracing::warn!(error = %detail, "phone bundle creation failed");
+            Refusal::of(&detail).map_or(BundleFailure::Controller, BundleFailure::Refused)
+        }
     }
 }

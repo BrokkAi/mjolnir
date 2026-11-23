@@ -689,7 +689,13 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
     });
     let request = bundles.recv().await.expect("bundle request forwarded");
     assert_eq!(request.source, "example/app");
-    request.reply.send(Ok("app".into())).unwrap();
+    request
+        .reply
+        .send(Ok(CreateBundleResponse {
+            bundle_id: "app".into(),
+            project: None,
+        }))
+        .unwrap();
     let response = response.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();

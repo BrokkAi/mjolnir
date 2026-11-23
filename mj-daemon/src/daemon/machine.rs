@@ -14,21 +14,15 @@ pub(super) async fn execute(
     let reply = mj_core::runtime::spawn_blocking(move || {
         let quit = cancelled.clone();
         let executor = CancellableProcessExecutor::new(cancelled);
-        // Preserve the dashboard's existing command deadlines, including the
-        // bound on preflight when it applies confirmed Git repairs.
+        // Preserve the dashboard's deadlines for host commands.
         let executor = match &action {
             DaemonAction::PreviewBuildCache { .. } => executor.with_deadline(Duration::from_secs(60)),
             DaemonAction::TestTarget { .. } => executor.with_deadline(Duration::from_secs(15)),
             DaemonAction::DiscoverSetup { .. } => executor.with_deadline(Duration::from_secs(30)),
-            DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
-            DaemonAction::DiscoverProjects { .. } => {
-                executor.with_deadline(Duration::from_secs(15))
-            }
             DaemonAction::ResolveContainerPath { .. }
             | DaemonAction::ResolveSetupPath { .. }
             | DaemonAction::ValidateMountSource { .. }
-            | DaemonAction::ValidateProjectDirectory { .. }
-            | DaemonAction::PreflightNewSession { .. } => {
+            | DaemonAction::ValidateProjectDirectory { .. } => {
                 executor.with_deadline(Duration::from_secs(30))
             }
             _ => executor,
@@ -161,14 +155,6 @@ pub(super) async fn execute(
             DaemonAction::ProfileLoginStatuses => Ok(DaemonReply::ProfileLoginStatuses(
                 mj_controller::profile_login::statuses(&controller.config, quit.clone()),
             )),
-            DaemonAction::PreflightNewSession { request } => {
-                crate::server_runtime::preflight::preflight_new_request(
-                    controller.config,
-                    request,
-                    executor,
-                )
-                .map(DaemonReply::NewSessionPreflight)
-            }
             DaemonAction::SuspendPreflight {
                 session_id,
                 dry_run,
@@ -190,9 +176,6 @@ pub(super) async fn execute(
                 &executor,
             )
             .map(DaemonReply::NewSessionPreflight),
-            DaemonAction::CompletePath { host, prefix, kind } => controller
-                .complete_path(&host, &prefix, kind, &executor)
-                .map(DaemonReply::PathCompletion),
             DaemonAction::CheckProjectDirectories { paths } => paths
                 .into_iter()
                 .map(|path| {
@@ -208,10 +191,6 @@ pub(super) async fn execute(
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(DaemonReply::ProjectDirectories),
-            DaemonAction::DiscoverProjects { request } => {
-                mj_controller::project_picker::discover(&request, &executor)
-                    .map(DaemonReply::ProjectDiscovery)
-            }
             DaemonAction::ResolveContainerPath { target_id, source } => controller
                 .resolve_input_path(&target_id, &source, &executor)
                 .map(DaemonReply::ResolvedPath),

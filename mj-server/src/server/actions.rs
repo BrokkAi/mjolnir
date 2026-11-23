@@ -404,7 +404,16 @@ pub struct BundleRequest {
     pub exact_sources: Option<Vec<String>>,
     /// A discovered network source may select an existing project unchanged.
     pub discovered: bool,
-    pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
+    pub include_project: bool,
+    pub admission: mj_core::upgrade::Work,
+    pub reply: tokio::sync::oneshot::Sender<Result<CreateBundleResponse, BundleFailure>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateBundleResponse {
+    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<mj_core::project_catalog::SavedProject>,
 }
 
 /// Safe failure classes for bundle creation. Detailed controller errors stay
@@ -480,6 +489,8 @@ pub struct NewPreflightRequest {
     pub target_id: String,
     pub project_directory: Option<PathBuf>,
     pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    pub admission: Option<mj_core::upgrade::Work>,
+    pub direct: bool,
     pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
 }
 
@@ -521,6 +532,7 @@ pub enum PreflightResume {
 #[derive(Debug)]
 pub struct MovePreparationRequest {
     pub selection: MoveSelection,
+    pub direct: bool,
     pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, Option<Refusal>>>,
 }
 
@@ -530,6 +542,7 @@ pub struct MovePreparationRequest {
 /// distinct without carrying filesystem, Git, or SSH details to the phone.
 #[derive(Debug)]
 pub enum PreflightFailure {
+    Terminal(String),
     InvalidMount,
     Validation,
     /// A configured isolated-session repository cannot be used as a network

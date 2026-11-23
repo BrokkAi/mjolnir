@@ -41,7 +41,7 @@ pub(crate) fn prepare(args: GoArgs) -> Result<mj_tui::GoMode> {
 }
 
 pub(crate) async fn resolve_workspace(
-    daemon: &mut crate::daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
     mode: &mut mj_tui::GoMode,
 ) -> Result<String> {
     let workspaces = daemon.list_workspaces().await?;
@@ -54,18 +54,14 @@ pub(crate) async fn resolve_workspace(
         &base,
         workspaces
             .iter()
-            .filter(|entry| {
-                existing.is_none_or(|current| current.workspace.id != entry.workspace.id)
-            })
-            .map(|entry| entry.workspace.name.as_str()),
+            .filter(|entry| existing.is_none_or(|current| current.id != entry.id))
+            .map(|entry| entry.name.as_str()),
     );
     let id = if let Some(existing) = existing {
-        if existing.workspace.name == legacy_name {
-            daemon
-                .rename_workspace(existing.workspace.id.clone(), name)
-                .await?;
+        if existing.name == legacy_name {
+            daemon.rename_workspace(existing.id.clone(), name).await?;
         }
-        existing.workspace.id.clone()
+        existing.id.clone()
     } else {
         daemon.create_workspace(name).await?.id
     };
@@ -86,19 +82,19 @@ pub(crate) async fn resolve_workspace(
 }
 
 pub(crate) async fn inferred_workspace(
-    workspaces: &[crate::daemon::WorkspaceListing],
+    workspaces: &[mj_core::workspace::WorkspaceRecord],
     directory: &std::path::Path,
 ) -> Result<Option<String>> {
     Ok(existing_directory_workspace(workspaces, directory, None)
         .await?
-        .map(|entry| entry.workspace.id.clone()))
+        .map(|entry| entry.id.clone()))
 }
 
 async fn existing_directory_workspace<'a>(
-    workspaces: &'a [crate::daemon::WorkspaceListing],
+    workspaces: &'a [mj_core::workspace::WorkspaceRecord],
     directory: &std::path::Path,
     bound_id: Option<&str>,
-) -> Result<Option<&'a crate::daemon::WorkspaceListing>> {
+) -> Result<Option<&'a mj_core::workspace::WorkspaceRecord>> {
     let key = directory.to_owned();
     let preferences =
         mj_core::runtime::spawn_blocking(|| GoPreferences::load(&GoPreferences::path()))
@@ -144,23 +140,19 @@ pub(crate) fn saved_workspace_modes() -> Result<Vec<mj_tui::GoMode>> {
 /// (launch finding R13-10). A workspace bound to another folder is never
 /// borrowed, and a workspace that is only recent is not taken either.
 fn directory_workspace<'a>(
-    workspaces: &'a [crate::daemon::WorkspaceListing],
+    workspaces: &'a [mj_core::workspace::WorkspaceRecord],
     bound_id: Option<&str>,
     legacy_name: &str,
     dashboard_name: &str,
     bound_elsewhere: &std::collections::BTreeSet<String>,
-) -> Option<&'a crate::daemon::WorkspaceListing> {
+) -> Option<&'a mj_core::workspace::WorkspaceRecord> {
     bound_id
-        .and_then(|id| workspaces.iter().find(|entry| entry.workspace.id == id))
-        .or_else(|| {
-            workspaces
-                .iter()
-                .find(|entry| entry.workspace.name == legacy_name)
-        })
+        .and_then(|id| workspaces.iter().find(|entry| entry.id == id))
+        .or_else(|| workspaces.iter().find(|entry| entry.name == legacy_name))
         .or_else(|| {
             workspaces.iter().find(|entry| {
-                entry.workspace.name.to_lowercase() == dashboard_name.to_lowercase()
-                    && !bound_elsewhere.contains(&entry.workspace.id)
+                entry.name.to_lowercase() == dashboard_name.to_lowercase()
+                    && !bound_elsewhere.contains(&entry.id)
             })
         })
 }
@@ -237,6 +229,8 @@ pub(crate) async fn quick_bundle_for_directory(directory: &std::path::Path) -> R
         .context("project directory must be valid UTF-8")?;
     crate::daemon::connect_or_start()
         .await?
+        .http()
+        .await?
         .create_project(vec![source.to_owned()])
         .await
         .map(|created| created.bundle_id)
@@ -263,15 +257,13 @@ pub(crate) fn project_directory(path: Option<PathBuf>, command: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    fn entry(id: &str, name: &str) -> crate::daemon::WorkspaceListing {
-        crate::daemon::WorkspaceListing {
-            workspace: mj_core::workspace::WorkspaceRecord {
-                id: id.into(),
-                name: name.into(),
-                created_at: String::new(),
-                last_opened_at: String::new(),
-                session_count: 1,
-            },
+    fn entry(id: &str, name: &str) -> mj_core::workspace::WorkspaceRecord {
+        mj_core::workspace::WorkspaceRecord {
+            id: id.into(),
+            name: name.into(),
+            created_at: String::new(),
+            last_opened_at: String::new(),
+            session_count: 1,
         }
     }
 
@@ -280,7 +272,7 @@ mod tests {
         let nothing_bound = std::collections::BTreeSet::new();
         let find = |workspaces, bound_id| {
             super::directory_workspace(workspaces, bound_id, "legacy", "folder", &nothing_bound)
-                .map(|entry| entry.workspace.id.clone())
+                .map(|entry| entry.id.clone())
         };
         let workspaces = [
             entry("recent", "project"),
@@ -304,7 +296,7 @@ mod tests {
         let nothing_bound = std::collections::BTreeSet::new();
         assert_eq!(
             super::directory_workspace(&workspaces, None, "legacy", "demo", &nothing_bound)
-                .map(|entry| entry.workspace.id.as_str()),
+                .map(|entry| entry.id.as_str()),
             Some("dashboard")
         );
 

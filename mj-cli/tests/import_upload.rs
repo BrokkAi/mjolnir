@@ -110,6 +110,9 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
         mj_client::daemon::DaemonClient::connect(metadata)
             .await
             .unwrap()
+            .http()
+            .await
+            .unwrap()
             .create_workspace("imports".into())
             .await
             .unwrap();

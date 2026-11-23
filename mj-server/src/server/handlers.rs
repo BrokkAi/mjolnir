@@ -555,11 +555,8 @@ const MAX_BUNDLE_SOURCES: usize = 32;
 pub(super) struct CreateBundleRequest {
     pub(super) source: Option<String>,
     pub(super) sources: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct CreateBundleResponse {
-    pub(super) bundle_id: String,
+    #[serde(default)]
+    pub(super) include_project: bool,
 }
 
 /// Create a quick bundle through the controller's dedicated persistence path.
@@ -568,20 +565,27 @@ pub(super) struct CreateBundleResponse {
 /// next new-session request.
 pub(super) async fn create_bundle(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CreateBundleRequest>,
 ) -> Result<Json<CreateBundleResponse>, ApiError> {
-    let bundle_id = match (request.source, request.sources) {
-        (Some(source), None) => create_quick_bundle(&state, source).await?,
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    let (source, exact_sources) = match (request.source, request.sources) {
+        (Some(source), None) => {
+            validate_bundle_source(&source)?;
+            (source, None)
+        }
         (None, Some(sources)) => {
-            if sources.is_empty() || sources.len() > MAX_BUNDLE_SOURCES {
-                return Err(ApiError::bad_request(
-                    "provide between 1 and 32 repository sources",
-                ));
+            if !direct {
+                if sources.is_empty() || sources.len() > MAX_BUNDLE_SOURCES {
+                    return Err(ApiError::bad_request(
+                        "provide between 1 and 32 repository sources",
+                    ));
+                }
+                for source in &sources {
+                    validate_bundle_source(source)?;
+                }
             }
-            for source in &sources {
-                validate_bundle_source(source)?;
-            }
-            request_bundle(&state, String::new(), Some(sources), false).await?
+            (String::new(), Some(sources))
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -589,18 +593,15 @@ pub(super) async fn create_bundle(
             ));
         }
     };
-    Ok(Json(CreateBundleResponse { bundle_id }))
-}
-
-/// Create or reuse the quick bundle for one repository source.
-///
-/// Used by the viewer's `/api/v1/bundles` route for bundle-backed targets.
-pub(super) async fn create_quick_bundle(
-    state: &ServerState,
-    source: String,
-) -> Result<String, ApiError> {
-    validate_bundle_source(&source)?;
-    request_bundle(state, source, None, false).await
+    create_bundle_response(
+        &state,
+        source,
+        exact_sources,
+        false,
+        request.include_project,
+    )
+    .await
+    .map(Json)
 }
 
 fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
@@ -621,6 +622,35 @@ pub(super) async fn request_bundle(
     exact_sources: Option<Vec<String>>,
     discovered: bool,
 ) -> Result<String, ApiError> {
+    create_bundle_response(state, source, exact_sources, discovered, false)
+        .await
+        .map(|created| created.bundle_id)
+}
+
+fn mutation_admission(
+    state: &ServerState,
+    label: &'static str,
+) -> Result<mj_core::upgrade::Work, ApiError> {
+    state
+        .upgrade_gate
+        .enter_unless_draining(label)
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the Mjolnir daemon is being replaced by an upgrade; ask again",
+            )
+            .with_code(Some(super::api::DAEMON_HANDOFF_CODE))
+        })
+}
+
+async fn create_bundle_response(
+    state: &ServerState,
+    source: String,
+    exact_sources: Option<Vec<String>>,
+    discovered: bool,
+    include_project: bool,
+) -> Result<CreateBundleResponse, ApiError> {
+    let admission = mutation_admission(state, "bundle creation")?;
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .bundle_tx
@@ -628,6 +658,8 @@ pub(super) async fn request_bundle(
             source,
             exact_sources,
             discovered,
+            include_project,
+            admission,
             reply,
         })
         .await
@@ -755,11 +787,23 @@ type PreflightNewRequest = mj_client::daemon::NewSessionPreflightRequest;
 /// after it has committed.
 pub(super) async fn preflight_new(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<PreflightNewRequest>,
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
-    super::validate_new_preflight(&request, &state.snapshot_rx.borrow())
-        .map_err(ApiError::bad_request)?;
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    if !direct {
+        super::validate_new_preflight(&request, &state.snapshot_rx.borrow())
+            .map_err(ApiError::bad_request)?;
+    }
+    let admission = if request.remote_repairs.is_empty() {
+        None
+    } else {
+        Some(mutation_admission(
+            &state,
+            "new-session preflight remote repairs",
+        )?)
+    };
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .preflight_tx
@@ -771,6 +815,8 @@ pub(super) async fn preflight_new(
             target_id: request.target_id,
             project_directory: request.project_directory,
             remote_repairs: request.remote_repairs,
+            admission,
+            direct,
             reply,
         }))
         .await
@@ -780,6 +826,7 @@ pub(super) async fn preflight_new(
         .map_err(|_| ApiError::controller_unavailable())?
         .map(Json)
         .map_err(|failure| match failure {
+            PreflightFailure::Terminal(message) => ApiError::bad_request(message),
             PreflightFailure::InvalidMount => ApiError::bad_request(
                 "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host",
             ),
@@ -810,6 +857,8 @@ pub(super) struct CompletePathRequest {
     /// own filesystem.
     #[serde(default)]
     pub(super) target_id: Option<String>,
+    #[serde(default)]
+    machine: Option<Box<mj_core::config::Machine>>,
     pub(super) prefix: String,
     #[serde(default)]
     pub(super) kind: CompletionKind,
@@ -822,17 +871,31 @@ pub(super) struct CompletePathRequest {
 /// the reason it failed stays in the log.
 pub(super) async fn complete_path(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CompletePathRequest>,
 ) -> Result<Json<PathCompletion>, ApiError> {
     if request.prefix.len() > MAX_COMPLETION_PREFIX_BYTES {
         return Err(ApiError::bad_request("path prefix is too long"));
     }
-    let host = match request.target_id {
-        Some(target_id) => {
-            require_target(&state.snapshot_rx.borrow(), &target_id)?;
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    let host = match (request.target_id, request.machine) {
+        (_, Some(_)) if !direct => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "terminal authentication is required",
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request("provide a target or a machine"));
+        }
+        (None, Some(machine)) => CompletionHost::Machine(machine),
+        (Some(target_id), None) => {
+            if !direct {
+                require_target(&state.snapshot_rx.borrow(), &target_id)?;
+            }
             CompletionHost::Target(target_id)
         }
-        None => CompletionHost::Local,
+        (None, None) => CompletionHost::Local,
     };
     let (reply, result) = tokio::sync::oneshot::channel();
     state
@@ -921,7 +984,8 @@ pub(super) async fn preflight_resume(
         .map_err(|failure| match failure {
             PreflightFailure::InvalidMount
             | PreflightFailure::Validation
-            | PreflightFailure::InvalidRepository(_) => {
+            | PreflightFailure::InvalidRepository(_)
+            | PreflightFailure::Terminal(_) => {
                 ApiError::bad_request("this session cannot resume on that target")
             }
             PreflightFailure::Controller(_) => ApiError::new(
@@ -937,13 +1001,21 @@ pub(super) async fn preflight_resume(
 /// before interrupting work.
 pub(super) async fn prepare_move(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Json(selection): Json<MoveSelection>,
 ) -> Result<Json<MovePreparation>, ApiError> {
-    validate_move_selection(&selection, &state.snapshot_rx.borrow())?;
+    let direct = super::api::loopback_authenticated(&state, &headers);
+    if !direct {
+        validate_move_selection(&selection, &state.snapshot_rx.borrow())?;
+    }
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .move_preparation_tx
-        .send(MovePreparationRequest { selection, reply })
+        .send(MovePreparationRequest {
+            selection,
+            direct,
+            reply,
+        })
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
     let preparation = result

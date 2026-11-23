@@ -139,7 +139,7 @@ pub(crate) fn spawn_background_async<T: Send + 'static>(
 /// drafts query. The per-workspace snapshot this replaced loaded the whole
 /// controller once per workspace for session previews the manager never shows.
 pub(crate) async fn load_workspace_management_entries(
-    daemon: &mut daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
 ) -> Result<Vec<WorkspaceManagementEntry>> {
     let mut entries = workspace_management_listings(daemon).await?;
     fill_workspace_management_drafts(daemon, &mut entries).await?;
@@ -148,20 +148,20 @@ pub(crate) async fn load_workspace_management_entries(
 
 /// The workspace list alone: names and session counts, no drafts.
 async fn workspace_management_listings(
-    daemon: &mut daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
 ) -> Result<Vec<WorkspaceManagementEntry>> {
     let listings = daemon.list_workspaces().await?;
     Ok(listings
         .into_iter()
         .map(|listing| WorkspaceManagementEntry {
-            workspace: listing.workspace,
+            workspace: listing,
             drafts: Vec::new(),
         })
         .collect())
 }
 
 async fn fill_workspace_management_drafts(
-    daemon: &mut daemon::DaemonClient,
+    daemon: &mj_client::http::HttpDaemonClient,
     entries: &mut [WorkspaceManagementEntry],
 ) -> Result<()> {
     for group in daemon.list_workspace_drafts().await? {
@@ -215,8 +215,8 @@ pub(crate) fn spawn_workspace_management_load(
         updates,
         None,
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
-            let mut entries = workspace_management_listings(&mut daemon).await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
+            let mut entries = workspace_management_listings(&daemon).await?;
             // Names first: the dialog opens on this answer while the drafts
             // query runs. The supervised task's own answer carries the details.
             let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
@@ -229,7 +229,7 @@ pub(crate) fn spawn_workspace_management_load(
                     ..Default::default()
                 }),
             });
-            fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
+            fill_workspace_management_drafts(&daemon, &mut entries).await?;
             Ok(WorkspaceManagementResult {
                 entries: Some(entries),
                 ..Default::default()
@@ -297,10 +297,10 @@ pub(crate) fn spawn_workspace_create(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             let workspace = daemon.create_workspace(name).await?;
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 select_workspace: Some(workspace.id),
                 ..Default::default()
             })
@@ -321,10 +321,10 @@ pub(crate) fn spawn_workspace_rename(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             daemon.rename_workspace(workspace_id, name).await?;
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 select_workspace: None,
                 ..Default::default()
             })
@@ -343,6 +343,8 @@ pub(crate) fn spawn_workspace_close_cancel(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .cancel_workspace_close(workspace_id)
                 .await
         },
@@ -360,7 +362,7 @@ pub(crate) fn spawn_workspace_close(
     mj_core::runtime::spawn(async move {
         let closing_workspace_id = workspace_id.clone();
         let work = mj_core::runtime::spawn(async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             daemon.close_workspace(workspace_id).await
         });
         let result = blocking_result("closing workspace", work.await);
@@ -388,8 +390,12 @@ pub(crate) fn spawn_workspace_draft_recovery(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
-            let (session_id, text, revision) = daemon.recover_draft(draft_id.clone()).await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
+            let mj_client::http::RecoveredDraft {
+                session_id,
+                text,
+                revision,
+            } = daemon.recover_draft(draft_id.clone()).await?;
             Ok(WorkspaceManagementResult {
                 recovered_draft: Some((
                     RetiredDetachedDraft { draft_id, revision },
@@ -412,9 +418,9 @@ pub(crate) fn spawn_workspace_drafts_reload(
         updates,
         None,
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 ..Default::default()
             })
         },
@@ -435,7 +441,7 @@ pub(crate) fn spawn_workspace_draft_discard(
         updates,
         Some(tracker),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             let single = draft_id.is_some();
             let count = daemon.discard_drafts(workspace_id, draft_id).await?;
             let message = if single {
@@ -453,7 +459,7 @@ pub(crate) fn spawn_workspace_draft_discard(
                 }),
             });
             Ok(WorkspaceManagementResult {
-                entries: Some(load_workspace_management_entries(&mut daemon).await?),
+                entries: Some(load_workspace_management_entries(&daemon).await?),
                 ..Default::default()
             })
         },
@@ -498,6 +504,34 @@ where
         drop(guard);
     });
     (cancelled, worker)
+}
+
+/// Drop the HTTP request on cancellation so its reply channel closes and
+/// the daemon can stop any disposable machine work behind it.
+pub(crate) fn spawn_cancellable_http<T: Send + 'static>(
+    tracker: CriticalOperationTracker,
+    label: &'static str,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+) -> Arc<AtomicBool> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = tracker.begin_cancellable(label, cancelled.clone());
+    let worker_cancelled = cancelled.clone();
+    mj_core::runtime::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(mj_core::runtime::spawn(work));
+        let result = tokio::select! {
+            joined = task => blocking_result(label, joined),
+            () = async {
+                while !worker_cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            } => Err("operation cancelled".into()),
+        };
+        report(label, &updates, to_update(result));
+        drop(guard);
+    });
+    cancelled
 }
 
 /// Discover and save first-run configuration without blocking terminal input.
@@ -1229,6 +1263,8 @@ pub(crate) fn spawn_terminal_draft_persist(
         async move {
             daemon::connect_or_start()
                 .await?
+                .http()
+                .await?
                 .persist_terminal_draft(
                     client_id,
                     persisted_session_id,
@@ -1269,6 +1305,8 @@ pub(crate) fn spawn_read_receipt_persist(
             // Give projection persistence or a reconnect time to catch up.
             tokio::time::sleep(retry_delay).await;
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .persist_read_receipt(client_id, workspace_id, persisted_session_id, through)
                 .await
@@ -1313,7 +1351,7 @@ pub(crate) fn spawn_create_bundle(
         updates,
         Duration::from_secs(60),
         async move {
-            let mut daemon = daemon::connect_or_start().await?;
+            let daemon = daemon::connect_or_start().await?.http().await?;
             let created = daemon.create_project(sources).await?;
             Ok(CreatedBundleUpdate {
                 bundle: created.project.bundle,
@@ -1339,6 +1377,8 @@ pub(crate) fn spawn_remove_bundle(
         Duration::from_secs(60),
         async move {
             daemon::connect_or_start()
+                .await?
+                .http()
                 .await?
                 .remove_project(bundle_id)
                 .await

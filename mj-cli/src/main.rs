@@ -1515,7 +1515,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
                 orchestrators: true,
             });
         }
-        daemon.prepare_move_session(selection).await
+        daemon.http().await?.prepare_move_session(selection).await
     }
     .await;
     let preparation = match prepared {
@@ -2246,49 +2246,35 @@ async fn start_dashboard(
     interactive: bool,
 ) -> Result<DashboardStartup> {
     let mut daemon = daemon::connect_or_start().await?;
-    let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some(resumed) = resumed_workspace.filter(|resumed| {
-        workspaces
-            .iter()
-            .any(|workspace| workspace.workspace.id == *resumed)
-    }) {
+    let http = daemon.http().await?;
+    let workspaces = http.list_workspaces().await?;
+    let selected = if let Some(resumed) = resumed_workspace
+        .filter(|resumed| workspaces.iter().any(|workspace| workspace.id == *resumed))
+    {
         resumed
     } else if let Some(mode) = &mut go {
-        go::resolve_workspace(&mut daemon, mode).await?
+        go::resolve_workspace(&http, mode).await?
     } else if let Some(requested) = requested_workspace {
         workspaces
             .iter()
-            .find(|candidate| {
-                candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
-            })
-            .map(|candidate| candidate.workspace.id.clone())
-            .ok_or_else(|| {
-                unknown_workspace(
-                    &requested,
-                    workspaces.iter().map(|candidate| &candidate.workspace),
-                )
-            })?
+            .find(|candidate| candidate.name.to_lowercase() == requested.trim().to_lowercase())
+            .map(|candidate| candidate.id.clone())
+            .ok_or_else(|| unknown_workspace(&requested, workspaces.iter()))?
     } else if let Some(workspace) = workspaces
         .iter()
-        .max_by_key(|candidate| &candidate.workspace.last_opened_at)
+        .max_by_key(|candidate| &candidate.last_opened_at)
     {
         // The listing is alphabetical; reopen the most recently opened one.
-        workspace.workspace.id.clone()
+        workspace.id.clone()
     } else {
-        daemon
-            .create_workspace(suggested_workspace_name(&workspaces)?)
+        http.create_workspace(suggested_workspace_name(&workspaces)?)
             .await?
             .id
     };
-    daemon.touch_workspace(selected.clone()).await?;
+    http.touch_workspace(selected.clone()).await?;
     let loaded = if interactive {
         // Listed again: choosing may have created a workspace.
-        let workspaces = daemon
-            .list_workspaces()
-            .await?
-            .into_iter()
-            .map(|listing| listing.workspace)
-            .collect();
+        let workspaces = http.list_workspaces().await?;
         let startup = daemon
             .dashboard_startup(client_id.clone(), selected.clone())
             .await?;
@@ -2303,23 +2289,17 @@ async fn start_dashboard(
 
 async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
     let mut daemon = daemon::connect_or_start().await?;
-    let workspaces = daemon.list_workspaces().await?;
+    let http = daemon.http().await?;
+    let workspaces = http.list_workspaces().await?;
     if let Some(requested) = requested {
         return workspaces
             .iter()
-            .find(|candidate| {
-                candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
-            })
-            .map(|candidate| candidate.workspace.id.clone())
-            .ok_or_else(|| {
-                unknown_workspace(
-                    requested,
-                    workspaces.iter().map(|candidate| &candidate.workspace),
-                )
-            });
+            .find(|candidate| candidate.name.to_lowercase() == requested.trim().to_lowercase())
+            .map(|candidate| candidate.id.clone())
+            .ok_or_else(|| unknown_workspace(requested, workspaces.iter()));
     }
     match workspaces.as_slice() {
-        [workspace] => Ok(workspace.workspace.id.clone()),
+        [workspace] => Ok(workspace.id.clone()),
         [] => bail!("no workspace exists; run `mj` to create one"),
         _ => bail!("several workspaces exist; pass `--workspace NAME`"),
     }
@@ -2354,15 +2334,8 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
 /// in a daemon container's volume.
 async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
-        Ok(mut daemon) => daemon
-            .list_workspaces()
+        Ok(mut daemon) => async { daemon.http().await?.list_workspaces().await }
             .await
-            .map(|workspaces| {
-                workspaces
-                    .into_iter()
-                    .map(|listing| listing.workspace)
-                    .collect::<Vec<_>>()
-            })
             .map_err(|error| {
                 tracing::warn!(%error, "could not list workspaces for the refusal");
             })
@@ -2488,7 +2461,7 @@ fn workspace_name_for_directory(directory: &std::path::Path) -> String {
         .collect::<String>()
 }
 
-fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
+fn suggested_workspace_name(workspaces: &[mj_core::workspace::WorkspaceRecord]) -> Result<String> {
     let base = if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())?
         .runtime
         == mj_core::config::DaemonRuntime::Ssh
@@ -2503,7 +2476,7 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
         .iter()
-        .map(|candidate| candidate.workspace.name.to_lowercase())
+        .map(|candidate| candidate.name.to_lowercase())
         .chain([mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()])
         .collect::<std::collections::BTreeSet<_>>();
     if !names.contains(&base.to_lowercase()) {

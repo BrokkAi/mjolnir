@@ -1,9 +1,9 @@
-use super::{HttpApiError, HttpDaemonClient};
+use super::{HttpApiError, HttpDaemonClient, encode_segment};
 use crate::daemon::{
     RegisteredSession, WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo,
     WikiSyncStatus,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use mj_core::attachment::AttachmentRef;
 use mj_core::local_git::SessionGitStatus;
 use mj_core::state::{ContainerUpgradePreview, ContainerUpgradeRequest, SessionResourceAllocation};
@@ -53,17 +53,7 @@ pub struct StopBackgroundTaskRequest {
     pub background_task_id: String,
 }
 
-fn encode_segment(segment: &str) -> Result<String> {
-    // The URL parser resolves dot segments even when percent-encoded.
-    ensure!(
-        !matches!(segment, "" | "." | ".."),
-        "invalid API path segment"
-    );
-    let encoded: String = url::form_urlencoded::byte_serialize(segment.as_bytes()).collect();
-    Ok(encoded.replace('+', "%20"))
-}
-
-fn session_path(id: &str, suffix: &str) -> Result<String> {
+pub(super) fn session_path(id: &str, suffix: &str) -> Result<String> {
     Ok(format!("/api/v1/sessions/{}{suffix}", encode_segment(id)?))
 }
 

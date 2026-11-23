@@ -324,12 +324,6 @@ pub struct ImportedBundle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceListing {
-    pub workspace: WorkspaceRecord,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionPreview {
     pub id: String,
     pub title: String,
@@ -977,9 +971,6 @@ pub enum DaemonAction {
     InstallMbx {
         machine: mj_core::config::Machine,
     },
-    PreflightNewSession {
-        request: NewSessionPreflightRequest,
-    },
     ValidateProjectDirectory {
         target_id: String,
         directory: PathBuf,
@@ -1002,16 +993,8 @@ pub enum DaemonAction {
         scope: crate::discovery::DetectScope,
         machines: Vec<(String, mj_core::config::Machine)>,
     },
-    CompletePath {
-        host: mj_core::path_completion::CompletionHost,
-        prefix: String,
-        kind: mj_core::path_completion::CompletionKind,
-    },
     CheckProjectDirectories {
         paths: Vec<std::path::PathBuf>,
-    },
-    DiscoverProjects {
-        request: mj_core::project_picker::ProjectDiscoveryRequest,
     },
     ResolveContainerPath {
         target_id: String,
@@ -1107,56 +1090,17 @@ pub enum DaemonAction {
     WebViewerAccess,
     ApiCredential,
     /// The daemon host's Git commit author, which its sessions inherit.
-    GitIdentity,
     /// Write the daemon host's global Git commit author.
-    SetGitIdentity {
-        name: String,
-        email: String,
-    },
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
-    ListWorkspaces,
     /// Every workspace's detached drafts, without their text: the workspace
     /// manager's details answer. Added in protocol 100.
-    ListWorkspaceDrafts,
-    CreateWorkspace {
-        name: String,
-    },
-    RenameWorkspace {
-        workspace_id: String,
-        name: String,
-    },
-    TouchWorkspace {
-        workspace_id: String,
-    },
-    CloseWorkspace {
-        workspace_id: String,
-    },
-    CancelWorkspaceClose {
-        workspace_id: String,
-    },
-    DeleteWorkspace {
-        workspace_id: String,
-    },
     /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
     },
     Detach {
         client_id: String,
-    },
-    PersistReadReceipt {
-        client_id: String,
-        workspace_id: String,
-        session_id: String,
-        through: u64,
-    },
-    PersistTerminalDraft {
-        client_id: String,
-        session_id: String,
-        owner_pid: u32,
-        revision: u64,
-        draft: mj_core::storage::DetachedSessionDraft,
     },
     RecordAbandonedPrompt {
         session_id: String,
@@ -1212,16 +1156,6 @@ pub enum DaemonAction {
     },
     /// Search the user's SessionWiki index. An empty query lists the most
     /// recent sessions.
-    ProjectCatalog {
-        refresh: bool,
-        retry: bool,
-    },
-    CreateProject {
-        sources: Vec<String>,
-    },
-    RemoveProject {
-        bundle_id: String,
-    },
     /// The live sessions whose user or agent messages contain a query,
     /// ignoring case. Tool calls and tool output do not count.
     SessionTextSearch {
@@ -1435,7 +1369,6 @@ pub enum DaemonAction {
         session_id: String,
     },
     ResumeSession(ResumeSessionRequest),
-    PrepareMoveSession(MoveSelection),
     MoveSession(MoveSessionRequest),
     MoveSources {
         session_id: String,
@@ -1449,13 +1382,6 @@ pub enum DaemonAction {
     },
     CancelLifecycle {
         session_id: String,
-    },
-    RecoverDraft {
-        draft_id: String,
-    },
-    DiscardDrafts {
-        workspace_id: String,
-        draft_id: Option<String>,
     },
     Stop,
 }
@@ -1564,9 +1490,7 @@ pub enum DaemonReply {
     SetupDiscovery(Box<crate::discovery::SetupDetection>),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
-    PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
-    ProjectDiscovery(mj_core::project_picker::ProjectDiscovery),
     ResolvedPath(std::path::PathBuf),
     MountValidation(std::path::PathBuf, Option<String>),
     SessionMountValidation(Option<(String, String)>),
@@ -1593,18 +1517,8 @@ pub enum DaemonReply {
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     ApiCredential(String),
-    GitIdentity(GitIdentity),
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
-    Workspaces(Vec<WorkspaceListing>),
-    Workspace(WorkspaceRecord),
-    WorkspaceDrafts(Vec<WorkspaceDrafts>),
-    RecoveredDraft {
-        session_id: String,
-        text: String,
-        revision: Option<i64>,
-    },
-    Count(usize),
     HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
@@ -1635,15 +1549,12 @@ pub enum DaemonReply {
     RegisteredSession(Box<RegisteredSession>),
     ContainerUpgradePreview(mj_core::state::ContainerUpgradePreview),
     SuspendPreflight(Box<mj_core::suspend_consent::SuspendPreflight>),
-    MovePreparation(Box<MovePreparation>),
     MoveOutcome(MoveOutcome),
     MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
     Ordinal(u64),
     Text(String),
     OptionalSessionState(Option<SessionState>),
     RecoveryScan(mj_core::state::RecoveryScan),
-    ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
-    ProjectCreated(mj_core::project_catalog::SavedProject),
     SessionTextMatches(SessionTextSearchPage),
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
@@ -2651,21 +2562,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn list_workspaces(&mut self) -> Result<Vec<WorkspaceListing>> {
-        match self.request(DaemonAction::ListWorkspaces).await? {
-            DaemonReply::Workspaces(workspaces) => Ok(workspaces),
-            reply => bail!("unexpected daemon workspace reply {reply:?}"),
-        }
-    }
-
-    /// Every workspace's detached drafts, without their text.
-    pub async fn list_workspace_drafts(&mut self) -> Result<Vec<WorkspaceDrafts>> {
-        match self.request(DaemonAction::ListWorkspaceDrafts).await? {
-            DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
-            reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
-        }
-    }
-
     /// The capacity service's latest reading of every host and fleet. This
     /// reads what the daemon holds and never probes.
     pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
@@ -2713,23 +2609,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn git_identity(&mut self) -> Result<GitIdentity> {
-        match self.request(DaemonAction::GitIdentity).await? {
-            DaemonReply::GitIdentity(identity) => Ok(identity),
-            reply => bail!("unexpected git-identity reply {reply:?}"),
-        }
-    }
-
-    pub async fn set_git_identity(&mut self, name: String, email: String) -> Result<GitIdentity> {
-        match self
-            .request(DaemonAction::SetGitIdentity { name, email })
-            .await?
-        {
-            DaemonReply::GitIdentity(identity) => Ok(identity),
-            reply => bail!("unexpected set-git-identity reply {reply:?}"),
-        }
-    }
-
     pub async fn rename_profile(&mut self, old_id: String, new_id: String) -> Result<()> {
         match self
             .request(DaemonAction::RenameProfile { old_id, new_id })
@@ -2750,63 +2629,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn create_workspace(&mut self, name: String) -> Result<WorkspaceRecord> {
-        match self.request(DaemonAction::CreateWorkspace { name }).await? {
-            DaemonReply::Workspace(workspace) => Ok(workspace),
-            reply => bail!("unexpected create-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn rename_workspace(&mut self, workspace_id: String, name: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RenameWorkspace { workspace_id, name })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected rename-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn touch_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::TouchWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected touch-workspace reply {reply:?}"),
-        }
-    }
-
-    pub async fn cancel_workspace_close(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CancelWorkspaceClose { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected cancel workspace close reply: {reply:?}"),
-        }
-    }
-
-    pub async fn close_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::CloseWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected close workspace reply: {reply:?}"),
-        }
-    }
-
-    pub async fn delete_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::DeleteWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected delete-workspace reply {reply:?}"),
-        }
-    }
-
     pub async fn attach(&mut self, client_id: String) -> Result<()> {
         match self.request(DaemonAction::Attach { client_id }).await? {
             DaemonReply::Done => Ok(()),
@@ -2818,50 +2640,6 @@ impl DaemonClient {
         match self.request(DaemonAction::Detach { client_id }).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected detach reply {reply:?}"),
-        }
-    }
-
-    pub async fn persist_read_receipt(
-        &mut self,
-        client_id: String,
-        workspace_id: String,
-        session_id: String,
-        through: u64,
-    ) -> Result<u64> {
-        match self
-            .request(DaemonAction::PersistReadReceipt {
-                client_id,
-                workspace_id,
-                session_id,
-                through,
-            })
-            .await?
-        {
-            DaemonReply::Ordinal(ordinal) => Ok(ordinal),
-            reply => bail!("unexpected read-receipt reply {reply:?}"),
-        }
-    }
-
-    pub async fn persist_terminal_draft(
-        &mut self,
-        client_id: String,
-        session_id: String,
-        owner_pid: u32,
-        revision: u64,
-        draft: mj_core::storage::DetachedSessionDraft,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::PersistTerminalDraft {
-                client_id,
-                session_id,
-                owner_pid,
-                revision,
-                draft,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected terminal-draft reply {reply:?}"),
         }
     }
 
@@ -3038,47 +2816,6 @@ impl DaemonClient {
         {
             DaemonReply::OptionalSessionState(state) => Ok(state),
             reply => bail!("unexpected target-missing reply {reply:?}"),
-        }
-    }
-
-    /// Search the user's SessionWiki index, newest first when the query is
-    /// empty and best match first otherwise. The reply carries the state of
-    /// the index as well as the rows, so a caller can say the first build is
-    /// still running.
-    pub async fn project_catalog(
-        &mut self,
-        refresh: bool,
-        retry: bool,
-    ) -> Result<mj_core::project_catalog::ProjectCatalogView> {
-        match self
-            .request(DaemonAction::ProjectCatalog { refresh, retry })
-            .await?
-        {
-            DaemonReply::ProjectCatalog(view) => Ok(view),
-            other => bail!("unexpected project catalog reply: {other:?}"),
-        }
-    }
-
-    pub async fn create_project(
-        &mut self,
-        sources: Vec<String>,
-    ) -> Result<mj_core::project_catalog::SavedProject> {
-        match self
-            .request(DaemonAction::CreateProject { sources })
-            .await?
-        {
-            DaemonReply::ProjectCreated(project) => Ok(project),
-            other => bail!("unexpected project creation reply: {other:?}"),
-        }
-    }
-
-    pub async fn remove_project(&mut self, bundle_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::RemoveProject { bundle_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            other => bail!("unexpected project removal reply: {other:?}"),
         }
     }
 
@@ -3784,41 +3521,6 @@ impl DaemonClient {
         }
     }
 
-    /// Fetch a detached draft. The destination terminal save retires the source.
-    pub async fn recover_draft(
-        &mut self,
-        draft_id: String,
-    ) -> Result<(String, String, Option<i64>)> {
-        match self
-            .request(DaemonAction::RecoverDraft { draft_id })
-            .await?
-        {
-            DaemonReply::RecoveredDraft {
-                session_id,
-                text,
-                revision,
-            } => Ok((session_id, text, revision)),
-            reply => bail!("unexpected recover-draft reply {reply:?}"),
-        }
-    }
-
-    pub async fn discard_drafts(
-        &mut self,
-        workspace_id: String,
-        draft_id: Option<String>,
-    ) -> Result<usize> {
-        match self
-            .request(DaemonAction::DiscardDrafts {
-                workspace_id,
-                draft_id,
-            })
-            .await?
-        {
-            DaemonReply::Count(count) => Ok(count),
-            reply => bail!("unexpected discard-drafts reply {reply:?}"),
-        }
-    }
-
     pub async fn stop(&mut self) -> Result<()> {
         match self.request(DaemonAction::Stop).await? {
             DaemonReply::Done => Ok(()),
@@ -3999,7 +3701,7 @@ pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
 const PRE_HTTP_SESSION_ACTIONS_PROTOCOL: u32 = ORCHESTRATORS_PROTOCOL + 1;
 /// Attachments, reviews, task stops, container upgrades, and wiki actions use HTTP.
-pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = PRE_HTTP_SESSION_ACTIONS_PROTOCOL + 2;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
@@ -4021,19 +3723,6 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RETRY_DELAY: Duration = Duration::from_millis(40);
 impl DaemonClient {
-    pub async fn prepare_move_session(
-        &mut self,
-        selection: MoveSelection,
-    ) -> Result<MovePreparation> {
-        match self
-            .request(DaemonAction::PrepareMoveSession(selection))
-            .await?
-        {
-            DaemonReply::MovePreparation(preparation) => Ok(*preparation),
-            _ => bail!("daemon returned an unexpected move preparation reply"),
-        }
-    }
-
     pub async fn move_sources(
         &mut self,
         session_id: String,
@@ -4063,11 +3752,6 @@ impl DaemonAction {
     /// Disposable machine work uses dedicated connections. Closing one or
     /// handing off the daemon cancels it; interrupted installs can be rerun.
     pub fn is_cancellable_machine_action(&self) -> bool {
-        if let Self::PreflightNewSession { request } = self
-            && !request.remote_repairs.is_empty()
-        {
-            return false;
-        }
         matches!(
             self,
             Self::InstallMbx { .. }
@@ -4076,12 +3760,9 @@ impl DaemonAction {
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses
                 | Self::DiscoverSetup { .. }
-                | Self::PreflightNewSession { .. }
                 | Self::SuspendPreflight { .. }
                 | Self::ValidateProjectDirectory { .. }
-                | Self::CompletePath { .. }
                 | Self::CheckProjectDirectories { .. }
-                | Self::DiscoverProjects { .. }
                 | Self::ResolveContainerPath { .. }
                 | Self::ResolveSetupPath { .. }
                 | Self::ValidateMountSource { .. }

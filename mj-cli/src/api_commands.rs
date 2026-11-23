@@ -1542,17 +1542,13 @@ async fn infer_new_session_inputs(
 
     if workspace_id.is_none() {
         let known_empty = listed.as_ref().is_some_and(Vec::is_empty);
-        let workspaces: Vec<_> = listed
-            .unwrap_or_default()
-            .into_iter()
-            .map(|workspace| crate::daemon::WorkspaceListing { workspace })
-            .collect();
+        let workspaces = listed.unwrap_or_default();
         if local && let Ok(directory) = folder() {
             workspace_id = crate::go::inferred_workspace(&workspaces, &directory).await?;
         }
         if workspace_id.is_none() {
             if let [only] = workspaces.as_slice() {
-                workspace_id = Some(only.workspace.id.clone());
+                workspace_id = Some(only.id.clone());
             } else if known_empty {
                 open.push("--workspace NAME (this instance has none yet. Create one with `mj workspaces create NAME`)".to_owned());
             } else if workspaces.is_empty() {
@@ -1560,7 +1556,7 @@ async fn infer_new_session_inputs(
             } else {
                 let names = workspaces
                     .iter()
-                    .map(|entry| entry.workspace.name.as_str())
+                    .map(|entry| entry.name.as_str())
                     .collect::<Vec<_>>();
                 open.push(format!("--workspace NAME (one of: {})", names.join(", ")));
             }

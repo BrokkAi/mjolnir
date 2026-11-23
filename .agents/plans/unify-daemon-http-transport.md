@@ -18,7 +18,7 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 - [x] (2026-11-23 17:56Z) Milestone 2.5: Published host-loopback container HTTP port (`CONTAINER_API_PORT = 8788`), `MJ_DAEMON_API_TOKEN`, host `api-endpoint.json` with owner-checked cleanup, SSH dual `-L` HTTP API forwarding on `SshLease`, unified `DaemonClient::direct_api_endpoint`, and shared `mj_client::http::HttpDaemonClient` (verified with Host, Container fake-engine, and real disposable localhost SSH phone-disabled scenarios).
 - [ ] Milestone 3: Migrate TCP `DaemonAction` families and the two remaining `#1043` dashboard git/working-context probes onto `/api/v1/*` in clean domain slices, deleting migrated TCP variants and handlers after each slice.
   - [x] (2026-11-23 18:49Z) Slice 3a-1: Migrated & deleted 14 TCP `DaemonAction` variants (`InstallAttachment`, `StartTurnReview`, dead `ResolveTurnReview`, `StopBackgroundTask`, `PreviewContainerUpgrade`, `UpgradeContainer`, `CancelContainerUpgrade`, and all 7 `Wiki*` actions) onto `/api/v1/*` via `mj_client::http::HttpDaemonClient`, unified TUI and Web image attachment upload on `POST /api/v1/sessions/{id}/attachments`, and moved the remaining 2 `#1043` local dashboard probes (`session_working_context`, `session_git_status`) behind `/api/v1/sessions/{id}/working-context` and `/api/v1/sessions/{id}/git-status` (deleting `live_controller_snapshot`).
-  - [ ] Slice 3a-2: Workspaces, drafts, read receipts, preflight, paths, projects, git identity, and move preparation.
+  - [x] (2026-11-23 19:17Z) Slice 3a-2: Migrated & deleted 21 TCP `DaemonAction` variants (all 12 Workspace/Draft/ReadReceipt actions including dead `DeleteWorkspace`, plus `PreflightNewSession`, `CompletePath`, `DiscoverProjects`, `ProjectCatalog`, `CreateProject`, `RemoveProject`, `GitIdentity`, `SetGitIdentity`, and `PrepareMoveSession`) and 11 unused `DaemonReply` variants onto `/api/v1/*`, gating the 5 private terminal draft/receipt routes on `loopback_authenticated` and guarding mutations with upgrade-gate admission (allowing `DELETE /workspaces/{id}/close` during drain).
   - [ ] Slice 3b: Consolidate `ServerState` channels + `SubagentBackend` and migrate remaining request/response `DaemonAction` families (including audio & session import so `UploadChunk` can be deleted).
 - [ ] Milestone 4: Move streaming/interactive/SSH daemon paths (`RuntimeChanges`, `LoginTerminal`, SSH `ssh -L` forwarding) onto HTTP `/api/v1/*`, reduce TCP `DaemonAction` to the five frozen upgrade-management variants, and clean up remaining `mj-controller` type imports in `mj-cli`.
 
@@ -70,7 +70,9 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 
 - **Milestone 3 Slice 3a-1 (complete):** Deleted 14 TCP `DaemonAction` variants (`InstallAttachment`, `StartTurnReview`, dead `ResolveTurnReview`, `StopBackgroundTask`, 3 container-upgrade actions, 7 Wiki actions) and their TCP handlers across `mj-client`/`mj-daemon`, unified TUI and Web image upload on `POST /api/v1/sessions/{id}/attachments`, and eliminated the last two local dashboard probes (`session_working_context`, `session_git_status`) via `GET /api/v1/sessions/{id}/working-context` and `/git-status` (deleting `live_controller_snapshot`).
 
-Milestones 3 (Slices 3a-2, 3b) and 4 remain.
+- **Milestone 3 Slice 3a-2 (complete):** Deleted 21 TCP `DaemonAction` variants (Workspaces, Drafts, ReadReceipts, Preflight, Paths, Projects/Bundles, GitIdentity, MovePrepare) and 11 unused `DaemonReply` variants, shrinking the repo net LOC while adding loopback-auth gating on terminal draft/receipt routes and upgrade-gate admission on workspace/project writes.
+
+Milestones 3 (Slice 3b) and 4 remain.
 
 ## Context and Orientation
 

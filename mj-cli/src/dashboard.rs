@@ -1256,6 +1256,8 @@ pub(crate) async fn run_dashboard_for_workspace(
         if let Some(workspace_id) = workspace_id {
             crate::daemon::connect_existing()
                 .await?
+                .http()
+                .await?
                 .touch_workspace(workspace_id)
                 .await?;
         }

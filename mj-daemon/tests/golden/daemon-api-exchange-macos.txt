@@ -211,64 +211,6 @@
   },
   {
     "request": {
-      "action": "complete_path",
-      "arguments": {
-        "host": "Local",
-        "prefix": "<server>/server-",
-        "kind": "directories"
-      }
-    },
-    "reply": {
-      "Ok": {
-        "reply": "path_completion",
-        "value": {
-          "candidates": [
-            "<server>/server-only-project/"
-          ],
-          "insert": "<server>/server-only-project/",
-          "truncated": false
-        }
-      }
-    }
-  },
-  {
-    "request": {
-      "action": "discover_projects",
-      "arguments": {
-        "request": {
-          "kind": "directory",
-          "path": "<server>",
-          "filter": ""
-        }
-      }
-    },
-    "reply": {
-      "Ok": {
-        "reply": "project_discovery",
-        "value": {
-          "entries": [
-            {
-              "name": "ready-profile",
-              "source": "<server>/ready-profile",
-              "description": "Directory",
-              "kind": "directory"
-            },
-            {
-              "name": "server-only-project",
-              "source": "<server>/server-only-project",
-              "description": "Directory",
-              "kind": "directory"
-            }
-          ],
-          "directory": "<server>",
-          "parent": "<server-parent>",
-          "truncated": false
-        }
-      }
-    }
-  },
-  {
-    "request": {
       "action": "resolve_setup_path",
       "arguments": {
         "machine": {
@@ -341,38 +283,6 @@
       "arguments": {
         "target_id": "local",
         "directory": "<server>/server-only-project"
-      }
-    },
-    "reply": {
-      "Ok": {
-        "reply": "new_session_preflight",
-        "value": {
-          "project_directory": "<server>/server-only-project",
-          "managed_worktree": {
-            "available": false,
-            "default_create": false
-          },
-          "remote_repairs": [],
-          "dirty_repositories": [],
-          "remote_repositories": [],
-          "local_changes_excluded": false
-        }
-      }
-    }
-  },
-  {
-    "request": {
-      "action": "preflight_new_session",
-      "arguments": {
-        "request": {
-          "additional_mounts": [],
-          "remote_repairs": [],
-          "workspace_id": "",
-          "profile_id": "agent",
-          "bundle_id": "",
-          "target_id": "local",
-          "project_directory": "<server>/server-only-project"
-        }
       }
     },
     "reply": {

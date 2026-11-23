@@ -1,6 +1,6 @@
 //! Typed access to the daemon's direct HTTP API.
 use crate::daemon::{DaemonClient, ssh::SshLease};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use hmac::{Hmac, KeyInit, Mac};
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -8,7 +8,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
 use std::sync::Arc;
 
+mod projects;
 mod sessions;
+mod workspaces;
+
+pub use workspaces::{
+    DiscardDraftsRequest, ReadReceiptRequest, RecoveredDraft, TerminalDraftRequest,
+};
 
 pub use sessions::{
     SessionWorkingContext, StopBackgroundTaskRequest, WikiRestoreBody, WikiRestoreResponse,
@@ -30,6 +36,16 @@ pub(crate) fn proof_nonce() -> Result<String> {
     getrandom::fill(&mut random)
         .map_err(|error| anyhow::anyhow!("generate HTTP proof nonce: {error}"))?;
     Ok(mj_core::hex::lower_hex(random))
+}
+
+fn encode_segment(segment: &str) -> Result<String> {
+    // The URL parser resolves dot segments even when percent-encoded.
+    ensure!(
+        !matches!(segment, "" | "." | ".."),
+        "invalid API path segment"
+    );
+    let encoded: String = url::form_urlencoded::byte_serialize(segment.as_bytes()).collect();
+    Ok(encoded.replace('+', "%20"))
 }
 
 fn proof_mac(token: &str, nonce: &str) -> Hmac<Sha256> {

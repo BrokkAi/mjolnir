@@ -338,6 +338,30 @@ pub trait SubagentBackend: Send + Sync {
             .await?
         })
     }
+    fn refresh_workspaces(&self) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn close_workspace(&self, _id: String) -> BoxFuture<'_, Result<(), ApiFailure>> {
+        Box::pin(async { Err(ApiFailure::unavailable("workspace close is unavailable")) })
+    }
+
+    fn cancel_workspace_close(&self, _id: &str) -> Result<(), ApiFailure> {
+        Err(ApiFailure::unavailable(
+            "workspace close cancellation is unavailable",
+        ))
+    }
+
+    fn list_workspace_drafts(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_client::daemon::WorkspaceDrafts>>> {
+        Box::pin(async { anyhow::bail!("terminal drafts are unavailable") })
+    }
+
+    fn remove_project(&self, _id: String) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { anyhow::bail!("project removal is unavailable") })
+    }
+
     fn set_config(
         &self,
         session_id: String,

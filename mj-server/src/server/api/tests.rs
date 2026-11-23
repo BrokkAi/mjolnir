@@ -7646,7 +7646,13 @@ async fn isolated_directory_start_uses_the_discovered_project_and_reports_remove
     let request = bundles.recv().await.unwrap();
     assert!(request.discovered);
     assert_eq!(request.source, "https://gitlab.example/team/hel.git");
-    request.reply.send(Ok("hel".into())).unwrap();
+    request
+        .reply
+        .send(Ok(crate::server::CreateBundleResponse {
+            bundle_id: "hel".into(),
+            project: None,
+        }))
+        .unwrap();
     let ControllerRequest { action, reply } = actions.recv().await.unwrap();
     let ControllerAction::New {
         bundle_id,
@@ -9353,4 +9359,114 @@ async fn wiki_restore_preserves_legacy_response_and_returns_opted_in_registratio
             memory_bytes: 4096,
         })
     );
+}
+
+#[tokio::test]
+async fn terminal_draft_and_receipt_routes_reject_browser_and_external_bearer_auth() {
+    let (mut options, _actions, _snapshots, _bundles, _client_state) =
+        api_options_with_client_state(
+            Arc::new(FakeBackend::default()),
+            |_| {},
+            absent_preferences_path(),
+            None,
+        );
+    options.set_loopback_token("terminal-token".into());
+    let app = router(options);
+    let cookie = login_cookie(&app).await;
+    for (method, path, body) in [
+        ("GET", "/api/v1/workspaces/drafts", ""),
+        ("GET", "/api/v1/drafts/missing", ""),
+        (
+            "POST",
+            "/api/v1/workspaces/sample/drafts/discard",
+            r#"{"draft_id":null}"#,
+        ),
+        (
+            "PUT",
+            "/api/v1/sessions/session-1/terminal-draft",
+            r#"{"client_id":"terminal","owner_pid":42,"revision":1,"draft":{"text":"private"}}"#,
+        ),
+        (
+            "POST",
+            "/api/v1/sessions/session-1/read-receipt",
+            r#"{"client_id":"terminal","workspace_id":"sample","through":0}"#,
+        ),
+    ] {
+        for (header, value) in [
+            (AUTHORIZATION, "Bearer test-api-token"),
+            (COOKIE, cookie.as_str()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header, value)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn workspace_and_project_mutations_refuse_upgrade_draining() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshots, mut bundles) = api_app(backend.clone(), |_| {});
+    backend.upgrade_gate.begin_draining();
+    for (method, path, body) in [
+        ("POST", "/api/v1/workspaces", r#"{"name":"After"}"#),
+        ("PATCH", "/api/v1/workspaces/sample", r#"{"name":"After"}"#),
+        ("POST", "/api/v1/workspaces/sample/touch", ""),
+        ("POST", "/api/v1/workspaces/sample/close", ""),
+        ("POST", "/api/v1/bundles", r#"{"source":"owner/repo"}"#),
+        ("DELETE", "/api/v1/bundles/sample", ""),
+        (
+            "POST",
+            "/api/v1/git-identity",
+            r#"{"name":"A User","email":"a@example.com"}"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::builder().method(method).uri(path))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {path}"
+        );
+    }
+    let cancel_close = app
+        .clone()
+        .oneshot(
+            bearer(Request::delete("/api/v1/workspaces/sample/close"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Cancelling an in-flight close is never refused as a handoff during drain;
+    // it reaches the backend (FakeBackend has no active close implementation).
+    let cancel_body = json_body(cancel_close).await;
+    assert_eq!(cancel_body["code"], serde_json::Value::Null);
+    assert_eq!(
+        cancel_body["error"],
+        "workspace close cancellation is unavailable"
+    );
+    assert!(matches!(
+        bundles.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
