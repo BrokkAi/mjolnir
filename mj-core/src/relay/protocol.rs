@@ -355,15 +355,6 @@ pub enum RelayRequest {
         barrier_command_id: String,
         cut: super::snapshot::RelayCursor,
     },
-    /// The prompt of one queued command as the relay's queue held it at the
-    /// cut of a ready checkpoint barrier, or none when no such prompt is
-    /// queued there. Refused unless that barrier is ready at exactly `cut` and
-    /// nothing has been journaled since. Protocol 85.
-    ReadCheckpointQueuedPrompt {
-        barrier_command_id: String,
-        cut: super::snapshot::RelayCursor,
-        command_id: String,
-    },
     ReadPendingElicitation {
         elicitation_id: String,
     },
@@ -683,7 +674,6 @@ impl RelayRequest {
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::ReadCheckpointMailbox { .. } => "read_checkpoint_mailbox",
             Self::ReadCheckpointNativeUse { .. } => "read_checkpoint_native_use",
-            Self::ReadCheckpointQueuedPrompt { .. } => "read_checkpoint_queued_prompt",
             Self::BeginLiveBaseline => "begin_live_baseline",
             Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
             Self::AbortLiveBaseline => "abort_live_baseline",
@@ -783,9 +773,6 @@ impl RelayRequest {
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::ReadCheckpointMailbox { .. } => super::RELAY_CHECKPOINT_MAILBOX_PROTOCOL,
             Self::ReadCheckpointNativeUse { .. } => super::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL,
-            Self::ReadCheckpointQueuedPrompt { .. } => {
-                super::RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL
-            }
             Self::HoldInPlaceMoveDispatch { .. }
             | Self::DiscardHeldMoveCommands { .. }
             | Self::SubmitFront { .. }
@@ -1115,9 +1102,6 @@ pub enum RelayResponsePayload {
     },
     CheckpointNativeUse {
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
-    },
-    CheckpointQueuedPrompt {
-        prompt: Option<Vec<agent_client_protocol::v1::schema::ContentBlock>>,
     },
     PendingElicitation {
         request: Option<crate::elicitation::ElicitationRequest>,

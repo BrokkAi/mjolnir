@@ -680,13 +680,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.harness_turn = None;
                 }
                 // Another session's message delivered as a turn, by a mailbox
-                // wake or, for workers without mailbox delivery, as a prompt.
-                RelayCommand::MailboxWake { .. } => {
-                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
-                }
-                RelayCommand::Prompt { .. }
-                    if crate::continuation::GeneratedPrompt::of(command_id)
-                        == Some(crate::continuation::GeneratedPrompt::SessionMessageTurn) =>
+                // wake or, for workers without mailbox delivery, as a prompt. A
+                // wake is known by its ID, as the projection knows it: restored
+                // from a checkpoint it is a plain prompt under that ID.
+                RelayCommand::MailboxWake { .. } | RelayCommand::Prompt { .. }
+                    if crate::continuation::carries_mailbox_wake(command_id)
+                        || crate::continuation::GeneratedPrompt::of(command_id)
+                            == Some(crate::continuation::GeneratedPrompt::SessionMessageTurn) =>
                 {
                     begin_delivered_message_turn(&mut snapshot.continuation, command_id);
                 }

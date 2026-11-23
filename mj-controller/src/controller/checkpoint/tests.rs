@@ -2099,16 +2099,16 @@ const QUEUED_WAKE_TEST_CHILD: &str = "MJ_TEST_QUEUED_WAKE_CHILD";
 /// A worker that restarts during a mailbox wake requeues the wake as its
 /// restart continuation, and saving the failed session checkpoints that queue
 /// without a harness. The daemon's projection keeps no payload for a wake, so
-/// the latch archives the prompt the worker's queue holds at the cut; a worker
-/// too old to answer defers the checkpoint rather than export a queue it
-/// cannot restore.
+/// the latch archives the prompt the worker's queue holds at the cut. A
+/// checkpoint-only worker too old to report it saves the rest and says so: it
+/// never starts the wake, so waiting for it would never end.
 // Hard-won: #1594: a queued mailbox wake failed every checkpoint export with "has no content".
 #[cfg(unix)]
 #[tokio::test]
 async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
-    let current = mj_core::relay::RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL;
+    let reads_queue = mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL;
     let Some(protocol) = std::env::var_os(QUEUED_WAKE_TEST_CHILD) else {
-        for protocol in [current, current - 1] {
+        for protocol in [mj_core::relay::RELAY_PROTOCOL_VERSION, reads_queue - 1] {
             let directory = tempfile::tempdir().unwrap();
             let test_name = format!(
                 "{}::a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue",
@@ -2133,11 +2133,12 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
         std::process::exit(101);
     });
 
-    /// Refuses every target command, keeping the export spec it was given.
+    /// Refuses every target command, keeping the export spec it was given
+    /// and the notices it showed.
     #[derive(Default)]
     struct ExportRecorder {
-        purposes: std::sync::Mutex<Vec<String>>,
         exported: std::sync::Mutex<Option<CheckpointExportSpec>>,
+        notices: std::sync::Mutex<Vec<String>>,
     }
 
     impl CommandExecutor for ExportRecorder {
@@ -2161,8 +2162,7 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
             self.execute_with_stdin(command, input)
         }
 
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.purposes.lock().unwrap().push(command.purpose.clone());
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 1,
                 stdout: Vec::new(),
@@ -2179,6 +2179,10 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 *self.exported.lock().unwrap() = Some(serde_json::from_reader(input)?);
             }
             self.execute(command)
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
         }
     }
 
@@ -2308,20 +2312,31 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
     let Err(error) = result else {
         panic!("a checkpoint exported to a target that refuses every command");
     };
-    let exported = executor.exported.lock().unwrap().take();
-    if protocol < current {
-        assert!(checkpoint_was_deferred(&error), "{error:#}");
+    assert!(
+        format!("{error:#}").contains("no target is provisioned for this test"),
+        "{error:#}"
+    );
+    let spec = executor
+        .exported
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the checkpoint never reached its export");
+    spec.canonical_session.validate().unwrap();
+    let notices = executor.notices.lock().unwrap().clone();
+    if protocol < reads_queue {
         assert!(
-            exported.is_none(),
-            "an old worker's queued wake was exported: {:?}",
-            executor.purposes.lock().unwrap()
+            spec.canonical_session.queued_prompts.is_empty(),
+            "a wake this worker cannot report was archived: {:?}",
+            spec.canonical_session.queued_prompts
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.starts_with("1 queued message turn could not be saved")),
+            "the unsaved wake went unreported: {notices:?}"
         );
     } else {
-        assert!(
-            format!("{error:#}").contains("no target is provisioned for this test"),
-            "{error:#}"
-        );
-        let spec = exported.expect("the checkpoint never reached its export");
         let [queued] = spec.canonical_session.queued_prompts.as_slice() else {
             panic!(
                 "expected only the wake's continuation in the archived queue: {:?}",
@@ -2341,7 +2356,7 @@ async fn a_checkpoint_archives_a_queued_mailbox_wake_from_the_worker_queue() {
                 .map(|block| serde_json::to_value(block).unwrap())
                 .collect::<Vec<_>>()
         );
-        spec.canonical_session.validate().unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
         // Restored, the wake shows and starts as a live one: no payload.
         assert!(
             mj_transcript::projection::materialized_queued_prompts_from_canonical(

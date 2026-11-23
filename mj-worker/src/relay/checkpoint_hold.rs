@@ -143,41 +143,6 @@ impl DurableRelay {
         Ok(self.snapshot.native_use_evidence.clone())
     }
 
-    /// The prompt one command holds in this relay's queue at a ready barrier's
-    /// cut. The daemon's projection keeps no payload for a mailbox wake (its
-    /// messages are rows of their own), so the checkpoint that archives the
-    /// cut reads the wake's prompt from the queue that owns it. The outer
-    /// error is a frame-size failure; the inner one is a refusal because the
-    /// relay is no longer at that cut.
-    pub(super) fn checkpoint_queued_prompt(
-        &self,
-        barrier_command_id: &str,
-        cut: &RelayCursor,
-        command_id: &str,
-    ) -> Result<std::result::Result<Option<Vec<ContentBlock>>, &'static str>> {
-        if !self.at_checkpoint_cut(barrier_command_id, cut) {
-            return Ok(Err("the relay is no longer at this checkpoint cut"));
-        }
-        let prompt = self
-            .snapshot
-            .queued_prompts
-            .iter()
-            .find(|queued| queued.command_id == command_id)
-            .and_then(|queued| match &queued.payload {
-                StoredQueuedRelayPayload::Prompt { prompt } => Some(prompt.clone()),
-                StoredQueuedRelayPayload::SetConfig { .. } => None,
-            });
-        // A wake carries every pending event, so one prompt can be as large as
-        // the mailbox. Refuse with an answer rather than a frame the transport
-        // would drop.
-        ensure_serialized_budget(
-            &prompt,
-            mj_core::relay::MAX_FRAME_BYTES - RELAY_EVENT_ENVELOPE_RESERVE,
-            "checkpoint queued prompt",
-        )?;
-        Ok(Ok(prompt))
-    }
-
     /// Spoil the ready barrier's cut: end its hold and remember that work
     /// started after it, which a journal frontier cannot show.
     fn spoil_checkpoint_cut(&mut self) -> Result<()> {

@@ -1,6 +1,21 @@
 use super::*;
 use mj_core::targets::SshTrafficClass;
 
+/// What a person is told when queued mailbox wakes are left out of a saved or
+/// recovered queue: their messages are in the transcript, and the agent will
+/// not receive them. `missed` is a past participle ("saved"), and `reason` a
+/// whole clause.
+pub(in crate::controller) fn lost_wakes_notice(count: usize, missed: &str, reason: &str) -> String {
+    let (turns, their) = if count == 1 {
+        ("turn", "Its")
+    } else {
+        ("turns", "Their")
+    };
+    format!(
+        "{count} queued message {turns} could not be {missed}: {reason}. {their} messages stay in the transcript, but the agent will not receive them."
+    )
+}
+
 impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_for_operation(
@@ -606,44 +621,12 @@ impl Controller {
                 Some(barrier.operational.notification_stack.as_ref().clone());
         }
         // The worker owns accepted mail; the daemon already marked it accepted
-        // and will not send it again. Ask the worker for it while the latch
-        // still holds the cut, before anything can move it.
-        if relay.connection_mut().protocol_version()
-            >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL
-        {
-            let mailbox = relay
-                .connection_mut()
-                .read_checkpoint_mailbox(barrier_command_id.clone(), cursor.clone())
-                .await
-                .context("read the worker's mail at the checkpoint cut")?;
-            canonical_session.mailbox = (!mailbox.is_empty()).then_some(mailbox);
-        } else if !barrier.operational.undelivered_mailbox_event_keys.is_empty() {
-            let keys = &barrier.operational.undelivered_mailbox_event_keys;
-            tracing::warn!(
-                session_id,
-                undelivered = ?keys,
-                "this worker predates checkpoint mail; its accepted, undelivered messages are not in the checkpoint"
-            );
-            executor.notify_notice(&format!(
-                "{} accepted message{} not yet delivered to this session could not be saved, because its worker predates saving them. {} not arrive after resume.",
-                keys.len(),
-                if keys.len() == 1 { "" } else { "s" },
-                if keys.len() == 1 { "It will" } else { "They will" },
-            ));
-        }
-        if relay.connection_mut().protocol_version()
-            >= mj_core::relay::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL
-        {
-            canonical_session.native_use_evidence = relay
-                .connection_mut()
-                .read_checkpoint_native_use(barrier_command_id.clone(), cursor.clone())
-                .await
-                .context("read the worker's native-session-use evidence at the checkpoint cut")?;
-        }
-        // The projection shows a mailbox wake's messages as rows of their own
-        // and keeps no payload for the queued wake; the worker's queue owns
-        // it. Read each one at the held cut so the archive restores exactly
-        // what the agent would have been sent.
+        // and will not send it again. It also owns a queued mailbox wake's
+        // prompt: the projection shows the wake's messages as rows of their own
+        // and keeps no payload for it. Ask the worker for both while the latch
+        // still holds the cut. Reading a queued command is not bound to the
+        // cut, so the wakes come first and the cut-bound mailbox read after
+        // them proves what they read: it refuses once the relay has moved.
         let wakes: Vec<usize> = canonical_session
             .queued_prompts
             .iter()
@@ -654,40 +637,89 @@ impl Controller {
             })
             .map(|(index, _)| index)
             .collect();
-        if !wakes.is_empty()
-            && relay.connection_mut().protocol_version()
-                < mj_core::relay::RELAY_CHECKPOINT_QUEUED_PROMPT_PROTOCOL
+        if relay.connection_mut().protocol_version()
+            >= mj_core::relay::RELAY_CHECKPOINT_MAILBOX_PROTOCOL
         {
-            relay.cancel_abandoned_barrier(admission).await?;
-            return Err(CheckpointDeferred::queued_mailbox_wake().into());
-        }
-        for index in wakes {
-            let queued = &mut canonical_session.queued_prompts[index];
-            let prompt = relay
+            for &index in &wakes {
+                let queued = &mut canonical_session.queued_prompts[index];
+                let command = relay
+                    .connection_mut()
+                    .read_queued_command(queued.command_id.clone())
+                    .await
+                    .with_context(|| {
+                        format!("read queued mailbox wake {} from the worker", queued.command_id)
+                    })?;
+                let prompt = command
+                    .as_ref()
+                    .and_then(RelayCommand::prompt_blocks)
+                    .filter(|prompt| !prompt.is_empty())
+                    .with_context(|| {
+                        format!(
+                            "the worker's queue holds no prompt for mailbox wake {}",
+                            queued.command_id
+                        )
+                    })?;
+                queued.content = prompt
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<serde_json::Result<_>>()?;
+            }
+            let mailbox = relay
                 .connection_mut()
-                .read_checkpoint_queued_prompt(
-                    barrier_command_id.clone(),
-                    cursor.clone(),
-                    queued.command_id.clone(),
-                )
+                .read_checkpoint_mailbox(barrier_command_id.clone(), cursor.clone())
                 .await
-                .with_context(|| {
-                    format!(
-                        "read queued mailbox wake {} at the checkpoint cut",
-                        queued.command_id
-                    )
-                })?
-                .filter(|prompt| !prompt.is_empty())
-                .with_context(|| {
-                    format!(
-                        "the worker's queue holds no prompt for mailbox wake {} at the checkpoint cut",
-                        queued.command_id
-                    )
-                })?;
-            queued.content = prompt
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<serde_json::Result<_>>()?;
+                .context("read the worker's mail at the checkpoint cut")?;
+            canonical_session.mailbox = (!mailbox.is_empty()).then_some(mailbox);
+        } else {
+            if !wakes.is_empty() && !barrier.operational.checkpoint_only {
+                // This worker cannot give the checkpoint a wake's prompt, but
+                // its harness starts the wake as soon as the barrier lets go.
+                relay.cancel_abandoned_barrier(admission).await?;
+                return Err(CheckpointDeferred::queued_mailbox_wake().into());
+            }
+            if !wakes.is_empty() {
+                // A checkpoint-only worker never starts the wake, so waiting
+                // would never end. Save the rest and say what was left out, as
+                // for its undelivered mail.
+                let dropped: Vec<String> = wakes
+                    .iter()
+                    .rev()
+                    .map(|&index| canonical_session.queued_prompts.remove(index).command_id)
+                    .collect();
+                tracing::warn!(
+                    session_id,
+                    dropped = ?dropped,
+                    "this worker predates checkpoint mail, so its queued mailbox wakes cannot be read at the cut and are not in the checkpoint"
+                );
+                executor.notify_notice(&lost_wakes_notice(
+                    dropped.len(),
+                    "saved",
+                    "this session's worker is too old to save queued messages",
+                ));
+            }
+            if !barrier.operational.undelivered_mailbox_event_keys.is_empty() {
+                let keys = &barrier.operational.undelivered_mailbox_event_keys;
+                tracing::warn!(
+                    session_id,
+                    undelivered = ?keys,
+                    "this worker predates checkpoint mail; its accepted, undelivered messages are not in the checkpoint"
+                );
+                executor.notify_notice(&format!(
+                    "{} accepted message{} not yet delivered to this session could not be saved, because its worker predates saving them. {} not arrive after resume.",
+                    keys.len(),
+                    if keys.len() == 1 { "" } else { "s" },
+                    if keys.len() == 1 { "It will" } else { "They will" },
+                ));
+            }
+        }
+        if relay.connection_mut().protocol_version()
+            >= mj_core::relay::RELAY_NATIVE_USE_EVIDENCE_PROTOCOL
+        {
+            canonical_session.native_use_evidence = relay
+                .connection_mut()
+                .read_checkpoint_native_use(barrier_command_id.clone(), cursor.clone())
+                .await
+                .context("read the worker's native-session-use evidence at the checkpoint cut")?;
         }
         let native_session_id = barrier
             .operational

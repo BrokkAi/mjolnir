@@ -967,25 +967,6 @@ impl RelayClient {
         }
     }
 
-    pub async fn read_checkpoint_queued_prompt(
-        &mut self,
-        barrier_command_id: String,
-        cut: mj_core::relay::RelayCursor,
-        command_id: String,
-    ) -> Result<Option<Vec<agent_client_protocol::v1::schema::ContentBlock>>> {
-        match self
-            .call(RelayRequest::ReadCheckpointQueuedPrompt {
-                barrier_command_id,
-                cut,
-                command_id,
-            })
-            .await?
-        {
-            RelayResponsePayload::CheckpointQueuedPrompt { prompt } => Ok(prompt),
-            _ => bail!("relay returned an unexpected checkpoint queued-prompt response"),
-        }
-    }
-
     pub async fn read_pending_elicitation(
         &mut self,
         elicitation_id: String,

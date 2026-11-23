@@ -229,21 +229,6 @@ impl DurableRelay {
                     ));
                 }
             },
-            RelayRequest::ReadCheckpointQueuedPrompt {
-                barrier_command_id,
-                cut,
-                command_id,
-            } => match self.checkpoint_queued_prompt(barrier_command_id, cut, command_id)? {
-                Ok(prompt) => RelayResponsePayload::CheckpointQueuedPrompt { prompt },
-                Err(message) => {
-                    return Ok(relay_error(
-                        RelayErrorCode::InvalidState,
-                        message,
-                        false,
-                        None,
-                    ));
-                }
-            },
             RelayRequest::ReadPendingElicitation { elicitation_id } => {
                 RelayResponsePayload::PendingElicitation {
                     request: self
