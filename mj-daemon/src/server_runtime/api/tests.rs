@@ -36,6 +36,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     committed.turns.insert_shared(
         "child".into(),
         mj_controller::database::CommittedTurn {
+            queued_command_ids: Vec::new(),
             state: (MaterializedExecutionState::Idle, None, Some(turn)),
             pending_form_times: Default::default(),
             failed_message: Some("owned failure details".into()),

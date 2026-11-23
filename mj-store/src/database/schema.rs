@@ -3047,6 +3047,35 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
+    // Compatible: deduplicates identical legacy drafts while preserving user
+    // text, the schema and the revisioned terminal draft contract.
+    if version < 154 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "DELETE FROM detached_drafts AS legacy
+              WHERE legacy.revision IS NULL AND legacy.recovered_at IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM detached_drafts AS current
+                    WHERE current.revision IS NOT NULL AND current.recovered_at IS NULL
+                      AND current.text <> '' AND current.workspace_id = legacy.workspace_id
+                      AND current.session_id IS legacy.session_id AND current.text = legacy.text
+                );
+             DELETE FROM detached_drafts WHERE draft_id IN (
+                 SELECT draft_id FROM (
+                     SELECT draft_id, row_number() OVER (
+                         PARTITION BY workspace_id, COALESCE(session_id, ''), text
+                         ORDER BY saved_at DESC, draft_id DESC
+                     ) AS rank
+                     FROM detached_drafts WHERE revision IS NULL AND recovered_at IS NULL
+                 ) WHERE rank > 1
+             );
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (154, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=154;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -5517,7 +5546,7 @@ mod reader_tests {
         drop(previous);
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
-        assert_eq!(state.revision, 153);
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(153));
         assert!(matches!(
             state
@@ -5551,6 +5580,67 @@ mod reader_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn revision_154_only_retires_exact_duplicate_legacy_drafts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        for id in ["untouched", "cleared", "saved", "deleted"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        stamp_schema_version(&path, 153);
+        let previous = Connection::open(&path).unwrap();
+        previous
+            .execute_batch(
+                "DELETE FROM sessions WHERE session_id = 'deleted';
+             INSERT INTO detached_drafts
+                (draft_id, workspace_id, session_id, source, saved_at, text, revision, recovered_at)
+             VALUES
+                ('orphan', 'default', 'deleted', 'terminal', '01', 'lost', NULL, NULL),
+                ('cleared-legacy', 'default', 'cleared', 'terminal', '01', 'old', NULL, NULL),
+                ('cleared-marker', 'default', 'cleared', 'terminal', '02', '', 3, NULL),
+                ('saved-legacy', 'default', 'saved', 'terminal', '01', 'old', NULL, NULL),
+                ('saved-draft', 'default', 'saved', 'terminal', '02', 'current', 2, NULL),
+                ('saved-copy', 'default', 'saved', 'other terminal', '03', 'current', NULL, NULL),
+                ('hidden-draft', 'default', 'saved', 'hidden terminal', '02', 'hidden', 1, '03'),
+                ('hidden-legacy', 'default', 'saved', 'legacy terminal', '01', 'hidden', NULL, NULL),
+                ('untouched', 'default', 'untouched', 'terminal', '02', 'unique', NULL, NULL),
+                ('dup-by-time', 'default', NULL, 'terminal', '01', 'dup', NULL, NULL),
+                ('dup-a', 'default', NULL, 'terminal', '02', 'dup', NULL, NULL),
+                ('dup-z', 'default', NULL, 'another terminal', '02', 'dup', NULL, NULL),
+                ('recovered', 'default', 'deleted', 'terminal', '01', 'old', NULL, '02');",
+            )
+            .unwrap();
+        drop(previous);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, 154);
+        assert_eq!(state.minimum_compatible, Some(153));
+        state.ensure_supported_by(153).unwrap();
+        let mut statement = upgraded
+            .prepare("SELECT draft_id FROM detached_drafts ORDER BY draft_id")
+            .unwrap();
+        let remaining = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            [
+                "cleared-legacy",
+                "cleared-marker",
+                "dup-z",
+                "hidden-draft",
+                "hidden-legacy",
+                "orphan",
+                "recovered",
+                "saved-draft",
+                "saved-legacy",
+                "untouched"
+            ]
+        );
     }
 
     /// Rewrites a store's recorded schema version the way another build's

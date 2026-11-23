@@ -831,12 +831,14 @@ impl GitIdentity {
 pub struct DraftPreview {
     pub id: String,
     pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub preview: String,
     pub source: String,
     pub owner_pid: Option<u32>,
     pub saved_at: String,
 }
 
-/// One workspace's detached drafts, without their text.
+/// One workspace's detached drafts, with bounded previews.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceDrafts {
     pub workspace_id: String,
@@ -1421,6 +1423,10 @@ pub enum DaemonAction {
     RecoverDraft {
         draft_id: String,
     },
+    DiscardDrafts {
+        workspace_id: String,
+        draft_id: Option<String>,
+    },
     Stop,
 }
 
@@ -1563,8 +1569,13 @@ pub enum DaemonReply {
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
-    /// Every workspace's detached drafts, without their text.
     WorkspaceDrafts(Vec<WorkspaceDrafts>),
+    RecoveredDraft {
+        session_id: String,
+        text: String,
+        revision: Option<i64>,
+    },
+    Count(usize),
     HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
@@ -3825,13 +3836,38 @@ impl DaemonClient {
         }
     }
 
-    pub async fn recover_draft(&mut self, draft_id: String) -> Result<()> {
+    /// Fetch a detached draft. The destination terminal save retires the source.
+    pub async fn recover_draft(
+        &mut self,
+        draft_id: String,
+    ) -> Result<(String, String, Option<i64>)> {
         match self
             .request(DaemonAction::RecoverDraft { draft_id })
             .await?
         {
-            DaemonReply::Done => Ok(()),
+            DaemonReply::RecoveredDraft {
+                session_id,
+                text,
+                revision,
+            } => Ok((session_id, text, revision)),
             reply => bail!("unexpected recover-draft reply {reply:?}"),
+        }
+    }
+
+    pub async fn discard_drafts(
+        &mut self,
+        workspace_id: String,
+        draft_id: Option<String>,
+    ) -> Result<usize> {
+        match self
+            .request(DaemonAction::DiscardDrafts {
+                workspace_id,
+                draft_id,
+            })
+            .await?
+        {
+            DaemonReply::Count(count) => Ok(count),
+            reply => bail!("unexpected discard-drafts reply {reply:?}"),
         }
     }
 
@@ -4013,7 +4049,7 @@ pub const MOVE_ORIGIN_DELTA_PROTOCOL: u32 = SUSPEND_CONSENT_PROTOCOL + 1;
 pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = ORCHESTRATORS_PROTOCOL;
+pub const PROTOCOL_VERSION: u32 = ORCHESTRATORS_PROTOCOL + 1;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";

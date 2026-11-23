@@ -5496,7 +5496,7 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         .expect("the cleanup runs a removal script");
     assert!(script.contains(&format!("/var/lib/hel/workers/{BORROWED_CHILD}")));
     assert!(script.contains(&format!("/var/lib/hel/profiles/{BORROWED_CHILD}")));
-    assert!(script.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(!script.contains(".local/share/hel/profiles/"));
     assert!(
         !script.contains(&format!("/var/lib/hel/workers/{SESSION}")),
         "a child must never remove its parent's worker root: {script}"
@@ -5505,6 +5505,22 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         !script.contains("podman rm") && !script.contains("docker rm"),
         "a child must never remove the borrowed container: {script}"
     );
+    let ssh_locator = TargetLocator::SshBare {
+        ssh: ssh(),
+        workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+        worker_id: Some(BORROWED_CHILD.into()),
+    };
+    let cleanup = borrowed_worker_cleanup_plan(&ssh_locator, BORROWED_CHILD).unwrap();
+    let command = cleanup.scripts()[0].args.last().unwrap();
+    let removal = command
+        .lines()
+        .find(|line| line.contains("rm -rf --"))
+        .unwrap();
+    assert!(removal.contains(&format!(".local/share/hel/workers/{BORROWED_CHILD}")));
+    assert!(removal.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(!removal.contains(SESSION));
+    assert!(!removal.contains("workspaces"));
+    assert!(!removal.contains("/var/lib/hel/profiles/"));
 }
 
 #[test]

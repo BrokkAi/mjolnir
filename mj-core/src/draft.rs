@@ -112,6 +112,27 @@ pub fn remove_startup_receipt(draft: &str, command_id: &str) -> Result<String> {
     envelope.encode()
 }
 
+/// A bounded, single-line preview of a persisted composer draft.
+pub fn preview(draft: &str) -> String {
+    let text = match draft.strip_prefix(CHAT_DRAFT_PREFIX) {
+        Some(_) => match Envelope::decode(draft) {
+            Ok(envelope) => std::borrow::Cow::Owned(envelope.text),
+            Err(_) => return "Unreadable draft".into(),
+        },
+        None => std::borrow::Cow::Borrowed(draft),
+    };
+    let mut chars = text
+        .split(|ch: char| ch.is_whitespace() || ch.is_control())
+        .filter(|word| !word.is_empty())
+        .enumerate()
+        .flat_map(|(index, word)| (index > 0).then_some(' ').into_iter().chain(word.chars()));
+    let mut preview: String = chars.by_ref().take(200).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
 fn image_range(image: &Value) -> Result<(usize, usize, u64)> {
     let start = image
         .pointer("/range/start")
