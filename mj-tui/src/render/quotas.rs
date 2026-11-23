@@ -679,12 +679,20 @@ fn other_long_blocked(member: &PoolMember, now: u64) -> bool {
         .is_some_and(|until| until >= 0 && until as u64 > now)
 }
 
+fn fable_same_reset(member: &PoolMember, fable: &QuotaWindow) -> bool {
+    match (fable.resets_at_epoch_seconds, member.reset) {
+        (None, None) => fable.resets == member.reset_text,
+        (fable, primary) => fable == primary,
+    }
+}
+
 fn has_fable_row(member: &PoolMember) -> bool {
     member.fable.as_ref().is_some_and(|fable| {
         !(member.remaining == 0
             && !member.awaiting_reading
             && !member.fable_awaiting_reading
-            && quota_remaining_percent(fable) == Some(0))
+            && quota_remaining_percent(fable) == Some(0)
+            && fable_same_reset(member, fable))
     })
 }
 
@@ -793,7 +801,10 @@ impl DetailReading {
 }
 
 enum FiveHourDetail {
-    Reading(DetailReading),
+    Reading {
+        reading: DetailReading,
+        blocked: bool,
+    },
     Due,
     Ready,
     Unavailable,
@@ -814,17 +825,20 @@ impl MemberReadings {
             member.awaiting_reading,
         );
         let other_long_blocked = other_long_blocked(member, now);
+        let blocked = other_long_blocked || (member.remaining == 0 && !member.awaiting_reading);
         let five_hour = if member.five_hour_awaiting_reading {
             FiveHourDetail::Due
-        } else if other_long_blocked || (member.remaining == 0 && !member.awaiting_reading) {
-            FiveHourDetail::Unavailable
         } else if let Some(five) = &member.five_hour {
-            FiveHourDetail::Reading(DetailReading::new(
-                quota_remaining_percent(five),
-                reset_label(five.resets_at_epoch_seconds, five.resets.as_deref(), now),
-                false,
-            ))
-        } else if !member.awaiting_reading && member_has_idle_five_hour(member, period) {
+            FiveHourDetail::Reading {
+                reading: DetailReading::new(
+                    quota_remaining_percent(five),
+                    reset_label(five.resets_at_epoch_seconds, five.resets.as_deref(), now),
+                    false,
+                ),
+                blocked,
+            }
+        } else if !blocked && !member.awaiting_reading && member_has_idle_five_hour(member, period)
+        {
             FiveHourDetail::Ready
         } else {
             FiveHourDetail::Unavailable
@@ -903,7 +917,7 @@ impl PoolDetail {
             readings
                 .iter()
                 .filter_map(|reading| match &reading.five_hour {
-                    FiveHourDetail::Reading(five) => Some(cell_width(&five.reset)),
+                    FiveHourDetail::Reading { reading, .. } => Some(cell_width(&reading.reset)),
                     _ => None,
                 })
                 .max()
@@ -1072,16 +1086,20 @@ impl PoolDetail {
     fn five_hour_spans(&self, five: &FiveHourDetail, accent: Color) -> Vec<Span<'static>> {
         let palette = theme::palette();
         let (text, color) = match five {
-            FiveHourDetail::Reading(five) => {
-                let fill = five.fill(accent);
-                let percent_style = if five.percent == Some(0) {
+            FiveHourDetail::Reading { reading, blocked } => {
+                let fill = if *blocked {
+                    palette.muted
+                } else {
+                    reading.fill(accent)
+                };
+                let percent_style = if reading.percent == Some(0) {
                     Style::default()
                         .fg(palette.error)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    five.percent_style(fill, five.percent.is_some())
+                    reading.percent_style(fill, !blocked && reading.percent.is_some())
                 };
-                return five.spans(
+                return reading.spans(
                     self.five_bar,
                     self.five_reset,
                     fill,
@@ -1172,9 +1190,9 @@ impl PoolDetail {
             full_reset("Fable resets", &fable.reset, self.primary_reset);
         }
         if self.five_reset > 0
-            && let FiveHourDetail::Reading(five) = &readings.five_hour
+            && let FiveHourDetail::Reading { reading, .. } = &readings.five_hour
         {
-            full_reset("5H resets", &five.reset, self.five_reset);
+            full_reset("5H resets", &reading.reset, self.five_reset);
         }
         let note = notes.join(" · ");
         let inline_note = !self.has_secondary()
@@ -1200,12 +1218,10 @@ impl PoolDetail {
             } else {
                 (palette.warning, fable.fill(palette.warning))
             };
-            let same_reset = member.fable.as_ref().is_some_and(|window| {
-                match (window.resets_at_epoch_seconds, member.reset) {
-                    (None, None) => window.resets == member.reset_text,
-                    (fable, primary) => fable == primary,
-                }
-            });
+            let same_reset = member
+                .fable
+                .as_ref()
+                .is_some_and(|window| fable_same_reset(member, window));
             let reset_color = if same_reset {
                 palette.border
             } else {
@@ -1222,7 +1238,7 @@ impl PoolDetail {
                 fable.percent_style(fill, !blocked && fable.percent.is_some_and(|pct| pct <= 15)),
                 Style::default().fg(reset_color),
             ));
-            let annotation = if blocked {
+            let annotation = if blocked && fable.percent != Some(0) {
                 Some(("week 0%", palette.muted))
             } else if !member.awaiting_reading
                 && fable.percent.is_some_and(|pct| pct < member.remaining)
@@ -2292,7 +2308,7 @@ mod tests {
                 for (id, week, short, reset) in [
                     ("codex", 80, 0, 7200),
                     ("codex2", 0, 0, 21600),
-                    ("codex3", 0, 0, 3600),
+                    ("codex3", 0, 9, 3600),
                 ] {
                     let report = dashboard.quotas.get_mut(id).unwrap();
                     report.windows = vec![
@@ -2337,7 +2353,7 @@ mod tests {
                 // A live 5H throttle and a spent Week both read 0%, but only the
                 // throttle is red and bold. The active Week uses OpenAI's color.
                 let (lines, _, _) = quota_lines(&dashboard, 130, now, true);
-                let balance_styles = |name: &str| {
+                let profile_line = |name: &str| {
                     lines
                         .iter()
                         .find(|line| {
@@ -2346,6 +2362,9 @@ mod tests {
                                 .is_some_and(|span| span.content.trim() == name)
                         })
                         .unwrap()
+                };
+                let balance_styles = |name| {
+                    profile_line(name)
                         .spans
                         .iter()
                         .filter(|span| span.content.trim_end().ends_with('%'))
@@ -2360,7 +2379,17 @@ mod tests {
                         bold(theme::palette().error),
                     ]
                 );
-                assert_eq!(balance_styles("codex2"), [theme::muted()]);
+                assert_eq!(
+                    balance_styles("codex2"),
+                    [theme::muted(), bold(theme::palette().error)]
+                );
+                assert_eq!(balance_styles("codex3"), [theme::muted(), theme::muted()]);
+                assert!(
+                    profile_line("codex3")
+                        .to_string()
+                        .trim_end()
+                        .ends_with("9% 1h")
+                );
                 capture(
                     &mut output,
                     &format!("{symbols:?} unreadable week and exhausted overlapping windows"),
@@ -2416,7 +2445,27 @@ mod tests {
                 let fallback = &mut dashboard.quotas.get_mut("claude7").unwrap().windows[1];
                 fallback.resets_at_epoch_seconds = None;
                 fallback.resets = Some("Nov 24 at 1pm".into());
+                let staggered = &mut dashboard.quotas.get_mut("claude").unwrap().windows[1];
+                staggered.remaining_percent = Some(0);
+                staggered.resets_at_epoch_seconds = Some(now as i64 + 2 * 86400);
                 dashboard.toggle_quota_pool();
+                let (lines, rows, _) = quota_lines(&dashboard, 74, now, true);
+                let profile_lines = |name| {
+                    rows.iter()
+                        .filter(|(row, _)| matches!(row, QuotaRow::Lane(_, id) if id == name))
+                        .map(|(_, index)| lines[*index].to_string())
+                        .collect::<Vec<_>>()
+                };
+                let staggered = profile_lines("claude");
+                assert_eq!(staggered.len(), 2, "{staggered:?}");
+                assert!(staggered[1].contains("↳ fable"), "{staggered:?}");
+                assert!(
+                    staggered[1].trim_end().ends_with("0% 2d0h"),
+                    "{staggered:?}"
+                );
+                let same_reset = profile_lines("claude4");
+                assert_eq!(same_reset.len(), 1, "{same_reset:?}");
+                assert!(same_reset[0].trim_end().ends_with('—'), "{same_reset:?}");
                 capture(
                     &mut output,
                     "Light · coincident Week and 5H, overdue Fable, and reset text",

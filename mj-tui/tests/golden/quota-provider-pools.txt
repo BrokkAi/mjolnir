@@ -1496,8 +1496,8 @@ minimized partial totals: ─ Profiles ── OpenAI 5H ~100%*, codex-short-spen
 │  1 profile not reporting                                                                                                         │
 │          WEEK                      5H                      BANK                                                                  │
 │  codex   ━━━━━━━━━╸──  80% 3h      ──────────   0% 2h      ⟲1                                                                    │
-│  codex2  ────────────   0% 3h      —                                                                                             │
-│  codex3  ────────────   0% 3h      —                                                                                             │
+│  codex2  ────────────   0% 3h      ──────────   0% 6h                                                                            │
+│  codex3  ────────────   0% 3h      ━─────────   9% 1h                                                                            │
 │ - 5H ~57%                                                                 ▉          2h▉                                    4h43m│
 │  codex4             ━━━━━━━━━━━─────  70% 2h      Week unknown                                                                   │
 │  codex-short-full   ━━━━━━━━━━━━━━━━ 100% 4h43m                                                                                  │
@@ -1531,7 +1531,7 @@ background runs (x..end, colour):
 3: 0..132 Rgb(22, 27, 30) NONE
 4: 0..132 Rgb(22, 27, 30) NONE
 5: 0..23 Rgb(22, 27, 30) NONE, 23..29 Rgb(22, 27, 30) BOLD, 29..47 Rgb(22, 27, 30) NONE, 47..53 Rgb(22, 27, 30) BOLD, 53..61 Rgb(22, 27, 30) NONE, 61..63 Rgb(22, 27, 30) BOLD, 63..132 Rgb(22, 27, 30) NONE
-6: 0..132 Rgb(22, 27, 30) NONE
+6: 0..47 Rgb(22, 27, 30) NONE, 47..53 Rgb(22, 27, 30) BOLD, 53..132 Rgb(22, 27, 30) NONE
 7: 0..132 Rgb(22, 27, 30) NONE
 8: 0..7 Rgb(22, 27, 30) NONE, 7..76 Rgb(16, 163, 127) NONE, 76..77 Rgb(22, 27, 30) NONE, 77..89 Rgb(15, 53, 46) NONE, 89..90 Rgb(22, 27, 30) NONE, 90..131 Rgb(15, 53, 46) NONE, 131..132 Rgb(22, 27, 30) NONE
 9: 0..38 Rgb(22, 27, 30) NONE, 38..44 Rgb(22, 27, 30) BOLD, 44..132 Rgb(22, 27, 30) NONE
@@ -1566,8 +1566,8 @@ background runs (x..end, colour):
 |  1 profile not reporting                                                                                                         |
 |          WEEK                      5H                      BANK                                                                  |
 |  codex   ==========--  80% 3h      ----------   0% 2h      B1                                                                    |
-|  codex2  ------------   0% 3h      -                                                                                             |
-|  codex3  ------------   0% 3h      -                                                                                             |
+|  codex2  ------------   0% 3h      ----------   0% 6h                                                                            |
+|  codex3  ------------   0% 3h      =---------   9% 1h                                                                            |
 | - 5H ~57%#################################################################|==========2h|====================================4h43m|
 |  codex4             ===========-----  70% 2h      Week unknown                                                                   |
 |  codex-short-full   ================ 100% 4h43m                                                                                  |
@@ -1601,7 +1601,7 @@ background runs (x..end, colour):
 3: 0..132 Rgb(22, 27, 30) NONE
 4: 0..132 Rgb(22, 27, 30) NONE
 5: 0..23 Rgb(22, 27, 30) NONE, 23..29 Rgb(22, 27, 30) BOLD, 29..47 Rgb(22, 27, 30) NONE, 47..53 Rgb(22, 27, 30) BOLD, 53..61 Rgb(22, 27, 30) NONE, 61..63 Rgb(22, 27, 30) BOLD, 63..132 Rgb(22, 27, 30) NONE
-6: 0..132 Rgb(22, 27, 30) NONE
+6: 0..47 Rgb(22, 27, 30) NONE, 47..53 Rgb(22, 27, 30) BOLD, 53..132 Rgb(22, 27, 30) NONE
 7: 0..132 Rgb(22, 27, 30) NONE
 8: 0..7 Rgb(22, 27, 30) NONE, 7..76 Rgb(16, 163, 127) REVERSED, 76..77 Rgb(16, 163, 127) NONE, 77..131 Rgb(15, 53, 46) NONE, 131..132 Rgb(22, 27, 30) NONE
 9: 0..38 Rgb(22, 27, 30) NONE, 38..44 Rgb(22, 27, 30) BOLD, 44..132 Rgb(22, 27, 30) NONE
@@ -1678,7 +1678,7 @@ background runs (x..end, colour):
 │  claude3    ━━──────────  18% 1d0h      ready                            ▐
 │    ↳ fable  ╸───────────   5% 18h55m    ◀ fable cap                      ▐
 │  claude     ────────────   0% 1d14h     —                                ▐
-│    ↳ fable  ━━━━━━━━━───  77% 1d14h     week 0%                          ▐
+│    ↳ fable  ────────────   0% 2d0h                                       ▐
 │  claude4    ────────────   0% 4d13h     —                                ▐
 │  claude7    ━━━━━───────  41% 6d0h      ready                    ⟲1      ▐
 │    ↳ fable  ━━━━━━━━━━━━ 100% Nov 24…                                    ▐
@@ -1737,13 +1737,13 @@ background runs (x..end, colour):
 │    5H reset due, awaiting reading                                                                │
 │MOONSHOT                                                                                          │
 │ - week 100%                                                                                      │
-│  kimi  ━━━━━━━━━━━━━━━━ 100% 2d0h    blocked by other limit · Booster balance: 123 credits       │
+│        WEEK                      5H                                                              │
+│  kimi  ━━━━━━━━━━━━ 100% 2d0h    ━━━━━━━━━━ 100% 2h50m                                           │
+│    blocked by other limit · Booster balance: 123 credits                                         │
 │ - Month                                                                                  12h   0%│
-│  kimi  ────────────────   0% 12h     Booster balance: 123 credits                                │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
+│        MONTH                     5H                                                              │
+│  kimi  ────────────   0% 12h     ━━━━━━━━━━ 100% 2h50m                                           │
+│    Booster balance: 123 credits                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -1758,10 +1758,10 @@ background runs (x..end, colour):
 6: 0..100 Rgb(22, 27, 30) NONE
 7: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..100 Rgb(22, 27, 30) NONE
 8: 0..9 Rgb(22, 27, 30) NONE, 9..99 Rgb(150, 110, 230) NONE, 99..100 Rgb(22, 27, 30) NONE
-9: 0..25 Rgb(22, 27, 30) NONE, 25..31 Rgb(22, 27, 30) BOLD, 31..100 Rgb(22, 27, 30) NONE
-10: 0..10 Rgb(22, 27, 30) NONE, 10..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+9: 0..100 Rgb(22, 27, 30) NONE
+10: 0..21 Rgb(22, 27, 30) NONE, 21..27 Rgb(22, 27, 30) BOLD, 27..100 Rgb(22, 27, 30) NONE
 11: 0..100 Rgb(22, 27, 30) NONE
-12: 0..100 Rgb(22, 27, 30) NONE
+12: 0..10 Rgb(22, 27, 30) NONE, 10..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
 13: 0..100 Rgb(22, 27, 30) NONE
 14: 0..100 Rgb(22, 27, 30) NONE
 15: 0..100 Rgb(22, 27, 30) NONE
@@ -1779,13 +1779,13 @@ background runs (x..end, colour):
 |    5H reset due, awaiting reading                                                                |
 |MOONSHOT                                                                                          |
 | - week 100%######################################################################################|
-|  kimi  ================ 100% 2d0h    blocked by other limit - Booster balance: 123 credits       |
+|        WEEK                      5H                                                              |
+|  kimi  ============ 100% 2d0h    ========== 100% 2h50m                                           |
+|    blocked by other limit - Booster balance: 123 credits                                         |
 | - Month =================================================================================12h   0%|
-|  kimi  ----------------   0% 12h     Booster balance: 123 credits                                |
-|                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
+|        MONTH                     5H                                                              |
+|  kimi  ------------   0% 12h     ========== 100% 2h50m                                           |
+|    Booster balance: 123 credits                                                                  |
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
@@ -1800,10 +1800,10 @@ background runs (x..end, colour):
 6: 0..100 Rgb(22, 27, 30) NONE
 7: 0..1 Rgb(22, 27, 30) NONE, 1..9 Rgb(22, 27, 30) BOLD, 9..100 Rgb(22, 27, 30) NONE
 8: 0..9 Rgb(22, 27, 30) NONE, 9..99 Rgb(150, 110, 230) REVERSED, 99..100 Rgb(22, 27, 30) NONE
-9: 0..25 Rgb(22, 27, 30) NONE, 25..31 Rgb(22, 27, 30) BOLD, 31..100 Rgb(22, 27, 30) NONE
-10: 0..10 Rgb(22, 27, 30) NONE, 10..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
+9: 0..100 Rgb(22, 27, 30) NONE
+10: 0..21 Rgb(22, 27, 30) NONE, 21..27 Rgb(22, 27, 30) BOLD, 27..100 Rgb(22, 27, 30) NONE
 11: 0..100 Rgb(22, 27, 30) NONE
-12: 0..100 Rgb(22, 27, 30) NONE
+12: 0..10 Rgb(22, 27, 30) NONE, 10..94 Rgb(47, 40, 70) NONE, 94..99 Rgb(22, 27, 30) BOLD, 99..100 Rgb(22, 27, 30) NONE
 13: 0..100 Rgb(22, 27, 30) NONE
 14: 0..100 Rgb(22, 27, 30) NONE
 15: 0..100 Rgb(22, 27, 30) NONE
