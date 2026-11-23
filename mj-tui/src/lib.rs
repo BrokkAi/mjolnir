@@ -1095,7 +1095,7 @@ pub struct DashboardState {
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_selection: Option<render::quota_pools::QuotaRow>,
-    pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
+    pub(crate) quota_expanded: BTreeSet<render::quota_pools::QuotaGroup>,
     /// Provider groups retained across openings of the new-session picker.
     pub(crate) new_wizard_expanded_providers: BTreeSet<mj_core::config::QuotaProvider>,
     pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,

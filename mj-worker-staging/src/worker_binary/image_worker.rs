@@ -1,10 +1,10 @@
-//! The worker an agent-dev image carries, and the choice between it and a
+//! The worker the daemon image carries, and the choice between it and a
 //! host binary.
 
 use super::*;
 use mj_core::targets::SshTrafficClass;
 
-/// Where an agent-dev image keeps the worker built from its own commit.
+/// Where the daemon image keeps the worker built from its own commit.
 pub const IMAGE_WORKER: &str = "/opt/mjolnir/mj-worker";
 
 /// Print the build of the image's worker, or `absent` when the image has
@@ -106,7 +106,7 @@ fn parse_image_worker_build(stdout: &[u8]) -> Result<Option<String>> {
     Ok(Some(text.to_owned()))
 }
 
-/// The label `containers/Containerfile.agent-dev` gives the worker it bakes in.
+/// The label `containers/Containerfile.daemon` gives the worker it bakes in.
 /// The image build fails unless the worker reports exactly this build.
 pub const WORKER_BUILD_LABEL: &str = "org.brokk.mjolnir.worker-build";
 

@@ -2452,6 +2452,57 @@ pub fn session_command_args(
     session
 }
 
+/// An EOF-watched command needs the stdin channel and sshd's non-PTY
+/// process group. OpenSSH's dedicated flags can override earlier `-o` values,
+/// so remove conflicting flags even when they appear in a short-option cluster.
+pub(super) fn configure_stdin_lifetime(args: &mut Vec<String>) {
+    let original = std::mem::take(args);
+    args.extend(
+        [
+            "-o",
+            "RequestTTY=no",
+            "-o",
+            "StdinNull=no",
+            "-o",
+            "ForkAfterAuthentication=no",
+        ]
+        .map(str::to_owned),
+    );
+    let mut original = original.into_iter();
+    while let Some(argument) = original.next() {
+        let Some(options) = argument
+            .strip_prefix('-')
+            .filter(|s| !s.is_empty() && *s != "-")
+        else {
+            args.push(argument);
+            args.extend(original);
+            break;
+        };
+        let mut retained = String::from("-");
+        for (index, option) in options.char_indices() {
+            if matches!(option, 'n' | 'f' | 't') {
+                continue;
+            }
+            retained.push(option);
+            // ssh(1) short options that take a value. An attached value
+            // consumes the rest of this argument, including any n, f or t.
+            if "BbcDEeFIiJLlmOoPpQRSWw".contains(option) {
+                let value = &options[index + option.len_utf8()..];
+                retained.push_str(value);
+                args.push(retained);
+                if value.is_empty() {
+                    args.extend(original.next());
+                }
+                retained = String::from("-");
+                break;
+            }
+        }
+        if retained.len() > 1 {
+            args.push(retained);
+        }
+    }
+}
+
 /// Append the command's own arguments after the session options.
 ///
 /// OpenSSH keeps the first value it sees for an option, so leading with the
@@ -3266,6 +3317,69 @@ mod tests {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keep_stdin_open_delivers_eof_over_a_real_mux_session() {
+        use crate::targets::CancellableProcessExecutor;
+        use std::sync::atomic::AtomicBool;
+
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sockets = sharing_socket_dir();
+        let Some(server) = LocalSshd::start(1, sockets.path()) else {
+            eprintln!("skipped: this machine has no sshd");
+            return;
+        };
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            sockets.path().to_path_buf(),
+        )));
+        let mut ssh = server.ssh.clone();
+        ssh.ssh_args
+            .extend(["-oRequestTTY=force", "-o", "StdinNull=yes", "-ntt"].map(str::to_owned));
+        let cleaned = sockets.path().join("cleaned");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let command = ssh_command(
+            SshTrafficClass::Control,
+            &ssh,
+            [
+                "sh",
+                "-c",
+                r#"set -eu
+IFS= read -r token
+[ "$token" = test-token ]
+[ ! -t 0 ]
+printf ready
+while IFS= read -r _unused; do :; done
+printf done > "$1""#,
+                "sh",
+                cleaned.to_str().unwrap(),
+            ],
+        )
+        .keep_stdin_open()
+        .with_sensitive_stdin(b"test-token\n".to_vec())
+        .with_stream_reply(move |bytes| {
+            if bytes.is_some() {
+                flag.store(true, Ordering::Release);
+            }
+        });
+        let result = CancellableProcessExecutor::new(cancelled.clone())
+            .with_deadline(Duration::from_secs(10))
+            .execute(&command);
+        set_ssh_connection_sharing_for_test(None);
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(fs::read_to_string(cleaned).unwrap(), "done");
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            fs::read_dir(sockets.path())
+                .unwrap()
+                .any(|entry| { entry.unwrap().file_type().unwrap().is_socket() })
+        );
     }
 
     /// Against a real `sshd` that allows two sessions per connection, with

@@ -1999,13 +1999,22 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if unique_keys.len() != lease.events.len() {
                 bail!("mailbox hook lease repeats an event key");
             }
-            if snapshot.pending_mailbox_events != lease.events {
-                bail!("mailbox hook lease does not claim all pending events in order");
+            let pending = &snapshot.pending_mailbox_events;
+            if *pending != lease.events
+                && !(lease.hook_event == "PostToolUse"
+                    && pending
+                        .iter()
+                        .filter(|event| !event.is_parent_message())
+                        .eq(&lease.events))
+            {
+                bail!("mailbox hook lease does not claim its pending partition in order");
             }
             if let Some(steering) = &lease.steering {
                 hook_steering_prompt(snapshot, steering)?;
             }
-            snapshot.pending_mailbox_events.clear();
+            snapshot
+                .pending_mailbox_events
+                .retain(|event| !unique_keys.contains(event.key.as_str()));
             snapshot.mailbox_hook_lease = Some(lease.clone());
         }
         RelayObservation::MailboxHookLeaseReturned { lease_id, .. } => {
@@ -2144,6 +2153,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 bail!("leased hook delivery is missing its event details");
             }
             record_handback_mailbox_assignments(snapshot, &claimed);
+            // Prompt attachment is claimed only after CommandStarted, when
+            // the worker is about to send the owning prompt to the harness.
+            record_delegated_mailbox_instructions(snapshot, &claimed);
             if path == &MailboxDeliveryPath::ToolHook && lease_id.is_some() {
                 snapshot.mailbox_hook_lease = None;
             } else {
@@ -2364,6 +2376,142 @@ fn record_handback_mailbox_assignments(
     }
 }
 
+/// Restore delivered parent authorization from the handback window saved by
+/// workers that did not yet keep a dedicated Guardian projection.
+pub fn seed_legacy_delegated_parent_instructions(snapshot: &mut RelaySnapshot) {
+    use crate::continuation::GeneratedPrompt;
+    use crate::guardian::{DelegatedParentInstruction, DelegatedParentInstructionKind};
+    use crate::mailbox::HANDBACK_PARENT_MAILBOX_PREFIX;
+
+    if !snapshot.delegated_parent_instructions.is_empty() {
+        return;
+    }
+    let Some(context) = snapshot.handback_checks.context.clone() else {
+        if snapshot.managed_subagent && snapshot.latest_prompt_accepted_ordinal.is_some() {
+            snapshot.delegated_parent_instructions_omitted = true;
+        }
+        return;
+    };
+
+    // /clear reset the conversation, but kept lifetime handback assignments.
+    // Only a retained receipt can prove that a legacy snapshot had a clear.
+    let cleared_through = snapshot
+        .handled_commands
+        .values()
+        .filter_map(|receipt| match receipt.outcome {
+            Some(RelayCommandOutcome::ContextCleared { .. }) => receipt.terminal_ordinal,
+            _ => None,
+        })
+        .max();
+
+    snapshot.delegated_parent_instructions_omitted |= !context.authorization_complete;
+    for message in context.messages {
+        if message.role != "user" {
+            continue;
+        }
+        let Some(raw_id) = message.id.strip_prefix("user:") else {
+            continue;
+        };
+        let (id, kind) = if let Some(key) = raw_id.strip_prefix(HANDBACK_PARENT_MAILBOX_PREFIX) {
+            if let Some(cleared) = cleared_through {
+                match snapshot.delivered_mailbox_event_keys.get(key) {
+                    Some(ordinal) if *ordinal > cleared => {}
+                    Some(_) => continue,
+                    None => {
+                        snapshot.delegated_parent_instructions_omitted = true;
+                        continue;
+                    }
+                }
+            }
+            (
+                format!("parent-mailbox:{key}"),
+                DelegatedParentInstructionKind::ParentMessage,
+            )
+        } else if cleared_through.is_none()
+            && GeneratedPrompt::of(raw_id) == Some(GeneratedPrompt::SubagentSpawn)
+        {
+            (
+                raw_id.to_owned(),
+                DelegatedParentInstructionKind::SpawnBrief,
+            )
+        } else {
+            continue;
+        };
+        // A head/tail trim did not change the legacy completeness flag, and
+        // assistant eviction does not say whether a parent entry was lost.
+        snapshot.delegated_parent_instructions_omitted |= message
+            .text
+            .contains(crate::assessment::TRIM_MIDDLE_MARKER_SUFFIX);
+        record_delegated_parent_instruction(
+            snapshot,
+            DelegatedParentInstruction {
+                id,
+                kind,
+                text: message.text,
+            },
+        );
+    }
+}
+
+fn record_delegated_parent_instruction(
+    snapshot: &mut RelaySnapshot,
+    mut instruction: crate::guardian::DelegatedParentInstruction,
+) {
+    use crate::{assessment::MAX_MESSAGES, continuation::USER_BYTES};
+
+    let instructions = &mut snapshot.delegated_parent_instructions;
+    let omitted = &mut snapshot.delegated_parent_instructions_omitted;
+    if instructions.iter().any(|input| input.id == instruction.id) {
+        return;
+    }
+    let Some(text_budget) = USER_BYTES.checked_sub(instruction.id.len()) else {
+        *omitted = true;
+        return;
+    };
+    if instruction.text.len() > text_budget {
+        instruction
+            .text
+            .truncate(instruction.text.floor_char_boundary(text_budget));
+        *omitted = true;
+    }
+    instructions.push(instruction);
+    let mut bytes = 0;
+    let retained = instructions
+        .iter()
+        .rev()
+        .take(MAX_MESSAGES)
+        .take_while(|input| {
+            bytes += input.id.len() + input.text.len();
+            bytes <= USER_BYTES
+        })
+        .count();
+    let removed = instructions.len() - retained;
+    if removed > 0 {
+        instructions.drain(..removed);
+        *omitted = true;
+    }
+}
+
+fn record_delegated_mailbox_instructions(
+    snapshot: &mut RelaySnapshot,
+    events: &[crate::mailbox::MailboxEvent],
+) {
+    use crate::guardian::{DelegatedParentInstruction, DelegatedParentInstructionKind};
+
+    for event in events {
+        if let crate::mailbox::MailboxEventBody::ParentMessage { text } = &event.body {
+            record_delegated_parent_instruction(
+                snapshot,
+                DelegatedParentInstruction {
+                    id: format!("parent-mailbox:{}", event.key),
+                    kind: DelegatedParentInstructionKind::ParentMessage,
+                    text: text.clone(),
+                },
+            );
+        }
+    }
+}
+
 /// Classification boundaries and action invalidation share the journal owner.
 fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     use crate::activity::verdict::CompletionEvidence;
@@ -2401,6 +2549,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     {
         let events = events.clone();
         record_handback_mailbox_assignments(snapshot, &events);
+        record_delegated_mailbox_instructions(snapshot, &events);
     }
     if let Some(id) = delivered
         && let Some(prompt) = snapshot
@@ -2423,6 +2572,27 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         if let Some(context) = &mut snapshot.handback_checks.context {
             context.handback_user(id, &prompt);
+        }
+        if matches!(&event.observation, RelayObservation::CommandStarted { .. })
+            && GeneratedPrompt::of(id) == Some(GeneratedPrompt::SubagentSpawn)
+            && matches!(snapshot.dispatches[id].command, RelayCommand::Prompt { .. })
+        {
+            let text = prompt
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            record_delegated_parent_instruction(
+                snapshot,
+                crate::guardian::DelegatedParentInstruction {
+                    id: id.clone(),
+                    kind: crate::guardian::DelegatedParentInstructionKind::SpawnBrief,
+                    text,
+                },
+            );
         }
     }
     if let Some(id) = delivered
@@ -2452,6 +2622,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             action,
             reply,
             answers,
+            permission_decision,
         } => {
             let pending = snapshot.assessment_questions.remove(elicitation_id);
             if pending
@@ -2476,6 +2647,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 elicitation_id,
                 pending_request.as_ref(),
                 action,
+                *permission_decision,
                 reply.as_deref(),
                 answers.as_deref(),
             ) {
@@ -2582,6 +2754,8 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         } => {
             snapshot.assessment_context = Some(Default::default());
             snapshot.trusted_user_inputs.clear();
+            snapshot.delegated_parent_instructions.clear();
+            snapshot.delegated_parent_instructions_omitted = false;
             snapshot.prior_guardian_reviews.clear();
             snapshot.assessment = None;
             // The conversation that held any open request is gone, so fence it
@@ -2677,6 +2851,80 @@ fn begin_delivered_message_turn(
 mod open_request_tests {
     use super::*;
 
+    fn apply(
+        snapshot: &mut RelaySnapshot,
+        replay: &mut RelaySnapshot,
+        observation: RelayObservation,
+    ) {
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V2,
+            ordinal: snapshot.latest_ordinal + 1,
+            previous_digest: String::new(),
+            digest: String::new(),
+            recorded_at_ms: 1,
+            command_id: None,
+            observation,
+        };
+        event.digest = relay_event_digest(&event).unwrap();
+        apply_relay_event(snapshot, &event).unwrap();
+        let wire = serde_json::to_vec(&event).unwrap();
+        apply_relay_event(replay, &serde_json::from_slice(&wire).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn guardian_parent_retention_bounds_unicode_and_clears_omissions_with_context() {
+        use crate::continuation::USER_BYTES;
+        use crate::guardian::{DelegatedParentInstruction, DelegatedParentInstructionKind};
+
+        let mut snapshot = RelaySnapshot::new("parent-history".into());
+        for (id, text) in [
+            ("first", "earlier restriction".into()),
+            ("latest", "🌱".repeat(USER_BYTES / 4)),
+        ] {
+            record_delegated_parent_instruction(
+                &mut snapshot,
+                DelegatedParentInstruction {
+                    id: id.into(),
+                    kind: DelegatedParentInstructionKind::ParentMessage,
+                    text,
+                },
+            );
+        }
+        let [latest] = snapshot.delegated_parent_instructions.as_slice() else {
+            panic!("the oversized recent delivery must evict the oldest entry");
+        };
+        assert_eq!(latest.id, "latest");
+        assert_eq!(latest.text, "🌱".repeat((USER_BYTES - latest.id.len()) / 4));
+        assert!(snapshot.delegated_parent_instructions_omitted);
+
+        let mut replay = snapshot.clone();
+        apply(
+            &mut snapshot,
+            &mut replay,
+            RelayObservation::CommandQueued {
+                command_id: "clear".into(),
+                command: RelayCommand::ClearContext,
+                created_at_ms: 1,
+                insert_at_front: false,
+            },
+        );
+        apply(
+            &mut snapshot,
+            &mut replay,
+            RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: None,
+                command_id: "clear".into(),
+                outcome: RelayCommandOutcome::ContextCleared {
+                    native_session_id: "new".into(),
+                    memory: None,
+                },
+            },
+        );
+        assert!(snapshot.delegated_parent_instructions.is_empty());
+        assert!(!snapshot.delegated_parent_instructions_omitted);
+    }
+
     #[test]
     fn guardian_alignment_keeps_latest_form_when_answers_exceed_the_history_budget() {
         use crate::continuation::USER_BYTES;
@@ -2705,6 +2953,7 @@ mod open_request_tests {
                     action: "accept".into(),
                     reply: None,
                     answers: Some(answers),
+                    permission_decision: None,
                 },
             };
             event.digest = relay_event_digest(&event).unwrap();
@@ -2729,25 +2978,12 @@ mod open_request_tests {
         use crate::elicitation::{
             ElicitationRequest, ElicitationResponse, TOOL_PERMISSION_ID_PREFIX, ToolPermissionForm,
         };
-        use crate::guardian::TrustedUserInputKind;
+        use crate::guardian::{
+            ManualPermissionDecision, TrustedUserDecision, TrustedUserInputKind,
+        };
 
         let mut snapshot = RelaySnapshot::new("forms".into());
         let mut replay = snapshot.clone();
-        let apply = |snapshot: &mut RelaySnapshot, replay: &mut RelaySnapshot, observation| {
-            let mut event = RelayEvent {
-                format: RELAY_EVENT_FORMAT_V2,
-                ordinal: snapshot.latest_ordinal + 1,
-                previous_digest: String::new(),
-                digest: String::new(),
-                recorded_at_ms: 1,
-                command_id: None,
-                observation,
-            };
-            event.digest = relay_event_digest(&event).unwrap();
-            apply_relay_event(snapshot, &event).unwrap();
-            let wire = serde_json::to_vec(&event).unwrap();
-            apply_relay_event(replay, &serde_json::from_slice(&wire).unwrap()).unwrap();
-        };
 
         for (id, permission, action, reply) in [
             ("ask", false, "accept", Some("  Keep it local.  ")),
@@ -2784,9 +3020,22 @@ mod open_request_tests {
                     action: action.into(),
                     reply,
                     answers: None,
+                    permission_decision: None,
                 },
             );
         }
+        let rejected = format!("{TOOL_PERMISSION_ID_PREFIX}typed-rejection");
+        apply(
+            &mut snapshot,
+            &mut replay,
+            RelayObservation::ElicitationResolved {
+                elicitation_id: rejected,
+                action: "accept".into(),
+                reply: None,
+                answers: Some(Vec::new()),
+                permission_decision: Some(ManualPermissionDecision::Rejected),
+            },
+        );
         for id in [
             "ask".to_owned(),
             format!("{TOOL_PERMISSION_ID_PREFIX}missing-request"),
@@ -2799,6 +3048,7 @@ mod open_request_tests {
                     action: "accept".into(),
                     reply: Some("Yes".into()),
                     answers: None,
+                    permission_decision: None,
                 },
             );
         }
@@ -2808,18 +3058,30 @@ mod open_request_tests {
         let restored: RelaySnapshot =
             serde_json::from_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
         assert_eq!(inputs, restored.trusted_user_inputs());
-        assert_eq!(inputs.len(), 4);
-        assert_ne!(inputs[0].id, inputs[2].id, "a legacy form ID can be reused");
+        assert_eq!(inputs.len(), 5);
+        assert_ne!(inputs[0].id, inputs[3].id, "a legacy form ID can be reused");
         assert_eq!(inputs[0].kind, TrustedUserInputKind::UserAnswer);
         assert_eq!(inputs[0].prompt, "Proceed?");
         assert_eq!(inputs[0].legacy_reply.as_deref(), Some("Keep it local."));
         assert_eq!(inputs[1].kind, TrustedUserInputKind::ManualPermission);
         assert_eq!(inputs[1].prompt, "Proceed?");
         assert_eq!(inputs[1].legacy_reply.as_deref(), Some("Skipped"));
-        assert_eq!(inputs[2].kind, TrustedUserInputKind::UserAnswer);
-        assert_eq!(inputs[2].legacy_reply.as_deref(), Some("Yes"));
-        assert_eq!(inputs[3].kind, TrustedUserInputKind::ManualPermission);
-        assert!(inputs[3].prompt.is_empty());
+        assert_eq!(
+            inputs[1].decision(),
+            TrustedUserDecision::PermissionRejected
+        );
+        assert_eq!(
+            inputs[2].decision(),
+            TrustedUserDecision::PermissionRejected
+        );
+        assert_eq!(inputs[2].action, "permission_reject");
+        assert_eq!(inputs[3].kind, TrustedUserInputKind::UserAnswer);
+        assert_eq!(inputs[3].legacy_reply.as_deref(), Some("Yes"));
+        assert_eq!(
+            inputs[4].decision(),
+            TrustedUserDecision::LegacyPermissionUnknown
+        );
+        assert!(inputs[4].prompt.is_empty());
 
         let form = ElicitationRequest::from_acp_params("label-injection", serde_json::json!({
             "mode": "form",
@@ -2861,6 +3123,7 @@ mod open_request_tests {
             action: "accept".into(),
             reply: Some(form.reply_text(&response)),
             answers: Some(form.trusted_answers(&response)),
+            permission_decision: None,
         };
         apply(
             &mut snapshot,
@@ -2963,6 +3226,7 @@ mod open_request_tests {
                     action: "accept".into(),
                     reply,
                     answers: None,
+                    permission_decision: None,
                 },
             };
             event.digest = relay_event_digest(&event).unwrap();

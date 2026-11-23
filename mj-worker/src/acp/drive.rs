@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::guardian::ManualPermissionDecision;
 
 /// How long a `session/cancel` may take to settle `session/prompt` before Hel
 /// kills the bridge and reloads the native session. A cooperative cancel can
@@ -622,10 +623,32 @@ where
                             let response = await_elicitation_response(
                                 &pending, &id, answer_rx, cancellation.cancelled(),
                             ).await;
+                            let selection = response.as_ref().map_or_else(
+                                || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
+                                |response| plan.answer(
+                                    &request,
+                                    response.human().cloned().unwrap_or(ElicitationResponse::Decline),
+                                    permission_enforcement,
+                                ),
+                            );
+                            let permission_decision = match response.as_ref().and_then(PendingAnswer::human) {
+                                Some(ElicitationResponse::Decline) => Some(ManualPermissionDecision::Rejected),
+                                Some(ElicitationResponse::Accept { .. }) => match &selection {
+                                    Ok(PlanPermissionAnswer::ContinueInBypass) => Some(ManualPermissionDecision::Allowed),
+                                    Ok(PlanPermissionAnswer::Native(answer)) => match &answer.outcome {
+                                        RequestPermissionOutcome::Selected(selected) =>
+                                            selected_permission_decision(&request, &selected.option_id),
+                                        _ => None,
+                                    },
+                                    Err(_) => None,
+                                },
+                                _ => None,
+                            };
                             if let Err(error) = emit_elicitation_resolution(
                                 &events, &permission_parent_context, &review,
                                 response.as_ref().map_or("cancel", PendingAnswer::action_name),
                                 response.as_ref().and_then(PendingAnswer::human),
+                                permission_decision,
                             )
                                 .await
                             {
@@ -636,12 +659,13 @@ where
                                     "could not report permission response to relay coordinator"
                                 );
                             }
-                            let response = if cancellation.is_cancelled() { None } else { response };
+                            let selection = if cancellation.is_cancelled() {
+                                Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)))
+                            } else {
+                                selection
+                            };
                             let mut handoff_completion = None;
-                            let selection = response.map_or_else(
-                                || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
-                                |response| plan.answer(&request, response.harness_response(), permission_enforcement),
-                            ).and_then(|selection| match selection {
+                            let selection = selection.and_then(|selection| match selection {
                                 PlanPermissionAnswer::Native(answer) => Ok(answer),
                                 PlanPermissionAnswer::ContinueInBypass => {
                                     let (completion, permission_sent) = oneshot::channel();
@@ -742,21 +766,12 @@ where
                             pending.remove(&id);
                             None
                         };
-                        if let Err(error) = emit_elicitation_resolution(
-                            &events, &permission_parent_context, &form,
-                            response.as_ref().map_or("closed", PendingAnswer::action_name),
-                            response.as_ref().and_then(PendingAnswer::human)
-                                .filter(|response| **response != ElicitationResponse::Cancel),
-                        ).await {
-                            tracing::debug!(%error, "harness permission result receiver closed");
-                        }
                         // ACP keeps `cancelled` for a cancelled turn. Skip is a
                         // rejection of this call alone, so it selects the
                         // request's one-time rejection. Cancel reaches here only
                         // after the prompt loop cancelled the turn, or when no
                         // turn is running.
                         let selected = match &response {
-                            _ if cancellation.is_cancelled() => None,
                             Some(PendingAnswer::Human(ElicitationResponse::Accept { content })) => match content.get("choice") {
                                 Some(ElicitationValue::String(value)) => choices.iter()
                                     .find(|choice| choice.option_id.to_string() == *value)
@@ -766,6 +781,22 @@ where
                             Some(PendingAnswer::Human(ElicitationResponse::Decline) | PendingAnswer::OperatorAway) => skip,
                             Some(PendingAnswer::Human(ElicitationResponse::Cancel)) | None => None,
                         };
+                        let permission_decision = match response.as_ref().and_then(PendingAnswer::human) {
+                            Some(ElicitationResponse::Decline) => Some(ManualPermissionDecision::Rejected),
+                            Some(ElicitationResponse::Accept { .. }) => selected.as_ref()
+                                .and_then(|option_id| selected_permission_decision(&request, option_id)),
+                            _ => None,
+                        };
+                        if let Err(error) = emit_elicitation_resolution(
+                            &events, &permission_parent_context, &form,
+                            response.as_ref().map_or("closed", PendingAnswer::action_name),
+                            response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel),
+                            permission_decision,
+                        ).await {
+                            tracing::debug!(%error, "harness permission result receiver closed");
+                        }
+                        let selected = selected.filter(|_| !cancellation.is_cancelled());
                         let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
                         let answer = if !cancellation.is_cancelled()
@@ -1037,6 +1068,7 @@ where
                             &events, &turn_context, &request,
                             response.as_ref().map_or("cancel", PendingAnswer::action_name),
                             response.as_ref().and_then(PendingAnswer::human),
+                            None,
                         )
                             .await
                         {
@@ -1130,6 +1162,7 @@ where
                             &events, &turn_context, &review,
                             response.as_ref().map_or("cancel", PendingAnswer::action_name),
                             response.as_ref().and_then(PendingAnswer::human),
+                            None,
                         )
                             .await
                         {
@@ -2074,6 +2107,25 @@ pub(super) fn harness_reports_missing_native_session(
     mj_core::acp::error_reports_missing_native_session(spec.harness, existing, error)
 }
 
+fn selected_permission_decision(
+    request: &RequestPermissionRequest,
+    option_id: &agent_client_protocol::v1::schema::PermissionOptionId,
+) -> Option<ManualPermissionDecision> {
+    let option = request
+        .options
+        .iter()
+        .find(|option| &option.option_id == option_id)?;
+    match option.kind {
+        PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways => {
+            Some(ManualPermissionDecision::Allowed)
+        }
+        PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways => {
+            Some(ManualPermissionDecision::Rejected)
+        }
+        _ => None,
+    }
+}
+
 /// The original ACP responder closes the form; no later RPC can cancel a reused id.
 async fn record_delegated_question(
     events: &mpsc::Sender<RuntimeEvent>,
@@ -2098,6 +2150,7 @@ async fn record_refused_question(
             action: action.into(),
             reply: None,
             answers: None,
+            permission_decision: None,
         })
         .await
         .map_err(|_| relay_event_channel_error())

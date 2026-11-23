@@ -374,7 +374,7 @@ impl GeneratedPrompt {
             .find(|producer| producer.recognizes(command_id))
     }
 
-    /// Parent assignments are authorization only for the handback check.
+    /// Prompts carrying a parent assignment for the child's handback check.
     pub fn is_subagent_assignment(command_id: &str) -> bool {
         matches!(
             Self::of(command_id),

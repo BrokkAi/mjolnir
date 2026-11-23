@@ -522,7 +522,7 @@ class TerraOutput(unittest.TestCase):
                 "coverage": {"complete": True, "open": []}, "excluded": [],
             }).encode()
 
-        good, bad, missing = answer(operand), answer({**operand, "extra": True}), None
+        good, bad, missing, void = answer(operand), answer({**operand, "extra": True}), None, object()
         # Normalizes cleanly but fails answer validation with three errors.
         staged = json.dumps({
             "rows": [{"kind": "structural_match", "primary_site": site, "fields": {"operand": operand}}],
@@ -590,8 +590,10 @@ class TerraOutput(unittest.TestCase):
             self.assertFalse(reuse_existing)
             destination = directory / directory_name
             destination.mkdir()
+            planned = schedule[int(sid[0]) - 1]
             rows = [{"type": "event_msg", "payload": {"type": "item_completed", "item": {
-                "type": "CommandExecution", "id": f"exec-{n}", "command": ["ls"],
+                "type": "CommandExecution", "id": f"exec-{n}",
+                "command": ["pip", "show", "tree-sitter"] if planned[n - 1] is void else ["ls"],
                 "cwd": f"/workspace/{sid}/engine-trees",
             }}} for n in range(1, len(sessions[sid]) + 1)]
             (destination / "rollout-fixture.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -624,16 +626,23 @@ class TerraOutput(unittest.TestCase):
                 stack.enter_context(patch.object(target, name, new=fake))
             # Hard-won: 2da79e863: fixing normalization exposed more validation errors and counted as a stall
             # Hard-won: 1a919b31c: Terra withheld output.json instead of enumerating, crashing turn 1 without repair
-            for schedule in (
-                ((bad, good),),
-                ((missing, good),),
-                ((missing, bad, good),),
-                ((bad, staged, good),),
-                ((bad, bad), (good,)),
-                ((missing, missing), (good,)),
-                ((bad, bad), (bad, bad)),
-            ):
-                with self.subTest(rounds=[len(turns) for turns in schedule]), TemporaryDirectory() as root:
+            cases = (
+                (((bad, good),), None, False),
+                (((missing, good),), None, False),
+                (((missing, bad, good),), None, False),
+                (((bad, staged, good),), None, False),
+                (((bad, bad), (good,)), None, False),
+                (((missing, missing), (good,)), None, False),
+                (((void,), (good,)), None, False),
+                (((missing, void), (good,)), None, False),
+                (((void,), (void,)), "Terra failed the pilot audit on retry", False),
+                (((void,), (bad, bad)), "Terra repair stalled after a voided session", False),
+                (((bad, bad), (bad, bad)), "Terra repair stalled in both sessions", False),
+                (((bad, bad), (bad, bad)), None, True),
+            )
+            for schedule, expected_error, with_bifrost in cases:
+                with self.subTest(rounds=[len(turns) for turns in schedule], expected_error=expected_error,
+                                  with_bifrost=with_bifrost), TemporaryDirectory() as root:
                     sessions.clear()
                     checks.clear()
                     destroyed.clear()
@@ -646,28 +655,51 @@ class TerraOutput(unittest.TestCase):
                     adapter.sources = {query.commit: "fixture"}
                     adapter.catalogue = adapter.menu = adapter.claude_version = ""
                     adapter.directory, adapter.terra_profile = directory, "terra"
+                    if with_bifrost:
+                        adapter.bifrost = SimpleNamespace(binary_sha256="1" * 64, build_identity="fake")
 
-                    if schedule[-1][-1] == bad:
+                    if expected_error:
                         engine = SimpleNamespace(answer=lambda *args, **kwargs: {"status": "ok", "rows": []})
-                        with self.assertRaisesRegex(RuntimeError, "Terra repair stalled in both sessions"):
+                        with self.assertRaisesRegex(RuntimeError, expected_error):
                             fidelity_live.run_sample(directory, [query], set(), engine, adapter,
                                                      stop_request=directory / "stop")
                         self.assertFalse((directory / query.key / "measurement.json").exists())
                     else:
                         result = adapter.enumerate_rows(query.repo, query.commit, query.text)
-                        self.assertEqual(len(result["rows"]), 1)
+                        if with_bifrost:
+                            self.assertEqual(result["rows"], [])
+                            self.assertEqual(result["failure"], fidelity_live.REPAIR_STALLED)
+                            self.assertEqual(len(result["repair_error_counts"]), 2)
+                            # Resuming replays the verified double-stall without launching a 3rd session.
+                            self.assertEqual(adapter.enumerate_rows(query.repo, query.commit, query.text), result)
+                            self.assertEqual(len(sessions), 2)
+                            # Changing inputs invalidates the double-stall receipt visibly.
+                            adapter.terra_profile = "other-terra"
+                            with self.assertRaisesRegex(ValueError, "fidelity session inputs changed"):
+                                adapter.enumerate_rows(query.repo, query.commit, query.text)
+                        else:
+                            self.assertEqual(len(result["rows"]), 1)
                     self.assertEqual([len(turns) for turns in sessions.values()], [len(turns) for turns in schedule])
                     self.assertEqual(destroyed, list(sessions))
-                    self.assertEqual(checks, [(sid, n) for sid, turns in sessions.items()
-                                              for n in range(1, len(turns) + 1)])
+                    expected_checks = [(sid, n) for index, (sid, turns) in enumerate(sessions.items())
+                                       for n in range(1, len(turns) + 1) if schedule[index][n - 1] is not void]
+                    self.assertEqual(checks, expected_checks)
                     stalls = directory / query.key / "terra-stalled"
-                    self.assertEqual(stalls.is_dir(), len(schedule) == 2)
+                    voids = directory / query.key / "terra-voided"
+                    first_voided = schedule[0][-1] is void
+                    self.assertEqual(stalls.is_dir(), len(schedule) == 2 and not first_voided)
+                    self.assertEqual(voids.is_dir(), len(schedule) == 2 and first_voided)
                     for index, turns in enumerate(sessions.values()):
-                        evidence = stalls if index == 0 and stalls.is_dir() else directory / query.key / "terra"
+                        if index == 0 and stalls.is_dir():
+                            evidence = stalls
+                        elif index == 0 and voids.is_dir():
+                            evidence = voids
+                        else:
+                            evidence = directory / query.key / "terra"
                         self.assertTrue((evidence / "destroy-receipt.json").is_file())
                         for n, (_, prompt) in enumerate(turns, 1):
                             audit = json.loads((evidence / f"turn-{n}-audit.json").read_bytes())
-                            self.assertTrue(audit["passed"])
+                            self.assertEqual(audit["passed"], schedule[index][n - 1] is not void)
                             self.assertTrue((evidence / audit["rollout_directory"]).is_dir())
                             self.assertEqual("failed mechanical verification" in prompt, n > 1)
                             if n > 1:
@@ -1309,10 +1341,77 @@ class BifrostGoldTests(unittest.TestCase):
         self.assertEqual(report["candidate_sources"], ["engine", "terra_enumerator", "bifrost", "census"])
         self.assertEqual(report["documented"]["metrics"]["recall"], 0.5)
         self.assertEqual(report["documented"]["bifrost"], {
-            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0, "total_rows": 2,
+            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0,
+            "timeout_queries": 0, "timeout_query_keys": [],
+            "error_queries": 0, "error_query_keys": [], "query_errors": {},
+            "total_rows": 2,
             "gold_rows_found": 2, "gold_rows_outside_engine": 1, "precision": 1.0, "recall": 1.0,
             "binary_sha256": ["1" * 64], "build_identity": ["abc123"],
         })
+
+        # Timed-out and structured-error Bifrost queries are excluded from scored documented metrics
+        # and flagged in reasons; Terra double-stalls are counted and flagged while retaining Bifrost gold.
+        timed_query = Query("documented", "random", "mjolnir", "a" * 40, '(callers (callable :name "slow"))')
+        timed_record = measure(
+            timed_query, True, fake_engine, fake_terra, fake_adjudicate,
+            bifrost_rows=lambda *a: {
+                "rows": [], "complete": False, "truncated": False, "timed_out": True, "query_timeout_s": 1800,
+                "diagnostics": [{"impact": "incomplete", "message": "bifrost query timed out after 1800s"}],
+                "bifrost_binary_sha256": "1" * 64, "bifrost_build_identity": "abc123",
+            },
+        )
+        err_query = Query("documented", "random", "mjolnir", "a" * 40, '(callers (callable :name "broken"))')
+        err_record = measure(
+            err_query, True, fake_engine, fake_terra, fake_adjudicate,
+            bifrost_rows=lambda *a: {
+                "rows": [], "complete": False, "truncated": False, "timed_out": False,
+                "query_error": "Analyzer store failure: ValidationFailed",
+                "diagnostics": [{"impact": "incomplete", "message": "Analyzer store failure: ValidationFailed"}],
+                "bifrost_binary_sha256": "1" * 64, "bifrost_build_identity": "abc123",
+            },
+        )
+        stalled_terra_record = {
+            **doc_record,
+            "terra_answer": {
+                "rows": [], "coverage": {"complete": False, "open": []}, "provenance": None,
+                "failure": fidelity_live.REPAIR_STALLED,
+                "repair_error_counts": [{"session": "1" * 32, "previous": 1, "current": 1},
+                                        {"session": "2" * 32, "previous": 1, "current": 1}],
+            },
+        }
+        mixed = gate_report(
+            "m" * 64, [], [doc_query, timed_query, err_query],
+            {doc_query.key: stalled_terra_record, timed_query.key: timed_record, err_query.key: err_record},
+            20261120,
+        )
+        self.assertEqual(mixed["documented"]["random_n"], 3)
+        self.assertEqual(mixed["documented"]["scored_n"], 1)
+        # Engine scored 1.0 on the two unavailable queries (against incomplete gold) and 0.5 on doc_query;
+        # primary recall must stay 0.5 (not inflated to 3/4).
+        self.assertEqual(mixed["documented"]["metrics"]["recall"], 0.5)
+        self.assertAlmostEqual(mixed["documented"]["metrics_including_bifrost_unavailable"]["recall"], 3 / 4)
+        self.assertEqual(mixed["documented"]["bifrost"]["queries_ran"], 1)
+        self.assertEqual(mixed["documented"]["bifrost"]["timeout_queries"], 1)
+        self.assertEqual(mixed["documented"]["bifrost"]["timeout_query_keys"], [timed_query.key])
+        self.assertEqual(mixed["documented"]["bifrost"]["error_queries"], 1)
+        self.assertEqual(mixed["documented"]["bifrost"]["error_query_keys"], [err_query.key])
+        self.assertEqual(mixed["documented"]["bifrost"]["query_errors"],
+                         {err_query.key: "Analyzer store failure: ValidationFailed"})
+        self.assertEqual(mixed["terra_failure_count"], 1)
+        self.assertEqual(mixed["documented"]["terra_failure_count"], 1)
+        self.assertEqual(mixed["documented"]["by_step"]["callers"]["terra_failure_count"], 1)
+        self.assertTrue(any("real Bifrost timed out on 1/3" in r for r in mixed["documented"]["reasons"]))
+        self.assertTrue(any("real Bifrost errored on 1/3" in r for r in mixed["documented"]["reasons"]))
+        self.assertTrue(any("Terra enumerator stalled on 1/3" in r for r in mixed["documented"]["reasons"]))
+
+        # When every documented Bifrost query is unavailable, Bifrost accuracy is undefined (None), not 1.0.
+        all_unavail = gate_report(
+            "m" * 64, [], [timed_query, err_query],
+            {timed_query.key: timed_record, err_query.key: err_record}, 20261120,
+        )
+        self.assertIsNone(all_unavail["documented"]["bifrost"]["precision"])
+        self.assertIsNone(all_unavail["documented"]["bifrost"]["recall"])
+        self.assertIsNone(all_unavail["documented"]["metrics"]["recall"])
 
     def test_bifrost_runner_checkpoints_resumes_and_isolates_checkouts(self):
         import subprocess
@@ -1348,7 +1447,17 @@ if "--query-file" in args:
     assert qtext.startswith("(limit 1000 "), qtext
     assert "--workspace-scaled-limits" in args
     if "trigger-error" in qtext:
-        print(json.dumps({{"isError": True, "error": "simulated failure"}}))
+        print(json.dumps({{"isError": True, "error": "Analyzer store failure: ValidationFailed"}}))
+        sys.exit(1)
+    if "trigger-crash" in qtext:
+        print("fatal crash", file=sys.stderr)
+        sys.exit(2)
+    if "trigger-timeout" in qtext:
+        import time as _time
+        _time.sleep(0.6)
+        print(json.dumps({{"isError": False, "structuredContent": {{"truncated": False, "results": [
+            {{"result_type": "declaration", "path": "src/lib.rs", "fq_name": "p.caller", "start_line": 2, "end_line": 2}}
+        ]}}}}))
         sys.exit(0)
     print(json.dumps({{"isError": False, "structuredContent": {{"truncated": False, "results": [
         {{"result_type": "declaration", "path": "src/lib.rs", "fq_name": "p.caller", "start_line": 2, "end_line": 2}}
@@ -1395,12 +1504,51 @@ for line in sys.stdin:
             with self.assertRaisesRegex(ValueError, "bifrost checkpoint inputs changed"):
                 bumped.query("mjolnir", c1, q)
 
-            # Query error fails visibly and writes no completed.json.
-            bad_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-error"))))'
-            with self.assertRaisesRegex(RuntimeError, "simulated failure"):
-                runner.query("mjolnir", c1, bad_q)
-            bad_key = fidelity_live.sha(fidelity_live.canonical(["documented", "mjolnir", c1, bad_q]).encode())
-            self.assertFalse((root / "checkpoints" / bad_key / "bifrost/completed.json").exists())
+            # Structured Bifrost query errors (isError=true) checkpoint cleanly and resume without re-running,
+            # while unstructured crashes still fail visibly and write no completed.json.
+            err_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-error"))))'
+            err_rec = runner.query("mjolnir", c1, err_q)
+            self.assertFalse(err_rec["timed_out"])
+            self.assertFalse(err_rec["complete"])
+            self.assertEqual(err_rec["rows"], [])
+            self.assertEqual(err_rec["query_error"], "Analyzer store failure: ValidationFailed")
+            self.assertEqual(err_rec["exit_code"], 1)
+            count_after_err = len(invocations.read_text().splitlines())
+            self.assertEqual(runner.query("mjolnir", c1, err_q), err_rec)
+            self.assertEqual(len(invocations.read_text().splitlines()), count_after_err)
+
+            crash_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-crash"))))'
+            with self.assertRaisesRegex(RuntimeError, "exited 2.*fatal crash"):
+                runner.query("mjolnir", c1, crash_q)
+            crash_key = fidelity_live.sha(fidelity_live.canonical(["documented", "mjolnir", c1, crash_q]).encode())
+            self.assertFalse((root / "checkpoints" / crash_key / "bifrost/completed.json").exists())
+
+            # Query timeout terminates cleanly, checkpoints timed_out=True/complete=False, resumes at same timeout,
+            # and re-runs if the operator raises query_timeout_s.
+            slow_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-timeout"))))'
+            timed_runner = bifrost_gold.BifrostRunner(
+                fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
+                memory_cap_gib=None, use_systemd_cap=False, query_timeout_s=0.2,
+            )
+            timed = timed_runner.query("mjolnir", c1, slow_q)
+            self.assertTrue(timed["timed_out"])
+            self.assertEqual(timed["query_timeout_s"], 0.2)
+            self.assertFalse(timed["complete"])
+            self.assertEqual(timed["rows"], [])
+            self.assertFalse((root / "work/checkouts/mjolnir" / bifrost_gold.QUERY_FILENAME).exists())
+            count_after_timeout = len(invocations.read_text().splitlines())
+            self.assertEqual(timed_runner.query("mjolnir", c1, slow_q), timed)
+            self.assertEqual(len(invocations.read_text().splitlines()), count_after_timeout)
+
+            longer_runner = bifrost_gold.BifrostRunner(
+                fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
+                memory_cap_gib=None, use_systemd_cap=False, query_timeout_s=2.0,
+            )
+            recovered = longer_runner.query("mjolnir", c1, slow_q)
+            self.assertFalse(recovered["timed_out"])
+            self.assertTrue(recovered["complete"])
+            self.assertEqual(len(recovered["rows"]), 1)
+            self.assertEqual(len(invocations.read_text().splitlines()), count_after_timeout + 1)
 
     def test_concurrent_run_sample_enforces_commit_repo_bounds_and_resumes_cleanly(self):
         import threading
@@ -1552,3 +1700,47 @@ for line in sys.stdin:
                             root / "resumed", queries, fresh, resume_engine, mismatch_models,
                             stop_request=stop_file, concurrency=workers,
                         )
+
+            # Raising query_timeout_s archives stale timed-out adjudication/measurement and retries cleanly.
+            for workers in (1, 3):
+                with self.subTest(timeout_retry_concurrency=workers):
+                    t_dir = root / f"timeout-retry-{workers}"
+                    q_one = [queries[0]]
+                    f_one = {queries[0].key}
+                    timed_bifrost = SimpleNamespace(
+                        binary_sha256="1" * 64, build_identity="fake", query_timeout_s=10,
+                    )
+                    timed_models = SimpleNamespace(
+                        enumerate_rows=resume_models.enumerate_rows,
+                        adjudicate=resume_models.adjudicate,
+                        bifrost=timed_bifrost,
+                        bifrost_rows=lambda *a: {
+                            "rows": [], "complete": False, "truncated": False, "timed_out": True,
+                            "query_timeout_s": 10, "bifrost_binary_sha256": "1" * 64, "bifrost_build_identity": "fake",
+                        },
+                    )
+                    first_run = fidelity_live.run_sample(
+                        t_dir, q_one, f_one, resume_engine, timed_models,
+                        stop_request=stop_file, concurrency=workers,
+                    )
+                    self.assertTrue(first_run[queries[0].key]["bifrost_answer"]["timed_out"])
+                    adj_dir = t_dir / queries[0].key / "adjudicator"
+                    adj_dir.mkdir(parents=True, exist_ok=True)
+                    (adj_dir / "capture.json").write_text("{}\n")
+
+                    longer_bifrost = SimpleNamespace(
+                        binary_sha256="1" * 64, build_identity="fake", query_timeout_s=60,
+                    )
+                    longer_models = SimpleNamespace(
+                        enumerate_rows=resume_models.enumerate_rows,
+                        adjudicate=resume_models.adjudicate,
+                        bifrost=longer_bifrost,
+                        bifrost_rows=resume_models.bifrost_rows,
+                    )
+                    retried = fidelity_live.run_sample(
+                        t_dir, q_one, f_one, resume_engine, longer_models,
+                        stop_request=stop_file, concurrency=workers,
+                    )
+                    self.assertFalse(retried[queries[0].key]["bifrost_answer"].get("timed_out", False))
+                    self.assertEqual(len(retried[queries[0].key]["bifrost_answer"]["rows"]), 1)
+                    self.assertTrue(list((t_dir / queries[0].key).glob("adjudicator-timeout-retry-*")))

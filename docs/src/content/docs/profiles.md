@@ -1290,11 +1290,11 @@ restores them into the destination profile’s isolated data directory.
 Unconstrained Muse reads and writes its session's project-memory files
 directly because its sandbox is disabled; with guardian approvals, writes
 outside the workspace go to auto-review. It receives Mjolnir's session-history and review MCP tools
-through muse-acp 0.8.0 or newer with Muse Code 1.3.0 or newer, which managed
-targets and the agent-dev image install. A session whose Muse runtime does not
-accept MCP servers, such as one in a container created from an older image,
-continues without those tools and says so; suspend and resume it once the image
-has updated. A Muse reviewer needs its review MCP tools, so it does not start
+through muse-acp 0.8.0 or newer with Muse Code 1.3.0 or newer. Mjolnir
+prepares these tools on demand on managed targets and in daemon containers.
+A session whose Muse runtime does not accept MCP servers, such as one in a
+container created from an older image, continues without those tools and says
+so; suspend and resume it once the image has updated. A Muse reviewer needs its review MCP tools, so it does not start
 without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).

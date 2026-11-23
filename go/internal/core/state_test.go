@@ -392,6 +392,24 @@ func TestContainerCapacityCountsOwnersAndProvisioningButNotBorrowedChildren(t *t
 	}
 }
 
+func TestLegacyDefaultContainerUpgradeKeepsItsImageFamily(t *testing.T) {
+	var settings ContainerSettings
+	if err := json.Unmarshal([]byte(`{"default_image":"ghcr.io/brokkai/mjolnir/agent-dev:2.51.0"}`), &settings); err != nil {
+		t.Fatal(err)
+	}
+	session := SessionRecord{TargetRuntime: &TargetRuntimeSettings{ContainerSettings: &settings}}
+	if got := ContainerSettingsUpgradeImage(&session, DefaultSessionImage); got != LegacyDefaultContainerImage {
+		t.Fatalf("default upgrade selected %q", got)
+	}
+	const customImage = "example.net/session:next"
+	if got := ContainerSettingsUpgradeImage(&session, customImage); got != customImage {
+		t.Fatalf("configured upgrade selected %q", got)
+	}
+	if ContainerSettingsDefaultMarker(ReleaseContainerImage) != nil {
+		t.Fatal("the daemon image was marked as a session default")
+	}
+}
+
 func TestAnUnrecordedOwnerAllocationMakesRemainingCapacityUnknown(t *testing.T) {
 	state := stateSampleState()
 	var sessions []*SessionRecord

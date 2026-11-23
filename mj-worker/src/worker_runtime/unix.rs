@@ -1435,6 +1435,8 @@ mod history_tests {
                 answers: Vec::new(),
                 legacy_reply: Some("Yes".into()),
             }],
+            parent_instructions: Vec::new(),
+            parent_instructions_omitted: false,
             prior_reviews: vec![mj_core::guardian::PriorGuardianReview {
                 review_id: None,
                 tool: "shell".into(),

@@ -19,7 +19,7 @@ checkpoints, and SessionWiki index — lives in that volume.
 ```toml
 [daemon]
 runtime = "docker"          # or "podman"; "host" is the default
-# image = "ghcr.io/brokkai/mjolnir/agent-dev:2.65.0"
+# image = "ghcr.io/brokkai/mjolnir/daemon:latest" # optional override
 # mounts = ["/srv/projects"]  # optional host directories
 ```
 
@@ -29,23 +29,23 @@ Then run any command:
 mj sessions
 ```
 
-The first start pulls the release's agent-development image, creates the named
-volume and the container, and starts `mj daemon-run` inside it. Later starts reuse the
-same container and volume. `mj daemon status` reports the container name.
+The first start pulls `ghcr.io/brokkai/mjolnir/daemon`, creates the named volume
+and the container, and starts `mj daemon-run` inside it. Releases use their
+version tag and development builds use `:latest`. Later starts reuse the same
+container and volume. `mj daemon status` reports the container name.
 
 This default is separate from the `buildpack-deps:noble` default for session
 containers. Changing a session target image does not change the daemon image.
 
-The image carries the daemon, the session worker, and every harness, so local
-sessions run their worker inside the same container. Files and harness logins
-created there persist in the volume.
+The image carries the daemon and session worker. Sessions targeting
+`localhost` run their worker inside the daemon container. Mjolnir prepares
+the pinned harnesses and Node.js on demand for sessions, model discovery,
+`mj login`, and quota checks. Harness installations and logins persist
+in the volume.
 
-Everything that runs a harness in the container uses the harnesses the image
-ships, at the versions this release pins: local sessions, model discovery,
-`mj login`, and quota checks. Mjolnir never downloads its own copy of a harness
-or of Node.js there, the way it does on a host. If a custom `[daemon] image`
-lacks a harness or carries an incompatible version, that harness reports an
-error naming the image; remove `[daemon] image` to use the release's own image.
+The image is built from `containers/Containerfile.daemon`. To build it from
+a Git checkout, run `scripts/build-daemon-image.sh podman` (or pass `docker`)
+and set `[daemon] image` to `localhost/mjolnir/daemon:dev`.
 
 ## Data and restarts
 
@@ -61,8 +61,8 @@ in that container.
 ## Setup and logins
 
 Start `mj` on a fresh volume and wait for the welcome dialog to finish
-discovering agents. First-run setup finds the harnesses in the daemon container
-and configures the volume. Use `mj login` to sign in.
+discovering agents. First-run setup prepares the harnesses in the daemon
+container and configures the volume. Use `mj login` to sign in.
 
 ```console
 mj login --profile codex

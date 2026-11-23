@@ -1520,6 +1520,7 @@ mod settled_task_tests {
                             action: "accept".into(),
                             reply: Some("Old format".into()),
                             answers: None,
+                            permission_decision: None,
                         })
                         .unwrap();
                 } else {
@@ -1646,6 +1647,7 @@ mod settled_task_tests {
                 action: "accept".into(),
                 reply: Some("Yes".into()),
                 answers: None,
+                permission_decision: None,
             })
             .unwrap();
     }
@@ -2026,6 +2028,7 @@ mod settled_task_tests {
                 action: "accept".into(),
                 reply: Some("Yes".into()),
                 answers: None,
+                permission_decision: None,
             })
             .unwrap();
         reply(&mut relay, "Deployed.");

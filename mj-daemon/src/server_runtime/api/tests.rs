@@ -6073,6 +6073,142 @@ fn pending_child_inputs_hide_old_reports_and_a_failed_delivery_leaves_the_child_
 }
 
 #[tokio::test]
+async fn listing_correlates_spawn_requests_and_survives_an_unavailable_queue() {
+    if !isolated_parked_test("listing_correlates_spawn_requests_and_survives_an_unavailable_queue")
+    {
+        return;
+    }
+    use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    // Both children have the same task name. Only the request key can tell them apart.
+    store_parent_and_child("other-child");
+    let spawn = SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "request-new-child".into(),
+        created_at_ms: 1,
+        action: SubagentToolAction::SpawnOrchestrator {
+            task_name: "audit deps".into(),
+            instructions: "work".into(),
+            target: None,
+            repos: None,
+            no_github_credentials: false,
+        },
+    };
+    let list = SubagentToolRequest {
+        request_id: "fresh-list".into(),
+        action: SubagentToolAction::ListAgents,
+        ..spawn.clone()
+    };
+    let backend = |queue_error: Option<String>| {
+        let mut view = ready_view("model");
+        let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot.subagent_requests.push(spawn.clone());
+        snapshot.subagent_queue_error = queue_error;
+        Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: Some(view),
+            })),
+            running_states(),
+            ParkingExports::new(SessionState::Parked, None),
+        ))
+    };
+    let observe = |backend: Arc<ApiBackend>| {
+        let list = list.clone();
+        async move {
+            let answer = backend
+                .execute_subagent_tool_durable("parent-1".into(), list)
+                .await
+                .unwrap();
+            assert!(!answer.persisted);
+            assert!(!answer.result.is_error, "{}", answer.result.message);
+            serde_json::from_str::<serde_json::Value>(&answer.result.message).unwrap()
+        }
+    };
+    let before = observe(backend(None)).await;
+    assert_eq!(
+        before["agents"][0]["spawn_request_id"],
+        "request-other-child"
+    );
+    assert_eq!(before["pending_spawns"][0]["request_id"], spawn.request_id);
+    assert_eq!(
+        before["pending_spawns"][0]["status"],
+        "pending_registration"
+    );
+
+    mj_controller::database::prepare_delegation(
+        "parent-1".into(),
+        mj_controller::database::PreparedDelegation {
+            request: spawn.clone(),
+            turn_target: None,
+            spawn: None,
+        },
+    )
+    .unwrap();
+    mj_controller::database::record_delegation_result(
+        "parent-1".into(),
+        mj_core::subagent::SubagentToolResult {
+            request_id: spawn.request_id.clone(),
+            completed_at_ms: 2,
+            is_error: true,
+            message: "no worker slot".into(),
+        },
+    )
+    .unwrap();
+    let failed = observe(backend(None)).await;
+    assert_eq!(failed["pending_spawns"][0]["status"], "failed");
+    assert_eq!(failed["pending_spawns"][0]["error"], "no worker slot");
+    mj_controller::database::acknowledge_delegation("parent-1".into(), spawn.request_id.clone())
+        .unwrap();
+
+    store_parent_and_child("new-child");
+    let registered = observe(backend(None)).await;
+    assert!(registered.get("pending_spawns").is_none());
+    assert!(
+        registered["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|child| child["spawn_request_id"] == spawn.request_id)
+    );
+
+    let degraded = observe(backend(Some("parent queue timed out".into()))).await;
+    assert_eq!(degraded["queue_status"], "unavailable");
+    assert_eq!(degraded["agents"], registered["agents"]);
+    assert!(
+        mj_controller::database::load_delegation("parent-1", &list.request_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // A completed row from a previous daemon still supplies its original reply.
+    mj_controller::database::prepare_delegation(
+        "parent-1".into(),
+        mj_controller::database::PreparedDelegation {
+            request: list.clone(),
+            turn_target: None,
+            spawn: None,
+        },
+    )
+    .unwrap();
+    let previous = mj_core::subagent::SubagentToolResult {
+        request_id: list.request_id.clone(),
+        completed_at_ms: 3,
+        is_error: false,
+        message: "{\"agents\":[]}".into(),
+    };
+    mj_controller::database::record_delegation_result("parent-1".into(), previous.clone()).unwrap();
+    let replayed = backend(None)
+        .execute_subagent_tool_durable("parent-1".into(), list)
+        .await
+        .unwrap();
+    assert!(replayed.persisted);
+    assert_eq!(replayed.result, previous);
+}
+
+#[tokio::test]
 async fn queued_input_is_visible_through_wait_and_list_agents() {
     if !isolated_parked_test("queued_input_is_visible_through_wait_and_list_agents") {
         return;
@@ -7652,7 +7788,15 @@ async fn legacy_worker_wait_requests_answer_immediately_without_marking_reports(
                 .unwrap()
                 .contains("end your turn")
         );
-        assert!(answer.reported_finishes.is_empty());
+        assert!(
+            mj_controller::database::load_delegation("parent-1", id)
+                .unwrap()
+                .unwrap()
+                .1
+                .unwrap()
+                .reported_finishes
+                .is_empty()
+        );
         assert!(
             mj_controller::database::load_subagent("child-1")
                 .unwrap()

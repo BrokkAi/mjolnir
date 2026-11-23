@@ -54,9 +54,7 @@ impl GuardianStage1 for WolfGuardianStage1 {
                     tokens,
                     elapsed_ms,
                 },
-                GuardianStage1Result::EscalatedActionTooLong => {
-                    GuardianStage1Verdict::EscalatedActionTooLong
-                }
+                GuardianStage1Result::Escalated(reason) => GuardianStage1Verdict::Escalated(reason),
                 GuardianStage1Result::Overflow { tokens } => {
                     GuardianStage1Verdict::Overflow { tokens }
                 }

@@ -27,6 +27,15 @@ const REVIEW_UNANSWERED_ADVICE: &str = "The review may still be preparing. Call 
 const UNANSWERED_ADVICE: &str =
     "It may still run; call list_agents to see the children's state before repeating this call.";
 
+const SPAWN_LOOKUP_ADVICE: &str = "Use list_agents to look up this exact request_id in pending_spawns[].request_id or agents[].spawn_request_id before spawning a replacement.";
+
+fn is_spawn(action: &SubagentToolAction) -> bool {
+    matches!(
+        action,
+        SubagentToolAction::Spawn { .. } | SubagentToolAction::SpawnOrchestrator { .. }
+    )
+}
+
 /// What to do about a request Mjolnir has not answered, for this action.
 fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
     match action {
@@ -35,6 +44,7 @@ fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
             "The fetch is safe to repeat; call fetch again for its result."
         }
         SubagentToolAction::RequestReview { .. } => REVIEW_UNANSWERED_ADVICE,
+        _ if is_spawn(action) => SPAWN_LOOKUP_ADVICE,
         _ => UNANSWERED_ADVICE,
     }
 }
@@ -80,20 +90,23 @@ impl DaemonContact {
 
 /// What to do about a request the daemon has not picked up. It stays saved
 /// and runs once a daemon reads the queue, which can be long after this call.
-fn not_picked_up_advice(action: &SubagentToolAction) -> &'static str {
+fn not_picked_up_advice(action: &SubagentToolAction) -> std::borrow::Cow<'static, str> {
+    if is_spawn(action) {
+        return format!(
+            "The request is saved and may still run, so do not repeat it. {SPAWN_LOOKUP_ADVICE}"
+        )
+        .into();
+    }
     match action {
         SubagentToolAction::Handback { .. } => HANDBACK_UNANSWERED_ADVICE,
         SubagentToolAction::Fetch { .. } => "The fetch is safe to repeat; call fetch again later.",
         SubagentToolAction::ListAgents
         | SubagentToolAction::ListTargets
         | SubagentToolAction::ListProfiles => "It changes nothing, so call it again later.",
-        SubagentToolAction::Spawn { .. } | SubagentToolAction::SpawnOrchestrator { .. } => {
-            "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Continue without this child or call list_agents later to see whether it started; close it if you no longer need it."
-        }
         _ => {
             "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Call list_agents later to see whether it ran."
         }
-    }
+    }.into()
 }
 
 /// The degraded answer when the worker has taken the request but the daemon
@@ -122,14 +135,15 @@ fn pending_reply(
     } else {
         "Mjolnir has not answered this request yet."
     };
-    (
-        json!({
-            "request_id": request_id,
-            "accepted": true,
-            "note": format!("{status} {}", unanswered_advice(action)),
-        }),
-        false,
-    )
+    let mut reply = json!({
+        "request_id": request_id,
+        "accepted": true,
+        "note": format!("{status} {}", unanswered_advice(action)),
+    });
+    if is_spawn(action) {
+        reply["status"] = "pending".into();
+    }
+    (reply, false)
 }
 
 /// How long an action may take to be answered. The daemon
@@ -183,17 +197,18 @@ fn unanswered_reply(
             false,
         );
     }
-    (
-        json!({
-            "request_id": request_id,
-            "error": format!(
-                "Mjolnir did not answer this request within {} seconds. {}",
-                waited.as_secs(),
-                unanswered_advice(action)
-            )
-        }),
-        true,
-    )
+    let mut reply = json!({
+        "request_id": request_id,
+        "error": format!(
+            "Mjolnir did not answer this request within {} seconds. {}",
+            waited.as_secs(),
+            unanswered_advice(action)
+        )
+    });
+    if is_spawn(action) {
+        reply["status"] = "confirmation_timed_out".into();
+    }
+    (reply, true)
 }
 
 /// What the model reads for one answer. The daemon and the worker both put the
@@ -2384,7 +2399,13 @@ mod tests {
             spawn_answered_by_worker(json!({"picked_up": true, "last_collected_seconds_ago": 2}));
         assert!(!is_error, "{value}");
         assert_eq!(value["accepted"], true);
+        assert_eq!(value["status"], "pending");
+        assert!(!value["request_id"].as_str().unwrap().is_empty());
         let note = value["note"].as_str().expect("note text");
+        assert!(
+            note.contains("pending_spawns[].request_id")
+                && note.contains("agents[].spawn_request_id")
+        );
         assert!(
             note.contains("picked up this request but has not finished it")
                 && note.contains("list_agents"),
@@ -2414,13 +2435,14 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let (value, is_error) = call_with_budget(
+        let (value, is_error) = call_with_budget_and_options(
             &socket,
-            None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name": "list_agents"})),
+            Some(&json!({"name": "spawn_orchestrator", "arguments": {"task_name": "audit", "instructions": "audit deps"}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_millis(200),
+            ParentTools { orchestrators_enabled: true, ..ParentTools::default() },
+            None,
         )
         .unwrap();
         assert!(
@@ -2429,6 +2451,12 @@ mod tests {
             started.elapsed()
         );
         assert!(is_error, "{value}");
+        assert_eq!(value["status"], "confirmation_timed_out");
+        let error = value["error"].as_str().unwrap();
+        assert!(
+            error.contains("pending_spawns[].request_id")
+                && error.contains("agents[].spawn_request_id")
+        );
         assert!(
             !value["request_id"].as_str().unwrap_or_default().is_empty(),
             "{value}"

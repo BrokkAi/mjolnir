@@ -306,8 +306,8 @@ async fn antigravity_matches_pin(
             == mj_core::harness_runtime::ANTIGRAVITY_VERSION)
 }
 
-/// The image's own programs for `harness`, by the names the agent-dev image
-/// installs on `PATH`: the ACP bridge, the native harness the launch runs, and
+/// The image's own programs for `harness`, by the names older daemon images
+/// provided on `PATH`: the ACP bridge, the native harness the launch runs, and
 /// the harness's command-line program.
 fn image_programs(harness: HarnessKind) -> (&'static str, &'static str, &'static str) {
     match harness {
@@ -330,7 +330,7 @@ async fn locate_in_image(
     let (bridge_name, entry_name, cli_name) = image_programs(harness);
     let missing = |name: &str| {
         anyhow!(
-            "the daemon's image does not provide {name} for {}; the daemon container runs only the image's pinned harnesses, so use an agent-dev image of this release",
+            "the daemon's image does not provide {name} for {}; this launch spec requires the harness bundled in the daemon image",
             harness.display_name()
         )
     };
@@ -413,7 +413,7 @@ async fn locate_in_image(
         HarnessKind::Antigravity => {
             ensure!(
                 antigravity_matches_pin(&bridge, environment).await?,
-                "the daemon's image must provide agy {}; use an agent-dev image of this release",
+                "the daemon's image must provide agy {} for this launch spec",
                 mj_core::harness_runtime::ANTIGRAVITY_VERSION
             );
             (

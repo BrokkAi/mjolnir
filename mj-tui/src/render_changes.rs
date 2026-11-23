@@ -263,11 +263,9 @@ impl DashboardState {
             &self.quota_providers,
             now,
         );
-        // A reading crossing its reset changes pool totals and lanes while the
+        // A reading crossing its reset changes pool totals and detail rows while the
         // countdowns stay at `0m`, so count the windows awaiting a reading
         // (the minimized line shows the totals too).
-        // Long and five-hour windows are counted separately: either crossing
-        // its reset changes what is drawn.
         let members = || {
             providers
                 .iter()
@@ -278,45 +276,59 @@ impl DashboardState {
         let five_awaiting = members()
             .filter(|member| member.five_hour_awaiting_reading)
             .count();
+        let fable_awaiting = members()
+            .filter(|member| member.fable_awaiting_reading)
+            .count();
         clocks.push(DisplayedClock {
             key: "quota:awaiting-reading".to_owned(),
-            value: format!("{awaiting}/{five_awaiting}"),
+            value: format!("{awaiting}/{five_awaiting}/{fable_awaiting}"),
         });
         if self.pane_size(SupportPane::Quota) != crate::PaneSize::Minimized {
+            use crate::render::quota_pools::{
+                profile_status, provider_status_summary, provider_text_expanded,
+            };
             for provider in providers {
-                for pool in provider.pools {
-                    let expanded = self.quota_expanded.contains(&pool.key);
-                    for member in pool.members {
+                let text_expanded = provider_text_expanded(&provider, &self.quota_expanded);
+                for pool in &provider.pools {
+                    let expanded = pool.is_expanded(&self.quota_expanded);
+                    for member in &pool.members {
                         clocks.push(DisplayedClock {
                             key: format!("quota:{:?}:{}:weekly", pool.key, member.id),
                             value: reset_duration(member.reset, now),
                         });
-                        if expanded && let Some(five) = member.five_hour {
+                        if expanded && let Some(five) = &member.five_hour {
                             clocks.push(DisplayedClock {
                                 key: format!("quota:{:?}:{}:five-hour", pool.key, member.id),
                                 value: reset_duration(five.resets_at_epoch_seconds, now),
                             });
                         }
-                        if let Some(note) = member.note {
+                        if expanded && let Some(fable) = &member.fable {
+                            clocks.push(DisplayedClock {
+                                key: format!("quota:{:?}:{}:fable", pool.key, member.id),
+                                value: reset_duration(fable.resets_at_epoch_seconds, now),
+                            });
+                        }
+                        if expanded && let Some(note) = &member.note {
                             clocks.push(DisplayedClock {
                                 key: format!("quota:{}:hold", member.id),
-                                value: note,
+                                value: note.clone(),
                             });
                         }
                     }
                 }
-                for (id, label) in provider.text {
+                if text_expanded {
+                    for (id, label) in provider.text {
+                        clocks.push(DisplayedClock {
+                            key: format!("quota:{id}:status"),
+                            value: profile_status(&id, &label, &self.quota_refreshing).into_owned(),
+                        });
+                    }
+                } else if provider.text_header().is_some() {
                     clocks.push(DisplayedClock {
-                        key: format!("quota:{id}:status"),
-                        value: label,
+                        key: format!("quota:{:?}:status", provider.provider),
+                        value: provider_status_summary(&provider, &self.quota_refreshing),
                     });
                 }
-            }
-            if !self.quota_expanded.is_empty() {
-                clocks.push(DisplayedClock {
-                    key: "quota:axis".into(),
-                    value: (now / 60).to_string(),
-                });
             }
         }
         clocks
@@ -434,6 +446,12 @@ mod tests {
                 "duration_seconds": 604800,
                 "remaining_percent": 50,
                 "resets_at_epoch_seconds": now + 1,
+            }, {
+                "label": "Week (Fable)",
+                "duration_seconds": 604800,
+                "model_scope": "fable",
+                "remaining_percent": 20,
+                "resets_at_epoch_seconds": now + 121,
             }],
         }))
         .unwrap();
@@ -442,7 +460,10 @@ mod tests {
             mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Claude, "/x"),
         );
         dashboard.quotas.insert("claude".into(), quota);
-        dashboard.acknowledge_render();
+        let pool = dashboard.quota_pools()[0].pools[0].key.clone();
+        dashboard
+            .quota_expanded
+            .insert(crate::render::quota_pools::QuotaGroup::Pool(pool));
         let before = dashboard.quota_clock_signature(now);
         let after = dashboard.quota_clock_signature(now + 2);
         let awaiting = |clocks: &[DisplayedClock]| {
@@ -451,7 +472,17 @@ mod tests {
                 .find(|clock| clock.key == "quota:awaiting-reading")
                 .map(|clock| clock.value.clone())
         };
-        assert_eq!(awaiting(&before).as_deref(), Some("0/0"));
-        assert_eq!(awaiting(&after).as_deref(), Some("1/0"));
+        assert_eq!(awaiting(&before).as_deref(), Some("0/0/0"));
+        assert_eq!(awaiting(&after).as_deref(), Some("1/0/0"));
+        let fable = |clocks: &[DisplayedClock]| {
+            clocks
+                .iter()
+                .find(|clock| clock.key.ends_with(":claude:fable"))
+                .map(|clock| clock.value.clone())
+        };
+        assert_eq!(fable(&before).as_deref(), Some("2m"));
+        assert_eq!(fable(&after).as_deref(), Some("1m"));
+        let after_fable = dashboard.quota_clock_signature(now + 122);
+        assert_eq!(awaiting(&after_fable).as_deref(), Some("1/0/1"));
     }
 }

@@ -60,6 +60,7 @@
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
 │                                      ││No live session in this workspace.                                            │
@@ -71,10 +72,9 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -88,6 +88,7 @@
 │ Create   Open   Filter: _____________││                                                          │
 │No sessions yet                       ││                                                          │
 │Create new work or open a session.    ││                                                          │
+│                                      ││                                                          │
 │                                      ││                     ✦  M J O L N I R                     │
 │                                      ││                                                          │
 │                                      ││            Create a session to start building.           │
@@ -112,10 +113,9 @@
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                                         │
-│  claude-1: refreshing…                                                                           │
+│ + refreshing…                                                                                    │
 │OPENAI                                                                                            │
-│  codex-1: refreshing…                                                                            │
-│  codex-2: refreshing…                                                                            │
+│ + 2 refreshing…                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
@@ -124,11 +124,12 @@
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
-│No sessions yet                       ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
 │Create new work or open a session.    ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -141,10 +142,9 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 1 unavailable · 1 refreshing…                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -153,11 +153,12 @@
 === expired login quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
-│No sessions yet                       ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
 │Create new work or open a session.    ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -170,10 +171,9 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: login expired                                                     │
+│                                      ││ + login expired                                                              │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -182,11 +182,12 @@
 === usage-priced API quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
-│No sessions yet                       ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
 │Create new work or open a session.    ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -199,10 +200,9 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  bedrock-claude: pay-per-use                                                 │
+│                                      ││ + pay-per-use                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: pay-per-use                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 1 pay-per-use · 1 refreshing…                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -228,10 +228,10 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────── ▁   ▄   □ ╮
 │                                      ││ANTHROPIC                                                                     ▐
-│                                      ││  claude-1: refreshing…                                                       ▐
+│                                      ││ + refreshing…                                                                ▐
 │                                      ││OPENAI                                                                        ▐
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              ▐
+│                                      ││OPENCODE                                                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -240,11 +240,12 @@
 === Claude Fable weekly quota (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                      ✦  M J O L N I R                                      │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                             Create a session to start building.                            │
-│No sessions yet                             ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                      ✦  M J O L N I R                                      │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                             Create a session to start building.                            │
 │Create new work or open a session.          ││                                                                                            │
+│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -259,8 +260,7 @@
 │                                            ││ANTHROPIC                                                                                   │
 │                                            ││ + ~21%              ▉                              2d0h▉                               2d0h│
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: unavailable                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 1 unavailable · 1 refreshing…                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -284,11 +284,11 @@
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                            ││ANTHROPIC                                                                                   ▐
-│                                            ││  claude-1: refreshing…                                                                     ▐
-│                                            ││OPENAI                                                                                      ▐
-│                                            ││ + ~73%*                                                           ▉                    2d0h▐
+│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││ + refreshing…                                                                              │
+│                                            ││OPENAI                                                                                      │
+│                                            ││ + ~73%*                                                           ▉                    2d0h│
 │                                            ││  1 profile not reporting                                                                   │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
@@ -313,11 +313,11 @@
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Profiles ▾ (refreshed unknown)──────────────────────────────────── ▁   ▄   □ ╮
-│ANTHROPIC                                                                     ▐
-│  claude-1: refreshing…                                                       ▐
-│OPENAI                                                                        ▐
-│ + ~73%*                                                 ▉             2d0h ⟲1▐
+╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                     │
+│ + refreshing…                                                                │
+│OPENAI                                                                        │
+│ + ~73%*                                                 ▉             2d0h ⟲1│
 │  1 profile not reporting                                                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
@@ -343,9 +343,9 @@
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (refreshed 2h ago)─────────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      ▐
-│                                            ││  codex-2: refreshing…                                                                      ▐
+│                                            ││ + refreshing…                                                                              │
+│                                            ││OPENAI                                                                                      ▐
+│                                            ││ + 2 refreshing…                                                                            ▐
 │                                            ││GOOGLE                                                                                      ▐
 │                                            ││>+ Gemini ~73%                                                       ▉                     ?│
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯

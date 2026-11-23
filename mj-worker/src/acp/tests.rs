@@ -2535,6 +2535,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         action,
         reply,
         answers,
+        permission_decision,
     } = resolution
     else {
         unreachable!()
@@ -2560,6 +2561,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
             action,
             reply,
             answers,
+            permission_decision,
         })
         .unwrap();
     let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");

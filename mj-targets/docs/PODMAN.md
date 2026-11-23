@@ -47,7 +47,7 @@ For a target such as:
 ```toml
 [targets.podman]
 kind = "podman"
-image = "localhost/mjolnir/agent-dev:latest"
+image = "docker.io/library/buildpack-deps:noble"
 ```
 
 Mjolnir invokes the `podman` CLI as the user running Mjolnir; it does not use
@@ -230,25 +230,18 @@ sshd if provisioning sees dropped connections. Doctor reads the files rather
 than running `sshd -T`, which needs root, so it says when a drop-in was
 unreadable instead of guessing sshd's default.
 
-Mjolnir's bundled agent-development image is published at
-`ghcr.io/brokkai/mjolnir/agent-dev` (multi-arch: `linux/amd64` and
-`linux/arm64`, public, no authentication needed to pull). Master publishes
-`:latest`; each release publishes an immutable tag for its own version. Pull it
-directly:
+Session targets default to `docker.io/library/buildpack-deps:noble`. Use
+`mj image build` to build a per-bundle image from the project's mise recipe.
+
+For daemon-container mode, Mjolnir publishes `ghcr.io/brokkai/mjolnir/daemon`
+for `linux/amd64` and `linux/arm64`. Master publishes `:latest` and each
+release publishes its own version tag. To build from a checkout, run:
 
 ```console
-podman pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+scripts/build-daemon-image.sh podman
 ```
 
-Building it locally remains a supported alternative, for example to customize
-the image or to work offline:
-
-```console
-podman build --pull=always \
-  --file containers/Containerfile.agent-dev \
-  --tag localhost/mjolnir/agent-dev:latest \
-  .
-```
+Set `[daemon] image` to `localhost/mjolnir/daemon:dev` to use the local build.
 
 ## Install Podman rootlessly
 
@@ -355,30 +348,24 @@ exact remediations" below.
 
 ### 3. The configured runtime image is available
 
-For Mjolnir's published image, set `IMAGE` to the exact `image` value from the
-Mjolnir target and pull it:
+Set `IMAGE` to the image used by the target. The example uses the default:
 
 ```console
-IMAGE=ghcr.io/brokkai/mjolnir/agent-dev:latest
+IMAGE=docker.io/library/buildpack-deps:noble
 podman pull "$IMAGE"
 podman image exists "$IMAGE"
 ```
 
-Both commands must exit zero. Replace the example with the configured image
-if it differs. For Mjolnir's locally built `localhost/mjolnir/agent-dev:latest`, build
-it with the command above and verify it without attempting a registry pull:
-
-```console
-podman image exists localhost/mjolnir/agent-dev:latest
-```
+Both commands must exit zero. For a locally built image, use
+`podman image exists "$IMAGE"` to check it.
 
 ### 4. A container can run, execute a command, and be removed
 
 Set `IMAGE` to the configured target's image. The commands below work as
-written with Mjolnir's published image:
+written with the default session image:
 
 ```console
-IMAGE=ghcr.io/brokkai/mjolnir/agent-dev:latest
+IMAGE=docker.io/library/buildpack-deps:noble
 CHECK_NAME="mj-podman-check-$$"
 podman run --init --detach --name "$CHECK_NAME" "$IMAGE" sleep infinity
 podman exec "$CHECK_NAME" /bin/sh -c 'printf "Mjolnir Podman exec works\n"'

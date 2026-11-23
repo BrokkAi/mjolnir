@@ -1212,13 +1212,13 @@ pub const CONFIG_VERSION: u32 = 24;
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
 /// The registry repository for the release image.
-pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
+pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/daemon";
 /// The image for daemon-container mode.
 ///
 /// A release build names the immutable image published for its own version; a
 /// development build names the floating image published from master.
 /// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
-pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+pub const RELEASE_CONTAINER_IMAGE: &str = env!("MJ_DAEMON_IMAGE");
 /// The session image used when neither its project nor target selects one.
 pub const DEFAULT_SESSION_IMAGE: &str = "docker.io/library/buildpack-deps:noble";
 /// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]

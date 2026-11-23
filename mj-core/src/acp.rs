@@ -677,6 +677,8 @@ pub enum RuntimeEvent {
         reply: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<Vec<crate::guardian::TrustedUserAnswerField>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_decision: Option<crate::guardian::ManualPermissionDecision>,
     },
     PromptFinished {
         #[serde(default, skip_serializing_if = "Option::is_none")]

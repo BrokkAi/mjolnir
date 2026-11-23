@@ -468,7 +468,7 @@ async fn a_verdict_reached_while_the_person_wrote_again_is_reviewed_again() {
     let prompts = recorded(temp.path(), "reviewer_prompts");
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1].as_str().unwrap().contains(
-        "Retry reason:\nNew user authorization arrived while the previous review was in flight."
+        "Retry reason:\nNew authorization arrived while the previous review was in flight."
     ));
     assert_eq!(context.prior_guardian_reviews().len(), 1);
     assert!(
@@ -553,6 +553,12 @@ async fn native_guardian_harnesses_send_surfaced_requests_to_the_daemon_only_wit
 
 #[tokio::test]
 async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_pending_entry() {
+    for parent in [false, true] {
+        guardian_rechecks_after_delivered_authorization(parent).await;
+    }
+}
+
+async fn guardian_rechecks_after_delivered_authorization(parent: bool) {
     use crate::relay::DurableRelay;
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{
@@ -579,27 +585,72 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
         },
     );
     let old = wait_for_guardian_request(&endpoint).await;
-    let elicitation_id = "tool-permission-deploy";
-    relay
-        .record_observation(RelayObservation::ElicitationRequested {
-            request: ElicitationRequest {
-                id: elicitation_id.into(),
-                message: "Deploy to staging?".into(),
-                title: None,
-                description: None,
-                fields: Vec::new(),
-                tool_permission: None,
+    if parent {
+        use crate::relay::test_support::{relay_request, submit_relay};
+        use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+        use mj_core::relay::{RelayCommand, RelayRequest, RelayResponseBody, RelayResponsePayload};
+
+        submit_relay(
+            &mut relay,
+            "deliver-parent",
+            RelayCommand::DeliverMailboxEvent {
+                event: MailboxEvent {
+                    key: "deploy-staging".into(),
+                    source: "parent".into(),
+                    wake: true,
+                    created_at_ms: 1,
+                    body: MailboxEventBody::ParentMessage {
+                        text: "Only to staging.".into(),
+                    },
+                },
             },
-        })
-        .unwrap();
-    relay
-        .record_observation(RelayObservation::ElicitationResolved {
-            elicitation_id: elicitation_id.into(),
-            action: "accept".into(),
-            reply: Some("Only to staging.".into()),
-            answers: None,
-        })
-        .unwrap();
+        );
+        let RelayResponsePayload::MailboxDrained {
+            lease_id: Some(lease_id),
+            ..
+        } = relay.drain_mailbox("PostToolBatch", None).unwrap()
+        else {
+            panic!("expected a leased parent instruction");
+        };
+        assert!(context.delegated_parent_instructions().0.is_empty());
+        let ack = relay.handle(relay_request(
+            "ack-parent",
+            RelayRequest::AckMailbox { lease_id },
+        ));
+        assert!(matches!(
+            ack.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::MailboxAcknowledged { acknowledged: true },
+            }
+        ));
+        assert_eq!(
+            context.delegated_parent_instructions().0[0].text,
+            "Only to staging."
+        );
+    } else {
+        let elicitation_id = "tool-permission-deploy";
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: ElicitationRequest {
+                    id: elicitation_id.into(),
+                    message: "Deploy to staging?".into(),
+                    title: None,
+                    description: None,
+                    fields: Vec::new(),
+                    tool_permission: None,
+                },
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::ElicitationResolved {
+                elicitation_id: elicitation_id.into(),
+                action: "accept".into(),
+                reply: Some("Only to staging.".into()),
+                answers: None,
+                permission_decision: None,
+            })
+            .unwrap();
+    }
     endpoint.complete(GuardianReviewResult {
         request_id: old.request_id.clone(),
         decision: GuardianReviewOutcome::Deny {
@@ -612,15 +663,24 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
     });
     let fresh = wait_for_guardian_request(&endpoint).await;
     assert_ne!(fresh.request_id, old.request_id);
-    let [answer] = fresh.trusted_user_inputs.as_slice() else {
-        panic!("expected one human permission answer");
-    };
-    assert_eq!(answer.kind, TrustedUserInputKind::ManualPermission);
-    assert_eq!(answer.prompt, "Deploy to staging?");
-    assert_eq!(answer.legacy_reply.as_deref(), Some("Only to staging."));
+    if parent {
+        assert!(old.parent_instructions.is_empty());
+        let [instruction] = fresh.parent_instructions.as_slice() else {
+            panic!("expected delivered parent authorization to restart the review");
+        };
+        assert_eq!(instruction.text, "Only to staging.");
+        assert!(fresh.trusted_user_inputs.is_empty());
+    } else {
+        let [answer] = fresh.trusted_user_inputs.as_slice() else {
+            panic!("expected one human permission answer");
+        };
+        assert_eq!(answer.kind, TrustedUserInputKind::ManualPermission);
+        assert_eq!(answer.prompt, "Deploy to staging?");
+        assert_eq!(answer.legacy_reply.as_deref(), Some("Only to staging."));
+    }
     assert_eq!(
         fresh.retry_reason.as_deref(),
-        Some("New user authorization arrived while the previous review was in flight.")
+        Some("New authorization arrived while the previous review was in flight.")
     );
     assert!(fresh.prior_reviews.is_empty());
     requests
@@ -642,6 +702,25 @@ async fn guardian_remote_verdict_rechecks_authorization_and_withdrawal_removes_p
 
 #[tokio::test]
 async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
+    use mj_core::guardian::TrustedUserDecision;
+
+    for (choice, label, decision) in [
+        ("reject", "Reject", TrustedUserDecision::PermissionRejected),
+        (
+            "approve",
+            "Approve once",
+            TrustedUserDecision::PermissionAllowed,
+        ),
+    ] {
+        guardian_alignment_form_answer_before_echo(choice, label, decision).await;
+    }
+}
+
+async fn guardian_alignment_form_answer_before_echo(
+    choice: &str,
+    label: &str,
+    decision: mj_core::guardian::TrustedUserDecision,
+) {
     use crate::relay::DurableRelay;
     use crate::worker_runtime::guardian_endpoint::GuardianEndpoint;
     use mj_core::guardian::{
@@ -690,7 +769,7 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
             response: ElicitationResponse::Accept {
                 content: BTreeMap::from([(
                     "choice".into(),
-                    ElicitationValue::String("approve".into()),
+                    ElicitationValue::String(choice.into()),
                 )]),
             },
             resolved,
@@ -704,17 +783,16 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
     let [answer] = second.trusted_user_inputs.as_slice() else {
         panic!("the next review must already have the human answer");
     };
-    assert_eq!(answer.action, "accept");
-    assert_eq!(
-        answer.answers[0].option_label.as_deref(),
-        Some("Approve once")
-    );
+    assert_eq!(answer.decision(), decision);
+    assert_eq!(context.trusted_user_inputs(), second.trusted_user_inputs);
+    assert_eq!(answer.answers[0].option_label.as_deref(), Some(label));
     let resolution = loop {
         if let RuntimeEvent::ElicitationResolved {
             elicitation_id,
             action,
             reply,
             answers,
+            permission_decision,
         } = next_event(&mut events).await
         {
             break RelayObservation::ElicitationResolved {
@@ -722,6 +800,7 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
                 action,
                 reply,
                 answers,
+                permission_decision,
             };
         }
     };
@@ -734,7 +813,11 @@ async fn guardian_alignment_sees_the_form_answer_before_its_journal_echo() {
             stage1_score: None,
         },
     });
-    await_recorded(temp.path(), "session_outcomes", 2).await;
+    let outcomes = await_recorded(temp.path(), "session_outcomes", 2).await;
+    assert_eq!(
+        outcomes[0]["outcome"],
+        json!({"outcome": "selected", "optionId": choice})
+    );
     assert!(endpoint.requests().is_empty());
     runtime.abort();
 }

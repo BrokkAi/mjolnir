@@ -151,6 +151,7 @@ pub(super) async fn resolve_session_config_recovery(
         request,
         response.action_name(),
         Some(response),
+        None,
     )
     .await?;
     *pending = None;

@@ -798,6 +798,7 @@ async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions(
                 action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
                 reply: None,
                 answers: None,
+                permission_decision: None,
             },
         ];
         if id == "blocked" {
@@ -5030,13 +5031,15 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     session.target_runtime = Some(runtime.into());
     mj_controller::database::save_session(&session).unwrap();
     // A historical default marker survives persistence and follows the
-    // current release image, not the new session default.
+    // retained agent-dev tag.
     let recorded = mj_controller::database::load_session_record("session-1")
         .unwrap()
         .unwrap();
     assert_eq!(
         mj_core::state::ContainerSettings::requested(&recorded).default_image,
-        Some(Some(mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned()))
+        Some(Some(
+            mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE.to_owned()
+        ))
     );
     // Hard-won: review of a13f351: upgrading an agent-dev session onto buildpack-deps lost its hel account, home and control directory.
     assert_eq!(
@@ -5044,7 +5047,15 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
             &recorded,
             mj_core::config::DEFAULT_SESSION_IMAGE
         ),
-        mj_core::config::RELEASE_CONTAINER_IMAGE
+        mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE
+    );
+    let mut refreshed = mj_core::state::ContainerSettings::requested(&recorded);
+    refreshed.record_upgrade_image(mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE);
+    assert_eq!(
+        refreshed.default_image,
+        Some(Some(
+            mj_core::config::LEGACY_DEFAULT_CONTAINER_IMAGE.to_owned()
+        ))
     );
     let state = test_runtime_state();
     let controller = Controller {

@@ -216,6 +216,7 @@ fn golden_plan_proposal_transcript() {
                 }),
             ),
             answers: None,
+            permission_decision: None,
         },
     );
     append_transcript_state(&mut output, "proposal remains after accepting", &session);
@@ -298,6 +299,7 @@ fn golden_plan_proposal_transcript() {
         action: "accept".into(),
         reply: Some(reply.clone()),
         answers: None,
+        permission_decision: None,
     };
     let encoded = serde_json::to_string(&resolution).unwrap();
     assert!(!encoded.contains("private-token"));
@@ -341,6 +343,7 @@ fn golden_plan_proposal_transcript() {
                 action: response.action_name().into(),
                 reply: Some(question.reply_text(&response)),
                 answers: None,
+                permission_decision: None,
             },
         );
     }
@@ -357,6 +360,7 @@ fn golden_plan_proposal_transcript() {
             action: "closed".into(),
             reply: None,
             answers: None,
+            permission_decision: None,
         },
     );
     append_transcript_state(
@@ -375,6 +379,7 @@ fn golden_plan_proposal_transcript() {
             action: "accept".into(),
             reply: Some(reply),
             answers: None,
+            permission_decision: None,
         },
     );
     writeln!(
@@ -948,6 +953,7 @@ fn golden_mailbox_delivery_transcript() {
             action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
             reply: None,
             answers: None,
+            permission_decision: None,
         },
     );
     let notices = vec![

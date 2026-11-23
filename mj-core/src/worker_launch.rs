@@ -60,10 +60,8 @@ pub enum HarnessRuntimePolicy {
     /// Mjolnir's managed installation of the compiled pin.
     #[serde(rename = "managed_remote", alias = "managed")]
     Managed,
-    /// Only the pinned harnesses of the image this process runs in: the
-    /// daemon container's agent-dev image. A missing or incompatible harness
-    /// is an error; nothing is installed. Only a container daemon writes it,
-    /// for workers in its own container, which run the image's own build.
+    /// Use harnesses provided by the daemon image. Retained for launch specs
+    /// written by older daemons. A missing or incompatible harness is an error.
     Image,
 }
 

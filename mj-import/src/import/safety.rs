@@ -98,15 +98,54 @@ impl ImportControl<'_> {
 
 /// Resolve a harness's configuration home without ever modifying it.
 ///
-/// The environment override wins; otherwise the harness's default directory
-/// beneath the user's home is used, the same pair first-run setup discovers.
+/// The environment override wins. Standalone dsh-acp defaults to a directory
+/// in the current workspace. Other harnesses default to the user's home.
 pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
-    let name = kind.display_name();
-    let home = std::env::var_os(kind.home_env())
+    resolve_harness_config_home(kind, std::env::var_os(kind.home_env()), || {
+        std::env::current_dir().ok()
+    })
+    .with_context(|| {
+        format!(
+            "cannot determine {} home; set {}",
+            kind.display_name(),
+            kind.home_env()
+        )
+    })
+}
+
+fn resolve_harness_config_home(
+    kind: HarnessKind,
+    environment_home: Option<std::ffi::OsString>,
+    current_dir: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    environment_home
+        .filter(|path| !path.is_empty())
         .map(|path| kind.home_from_environment(path))
         .or_else(|| {
-            mj_core::path_input::user_home().map(|home| home.join(kind.default_home_leaf()))
+            if kind == HarnessKind::Dsh {
+                current_dir().map(|cwd| cwd.join(".dsh-acp"))
+            } else {
+                mj_core::path_input::user_home().map(|home| home.join(kind.default_home_leaf()))
+            }
         })
-        .with_context(|| format!("cannot determine {name} home; set {}", kind.home_env()))?;
-    Ok(home)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dsh_import_home_matches_standalone_acp_environment_and_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("workspace");
+        let override_dir = directory.path().join("custom-acp-home");
+        let resolve =
+            |env| resolve_harness_config_home(HarnessKind::Dsh, env, || Some(cwd.clone())).unwrap();
+        assert_eq!(
+            resolve(Some(override_dir.clone().into_os_string())),
+            override_dir
+        );
+        assert_eq!(resolve(None), cwd.join(".dsh-acp"));
+        assert_eq!(resolve(Some("".into())), cwd.join(".dsh-acp"));
+    }
 }

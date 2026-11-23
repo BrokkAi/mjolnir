@@ -21,9 +21,9 @@ Each milestone is independently testable, reviewed through `mj-review`, committe
 - [x] (2026-11-23 15:25Z) Fast-forwarded checkout to `8a8ea94d0`, self-assigned/labeled `#1666`, `#1602`, `#1431`, `#1405`, and completed read-only design blueprints for all four milestones.
 - [x] (2026-11-23 15:30Z) Authored `.agents/plans/1666-subagent-lifecycle.md`.
 - [x] (2026-11-23 16:08Z) Milestone 1 (`#1602` + borrowed transcript cleanup on parent suspend/cross-target Move + `close` guidance wording): committed (`b6ea44833`), merged with upstream (`a99389555`), reviewed clean, pushed to `origin/master`, and `#1602` closed.
-- [x] (2026-11-23 17:40Z) Milestone 2 (`#1431` single-owner startup outcome via existing typed-exit `worker-exit.json` + removing fabricated 60 s timeout): implemented in 4 production files and validated (all targeted worker/daemon/store tests + 4-package clippy `-D warnings` + rustfmt clean); ready for `mj-review` and push.
-- [ ] Milestone 3 (`#1438` fast `list_agents` read path, `spawn` timeout correlation, load-resilient relay/startup deadlines): implementation, validation, review, and push.
-- [ ] Milestone 4 (`#1405` Mjolnir ACP Guardian + Codex native Guardian parent `send_message` authorization): implementation, validation, review, and push.
+- [x] (2026-11-23 18:40Z) Milestone 2 (`#1431` single-owner startup outcome via existing typed-exit `worker-exit.json` + removing fabricated 60 s timeout + confirmed worker termination for ordinary and reviewer children): committed (`88c36a368`, `c8bbdfaa7`, `56bea2c1b`, `7e0eee545`, `97bcd7755`, `f952ffd12`), merged (`b9ddea634`), reviewed, pushed to `origin/master`, and `#1431` closed.
+- [x] (2026-11-23 19:00Z) Milestone 3 (`#1438` fast `list_agents` read path, `spawn` timeout correlation, load-resilient relay/startup deadlines): committed (`c5d329984`), merged (`c4c478d4f`), reviewed, pushed to `origin/master`, and `#1438` closed.
+- [x] (2026-11-23 19:19Z) Milestone 4 (`#1405` Mjolnir ACP Guardian + Codex native Guardian parent `send_message` authorization): implemented and validated (7-package clippy `-D warnings`, rustfmt, 136 targeted tests across core/worker/transcript/import/github-relevance/session-runtime/daemon); ready for `mj-review` and push.
 
 ## Surprises & Discoveries
 
@@ -72,7 +72,10 @@ Each milestone is independently testable, reviewed through `mj-review`, committe
 
 ## Outcomes & Retrospective
 
-(To be populated as each milestone lands and at completion of `#1666`.)
+- **Milestone 1 (`#1602`, `b6ea44833` / `a99389555`):** Borrowed child worker/profile roots are reclaimed immediately on `close`, `Destroy`, and failed-start cleanup via `stopped_borrowed_worker_cleanup_plan` under `WorkerPermit`, closed borrowed child SQLite transcripts and `.mjtd` tool details are atomically purged on parent `suspend` and cross-target `Move` while standalone orchestrators remain untouched, and `FAILED_CHILD_CLOSE_GUIDANCE` names `close`.
+- **Milestone 2 (`#1431`, `88c36a368`..`f952ffd12` / `b9ddea634`):** Simplifying away an over-engineered live-fenced worker + schema rev-154 design to reuse existing `WorkerHarnessStartupFailure` (`worker-exit.json`) eliminated fabricated 60-second projection timeouts and guaranteed confirmed worker termination (for both ordinary and reviewer sub-agents, including pre-upgrade `rejecting` handoff rows) before declaring startup failed.
+- **Milestone 3 (`#1438` + folded `#1363`, `c5d329984` / `c4c478d4f`):** `list_agents` now runs in dedicated execution and delivery lanes without serialized SQLite delegation writes or report reconciliation, degrades gracefully on queue unavailability, exposes `spawn_request_id`, `provisioning_stages`, and `pending_spawns` correlated strictly by `(parent_session_id, request_id)` alongside structured `spawn` timeout guidance, observation/queue relay RPCs use a 60-second deadline while preserving stream abandonment and fast EOF recovery, and the worker's 300-second native-open timer resets only on strictly monotonic forward ACP milestones.
+- **Milestone 4 (`#1405`):** Mjolnir ACP Guardian projects daemon-owned spawn briefs and verified `MailboxEventBody::ParentMessage` deliveries into a host-labelled, quoted `DELEGATED PARENT INSTRUCTIONS` section (protocol 88, relay snapshot revision 32, immediate `TurnContext` refresh + stale-auth recheck, Wolf Stage-1 escalation to full review), and Codex partitions verified `ParentMessage` events onto existing `_session/steering` / parent-only `UserInput` on steer-safe `ToolBoundary` providers while keeping `PeerMessage` isolated on hook/separate batches and preserving direct DeepSeek `TurnBoundary` ordering (`#1455`/`#1492`). Remaining limitation: live Codex native `auto_review` verdicts against a live model were not run in automated tests (verified through relay + scripted ACP steering tests).
 
 ## Context and Orientation
 

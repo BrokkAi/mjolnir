@@ -11,6 +11,7 @@ enum CachedNativeMetadata {
     /// `codex_session_metadata`, including its "not interactive" verdict.
     Codex(Option<CodexSessionMetadata>),
     IndexEligible(bool),
+    Metadata(Option<NativeMetadata>),
 }
 
 #[derive(Debug)]
@@ -144,6 +145,28 @@ impl NativeScanCache {
         Ok(metadata)
     }
 
+    pub(super) fn native_metadata(
+        &self,
+        path: &Path,
+        parse: impl FnOnce() -> Result<Option<NativeMetadata>>,
+    ) -> Result<Option<NativeMetadata>> {
+        let file = fs::metadata(path)?;
+        let modified_at = file.modified()?;
+        let size = file.len();
+        if let Some(CachedNativeMetadata::Metadata(metadata)) = self.cached(path, modified_at, size)
+        {
+            return Ok(metadata);
+        }
+        let metadata = parse()?;
+        self.store(
+            path,
+            modified_at,
+            size,
+            CachedNativeMetadata::Metadata(metadata.clone()),
+        );
+        Ok(metadata)
+    }
+
     /// Codex metadata for one rollout, parsing only on a cache miss.
     pub(super) fn codex_metadata(
         &self,
@@ -174,6 +197,7 @@ impl NativeScanCache {
 pub struct LocatedNativeSession {
     pub native_session_id: String,
     pub source_path: PathBuf,
+    pub modified_at: SystemTime,
 }
 
 /// One native session as a picker lists it, normalized across harnesses.
@@ -197,35 +221,74 @@ pub fn locate_native_session(
     home: &Path,
     selection: &ClaudeSessionSelection,
 ) -> Result<LocatedNativeSession> {
-    let (native_session_id, source_path) = match harness {
+    let (native_session_id, source_path, modified_at) = match harness {
         HarnessKind::Muse => {
             return muse::locate(&mj_checkpoint::native::muse_sessions_root(home)?, selection);
         }
         HarnessKind::Codex => {
             let located = locate_codex_session(home, selection)?;
-            (located.native_session_id, located.jsonl_path)
+            (
+                located.native_session_id,
+                located.jsonl_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Claude => {
             let located = locate_claude_session(home, selection)?;
-            (located.native_session_id, located.jsonl_path)
+            (
+                located.native_session_id,
+                located.jsonl_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Kimi => {
             let located = locate_kimi_session(home, selection)?;
-            (located.native_session_id, located.session_path)
+            (
+                located.native_session_id,
+                located.session_path,
+                located.modified_at,
+            )
         }
         HarnessKind::Grok => {
             let located = locate_grok_session(home, selection)?;
-            (located.native_session_id, located.session_path)
+            (
+                located.native_session_id,
+                located.session_path,
+                located.modified_at,
+            )
         }
-        HarnessKind::OpenCode => bail!(
-            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
-        ),
-        HarnessKind::Antigravity => bail!("Mjolnir cannot import Antigravity sessions yet"),
-        HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
+        HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode => {
+            let found = metadata_candidates(harness, home, &NativeScanCache::shared())?
+                .into_iter()
+                .find(|candidate| match selection {
+                    ClaudeSessionSelection::Latest => {
+                        candidate.listing.unavailable_reason.is_none()
+                    }
+                    ClaudeSessionSelection::NativeSessionId(id) => {
+                        candidate.listing.native_session_id == *id
+                    }
+                })
+                .with_context(|| {
+                    format!(
+                        "no matching {} session in {}",
+                        harness.display_name(),
+                        home.display()
+                    )
+                })?;
+            if let Some(reason) = found.listing.unavailable_reason {
+                bail!("{reason}");
+            }
+            return Ok(LocatedNativeSession {
+                native_session_id: found.listing.native_session_id,
+                source_path: found.source_path,
+                modified_at: found.listing.modified_at,
+            });
+        }
     };
     Ok(LocatedNativeSession {
         native_session_id,
         source_path,
+        modified_at,
     })
 }
 
@@ -243,7 +306,7 @@ pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<
     if harness == HarnessKind::Codex && path.to_string_lossy().contains('\u{1f}') {
         return None;
     }
-    super::adapter_transcript::import_adapter(harness)?.native_id(path.to_str()?)
+    super::adapter_transcript::import_adapter(harness, None).native_id(path.to_str()?)
 }
 
 /// Project one native session into the canonical transcript, for any harness.
@@ -259,22 +322,41 @@ pub fn read_native_transcript(
         HarnessKind::Claude => read_claude_transcript(source_path),
         HarnessKind::Kimi => read_kimi_transcript(source_path),
         HarnessKind::Grok => read_grok_transcript(source_path),
-        HarnessKind::OpenCode => bail!(
-            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
-        ),
-        HarnessKind::Antigravity => bail!("Mjolnir cannot import Antigravity sessions yet"),
-        HarnessKind::Dsh => bail!("Mjolnir cannot import DSH sessions yet"),
+        HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode => {
+            super::adapter_transcript::read_projection(
+                harness,
+                source_path,
+                native_source_file(harness, source_path),
+            )
+        }
     }
 }
 
-/// Whether Mjolnir can list this harness's native sessions at all. The
-/// harnesses that keep sessions in a database, and DSH, cannot be scanned yet;
-/// callers skip them instead of reporting the scan as a failure.
-pub fn native_sessions_enumerable(harness: HarnessKind) -> bool {
-    !matches!(
-        harness,
-        HarnessKind::OpenCode | HarnessKind::Dsh | HarnessKind::Antigravity
-    )
+/// The physical artifact for a transcript key, used for filesystem metadata.
+pub fn native_source_file(harness: HarnessKind, path: &Path) -> &Path {
+    if harness == HarnessKind::OpenCode
+        && let Some((database, _)) = opencode::database_key(path)
+    {
+        return database;
+    }
+    path
+}
+
+/// An import limitation recognizable from the indexed path alone.
+pub fn native_source_import_issue(harness: HarnessKind, path: &Path) -> Option<&'static str> {
+    match harness {
+        HarnessKind::Codex if path.to_string_lossy().contains('\u{1f}') => Some(
+            "Mjolnir can only import Codex sessions with a rollout log; this row is from the Codex history database",
+        ),
+        HarnessKind::Dsh if !dsh::is_acp_record(path) => Some(
+            "the pinned DSH bridge loads flat ACP session records; this row is from the DSH CLI store",
+        ),
+        HarnessKind::OpenCode if opencode::database_key(path).is_none() => Some(opencode::LEGACY),
+        HarnessKind::Antigravity if !antigravity::is_cli_log(path) => Some(
+            "Mjolnir imports Antigravity CLI conversations; this row is from the Antigravity IDE",
+        ),
+        _ => None,
+    }
 }
 
 /// Scan a harness home newest first, reporting after every candidate.
@@ -350,10 +432,114 @@ pub fn scan_native_sessions(
             });
             forward(progress.scanned, progress.total, session);
         }),
-        HarnessKind::OpenCode => bail!(
-            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
-        ),
-        HarnessKind::Antigravity => bail!("Mjolnir cannot enumerate Antigravity sessions yet"),
-        HarnessKind::Dsh => bail!("Mjolnir cannot enumerate DSH sessions yet"),
+        HarnessKind::Antigravity | HarnessKind::Dsh | HarnessKind::OpenCode => {
+            let candidates = metadata_candidates(harness, home, cache)?;
+            let total = candidates.len();
+            forward(0, total, None);
+            for (index, candidate) in candidates.into_iter().enumerate() {
+                forward(index + 1, total, Some(candidate.listing));
+            }
+            Ok(())
+        }
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(super) struct NativeMetadata {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+}
+
+pub(super) fn absolute_native_cwd(cwd: String) -> Option<PathBuf> {
+    (!cwd.trim().is_empty())
+        .then(|| PathBuf::from(cwd))
+        .filter(|cwd| cwd.is_absolute())
+}
+
+pub(super) struct NativeCandidate {
+    pub source_path: PathBuf,
+    pub listing: NativeSessionListing,
+}
+
+impl NativeCandidate {
+    pub(super) fn from_metadata(
+        adapter: &dyn sessionwiki::adapters::Adapter,
+        source_path: PathBuf,
+        file: &Path,
+        metadata: NativeMetadata,
+        issue: Option<&'static str>,
+    ) -> Result<Option<Self>> {
+        if metadata.parent_session_id.is_some_and(|id| !id.is_empty()) {
+            return Ok(None);
+        }
+        let Some(native_session_id) = source_path.to_str().and_then(|key| adapter.native_id(key))
+        else {
+            return Ok(None);
+        };
+        let file = fs::metadata(file)?;
+        let cwd = metadata.cwd.and_then(absolute_native_cwd);
+        let unavailable_reason = issue.or_else(|| {
+            cwd.is_none()
+                .then_some("native session has no absolute recorded working directory")
+        });
+        Ok(Some(Self {
+            source_path,
+            listing: NativeSessionListing {
+                title: metadata
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .map(|title| {
+                        sessionwiki::util::truncate(&sessionwiki::redact::redact(&title), 80)
+                    })
+                    .unwrap_or_else(|| native_session_id.clone()),
+                native_session_id,
+                modified_at: metadata
+                    .updated_at
+                    .map(SystemTime::from)
+                    .unwrap_or(file.modified()?),
+                size_bytes: file.len(),
+                cwd: cwd.unwrap_or_default(),
+                git_branch: String::new(),
+                unavailable_reason,
+                natively_archived: false,
+            },
+        }))
+    }
+}
+
+fn metadata_candidates(
+    harness: HarnessKind,
+    home: &Path,
+    cache: &NativeScanCache,
+) -> Result<Vec<NativeCandidate>> {
+    let adapter = super::adapter_transcript::import_adapter(harness, Some(home));
+    let mut candidates = match harness {
+        HarnessKind::Antigravity => antigravity::candidates(home, adapter.as_ref(), cache)?,
+        HarnessKind::Dsh => dsh::candidates(home, adapter.as_ref(), cache)?,
+        HarnessKind::OpenCode => opencode::candidates(home, adapter.as_ref(), cache)?,
+        _ => unreachable!("harness already has its own inventory"),
+    };
+    candidates.sort_by(|a, b| {
+        b.listing
+            .modified_at
+            .cmp(&a.listing.modified_at)
+            .then_with(|| a.source_path.cmp(&b.source_path))
+    });
+    Ok(candidates)
+}
+
+pub(super) fn optional_entries(
+    path: &Path,
+) -> Result<impl Iterator<Item = std::io::Result<fs::DirEntry>>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    Ok(entries.into_iter().flatten())
 }
