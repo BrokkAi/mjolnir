@@ -59,7 +59,7 @@ The `override_review` tool takes pairs of findings and reasons for findings the 
 
 The pre-push hook accepts trees recorded under either `refs/mj/reviewed/` or `refs/mj/overridden/`. It also permits plain documentation changes without review: `.md`, `.markdown`, `.rst`, `.adoc`, and `.asciidoc` files, and root-level `README`, `LICENSE`, `COPYING`, `AUTHORS`, `CONTRIBUTORS`, `CHANGELOG`, and `NEWS` files. Executables, symbolic links, binary files, scripts, configuration, lockfiles, and MDX still require review.
 
-The documentation exemption compares the entire pushed tree with the destination's previous commit or a reviewed ancestor. For a new branch, a published ancestor on the same remote can also provide the comparison point. A documentation commit on top of unreviewed code does not qualify. A new repository containing only documentation also qualifies. Existing user pre-push hooks still run for exempt pushes, and exemptions do not mark trees as reviewed. A merge of the default branch does not require reviewing changes already covered by the prior review base.
+The documentation exemption compares the entire pushed tree with the destination's previous commit or a reviewed ancestor that includes the destination's history. For a new branch, a published ancestor on the same remote can also provide the comparison point. A documentation commit on top of unreviewed code does not qualify. A new repository containing only documentation also qualifies. Existing user pre-push hooks still run for exempt pushes, and exemptions do not mark trees as reviewed. A merge of the default branch does not require reviewing changes already covered by the prior review base.
 
 ## Follow a review
 

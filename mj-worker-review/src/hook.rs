@@ -19,7 +19,8 @@ cat > "$tmp" || exit 1
 # Let Git match paths, including names containing whitespace or newlines.
 # Disable renames so moving code to a documentation name still exposes its deletion.
 documentation_only() {
-  git diff --quiet --no-ext-diff --no-textconv --no-renames "$1" "$2" -- ':(top)**' \
+  git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- ':(top)**' \
     ':(top,exclude,glob)**/*.md' ':(top,exclude,glob)**/*.markdown' \
     ':(top,exclude,glob)**/*.rst' ':(top,exclude,glob)**/*.adoc' \
     ':(top,exclude,glob)**/*.asciidoc' \
@@ -28,7 +29,7 @@ documentation_only() {
     ':(top,exclude,literal)CONTRIBUTORS' ':(top,exclude,literal)CHANGELOG' \
     ':(top,exclude,literal)NEWS' || return 1
   # A documentation extension cannot exempt executables, links, or binary data.
-  git diff --raw --numstat --no-abbrev --no-ext-diff --no-textconv --no-renames \
+  git diff --raw --numstat --no-abbrev --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
     "$1" "$2" -- > "$tmp.diff" || return 1
   awk '
     /^:/ && ($1 !~ /^:(000000|100644)$/ || $2 !~ /^(000000|100644)$/) { exit 1 }
@@ -39,19 +40,17 @@ documentation_only_push() {
   case "$2" in
     *[!0]*)
       documentation_only "$2" "$1" && return 0
+      # A reviewed comparison point must cover the destination's existing history.
+      git for-each-ref --merged="$1" --contains="$2" --format='%(objectname)' \
+        refs/mj/reviewed/ refs/mj/overridden/ > "$tmp.bases" || return 1
       ;;
-  esac
-  # A new branch can build on published history or a reviewed/overridden ancestor.
-  # Compare whole trees, never just the tip commit, to include earlier code edits.
-  git for-each-ref --merged="$1" --format='%(objectname)' \
-    refs/mj/reviewed/ refs/mj/overridden/ > "$tmp.bases" || return 1
-  case "$2" in
-    *[!0]*) ;;
     *)
+      # A new branch can build on published history or a reviewed ancestor.
       git for-each-ref --merged="$1" --format='%(objectname)' \
-        "refs/remotes/$3/" >> "$tmp.bases" || return 1
+        refs/mj/reviewed/ refs/mj/overridden/ "refs/remotes/$3/" > "$tmp.bases" || return 1
       ;;
   esac
+  # Compare whole trees, never just the tip commit, to include earlier code edits.
   while read -r base; do
     documentation_only "$base" "$1" && return 0
   done < "$tmp.bases"
@@ -277,6 +276,7 @@ mod tests {
             push(&root, true, &["HEAD:refs/heads/reviewed-docs"]).status,
             0
         );
+        assert_eq!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
         // Documentation exemptions must not manufacture review approval refs.
         let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
         assert!(!git(&root, &["for-each-ref", "refs/mj/reviewed/"]).contains(&tree));
@@ -297,6 +297,75 @@ mod tests {
         assert_eq!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
         // Another published branch is no license to delete the destination's code.
         assert_ne!(push(&root, true, &["+HEAD:refs/heads/main"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_cannot_revert_published_code_to_a_reviewed_ancestor() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        reviewed(&root);
+        let reviewed = git(&root, &["rev-parse", "HEAD"]);
+        commit(&root, "newer published code");
+        assert_eq!(push(&root, false, &["HEAD:refs/heads/main"]).status, 0);
+        git(&root, &["reset", "--hard", &reviewed]);
+        commit_file(
+            &root,
+            "README.md",
+            b"Documentation after the older reviewed code\n",
+        );
+        assert_ne!(push(&root, true, &["+HEAD:refs/heads/main"]).status, 0);
+    }
+
+    #[test]
+    fn hook_documentation_exemption_includes_ignored_submodule_updates() {
+        let temp = repository();
+        let root = temp.path().join("checkout");
+        install_pre_push_hook(&SystemGit, &root).unwrap();
+        let first = git(&root, &["rev-parse", "HEAD"]);
+        commit_file(
+            &root,
+            ".gitmodules",
+            b"[submodule \"vendor\"]\n\tpath = vendor\n\turl = /unused\n",
+        );
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                &first,
+                "vendor",
+            ],
+        );
+        git(&root, &["commit", "-qm", "add a submodule"]);
+        let second = git(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(push(&root, false, &["HEAD:refs/heads/main"]).status, 0);
+        git(
+            &root,
+            &["update-index", "--cacheinfo", "160000", &second, "vendor"],
+        );
+        git(&root, &["commit", "-qm", "update the dependency code"]);
+        commit_file(
+            &root,
+            "README.md",
+            b"Documentation beside a submodule update\n",
+        );
+        for setting in ["diff.ignoreSubmodules", "submodule.vendor.ignore"] {
+            git(&root, &["config", setting, "all"]);
+            assert_ne!(
+                push(&root, true, &["HEAD:refs/heads/main"]).status,
+                0,
+                "{setting}"
+            );
+            assert_ne!(
+                push(&root, true, &["HEAD:refs/heads/new"]).status,
+                0,
+                "{setting}"
+            );
+            git(&root, &["config", "--unset", setting]);
+        }
     }
 
     #[test]
