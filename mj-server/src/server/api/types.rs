@@ -740,6 +740,7 @@ pub struct TurnState {
     pub execution: MaterializedExecutionState,
     pub active_turn: Option<MaterializedTurn>,
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
+    pub queued_command_ids: Vec<String>,
 }
 
 pub use mj_store::database::TurnSummary;

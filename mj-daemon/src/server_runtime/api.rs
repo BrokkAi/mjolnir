@@ -4877,16 +4877,20 @@ impl SubagentBackend for ApiBackend {
                         execution,
                         active_turn,
                         last_turn_outcome,
+                        queued_command_ids: turn.queued_command_ids.clone(),
                     }
                 }));
             }
             blocking("load turn outcome", move || {
                 Ok(
-                    mj_controller::database::load_materialized_turn_outcome(&session_id)?.map(
-                        |(execution, active_turn, last_turn_outcome)| TurnState {
-                            execution,
-                            active_turn,
-                            last_turn_outcome,
+                    mj_controller::database::load_materialized_turn_with_queue(&session_id)?.map(
+                        |((execution, active_turn, last_turn_outcome), queued_command_ids)| {
+                            TurnState {
+                                execution,
+                                active_turn,
+                                last_turn_outcome,
+                                queued_command_ids,
+                            }
                         },
                     ),
                 )

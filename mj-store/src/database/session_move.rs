@@ -466,7 +466,22 @@ pub fn commit_move_destination_owns(
         super::state_io::update_lifecycle_fields(&tx, &destination_session)?;
         super::state_io::replace_targets(&tx, &destination_session)?;
         save_move_operation_with(&tx, &operation)?;
+        let purged = if !operation.in_place {
+            let destination_environment: String = tx.query_row(
+                "SELECT environment_id FROM environment_bindings WHERE session_id=?1",
+                [&destination_session.id],
+                |row| row.get(0),
+            )?;
+            super::sessions::purge_borrowed_descendants_in_tx(
+                &tx,
+                &destination_session.id,
+                Some(&destination_environment),
+            )?
+        } else {
+            Vec::new()
+        };
         tx.commit()?;
+        super::tool_details::unlink_deleted_sessions(&database_path(), &purged);
         Ok(())
     })
 }
@@ -836,6 +851,145 @@ mod tests {
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             error: None,
+        }
+    }
+
+    #[test]
+    fn move_destination_fence_purges_only_source_and_historical_closed_borrowers() {
+        const NAME: &str =
+            "move_destination_fence_purges_only_source_and_historical_closed_borrowers";
+        const CHILD: &str = "MJ_TEST_MOVE_BORROWED_TRANSCRIPTS";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                NAME,
+            ))
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        use super::super::tests::{session, test_subagent};
+        use mj_core::state::TargetLocator;
+        let _writer = install_isolated_test_writer();
+        let mut parent = session("parent", "project");
+        parent.state = SessionState::Running;
+        let place = |parent: &mut SessionRecord, generation| {
+            parent.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: PathBuf::from(format!("/fixture/{generation}/parent")),
+            }));
+            save_session(parent).unwrap();
+        };
+        let child = |id: &str, parent: &str, state, own| {
+            let mut record = session(id, "project");
+            record.state = state;
+            let mut relation = test_subagent(parent, id);
+            relation.orchestrator = matches!(id, "old" | "orchestrator");
+            if id == "independent-reviewer" {
+                relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+            }
+            register_subagent_with_startup(&record, &relation, Vec::new(), None, None, own)
+                .unwrap();
+            let body = serde_json::to_string(&mj_core::transcript::TranscriptBody::System {
+                text: id.into(),
+            })
+            .unwrap();
+            tool_details::append_tool_detail(&mj_core::config::data_dir(), id, "detail", &body)
+                .unwrap();
+        };
+        let exists = |id: &str| {
+            let row = load_session_record(id).unwrap().is_some();
+            assert_eq!(
+                row,
+                mj_core::config::data_dir()
+                    .join("tool-details")
+                    .join(format!("{id}.mjtd"))
+                    .is_file()
+            );
+            row
+        };
+        place(&mut parent, "historical");
+        child("old", "parent", SessionState::Running, false);
+        child("nested", "old", SessionState::Stopped, false);
+        child("orchestrator", "parent", SessionState::Running, true);
+        child(
+            "orchestrator-child",
+            "orchestrator",
+            SessionState::Stopped,
+            false,
+        );
+        child("ancestor", "parent", SessionState::Running, false);
+        child(
+            "independent-reviewer",
+            "ancestor",
+            SessionState::Stopped,
+            true,
+        );
+        for (id, state) in [
+            ("old", SessionState::Error),
+            ("orchestrator", SessionState::Stopped),
+            ("ancestor", SessionState::Stopped),
+        ] {
+            let mut owner = load_session_record(id).unwrap().unwrap();
+            owner.state = state;
+            save_lifecycle_session(&owner).unwrap();
+        }
+        place(&mut parent, "source");
+        child("source", "parent", SessionState::Stopped, false);
+        let mut intent = operation(&parent);
+        intent.in_place = true;
+        intent.phase = MovePhase::DispatchReleased;
+        commit_in_place_dispatch_released(&intent).unwrap();
+        assert!(exists("source") && exists("old"));
+        intent.in_place = false;
+        intent.phase = MovePhase::Cancelled;
+        save_move_operation(&intent).unwrap();
+        assert!(exists("source") && exists("old"));
+        intent.phase = MovePhase::DestinationStarting;
+        save_move_operation(&intent).unwrap();
+
+        place(&mut parent, "destination");
+        child("destination", "parent", SessionState::Stopped, false);
+        child("live", "parent", SessionState::Running, false);
+        intent.phase = MovePhase::DestinationOwns;
+        intent.destination_target = parent.target.as_deref().cloned();
+        intent.queue_admission_started = true;
+        let connection = open(&database_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_purge BEFORE DELETE ON sessions
+            WHEN OLD.session_id='source' BEGIN SELECT RAISE(ABORT, 'injected purge failure'); END;",
+            )
+            .unwrap();
+        let error = commit_move_destination_owns(&intent, &parent).unwrap_err();
+        assert!(format!("{error:#}").contains("injected purge failure"));
+        assert_eq!(
+            load_move_operation("parent").unwrap().unwrap().phase,
+            MovePhase::DestinationStarting
+        );
+        assert!(exists("nested") && exists("old") && exists("source"));
+
+        connection
+            .execute_batch("DROP TRIGGER reject_purge")
+            .unwrap();
+        commit_move_destination_owns(&intent, &parent).unwrap();
+        assert_eq!(
+            load_move_operation("parent").unwrap().unwrap().phase,
+            MovePhase::DestinationOwns
+        );
+        for id in ["old", "nested", "source"] {
+            assert!(!exists(id), "{id} survived the ownership fence");
+        }
+        for id in [
+            "destination",
+            "live",
+            "orchestrator",
+            "orchestrator-child",
+            "ancestor",
+            "independent-reviewer",
+        ] {
+            assert!(exists(id), "{id} was purged");
         }
     }
 

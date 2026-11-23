@@ -19,25 +19,33 @@ use crate::worker_lifecycle::WorkerPermit;
 pub(super) struct Reclamation {
     environment: EnvironmentRecord,
     workers: Vec<(EnvironmentWorker, targets::TargetLocator)>,
-    _permits: Vec<WorkerPermit>,
+    permits: Vec<WorkerPermit>,
 }
 
 /// Exact worker whose managed Stop completed under retained launch permits.
 pub(crate) struct StoppedWorker<'a> {
-    _authority: &'a Reclamation,
-    session_id: &'a str,
+    permit: &'a WorkerPermit,
     target: &'a targets::TargetLocator,
     root: String,
 }
 impl targets::StoppedWorkerProof for StoppedWorker<'_> {
     fn session_id(&self) -> &str {
-        self.session_id
+        self.permit.session_id()
     }
     fn target(&self) -> &targets::TargetLocator {
         self.target
     }
     fn root(&self) -> &str {
         &self.root
+    }
+}
+impl<'a> StoppedWorker<'a> {
+    fn new(permit: &'a WorkerPermit, target: &'a targets::TargetLocator, root: String) -> Self {
+        Self {
+            permit,
+            target,
+            root,
+        }
     }
 }
 impl Reclamation {
@@ -52,12 +60,16 @@ impl Reclamation {
                 .any(|(entry, location)| std::ptr::eq(entry, worker) && location == target),
             "retirement does not cover worker placement"
         );
-        Ok(StoppedWorker {
-            _authority: self,
-            session_id: &worker.session_id,
+        let permit = self
+            .permits
+            .iter()
+            .find(|permit| permit.session_id() == worker.session_id)
+            .context("retirement does not hold worker permit")?;
+        Ok(StoppedWorker::new(
+            permit,
             target,
-            root: targets::worker_root(target, &worker.session_id)?,
-        })
+            targets::worker_root(target, &worker.session_id)?,
+        ))
     }
 }
 
@@ -192,7 +204,7 @@ impl Reclamation {
         Ok(Self {
             environment,
             workers,
-            _permits: permits,
+            permits,
         })
     }
 
@@ -231,17 +243,18 @@ impl Reclamation {
             )?;
         }
         for (worker, target) in &self.workers {
-            if targets::is_borrowed(target) {
-                // A removed container removes these private roots with it. A
-                // bare child has a separate root that must be reclaimed here.
-                if matches!(target, targets::TargetLocator::SshBare { .. }) {
+            if worker.session_id != self.environment.owner_session_id {
+                // Container retirement removes the child roots with it.
+                if matches!(
+                    target,
+                    targets::TargetLocator::LocalBare { .. }
+                        | targets::TargetLocator::SshBare { .. }
+                ) {
                     targets::stopped_borrowed_worker_cleanup_plan(
                         self.stopped_worker(worker, target)?,
                     )?
                     .execute(executor, &crate::controller::ControlWorker)?;
                 }
-            } else if worker.session_id != self.environment.owner_session_id {
-                execute_owned_target_cleanup(self, target, worker, executor)?;
             }
         }
         for (worker, target) in &self.workers {
@@ -298,15 +311,22 @@ fn execute_owned_target_cleanup(
     Ok(())
 }
 
-/// A child relinquishes execution, not the owner's files. Its lease remains
-/// durable until the entire environment is reclaimed, including after Destroy.
+/// Stop each borrowed worker and remove its private roots. Keep the lease
+/// inventory until the entire environment is reclaimed, including after Destroy.
 pub(super) fn stop_borrower(
     session_id: &str,
     config: &Config,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     let environments = database::worker_environments(session_id)?;
-    stop_workers_in_environments(session_id, config, executor, &environments)
+    stop_workers_in_environments(
+        session_id,
+        config,
+        executor,
+        environments
+            .iter()
+            .filter(|environment| environment.owner_session_id != session_id),
+    )
 }
 
 pub(super) fn stop_workers_in_environments<'a>(
@@ -327,6 +347,12 @@ pub(super) fn stop_workers_in_environments<'a>(
             let target = backend(&worker, config)?;
             let root = targets::worker_root(&target, session_id)?;
             super::worker_binary::stop_worker(&permit, executor, &target, &root)?;
+            if environment.owner_session_id != session_id {
+                targets::stopped_borrowed_worker_cleanup_plan(StoppedWorker::new(
+                    &permit, &target, root,
+                ))?
+                .execute(executor, &super::ControlWorker)?;
+            }
         }
     }
     Ok(())

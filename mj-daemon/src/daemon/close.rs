@@ -902,11 +902,18 @@ impl RuntimeState {
         consent: &mj_core::suspend_consent::SuspendConsent,
         commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
+        use mj_controller::controller::lifecycle::SuspendSettlement;
+        let settlement = if commit.is_some() {
+            SuspendSettlement::Suspend
+        } else {
+            SuspendSettlement::TemporaryStop
+        };
         if controller
             .settle_superseded_move_for_close(
                 session_id,
                 executor,
                 Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+                settlement,
             )
             .await?
         {
@@ -927,6 +934,10 @@ impl RuntimeState {
                 Self::commit_close(control)?;
             }
             self.stop_borrowed_workers(session_id).await?;
+            if settlement == SuspendSettlement::Suspend {
+                let id = session_id.to_owned();
+                blocking(move || mj_controller::database::settle_stopped_suspend(&id)).await?;
+            }
             return Ok(if route == CloseRoute::DeferredCleanup {
                 DaemonLifecycleResult::DeferredCleanup
             } else {
@@ -956,6 +967,7 @@ impl RuntimeState {
                         &self.session_manager,
                         consent,
                         Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+                        settlement,
                     )
                     .await?
             }
@@ -970,7 +982,8 @@ impl RuntimeState {
                     Self::commit_close(control)?;
                 }
                 self.stop_borrowed_workers(session_id).await?;
-                let outcome = controller.suspend_without_checkpoint(session_id, true, executor)?;
+                let outcome =
+                    controller.stop_without_checkpoint(session_id, true, executor, settlement)?;
                 for warning in outcome.warnings {
                     tracing::warn!(session_id, %warning, "suspend without checkpoint warning");
                     self.push_public_notice(session_id, warning);
@@ -986,6 +999,7 @@ impl RuntimeState {
                         &self.session_manager,
                         consent,
                         Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+                        settlement,
                     )
                     .await?
             }
