@@ -13,6 +13,7 @@ Usage: record_egress.py --out <evidence.jsonl> <container>
 """
 import argparse
 from datetime import datetime, timezone
+import fcntl
 import json
 from pathlib import Path
 import subprocess
@@ -48,7 +49,9 @@ def main():
               "reachable": reachable, "enforced": False}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("a") as log:
+        fcntl.flock(log, fcntl.LOCK_EX)
         log.write(json.dumps(record, sort_keys=True) + "\n")
+        log.flush()
 
 
 if __name__ == "__main__":
