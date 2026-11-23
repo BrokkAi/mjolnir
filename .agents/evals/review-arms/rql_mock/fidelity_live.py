@@ -921,6 +921,10 @@ def _load_measurement(path, query, models):
         if (bifrost_answer.get("bifrost_binary_sha256") != runner.binary_sha256
                 or bifrost_answer.get("bifrost_build_identity") != runner.build_identity):
             raise ValueError(f"saved measurement at {path} used a different Bifrost binary")
+        if (bifrost_answer.get("timed_out")
+                and getattr(runner, "query_timeout_s", None) is not None
+                and bifrost_answer.get("query_timeout_s") != runner.query_timeout_s):
+            raise ValueError(f"saved measurement at {path} timed out under a different Bifrost query timeout")
     return record
 
 

@@ -1309,10 +1309,36 @@ class BifrostGoldTests(unittest.TestCase):
         self.assertEqual(report["candidate_sources"], ["engine", "terra_enumerator", "bifrost", "census"])
         self.assertEqual(report["documented"]["metrics"]["recall"], 0.5)
         self.assertEqual(report["documented"]["bifrost"], {
-            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0, "timeout_queries": 0, "total_rows": 2,
+            "queries_ran": 1, "complete_queries": 1, "truncated_queries": 0, "timeout_queries": 0,
+            "timeout_query_keys": [], "total_rows": 2,
             "gold_rows_found": 2, "gold_rows_outside_engine": 1, "precision": 1.0, "recall": 1.0,
             "binary_sha256": ["1" * 64], "build_identity": ["abc123"],
         })
+
+        # A timed-out Bifrost query is excluded from scored documented metrics and flagged in reasons.
+        timed_query = Query("documented", "random", "mjolnir", "a" * 40, '(callers (callable :name "slow"))')
+        timed_record = measure(
+            timed_query, True, fake_engine, fake_terra, fake_adjudicate,
+            bifrost_rows=lambda *a: {
+                "rows": [], "complete": False, "truncated": False, "timed_out": True, "query_timeout_s": 1800,
+                "diagnostics": [{"impact": "incomplete", "message": "bifrost query timed out after 1800s"}],
+                "bifrost_binary_sha256": "1" * 64, "bifrost_build_identity": "abc123",
+            },
+        )
+        mixed = gate_report(
+            "m" * 64, [], [doc_query, timed_query],
+            {doc_query.key: doc_record, timed_query.key: timed_record}, 20261120,
+        )
+        self.assertEqual(mixed["documented"]["random_n"], 2)
+        self.assertEqual(mixed["documented"]["scored_n"], 1)
+        # Engine scored 1.0 on the timed-out query (against incomplete gold) and 0.5 on doc_query;
+        # primary recall must stay 0.5 (not inflated to 2/3).
+        self.assertEqual(mixed["documented"]["metrics"]["recall"], 0.5)
+        self.assertAlmostEqual(mixed["documented"]["metrics_including_bifrost_timeouts"]["recall"], 2 / 3)
+        self.assertEqual(mixed["documented"]["bifrost"]["queries_ran"], 1)
+        self.assertEqual(mixed["documented"]["bifrost"]["timeout_queries"], 1)
+        self.assertEqual(mixed["documented"]["bifrost"]["timeout_query_keys"], [timed_query.key])
+        self.assertTrue(any("real Bifrost timed out on 1/2" in r for r in mixed["documented"]["reasons"]))
 
     def test_bifrost_runner_checkpoints_resumes_and_isolates_checkouts(self):
         import subprocess
@@ -1352,7 +1378,10 @@ if "--query-file" in args:
         sys.exit(0)
     if "trigger-timeout" in qtext:
         import time as _time
-        _time.sleep(5)
+        _time.sleep(0.6)
+        print(json.dumps({{"isError": False, "structuredContent": {{"truncated": False, "results": [
+            {{"result_type": "declaration", "path": "src/lib.rs", "fq_name": "p.caller", "start_line": 2, "end_line": 2}}
+        ]}}}}))
         sys.exit(0)
     print(json.dumps({{"isError": False, "structuredContent": {{"truncated": False, "results": [
         {{"result_type": "declaration", "path": "src/lib.rs", "fq_name": "p.caller", "start_line": 2, "end_line": 2}}
@@ -1406,20 +1435,32 @@ for line in sys.stdin:
             bad_key = fidelity_live.sha(fidelity_live.canonical(["documented", "mjolnir", c1, bad_q]).encode())
             self.assertFalse((root / "checkpoints" / bad_key / "bifrost/completed.json").exists())
 
-            # Query timeout terminates cleanly, checkpoints timed_out=True/complete=False, and resumes without re-running.
+            # Query timeout terminates cleanly, checkpoints timed_out=True/complete=False, resumes at same timeout,
+            # and re-runs if the operator raises query_timeout_s.
             slow_q = '(callers (enclosing-decl (where "src/lib.rs" (callable :name "trigger-timeout"))))'
             timed_runner = bifrost_gold.BifrostRunner(
                 fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
-                memory_cap_gib=None, use_systemd_cap=False, query_timeout_s=0.3,
+                memory_cap_gib=None, use_systemd_cap=False, query_timeout_s=0.2,
             )
             timed = timed_runner.query("mjolnir", c1, slow_q)
             self.assertTrue(timed["timed_out"])
+            self.assertEqual(timed["query_timeout_s"], 0.2)
             self.assertFalse(timed["complete"])
             self.assertEqual(timed["rows"], [])
             self.assertFalse((root / "work/checkouts/mjolnir" / bifrost_gold.QUERY_FILENAME).exists())
             count_after_timeout = len(invocations.read_text().splitlines())
             self.assertEqual(timed_runner.query("mjolnir", c1, slow_q), timed)
             self.assertEqual(len(invocations.read_text().splitlines()), count_after_timeout)
+
+            longer_runner = bifrost_gold.BifrostRunner(
+                fake_bin, {"mjolnir": repo}, root / "work", root / "checkpoints",
+                memory_cap_gib=None, use_systemd_cap=False, query_timeout_s=2.0,
+            )
+            recovered = longer_runner.query("mjolnir", c1, slow_q)
+            self.assertFalse(recovered["timed_out"])
+            self.assertTrue(recovered["complete"])
+            self.assertEqual(len(recovered["rows"]), 1)
+            self.assertEqual(len(invocations.read_text().splitlines()), count_after_timeout + 1)
 
     def test_concurrent_run_sample_enforces_commit_repo_bounds_and_resumes_cleanly(self):
         import threading

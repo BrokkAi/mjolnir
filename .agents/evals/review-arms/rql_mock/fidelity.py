@@ -455,8 +455,17 @@ def gate_report(manifest_hash, served, queries, records, seed):
                                  "fresh": fresh, "reason": answer["failure"],
                                  "repair_error_counts": answer["repair_error_counts"]})
                 failure_counts[query.step, step] += 1
-    documented = groups.get((DOCUMENTED, "random"), [])
-    docs = stratum_metrics(documented, f"{seed}/documented")
+    documented_entries = [(q, records[q.key]) for q in queries if q.step == DOCUMENTED and q.stratum == "random"]
+    documented = [record for _, record in documented_entries]
+    timeout_keys = [
+        q.key for q, record in documented_entries
+        if (record.get("bifrost_answer") or {}).get("timed_out")
+    ]
+    scored_documented = [
+        record for record in documented
+        if not (record.get("bifrost_answer") or {}).get("timed_out")
+    ]
+    docs = stratum_metrics(scored_documented, f"{seed}/documented")
     decisive = {step: groups.get((step, "decisive"), []) for step in served}
     pooled = pooled_prescience([row for step in served for row in decisive[step]], f"{seed}/prescience",
                                applicable=bool(served))
@@ -464,28 +473,50 @@ def gate_report(manifest_hash, served, queries, records, seed):
                     "engine_failure_count": failure_counts[step, step]}
              for step in served}
     bifrost_records = [row for row in documented if row.get("bifrost_answer") is not None]
+    bifrost_completed = [row for row in bifrost_records if not row["bifrost_answer"].get("timed_out")]
+    doc_reasons = bar_failures("documented pooled random", docs)
+    if timeout_keys:
+        doc_reasons.append(
+            f"real Bifrost timed out on {len(timeout_keys)}/{len(bifrost_records)} documented queries "
+            f"(excluded from scored documented metrics)"
+        )
+    by_step_report = {}
+    for step, rows in sorted(by_step.items()):
+        step_scored = [row for row in rows if not (row.get("bifrost_answer") or {}).get("timed_out")]
+        step_entry = {
+            "random_n": len(rows),
+            "engine_failure_count": failure_counts[DOCUMENTED, step],
+            "metrics": stratum_metrics(step_scored, f"{seed}/{step}"),
+        }
+        if len(step_scored) != len(rows):
+            step_entry["scored_n"] = len(step_scored)
+            step_entry["bifrost_timeout_count"] = len(rows) - len(step_scored)
+        by_step_report[step] = step_entry
     documented_report = {"reported_only": True, "random_n": len(documented), "metrics": docs,
-                         "reasons": bar_failures("documented pooled random", docs),
+                         "reasons": doc_reasons,
                          "prescience": "not_estimable",
                          "engine_failure_count": sum(failure_counts[DOCUMENTED, step] for step in by_step),
-                         "by_step": {step: {"random_n": len(rows),
-                                            "engine_failure_count": failure_counts[DOCUMENTED, step],
-                                            "metrics": stratum_metrics(rows, f"{seed}/{step}")}
-                                     for step, rows in sorted(by_step.items())}}
+                         "by_step": by_step_report}
+    if timeout_keys:
+        documented_report["scored_n"] = len(scored_documented)
+        documented_report["metrics_including_bifrost_timeouts"] = stratum_metrics(
+            documented, f"{seed}/documented/all"
+        )
     if bifrost_records:
-        b_tp = sum(len(set(row["gold"]) & set(row.get("bifrost", ()))) for row in bifrost_records)
-        b_ret = sum(len(set(row.get("bifrost", ()))) for row in bifrost_records)
-        b_gold = sum(len(set(row["gold"])) for row in bifrost_records)
+        b_tp = sum(len(set(row["gold"]) & set(row.get("bifrost", ()))) for row in bifrost_completed)
+        b_ret = sum(len(set(row.get("bifrost", ()))) for row in bifrost_completed)
+        b_gold = sum(len(set(row["gold"])) for row in bifrost_completed)
         b_outside_eng = sum(
             len((set(row["gold"]) - set(row["engine"])) & set(row.get("bifrost", ())))
-            for row in bifrost_records
+            for row in bifrost_completed
         )
         documented_report["bifrost"] = {
-            "queries_ran": len(bifrost_records),
-            "complete_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("complete")),
-            "truncated_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("truncated")),
-            "timeout_queries": sum(1 for row in bifrost_records if row["bifrost_answer"].get("timed_out")),
-            "total_rows": sum(len(row["bifrost_answer"].get("rows", ())) for row in bifrost_records),
+            "queries_ran": len(bifrost_completed),
+            "complete_queries": sum(1 for row in bifrost_completed if row["bifrost_answer"].get("complete")),
+            "truncated_queries": sum(1 for row in bifrost_completed if row["bifrost_answer"].get("truncated")),
+            "timeout_queries": len(timeout_keys),
+            "timeout_query_keys": timeout_keys,
+            "total_rows": sum(len(row["bifrost_answer"].get("rows", ())) for row in bifrost_completed),
             "gold_rows_found": b_tp,
             "gold_rows_outside_engine": b_outside_eng,
             "precision": fraction(b_tp, b_ret),

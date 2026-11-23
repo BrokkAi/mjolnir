@@ -541,7 +541,9 @@ class BifrostRunner:
             if completed_path.exists():
                 if not intent_path.exists():
                     raise ValueError(f"bifrost checkpoint is missing intent.json at {directory}")
-                return json.loads(completed_path.read_bytes())
+                saved = json.loads(completed_path.read_bytes())
+                if not saved.get("timed_out") or saved.get("query_timeout_s") == self.query_timeout_s:
+                    return saved
 
             driver.save(intent_path, intent)
             checkout = self._checkout_commit(repo, commit)
@@ -556,6 +558,7 @@ class BifrostRunner:
                     "raw_row_count": 0,
                     "truncated": False,
                     "timed_out": True,
+                    "query_timeout_s": self.query_timeout_s,
                     "diagnostics": [{
                         "impact": "incomplete",
                         "message": f"bifrost query timed out after {self.query_timeout_s}s",
