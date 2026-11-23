@@ -1705,7 +1705,13 @@ article > h3 {
   border-radius: var(--radius);
 }
 
-.virtual-workspace > span {
+.virtual-workspace-breadcrumb {
+  display: flex;
+  min-width: 0;
+  white-space: pre;
+}
+
+.virtual-workspace-breadcrumb > :is(a, span:last-child) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1713,6 +1719,7 @@ article > h3 {
 }
 
 .virtual-workspace-close {
+  flex-shrink: 0;
   min-width: 1.6rem;
   padding: 0.05rem 0.35rem;
   border-radius: 999px;

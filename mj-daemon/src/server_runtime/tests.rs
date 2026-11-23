@@ -79,7 +79,7 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             let id = format!("history-{index:06}");
             let mut record = phone_session(&id, 0);
             record.state = SessionState::Stopped;
-            controller.state.sessions.insert(id, record);
+            insert_session_fixture(&mut controller, record, None);
         }
         let sources = PhoneProjectSources::default();
         let native = mj_core::native_agent::NativeAgent {
@@ -388,7 +388,6 @@ fn move_recovery_fixture() -> mj_core::state::MoveOperation {
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -652,7 +651,7 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
     record.harness_kind = HarnessKind::Claude;
     record.last_profile = "claude".into();
     record.state = SessionState::Running;
-    controller.state.sessions.insert(record.id.clone(), record);
+    insert_session_fixture(&mut controller, record, None);
 
     let project = |execution| {
         let materialized_activity = std::collections::BTreeMap::from([(
@@ -730,12 +729,13 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
     ] {
         let mut record = phone_session(id, 0);
         record.state = state;
-        controller.state.sessions.insert(id.to_owned(), record);
+        insert_session_fixture(&mut controller, record, Some("parent"));
     }
     for id in ["live-child", "stopped-child"] {
         controller.state.subagents.insert(
             id.into(),
             mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: None,
                 child_session_id: id.into(),
@@ -751,7 +751,7 @@ fn only_a_stopped_sub_agent_can_read_its_history() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             }
             .into(),
         );
@@ -806,7 +806,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.harness_kind = HarnessKind::Claude;
     record.last_profile = "claude".into();
     record.state = SessionState::Running;
-    controller.state.sessions.insert(record.id.clone(), record);
+    insert_session_fixture(&mut controller, record, None);
     let operational = RelayOperationalState {
         in_place_move_hold: None,
         assessment: None,
@@ -1081,7 +1081,7 @@ fn disconnected_worker_never_projects_cached_idle_as_ready() {
     let mut controller = controller_with_profiles(&["codex"]);
     let mut record = phone_session(id, 0);
     record.state = SessionState::Running;
-    controller.state.sessions.insert(id.into(), record);
+    insert_session_fixture(&mut controller, record, None);
     let mut operational = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
     operational.config_options = vec![
         SessionConfigOption::select(
@@ -1231,11 +1231,12 @@ fn golden_phone_session_snapshot() {
     for id in ["session-1", "child-1"] {
         let mut record = phone_session(id, 0);
         record.state = SessionState::Running;
-        controller.state.sessions.insert(id.to_owned(), record);
+        insert_session_fixture(&mut controller, record, Some("session-1"));
     }
     controller.state.subagents.insert(
         "child-1".into(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "child-1".into(),
@@ -1251,7 +1252,7 @@ fn golden_phone_session_snapshot() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );
@@ -1464,9 +1465,10 @@ fn golden_phone_session_snapshot() {
     let mut controller = controller_with_profiles(&["codex"]);
     let mut record = phone_session("session-1", 0);
     record.state = SessionState::Running;
-    controller.state.sessions.insert(record.id.clone(), record);
+    insert_session_fixture(&mut controller, record, None);
     let entry = |id: u64, role: &'static str, recorded_at_ms: Option<i64>| {
         crate::server::BrowserTranscriptEntry {
+            tool_detail_trimmed: false,
             stable_id: None,
             command_id: None,
             id,
@@ -1561,10 +1563,7 @@ fn golden_phone_session_snapshot() {
     let mut action_sessions = BTreeMap::new();
     track_started_phone_session(&mut active_actions, &mut action_sessions, 7, session_id).unwrap();
     let mut controller = controller_with_profiles(&[]);
-    controller
-        .state
-        .sessions
-        .insert(session_id.into(), phone_session(session_id, 0));
+    insert_session_fixture(&mut controller, phone_session(session_id, 0), None);
     let started = viewer_snapshot(
         &controller,
         &[],
@@ -1956,6 +1955,10 @@ async fn phone_projects_resolve_origins_and_discard_results_after_location_chang
         let mut record = phone_session(id, 0);
         record.project_directory = Some(directory);
         record.target_template_id = "local".into();
+        controller
+            .state
+            .environment_owners
+            .insert(id.into(), id.into());
         controller.state.sessions.insert(id.into(), record);
     }
     let mut sources = PhoneProjectSources::default();
@@ -2065,6 +2068,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     controller.state.subagents.insert(
         child.id.clone(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child.id.clone(),
@@ -2080,10 +2084,18 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );
+    controller
+        .state
+        .environment_owners
+        .insert(parent.id.clone(), parent.id.clone());
+    controller
+        .state
+        .environment_owners
+        .insert(child.id.clone(), parent.id.clone());
     controller.state.sessions.insert(parent.id.clone(), parent);
     controller.state.sessions.insert(child.id.clone(), child);
 
@@ -2164,6 +2176,10 @@ async fn phone_projects_log_a_repeated_failure_once() {
     let mut record = phone_session("gone", 0);
     record.project_directory = Some(root.path().join("removed"));
     record.target_template_id = "local".into();
+    controller
+        .state
+        .environment_owners
+        .insert(record.id.clone(), record.id.clone());
     controller.state.sessions.insert(record.id.clone(), record);
 
     let mut sources = PhoneProjectSources::default();
@@ -2210,7 +2226,6 @@ fn prompt_action() -> ControllerAction {
 fn new_action() -> ControllerAction {
     ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -2237,11 +2252,19 @@ fn new_action() -> ControllerAction {
     }
 }
 
+fn insert_session_fixture(controller: &mut Controller, record: SessionRecord, owner: Option<&str>) {
+    let id = record.id.clone();
+    controller
+        .state
+        .environment_owners
+        .insert(id.clone(), owner.unwrap_or(&id).to_owned());
+    controller.state.sessions.insert(id, record);
+}
+
 fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -2842,12 +2865,9 @@ fn historical_sessions_do_not_restore_missing_workspace_tabs() {
     let mut controller = controller_with_profiles(&["codex"]);
     let mut listed = phone_session("in-listed", 0);
     listed.workspace_id = "workspace-1".into();
-    controller.state.sessions.insert(listed.id.clone(), listed);
+    insert_session_fixture(&mut controller, listed, None);
     let unlisted = phone_session("in-default", 0);
-    controller
-        .state
-        .sessions
-        .insert(unlisted.id.clone(), unlisted);
+    insert_session_fixture(&mut controller, unlisted, None);
     let workspaces = [mj_core::workspace::WorkspaceRecord {
         id: "workspace-1".into(),
         name: "Mjolnir".into(),
@@ -2897,10 +2917,7 @@ async fn a_missing_historical_checkout_is_not_probed_on_every_retry_tick() {
     session.state = SessionState::Stopped;
     session.target_template_id = "local".into();
     session.project_directory = Some(root.path().join("gone"));
-    controller
-        .state
-        .sessions
-        .insert(session.id.clone(), session);
+    insert_session_fixture(&mut controller, session, None);
     let mut sources = PhoneProjectSources::default();
     sources.synchronize(&controller);
     let result = sources.jobs.join_next().await.unwrap().unwrap();
@@ -2935,7 +2952,7 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
     let mut controller = controller_with_profiles(&["codex"]);
     let mut record = phone_session("parent", 0);
     record.state = SessionState::Running;
-    controller.state.sessions.insert("parent".into(), record);
+    insert_session_fixture(&mut controller, record, None);
     let question = mj_core::elicitation::ElicitationRequest {
         id: "fable-decline-1".into(),
         message: "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?"
@@ -3047,11 +3064,12 @@ fn child_worker_turn_and_attention_publish_together_and_update_the_parent() {
     for id in ["parent", "child"] {
         let mut record = phone_session(id, 0);
         record.state = SessionState::Running;
-        controller.state.sessions.insert(id.into(), record);
+        insert_session_fixture(&mut controller, record, Some("parent"));
     }
     controller.state.subagents.insert(
         "child".into(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "child".into(),
@@ -3067,7 +3085,7 @@ fn child_worker_turn_and_attention_publish_together_and_update_the_parent() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );
@@ -3116,7 +3134,7 @@ fn metadata_only_workspace_and_storage_changes_refresh_existing_rows() {
         record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: PathBuf::from("/worker").join(id),
         }));
-        controller.state.sessions.insert(id.into(), record);
+        insert_session_fixture(&mut controller, record, None);
     }
     let mut runtime = mj_client::runtime_feed::RuntimeProjection {
         records: controller.state.sessions.clone(),
@@ -3227,7 +3245,7 @@ fn session_verdicts_reconcile_lifecycle_move_and_workspace_offers() {
     failed_launch.state = SessionState::StartupCleanup;
     failed_launch.last_error = Some("launch cleanup failed".into());
     for record in [checkpoint, failed, moving, failed_launch] {
-        controller.state.sessions.insert(record.id.clone(), record);
+        insert_session_fixture(&mut controller, record, None);
     }
     let mut held = move_recovery_fixture();
     held.selection.session_id = "moving".into();

@@ -382,8 +382,8 @@ pub(crate) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         subagent_kind: None,
-        supervisor: false,
-        supervisors_enabled: false,
+        orchestrator: false,
+        orchestrators_enabled: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -458,6 +458,36 @@ fn stub_runtime_bridge(root: &Path) -> PathBuf {
     std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
+}
+
+#[tokio::test]
+async fn harness_launch_records_the_profile_temp_dir_relative_to_its_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    let workspace = temp.path().join("workspace");
+    let relative = format!(
+        "harness-temp-{} ",
+        temp.path().file_name().unwrap().to_str().unwrap()
+    );
+    let expected = workspace.join(&relative);
+    std::fs::create_dir_all(&expected).unwrap();
+    let login = mj_harness_install::login_environment::resolve()
+        .await
+        .unwrap();
+    assert_ne!(login.get("TMPDIR"), Some(&relative));
+
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.cwd = workspace;
+    config.bridge_command = stub_runtime_bridge(temp.path());
+    config.harness_runtime = mj_core::worker_launch::HarnessRuntimePolicy::Image;
+    config.environment.insert("TMPDIR".into(), relative);
+    expect_daemon_launch_failure(&root, config).await;
+
+    assert!(expected.is_absolute());
+    assert_eq!(
+        std::fs::read(root.join("session-temp-dir")).unwrap(),
+        expected.to_str().unwrap().as_bytes()
+    );
 }
 
 fn git_repository(temp: &tempfile::TempDir) -> PathBuf {
@@ -10239,6 +10269,8 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
             );
             assert_eq!(spec.environment["MJ_REVIEW_GATE"], "1");
         }
+        // The controller writes Off for workers that borrow the workspace.
+        launch.review_trigger = mj_core::config::ReviewTrigger::Off;
         launch.environment.insert(
             mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
             "1".into(),
@@ -10265,11 +10297,8 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
     }
 }
 
-// A child offered the review tools records where its work starts at launch,
-// without the push gate. Otherwise a repository with no default-branch merge
-// base would record the already-committed HEAD at its first request and refuse.
 #[test]
-fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
+fn an_owning_orchestrator_pins_the_start_and_installs_the_push_gate() {
     let temp = tempfile::tempdir().unwrap();
     let repository = git_repository(&temp);
     let mut launch = launch_config("/test/profile");
@@ -10282,12 +10311,12 @@ fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
         "1".into(),
     );
     let start = git(&repository, &["rev-parse", "HEAD"]);
-    assert!(launch.prepares_review() && !launch.review_gate());
+    assert!(launch.prepares_review() && launch.review_gate());
     let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
     assert!(notices.is_empty());
-    assert!(!repository.join(".git/hooks/pre-push").exists());
+    assert!(repository.join(".git/hooks/pre-push").exists());
     assert!(
-        !super::harness_launch::primary_supervisor_spec(&launch)
+        super::harness_launch::primary_supervisor_spec(&launch)
             .environment
             .contains_key("MJ_REVIEW_GATE")
     );
@@ -10306,6 +10335,7 @@ fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
     // A harness that cannot offer the tools records nothing and says nothing.
     launch.session_id = "muse-child".into();
     launch.harness = HarnessKind::Muse;
+    launch.review_trigger = mj_core::config::ReviewTrigger::Off;
     assert!(!launch.prepares_review());
     assert!(
         super::harness_launch::prepare_review_gate(&launch)

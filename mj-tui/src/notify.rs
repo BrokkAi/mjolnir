@@ -24,7 +24,19 @@ pub(crate) struct PendingAlert {
 
 impl DashboardState {
     pub(crate) fn attention_notice_level(&self, session_id: &str) -> AttentionLevel {
-        self.attention_level(session_id)
+        let level = self.attention_level(session_id);
+        // Published cards choose which session interrupts for a shared question.
+        if matches!(level, AttentionLevel::Waiting | AttentionLevel::Important)
+            && let Some(cards) = &self.notification_cards
+        {
+            match cards.get(session_id).map(|card| card.badge) {
+                Some(mj_core::attention::NotificationKind::NeedsInput) => AttentionLevel::Waiting,
+                Some(mj_core::attention::NotificationKind::Important) => AttentionLevel::Important,
+                None => AttentionLevel::Idle,
+            }
+        } else {
+            level
+        }
     }
 
     pub(crate) fn failure_drawn(&mut self, session_id: &str) {
@@ -97,6 +109,14 @@ impl DashboardState {
             let published = delay.is_zero()
                 || self.notification_cards.as_ref().is_some_and(|cards| {
                     cards.iter().any(|(session, card)| {
+                        if self
+                            .state
+                            .sessions
+                            .get(session)
+                            .is_some_and(|record| record.notifications_ignored)
+                        {
+                            return false;
+                        }
                         (0..card.entries.len() + usize::from(card.form.is_some())).any(|item| {
                             card.item_destination(session, item) == event.destination
                                 && card.item_identity(session, item).as_deref()
@@ -380,16 +400,6 @@ impl DashboardState {
         // word, most urgent first: "waiting" means a question for a person.
         let (mut failed, mut unreachable, mut waiting, mut important, mut unread) = (0, 0, 0, 0, 0);
         for entry in self.attention_queue() {
-            // Ignored sessions still render their state in the list; the
-            // title is an interruption channel, so they are not in it.
-            if self
-                .state
-                .sessions
-                .get(&entry.session_id)
-                .is_some_and(|session| session.notifications_ignored)
-            {
-                continue;
-            }
             match entry.level {
                 AttentionLevel::Failed => failed += 1,
                 AttentionLevel::Unreachable => unreachable += 1,
@@ -448,10 +458,10 @@ mod tests {
             config(),
             State {
                 last_oracle_choices: Default::default(),
-                last_supervisor_choices: Default::default(),
                 operator_presence: Default::default(),
                 last_subagent_policies: Default::default(),
                 subagents: Default::default(),
+                environment_owners: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: Default::default(),
@@ -476,6 +486,155 @@ mod tests {
         ]));
         dashboard.set_current_session(None);
         dashboard
+    }
+
+    #[test]
+    fn unmuted_subagent_notifications_follow_the_child_at_either_depth() {
+        use crate::{AttentionLevel, CommandId, DashboardAction};
+        use mj_client::runtime_feed::{AlertEvent, CardForm, CardFormSource, NotificationCard};
+        use mj_core::attention::{NotificationKind, SessionAttention};
+        let (mut dashboard, root) = crate::test_support::dashboard_with_one_subagent();
+        let child = "child-session";
+        let grandchild = "nested-child";
+        let mut state = dashboard.state.clone();
+        let mut session = state.sessions[child].clone();
+        session.id = grandchild.into();
+        state.sessions.insert(grandchild.into(), session);
+        let mut relation = state.subagents[child].clone();
+        relation.child_session_id = grandchild.into();
+        relation.parent_session_id = child.into();
+        state.subagents.insert(grandchild.into(), relation);
+        dashboard.set_state(state);
+        crate::test_support::publish_fixture_verdicts(&mut dashboard);
+        dashboard.config.notify.mode = mj_core::config::NotifyMode::System;
+        dashboard.config.notify.delay_seconds = 1;
+        dashboard.set_current_session(None);
+        dashboard.set_alert_events(0, vec![]);
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&root, child, grandchild],
+            SessionAttention::NeedsInput,
+        );
+        dashboard
+            .state
+            .sessions
+            .get_mut(&root)
+            .unwrap()
+            .notifications_ignored = true;
+        for (index, (owner, muted, parent)) in [
+            (child, grandchild, root.as_str()),
+            (grandchild, child, child),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            dashboard
+                .state
+                .sessions
+                .get_mut(owner)
+                .unwrap()
+                .notifications_ignored = false;
+            dashboard
+                .state
+                .sessions
+                .get_mut(muted)
+                .unwrap()
+                .notifications_ignored = true;
+            let card = |id: &str| NotificationCard {
+                since_ms: 1,
+                badge: NotificationKind::NeedsInput,
+                entries: Vec::new(),
+                dismissal: None,
+                holder: Some(id.into()),
+                form: Some(CardForm {
+                    source: CardFormSource::Elicitation,
+                    raised_at_ms: 1,
+                    request_id: format!("{id}-approval"),
+                    message: "Approve?".into(),
+                }),
+            };
+            for cards in [
+                None,
+                Some(
+                    [owner, muted, root.as_str()]
+                        .into_iter()
+                        .map(|id| (id.to_owned(), card(id)))
+                        .collect(),
+                ),
+            ] {
+                dashboard.set_notification_cards(cards);
+                let queue = dashboard.attention_queue();
+                assert_eq!(queue.len(), 1);
+                assert_eq!(queue[0].session_id, owner);
+                assert_eq!(
+                    dashboard.attention_badge_summary(),
+                    Some((AttentionLevel::Waiting, 1))
+                );
+                assert_eq!(
+                    dashboard.workspace_attention_summary(&queue[0].workspace_id),
+                    Some((AttentionLevel::Waiting, 1))
+                );
+                assert_eq!(
+                    dashboard.terminal_title().as_deref(),
+                    Some("mj · 1 waiting")
+                );
+                let entries = dashboard.notification_entries();
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].session_id, owner);
+            }
+            let event = |sequence, id: &str| AlertEvent {
+                sequence,
+                destination: id.into(),
+                identity: card(id).item_identity(id, 0).unwrap(),
+                kind: NotificationKind::NeedsInput,
+                session_title: id.into(),
+                text: "Approve?".into(),
+            };
+            let sequence = 2 * index as u64 + 1;
+            dashboard.set_alert_events(
+                sequence + 1,
+                vec![event(sequence, owner), event(sequence + 1, muted)],
+            );
+            let notices = dashboard.notification_events_at(
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            );
+            assert_eq!(
+                notices
+                    .iter()
+                    .map(|notice| notice.session_id.as_str())
+                    .collect::<Vec<_>>(),
+                [owner]
+            );
+
+            assert_eq!(
+                dashboard.step_attention(1),
+                DashboardAction::Open {
+                    session_id: owner.into()
+                }
+            );
+            assert_eq!(dashboard.subagent_parent_id(), Some(parent));
+            assert_eq!(dashboard.selected_session_id(), Some(owner));
+            assert_eq!(
+                dashboard.dispatch_command(CommandId::IgnoreNotifications),
+                DashboardAction::SetSessionNotificationsIgnored {
+                    session_id: owner.into(),
+                    ignored: true
+                }
+            );
+            dashboard
+                .state
+                .sessions
+                .get_mut(owner)
+                .unwrap()
+                .notifications_ignored = true;
+            assert_eq!(
+                dashboard.dispatch_command(CommandId::IgnoreNotifications),
+                DashboardAction::SetSessionNotificationsIgnored {
+                    session_id: owner.into(),
+                    ignored: false
+                }
+            );
+        }
     }
 
     #[test]

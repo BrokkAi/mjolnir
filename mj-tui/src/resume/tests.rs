@@ -201,10 +201,10 @@ fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
 fn state_with(sessions: Vec<SessionRecord>) -> State {
     State {
         last_oracle_choices: Default::default(),
-        last_supervisor_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
+        environment_owners: Default::default(),
         version: STATE_VERSION,
         sessions: sessions
             .into_iter()
@@ -238,7 +238,6 @@ fn incomplete_move() -> MoveOperation {
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             subagents: None,
             consent: Default::default(),
@@ -353,6 +352,7 @@ fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
 fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
     use mj_core::subagent::SubagentPolicy;
     let policy = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "gpt-6-luna".into(),
             effort: Some("max".into()),
@@ -2516,7 +2516,7 @@ fn sub_agents_are_never_offered_for_resume() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         },
     );
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());

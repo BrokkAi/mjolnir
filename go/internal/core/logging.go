@@ -344,6 +344,10 @@ func ioErrorDisplay(err error) string {
 	return fmt.Sprintf("%s (os error %d)", description, int(errno))
 }
 
+// IOErrorDisplay is the text Rust's io::Error shows for err, for crates
+// above core that print an io::Error with Display.
+func IOErrorDisplay(err error) string { return ioErrorDisplay(err) }
+
 // ioErrorKinds names OS errors as Rust's io::ErrorKind Debug form does,
 // following std's decode_error_kind.
 var ioErrorKinds = map[syscall.Errno]string{

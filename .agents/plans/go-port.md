@@ -45,7 +45,7 @@ User-visible output must match the Rust build. Prove it with golden files captur
 - [ ] Milestone 1 rest: all of `mj-core` (config, state, relay protocol, transcript, subprocess, targets, credentials, harness install/runtime, acp on acp-go).
 - [x] (2026-11-20) Layer 1: mj-transcript, mj-checkpoint, mj-review, mj-build-id ported (323 tests; 2 benchmark tests skip as in Rust), merged d98013ebf.
 - [x] (2026-11-20) Layer 2 declarations: mj-client (`go/internal/client`) and mj-worker (`go/internal/worker`) declared in 14 groups and merged (6a0035221); builds and vets, 971 bodies still `panic("unported: ...")`, no tests ported yet.
-- [ ] Layer 2 bodies and tests. Stopped 2026-11-20 at the owner's request (weekly usage nearly spent) while the 14 bodies agents were mid-way; none had committed, so their work is lost. Resume point is in "Resume here" below.
+- [x] (2026-11-23) Layer 2 bodies and tests: mj-client and mj-worker fully ported, 1030 tests, all Go packages pass (merged 1ba15ffb6 after three rounds). Six groups had finished before the 2026-11-20 stop and were reused from the workflow cache; eight reran. Some groups read Rust at 4273087e6, others at f470ca8f7; `go/PORTED_FROM` records the older one so the sync pass re-checks the difference.
 - [ ] Sync pass: port the Rust changes made since each crate's base in `go/PORTED_FROM`.
 - [ ] Milestone 2: leaf crates `mj-transcript`, `mj-checkpoint`, `mj-review`, `mj-session-types`, `mj-targets`, `mj-client`.
 - [ ] Milestone 3: `mj-worker` and `mj-worker-bin` (the data plane: harness process, ACP connection, relay journal).

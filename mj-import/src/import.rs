@@ -16,9 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, GitSnapshotProgress,
@@ -33,13 +36,10 @@ use mj_core::config::{
 use mj_core::local_git::main_worktree_root;
 use mj_core::remote_git::resolve_repository;
 use mj_core::state::{
-    CheckpointMetadata, SessionRecord, SessionState, State, harness_session_title, new_session_id,
-    normalize_session_title,
+    CheckpointMetadata, SessionRecord, SessionState, State, new_session_id, normalize_session_title,
 };
-use mj_transcript::projection::canonical_session_from_materialized;
 
 use crate::targets::ProcessExecutor;
-use mj_core::relay::{SequencedEvent, WorkerEvent, strip_hidden_prompt_context};
 
 mod named_session;
 use named_session::{CLAUDE_STORE, CODEX_STORE, GROK_STORE, KIMI_STORE, NamedEntry, cannot_read};
@@ -55,8 +55,10 @@ mod kimi;
 pub use kimi::*;
 pub mod claude;
 pub use claude::*;
-mod transcripts;
-pub use transcripts::*;
+mod adapter_transcript;
+pub use adapter_transcript::{
+    read_claude_transcript, read_codex_transcript, read_grok_transcript, read_kimi_transcript,
+};
 mod edit_targets;
 pub use edit_targets::*;
 mod bundles;
@@ -68,7 +70,7 @@ mod grok;
 
 #[cfg(test)]
 use grok::grok_decode_cwd_dirname;
-pub use grok::{list_grok_sessions, locate_grok_session, read_grok_transcript, scan_grok_sessions};
+pub use grok::{list_grok_sessions, locate_grok_session, scan_grok_sessions};
 
 /// A repository on GitHub, as its owner and name.
 #[derive(Debug, Clone, PartialEq, Eq)]

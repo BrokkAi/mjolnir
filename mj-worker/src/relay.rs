@@ -455,6 +455,7 @@ impl DurableRelay {
         }
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_sent(
         &mut self,
         resume_id: u64,
@@ -465,6 +466,7 @@ impl DurableRelay {
             .push(PendingNativeResume { resume_id, goal });
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn native_goal_resume_rejected(&mut self, resume_id: u64) {
         self.pending_native_resumes
             .retain(|pending| pending.resume_id != resume_id);
@@ -1573,6 +1575,7 @@ impl DurableRelay {
         self.mailbox_delivery_mode = Some(mode);
     }
 
+    #[cfg(unix)]
     pub(crate) fn update_mailbox_delivery_mode(
         &mut self,
         mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
@@ -1580,6 +1583,7 @@ impl DurableRelay {
         self.mailbox_delivery_mode = mode;
     }
 
+    #[cfg(unix)]
     pub(crate) fn in_place_move_hold_active(&self) -> bool {
         self.snapshot.in_place_move_hold.is_some()
     }

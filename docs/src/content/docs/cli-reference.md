@@ -305,7 +305,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--oracle enabled|disabled]
        [--subagent-oracle <model>] [--subagent-oracle-effort <effort>]
        [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
-       [--with-notifications]
+       [--ignore-notifications]
        [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -381,8 +381,8 @@ mj new --workspace eval --bundle product --target builder \
   what the dashboard's next new-session form preselects. Only interactive
   launches (the dashboard, `mj go`, `mj simple`, and the web or phone form)
   do.
-- `mj new` suppresses session notifications by default. Pass
-  `--with-notifications` to include notifications for that session.
+- `mj new` delivers session notifications by default. Pass
+  `--ignore-notifications` to suppress notifications for that session.
 - `mj new --model <name>` chooses the enabled, usable profile offering that
   exact model with the strongest quota headroom relative to its reset times,
   then starts the session on it. It conflicts with
@@ -394,7 +394,7 @@ mj new --workspace eval --bundle product --target builder \
   Mjolnir is the default. If Mjolnir delegation is unconfigured or unavailable,
   the session uses `native` on harnesses with native delegation and `none` on
   DSH and Antigravity, with a notice on stderr. An explicit `--subagents mjolnir`
-  or `--supervisors enabled` requires Mjolnir delegation to be available.
+  or `--orchestrators` requires Mjolnir delegation to be available.
   A named DSH or Antigravity profile refuses an explicit `native` choice.
   Every profile accepts `none`, which turns off delegation.
   Mjolnir delegation supports Claude, Codex, DSH, OpenCode, and Antigravity
@@ -409,9 +409,9 @@ mj new --workspace eval --bundle product --target builder \
   `--subagent-effort` flags fail with guidance to use the four per-type flags.
   `single-model` and `all-models` remain rejected.
   When both types are configured, each spawn selects `straightforward` or
-  `subtle`. With only straightforward, the spawn tool has no task type,
-  every child uses the straightforward choice, and the parent is told to
-  delegate straightforward work.
+  `subtle`. With only straightforward configured, the spawn tool omits the
+  task type field and every child uses the straightforward choice. See the
+  [sub-agent task types](/profiles/) for how parents route work.
   Mjolnir chooses an enabled profile offering its model and effort by quota.
 - `mj new --oracle enabled|disabled` chooses whether the session may consult
   the oracle, a read-only advisor behind the `ask_oracle` tool. It works with

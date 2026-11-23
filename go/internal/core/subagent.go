@@ -107,6 +107,21 @@ const (
 	SubagentTaskTypeOracle          SubagentTaskType = "oracle"
 )
 
+// UnmarshalJSON accepts only the snake_case variants, as serde's derived
+// Deserialize does.
+func (t *SubagentTaskType) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	switch kind := SubagentTaskType(text); kind {
+	case SubagentTaskTypeStraightforward, SubagentTaskTypeSubtle, SubagentTaskTypeOracle:
+		*t = kind
+		return nil
+	}
+	return transcriptUnknownVariant(text, "straightforward", "subtle", "oracle")
+}
+
 func (t SubagentTaskType) ID() string {
 	if t == "" {
 		return string(SubagentTaskTypeStraightforward)
@@ -559,8 +574,11 @@ type SubagentToolActionFetch struct {
 
 type SubagentToolActionListProfiles struct{}
 
+// SubagentToolActionRequestReview reviews the worktrees in Paths together.
+// Empty means the repository that contains the session's working
+// directory.
 type SubagentToolActionRequestReview struct {
-	Path *string `json:"path,omitempty"`
+	Paths []string `json:"paths,omitempty"`
 }
 
 type SubagentToolActionAskOracle struct {
@@ -791,10 +809,23 @@ func DecodeSubagentToolAction(data []byte) (SubagentToolAction, error) {
 	case "list_profiles":
 		return unit(SubagentToolActionListProfiles{}, "ListProfiles")
 	case "request_review":
-		type plain SubagentToolActionRequestReview
-		var v plain
-		err = transcriptStrictDecode(params, &v, true)
-		return SubagentToolActionRequestReview(v), err
+		var v struct {
+			Paths []string `json:"paths" serde:"default"`
+			// Path is a queued request from an older worker, which named
+			// one worktree.
+			Path *string `json:"path"`
+		}
+		if err := transcriptStrictDecode(params, &v, true); err != nil {
+			return nil, err
+		}
+		paths := v.Paths
+		if v.Path != nil {
+			paths = append(paths, *v.Path)
+		}
+		if len(paths) == 0 {
+			paths = nil
+		}
+		return SubagentToolActionRequestReview{Paths: paths}, nil
 	case "ask_oracle":
 		type plain SubagentToolActionAskOracle
 		var v plain

@@ -2141,7 +2141,7 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
     .unwrap();
 
     let mut config = Config::load_from(&path).unwrap();
-    assert_eq!(config.subagents.max_concurrent, 6);
+    assert_eq!(config.subagents.max_concurrent, 8);
 
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
@@ -2149,7 +2149,7 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
     assert!(!saved.contains("[subagents]"), "{saved}");
     assert_eq!(
         Config::load_from(&path).unwrap().subagents.max_concurrent,
-        6
+        8
     );
 
     // Other settings in the same section survive the same round trip.
@@ -2181,7 +2181,7 @@ fn version_eight_enables_parent_only_subagents_by_default() {
     let config = Config::load_from(&path).unwrap();
 
     assert_eq!(config.version, CONFIG_VERSION);
-    assert_eq!(config.subagents.max_concurrent, 6);
+    assert_eq!(config.subagents.max_concurrent, 8);
 }
 
 #[test]
@@ -3364,12 +3364,14 @@ fn subtle_subagents_are_optional_but_never_configured_alone() {
     config.validate().unwrap();
     assert!(config.subagents.is_configured());
     let policy = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
     assert!(!config.subagents.offers_subtle(&policy));
     // A session override can add the subtle type for one session.
     let with_subtle = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: Some(Box::new(choice("smart"))),
     };

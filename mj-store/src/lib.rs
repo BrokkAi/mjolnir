@@ -20,6 +20,6 @@ pub mod database;
 pub mod mailbox_outbox;
 pub mod managed_archive;
 pub mod recovery_gate;
-pub mod upgrade;
+pub use mj_core::upgrade;
 pub mod web_push;
 pub mod worker_lifecycle;

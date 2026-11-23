@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	acp "github.com/BrokkAi/acp-go"
 	"github.com/BrokkAi/acp-go/jsonvalue"
@@ -66,7 +67,36 @@ func decodeInventory(value any) (Inventory, error) {
 // refreshAvailability is only called after the adapter explicitly
 // negotiates this read-only extension.
 func refreshAvailability(ctx context.Context, connection *acp.Connection, sessionID schema.SessionId, events chan<- core.RuntimeEvent) error {
-	panic("unported: mj-worker/src/acp/native_agents.rs refresh_availability")
+	params := jsonvalue.Object{{Key: "sessionId", Value: string(sessionID)}}
+	answered, drop := acpStartCall[json.RawMessage](ctx, connection, "_session/subagents/availability", params)
+	defer drop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	var inventory Inventory
+	var failure error
+	select {
+	case response := <-answered:
+		if response.err != nil {
+			failure = response.err
+		} else if value, err := jsonvalue.Parse(response.value); err != nil {
+			failure = err
+		} else {
+			inventory, failure = decodeInventory(value)
+		}
+	case <-timer.C:
+		failure = errors.New("availability query timed out")
+	case <-ctx.Done():
+		return errRelayEventCoordinatorStopped
+	}
+	var event core.RuntimeEvent
+	if failure == nil {
+		event = core.RuntimeEventNativeAgent{Event: core.NativeAgentEventAvailability{
+			Reports: inventory.Agents, Complete: inventory.Complete,
+		}}
+	} else {
+		event = core.RuntimeEventWarning{Message: "Subagent availability remains unknown: " + failure.Error()}
+	}
+	return emitRuntimeEvent(ctx, events, event)
 }
 
 // NativeAgentRouter routes notifications addressed to native child sessions.
@@ -162,5 +192,54 @@ func (r *NativeAgentRouter) IsChild(id string) bool {
 }
 
 func (r *NativeAgentRouter) Route(addressed string, update any) (Routed, error) {
-	panic("unported: mj-worker/src/acp/native_agents.rs NativeAgentRouter::route")
+	kind, _ := jsonGetString(update, "sessionUpdate")
+	if kind != nil && (*kind == "subagent_spawned" || *kind == "subagent_state_update") {
+		encoded, err := jsonvalue.Marshal(update)
+		var event Lifecycle
+		if err == nil {
+			event, err = unmarshalLifecycle(encoded)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decode native agent lifecycle: %w", err)
+		}
+		switch event := event.(type) {
+		case LifecycleSpawned:
+			if event.SubagentSessionID == "" || event.SubagentSessionID == addressed {
+				return nil, errors.New("native agent has an empty or self-referential identity")
+			}
+			var parentSessionID *string
+			if r.IsChild(addressed) {
+				parent := addressed
+				parentSessionID = &parent
+			}
+			if r.children == nil {
+				r.children = map[string]struct{}{}
+			}
+			r.children[event.SubagentSessionID] = struct{}{}
+			return RoutedEvent{Value: core.NativeAgentEventSpawned{
+				SessionID:       event.SubagentSessionID,
+				ParentSessionID: parentSessionID,
+				Name:            event.Name,
+				Task:            event.Task,
+				Capabilities:    event.Capabilities,
+			}}, nil
+		case LifecycleState:
+			if !r.IsChild(event.SubagentSessionID) {
+				return nil, errors.New("native agent state precedes its spawn")
+			}
+			return RoutedEvent{Value: core.NativeAgentEventState{SessionID: event.SubagentSessionID, State: event.State}}, nil
+		}
+	}
+	if r.IsChild(addressed) {
+		encoded, err := jsonvalue.Marshal(update)
+		var decoded schema.SessionUpdate
+		if err == nil {
+			err = json.Unmarshal(encoded, &decoded)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decode native child update: %w", err)
+		}
+		return RoutedEvent{Value: core.NativeAgentEventUpdate{SessionID: addressed, Update: decoded}}, nil
+	}
+	return RoutedParent{}, nil
 }

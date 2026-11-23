@@ -115,6 +115,8 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
+    #[command(hide = true)]
+    DaemonWaitExit(daemon::wait_exit::DaemonWaitExitArgs),
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
     Acp(acp::AcpArgs),
@@ -321,8 +323,8 @@ enum DaemonCommand {
     },
     /// Show daemon PID, version, start time, and client count.
     Status,
-    /// Gracefully stop the daemon. Detached workers keep running unless
-    /// `--suspend-sessions` suspends them first.
+    /// Stop the daemon. A graceful stop leaves detached workers running
+    /// unless `--suspend-sessions` suspends them first.
     Stop(DaemonStopArgs),
     /// Gracefully replace the daemon with this Mjolnir build.
     Restart,
@@ -337,6 +339,10 @@ enum AfkCommand {
 
 #[derive(Debug, Args)]
 struct DaemonStopArgs {
+    /// Stop an unresponsive or still-starting daemon, including workers in
+    /// its container, or clear an unreachable legacy container record.
+    #[arg(long)]
+    force: bool,
     /// Suspend every active session first, saving a recovery copy of each,
     /// then stop the daemon. A session that does not suspend keeps the
     /// daemon running and is named.
@@ -370,9 +376,9 @@ struct MoveArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
-    /// Supervisor sub-agent availability for this session (requires --subagents mjolnir).
-    #[arg(long, value_parser = ["enabled", "disabled"])]
-    supervisors: Option<String>,
+    /// Enable orchestrators (requires Mjolnir delegation).
+    #[arg(long)]
+    orchestrators: bool,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -579,18 +585,21 @@ enum SetupPlatform {
 }
 
 fn main() -> Result<()> {
-    // First, before any thread or child: every child inherits the limit.
-    mj_core::subprocess::raise_open_file_limit();
-    mj_core::worker_build::install(mj_build_id::identity());
-    #[cfg(feature = "test-hooks")]
-    mj_core::test_hooks::enable_test_hooks();
-    mj_daemon::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     if let Some(notice) = replacement_notice(cli.command.as_ref()) {
         // Exit 2, the status clap uses for a usage error, which this is.
         eprintln!("error: {notice}");
         std::process::exit(2);
     }
+    if let Some(Command::DaemonWaitExit(args)) = cli.command {
+        return daemon::wait_exit::run(args);
+    }
+    // First, before any thread or child: every child inherits the limit.
+    mj_core::subprocess::raise_open_file_limit();
+    mj_core::worker_build::install(mj_build_id::identity());
+    #[cfg(feature = "test-hooks")]
+    mj_core::test_hooks::enable_test_hooks();
+    mj_daemon::server::install_rustls_crypto_provider();
     // Apply before logging, daemon startup, or any path lookup: everything
     // derives its directories from the instance environment, and the daemon
     // child inherits it. This also covers `daemon-run`, which is this same
@@ -609,6 +618,7 @@ fn main() -> Result<()> {
         process_kind(cli.command.as_ref()),
     )?);
     install_panic_logging();
+    let daemon_run = matches!(cli.command, Some(Command::DaemonRun));
     let result = run(cli);
     if let Err(error) = &result {
         tracing::error!(error = format!("{error:#}"), "Mjolnir exited with an error");
@@ -617,6 +627,15 @@ fn main() -> Result<()> {
         tracing::info!("Mjolnir stopped");
     }
     drop(log);
+    if daemon_run
+        && let Err(error) = &result
+        && error
+            .chain()
+            .any(|cause| cause.is::<mj_controller::controller::StoreAlreadyOwnedError>())
+    {
+        eprintln!("Error: {error:?}");
+        std::process::exit(mj_core::daemon_exit::STORE_OWNED_EXIT_CODE);
+    }
     result
 }
 
@@ -921,6 +940,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Workspaces(_)) => "workspaces",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
+        Some(Command::DaemonWaitExit(_)) => "daemon-wait-exit",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Ec2(_)) => "ec2",
@@ -1116,6 +1136,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::DaemonWaitExit(_)) => unreachable!("the waiter runs before Tokio starts"),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);
@@ -1368,6 +1389,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
+        args.orchestrators,
     )?;
     let oracle_choice = api_commands::oracle_override(
         args.subagent_oracle.as_deref(),
@@ -1440,13 +1462,9 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         _ => None,
     };
     let sized_by_flags = resource_allocation.is_some();
-    let selection = MoveSelection {
+    let mut selection = MoveSelection {
         subagents,
         oracle: oracle_enabled,
-        supervisors: args
-            .supervisors
-            .as_deref()
-            .map(|choice| choice == "enabled"),
         oracle_choice,
         consent: mj_core::suspend_consent::SuspendConsent {
             discard_untracked: if args.discard_untracked {
@@ -1470,7 +1488,30 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         resource_allocation,
         clear_resource_allocation: args.clear_resources,
     };
-    let preparation = match daemon.prepare_move_session(selection).await {
+    let prepared = async {
+        // With no policy or model flags, the opt-in only changes the
+        // orchestrator choice in the session's existing policy.
+        if args.orchestrators
+            && args.subagents.is_none()
+            && args.subagent_straightforward.is_none()
+            && args.subagent_subtle.is_none()
+            && let Some(record) = daemon.session_record(args.session.clone()).await?
+            && let Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward,
+                subtle,
+                ..
+            }) = record.subagents
+        {
+            selection.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward,
+                subtle,
+                orchestrators: true,
+            });
+        }
+        daemon.prepare_move_session(selection).await
+    }
+    .await;
+    let preparation = match prepared {
         Ok(preparation) => preparation,
         Err(error) => {
             if args.json {
@@ -1491,29 +1532,14 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&preparation)?);
         } else {
-            if let Some(route) = preparation.route_preview {
-                println!("Route: {}", route.label());
-            }
-            if !preparation.skip_keep_sizes.is_empty() {
-                println!(
-                    "Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):"
-                );
-                for (path, bytes) in &preparation.skip_keep_sizes {
-                    println!(
-                        "  {} ({})",
-                        path.display(),
-                        mj_core::move_workspace::format_bytes(*bytes)
-                    );
-                }
-            }
-            if let Some(preflight) = &preparation.suspend_preflight {
-                println!(
-                    "Untracked files: {}, nested repositories: {}, untracked stashes: {}",
-                    preflight.untracked.len(),
-                    preflight.nested_repositories.len(),
-                    preflight.untracked_stashes.len()
-                );
-            }
+            print!(
+                "{}",
+                format_move_dry_run(
+                    preparation.route_preview,
+                    &preparation.skip_keep_sizes,
+                    preparation.suspend_preflight.as_deref(),
+                )
+            );
         }
         return Ok(());
     }
@@ -1949,6 +1975,49 @@ fn confirm_move_prompt() -> io::Result<bool> {
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line.trim().eq_ignore_ascii_case("y"))
+}
+
+fn format_move_dry_run(
+    route: Option<mj_core::state::RoutePreview>,
+    skip_keep_sizes: &[(std::path::PathBuf, u64)],
+    preflight: Option<&mj_core::suspend_consent::SuspendPreflight>,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    if let Some(route) = route {
+        let _ = writeln!(out, "Route: {}", route.label());
+    }
+    if !skip_keep_sizes.is_empty() {
+        let _ = writeln!(
+            out,
+            "Skipped .mj/keep/ paths (deleted when managed source is retired; kept on raw checkout):"
+        );
+        for (path, bytes) in skip_keep_sizes {
+            let _ = writeln!(
+                out,
+                "  {} ({})",
+                path.display(),
+                mj_core::move_workspace::format_bytes(*bytes)
+            );
+        }
+    }
+    if let Some(preflight) = preflight {
+        let _ = writeln!(
+            out,
+            "Untracked files: {}, nested repositories: {}, untracked stashes: {}",
+            preflight.untracked.len() + preflight.keep_dir_entries.len(),
+            preflight.nested_repositories.len(),
+            preflight.untracked_stashes.len()
+        );
+        if preflight.has_blockers() {
+            let _ = writeln!(out, "Blockers:");
+            for blocker in &preflight.blockers {
+                let _ = writeln!(out, "  - {}", blocker.remedy);
+            }
+        }
+    }
+    out
 }
 
 fn move_error_outcome(
@@ -2554,7 +2623,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             )?;
             if stop.suspend_sessions {
                 let stopped = suspend_all_sessions(stop.discard_untracked).await?;
-                daemon::stop_instance().await?;
+                daemon::stop_instance(stop.force).await?;
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
                     1 => println!("Mjolnir daemon stopped after stopping its active session."),
@@ -2562,8 +2631,12 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 return Ok(());
             }
-            if !daemon::stop_instance().await? {
+            if !daemon::stop_instance(stop.force).await? {
                 println!("Mjolnir daemon is already stopped.");
+                return Ok(());
+            }
+            if stop.force {
+                println!("Mjolnir daemon stopped.");
                 return Ok(());
             }
             println!(
@@ -3031,6 +3104,31 @@ mod tests {
     use mj_controller::controller::Controller;
     use mj_core::state::{SessionRecord, SessionState, State};
 
+    // Hard-won: #1659: Move dry-run discarded the inventory's outside-worktree blocker.
+    #[test]
+    fn golden_move_dry_run_reports_snapshot_blockers() {
+        let preflight = mj_core::suspend_consent::SuspendPreflight {
+            blockers: vec![mj_core::suspend_consent::SuspendBlocker {
+                kind: "unrepresented_git_state".into(),
+                paths: vec!["/workspace/outside".into()],
+                remedy: "unrepresented worktree /workspace/outside; push or copy out anything wanted, then run `git --git-dir /workspace/clone --work-tree /workspace/clone worktree remove --force /workspace/outside` or move it inside the clone before suspending".into(),
+            }],
+            keep_dir_entries: vec![mj_core::suspend_consent::KeepDirEntry {
+                checkout: Default::default(),
+                path: "legacy.txt".into(),
+                bytes: 8,
+                identity: mj_core::suspend_consent::FileIdentity::new("abc".into()),
+            }],
+            ..Default::default()
+        };
+        let output = format_move_dry_run(
+            Some(mj_core::state::RoutePreview::DirectOrDaemonStream),
+            &[],
+            Some(&preflight),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "move-dry-run", &output);
+    }
+
     // Hard-won: 0475c51230: Launch finding C-7 found the refusal say “1 queued command require”; this checks singular and plural counts agree.
     #[test]
     fn queued_command_refusal_agrees_in_number() {
@@ -3224,7 +3322,6 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,

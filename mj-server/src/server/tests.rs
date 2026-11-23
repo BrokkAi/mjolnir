@@ -135,17 +135,18 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
     };
     let state = AppState {
         last_oracle_choices: Default::default(),
-        last_supervisor_choices: Default::default(),
         operator_presence: Default::default(),
         last_subagent_policies: Default::default(),
         subagents: Default::default(),
+        environment_owners: [("session-1".into(), "session-1".into())]
+            .into_iter()
+            .collect(),
         version: STATE_VERSION,
         sessions: [(
             "session-1".into(),
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
-                supervisors: false,
                 notifications_ignored: false,
                 project: None,
                 target_runtime: None,
@@ -843,10 +844,14 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
         } else {
             mj_core::state::SessionState::Stopped
         };
+        state
+            .environment_owners
+            .insert(id.into(), parent.id.clone());
         state.sessions.insert(id.into(), child);
         state.subagents.insert(
             id.into(),
             mj_core::subagent::SubagentRecord {
+                resume_with_parent: false,
                 kind,
                 reviewer_launch: None,
                 child_session_id: id.into(),
@@ -862,7 +867,7 @@ fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             }
             .into(),
         );
@@ -1673,6 +1678,9 @@ fn the_project_key_groups_without_naming_a_path() {
     let first = state.sessions["session-1"].clone();
     let mut second = first.clone();
     second.id = "session-2".into();
+    state
+        .environment_owners
+        .insert(second.id.clone(), second.id.clone());
     state.sessions.insert(second.id.clone(), second);
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
 
@@ -1703,6 +1711,9 @@ fn web_project_keys_follow_the_complete_repository_set() {
     let mut other = state.sessions["session-1"].clone();
     other.id = "session-2".into();
     other.bundle_id = "other".into();
+    state
+        .environment_owners
+        .insert(other.id.clone(), other.id.clone());
     state.sessions.insert(other.id.clone(), other);
 
     assert_eq!(
@@ -3215,7 +3226,6 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -3276,7 +3286,6 @@ fn container_target_missing_or_invalid_bundle_id_names_field() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |bundle_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
@@ -3362,7 +3371,6 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
@@ -3619,7 +3627,6 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         subagents: None,
         consent: Default::default(),
@@ -3861,6 +3868,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
         reset: false,
         entries: vec![
             BrowserTranscriptEntry {
+                tool_detail_trimmed: false,
                 stable_id: None,
                 command_id: None,
                 id: 3,
@@ -3878,6 +3886,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 diffstats: Vec::new(),
             },
             BrowserTranscriptEntry {
+                tool_detail_trimmed: false,
                 stable_id: None,
                 command_id: None,
                 id: 7,
@@ -3964,6 +3973,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
         window_start_seq: 1,
         reset: false,
         entries: vec![BrowserTranscriptEntry {
+            tool_detail_trimmed: false,
             stable_id: None,
             command_id: None,
             id: 1,
@@ -6103,4 +6113,78 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         body["sessions"][0]["notification_card"]["entries"][0]["message"]["found"],
         "agent:1"
     );
+}
+
+#[test]
+fn viewer_tool_detail_fold_caches_full_details_and_retries_unavailable() {
+    let source = viewer_source(
+        "let toolDetailSession = null;",
+        "/// Rewrite one entry's row.",
+    );
+    let setup = r#"
+import assert from 'node:assert/strict';
+const el = (tag, className, value = '') => ({
+  tag, className, value, children: [], dataset: {},
+  append(...children) { this.children.push(...children); },
+  replaceChildren(...children) { this.children = children; },
+  addEventListener(name, listener) { this[name] = listener; },
+  text() { return [this.value, ...this.children.map(child => child.text())].join('\n'); }
+});
+const renderToolOutput = text => el('pre', '', text);
+const calls = [];
+const replies = [];
+const request = url => {
+  calls.push(url);
+  return new Promise((resolve, reject) => replies.push({ resolve, reject }));
+};
+const open = fold => {
+  fold.open = true;
+  return fold.toggle();
+};
+const close = fold => {
+  fold.open = false;
+  return fold.toggle();
+};
+"#;
+    let checks = r#"
+const fold = toolDetailFold('session one', 'tool:/edit');
+assert.equal(fold.dataset.foldKey, 'tool-detail-tool:/edit');
+assert.deepEqual(calls, []);
+const first = open(fold);
+assert.match(fold.text(), /Loading tool details…/);
+assert.deepEqual(calls, ['/api/sessions/session%20one/items/tool%3A%2Fedit/detail']);
+replies.shift().resolve({ status: 'unavailable', unavailable_reason: 'The spill is missing' });
+await first;
+assert.match(fold.text(), /The spill is missing/);
+
+await close(fold);
+const retry = open(fold);
+replies.shift().reject(new Error('HTTP 503'));
+await retry;
+assert.match(fold.text(), /HTTP 503/);
+await close(fold);
+const succeed = open(fold);
+const replacement = toolDetailFold('session one', 'tool:/edit');
+const shared = open(replacement);
+assert.equal(calls.length, 3);
+replies.shift().resolve({
+  status: 'full',
+  entry: { tool_input: { path: 'notes' }, tool_error: 'failed', tool_content: ['terminal output'] },
+  diffs: [{ text: '-old\n+new' }],
+});
+await Promise.all([succeed, shared]);
+assert.match(replacement.text(), /notes[\s\S]+failed[\s\S]+terminal output[\s\S]+\+new/);
+await close(replacement);
+await open(replacement);
+assert.equal(calls.length, 3);
+
+const other = toolDetailFold('session two', 'tool:/edit');
+const switched = open(other);
+assert.equal(calls.length, 4);
+assert.match(calls[3], /session%20two/);
+replies.shift().resolve({ status: 'full', body: { kind: 'terminal_output' }, entry: { text: 'standalone output' } });
+await switched;
+assert.match(other.text(), /standalone output/);
+"#;
+    run_viewer_script("tool-detail-fold", &format!("{setup}\n{source}\n{checks}"));
 }

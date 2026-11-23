@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-accounts"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-build-cache"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-build-id"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "brokk-mj-core",
  "serde_json",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -821,6 +821,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "flate2",
+ "futures",
  "getrandom 0.3.4",
  "http",
  "httpdate",
@@ -848,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-daemon"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -886,12 +887,13 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
 [[package]]
 name = "brokk-mj-github-relevance"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -922,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-github-watch"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -945,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-harness-install"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -971,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-import"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -982,6 +984,7 @@ dependencies = [
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
+ "brokk-sessionwiki",
  "chrono",
  "futures",
  "rayon",
@@ -990,6 +993,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -999,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-microvm"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1029,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-profile-catalog"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1051,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "brokk-mj-core",
  "serde_json",
@@ -1059,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review-host"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-accounts",
@@ -1080,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-server"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1127,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-session-runtime"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1166,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-session-types"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "brokk-mj-core",
  "brokk-mj-targets",
@@ -1175,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-sessionwiki"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1199,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-setup"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-accounts",
@@ -1221,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-store"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1232,6 +1236,7 @@ dependencies = [
  "brokk-mj-targets",
  "brokk-mj-transcript",
  "chrono",
+ "crc32fast",
  "futures",
  "ring",
  "rusqlite",
@@ -1242,11 +1247,12 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zstd",
 ]
 
 [[package]]
 name = "brokk-mj-targets"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
@@ -1269,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "aho-corasick",
@@ -1290,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -1311,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
@@ -1325,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1350,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker-launch"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1368,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker-mcp"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-core",
@@ -1380,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker-review"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-checkpoint",
@@ -1392,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker-runtime"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1428,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker-staging"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "anyhow",
  "brokk-mj-accounts",
@@ -1456,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.73.0"
+version = "2.74.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1503,9 +1509,9 @@ dependencies = [
 
 [[package]]
 name = "brokk-sessionwiki"
-version = "0.34.27"
+version = "0.34.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b45392edba21c82a3f86755cced8180f93fb623bdce8cbe2509169da234ed4e7"
+checksum = "96de98538edbdb9e2359f6e9cd57cc5ab648431d5be2cc7fa76e8f253c4c9a34"
 dependencies = [
  "anyhow",
  "chrono",

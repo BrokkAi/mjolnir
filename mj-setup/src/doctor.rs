@@ -4094,6 +4094,9 @@ pub fn review_residue_repositories(
     let mut state = mj_core::state::State::default();
     for session in sessions {
         state
+            .environment_owners
+            .insert(session.id.clone(), session.id.clone());
+        state
             .sessions
             .insert(session.id.clone(), (**session).clone());
     }

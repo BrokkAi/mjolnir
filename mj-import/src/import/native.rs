@@ -240,15 +240,10 @@ pub fn locate_native_session(
 /// the session's own directory, and Muse names the directory above
 /// `session.jsonl`.
 pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<String> {
-    match harness {
-        HarnessKind::Claude => path.file_stem()?.to_str().map(str::to_owned),
-        HarnessKind::Codex => codex_rollout_id_from_path(path).map(str::to_owned),
-        HarnessKind::Kimi | HarnessKind::Grok => path.file_name()?.to_str().map(str::to_owned),
-        HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
-        // OpenCode sessions live in SQLite rows, not files, so no transcript
-        // path carries their id; DSH sessions are not imported.
-        HarnessKind::OpenCode | HarnessKind::Dsh | HarnessKind::Antigravity => None,
+    if harness == HarnessKind::Codex && path.to_string_lossy().contains('\u{1f}') {
+        return None;
     }
+    super::adapter_transcript::import_adapter(harness)?.native_id(path.to_str()?)
 }
 
 /// Project one native session into the canonical transcript, for any harness.
@@ -257,7 +252,9 @@ pub fn read_native_transcript(
     source_path: &Path,
 ) -> Result<ClaudeTranscript> {
     match harness {
-        HarnessKind::Muse => muse::read_transcript(source_path),
+        HarnessKind::Muse => {
+            super::adapter_transcript::read_muse_transcript(source_path, source_path)
+        }
         HarnessKind::Codex => read_codex_transcript(source_path),
         HarnessKind::Claude => read_claude_transcript(source_path),
         HarnessKind::Kimi => read_kimi_transcript(source_path),

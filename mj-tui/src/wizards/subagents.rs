@@ -14,8 +14,7 @@ pub(crate) struct SubagentDraft {
     pub(crate) oracle: bool,
     pub(crate) oracle_choice: Option<mj_core::config::SubagentChoice>,
     oracle_configured: bool,
-    pub(crate) supervisors: bool,
-    supervisors_available: bool,
+    orchestrators_configured: bool,
     /// The drafted intent. A harness without sub-agents of its own shows and
     /// submits Native as None; see [`Self::selected`].
     pub(crate) policy: SubagentPolicy,
@@ -61,8 +60,8 @@ impl SubagentDraft {
     pub(crate) fn oracle_available(&self) -> bool {
         self.oracle_configured || self.oracle_choice.is_some()
     }
-    pub(crate) fn supervisors_available(&self) -> bool {
-        self.selected().uses_mjolnir() && self.supervisors_available
+    pub(crate) fn orchestrators_available(&self) -> bool {
+        self.policy.uses_mjolnir() && self.orchestrators_configured
     }
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
@@ -80,11 +79,6 @@ impl SubagentDraft {
     ) -> Self {
         self.oracle = enabled;
         self.oracle_choice = choice;
-        self
-    }
-
-    pub(crate) fn with_supervisors(mut self, enabled: bool) -> Self {
-        self.supervisors = enabled;
         self
     }
 
@@ -215,6 +209,7 @@ impl SubagentDraft {
                 DelegationMode::Native => SubagentPolicy::Native,
                 DelegationMode::Mjolnir => self.last_mjolnir_policy.as_deref().cloned().unwrap_or(
                     SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: None,
                     },
@@ -253,8 +248,13 @@ impl SubagentDraft {
                 self.oracle = next;
                 Some(changed)
             }
-            Interaction::Toggle(WizardControl::Supervisors) if self.supervisors_available() => {
-                self.supervisors = !self.supervisors;
+            Interaction::Toggle(WizardControl::Orchestrators) if self.orchestrators_available() => {
+                let SubagentPolicy::Mjolnir { orchestrators, .. } = &mut self.policy else {
+                    return None;
+                };
+                *orchestrators = !*orchestrators;
+                self.chosen_policy = Some(Box::new(self.policy.clone()));
+                self.last_mjolnir_policy = self.chosen_policy.clone();
                 Some(true)
             }
             _ => None,
@@ -286,24 +286,19 @@ impl SubagentDraft {
                 true,
             );
         }
-        if self.supervisors_available() {
-            form.declare_with_enabled(WizardControl::Supervisors, ControlKind::Checkbox, true);
+        if self.orchestrators_available() {
+            form.declare_with_enabled(WizardControl::Orchestrators, ControlKind::Checkbox, true);
         }
     }
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn refresh_create(
         &mut self,
         profile: &str,
-        target_id: &str,
         config: &Config,
-        snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
         remembered: Option<&SubagentPolicy>,
         remembered_oracle: bool,
-        remembered_supervisors: bool,
     ) {
         if self.profile_id.as_deref() != Some(profile) {
             self.oracle = remembered_oracle;
-            self.supervisors = remembered_supervisors;
             self.profile_id = Some(profile.to_owned());
             self.chosen_policy = None;
             self.last_mjolnir_policy = None;
@@ -318,13 +313,14 @@ impl SubagentDraft {
             .or(remembered)
             .cloned()
             .unwrap_or(SubagentPolicy::Mjolnir {
+                orchestrators: false,
                 straightforward: None,
                 subtle: None,
             });
         if desired.uses_mjolnir() {
             self.last_mjolnir_policy = Some(Box::new(desired.clone()));
         }
-        self.update_choices(profile, target_id, config, snapshot);
+        self.update_choices(profile, config);
         let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_some() {
             SubagentPolicy::Native
         } else {
@@ -336,13 +332,7 @@ impl SubagentDraft {
         }
     }
 
-    pub(crate) fn update_choices(
-        &mut self,
-        profile: &str,
-        target_id: &str,
-        config: &Config,
-        _snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
-    ) {
+    pub(crate) fn update_choices(&mut self, profile: &str, config: &Config) {
         let auto_primary = profile.is_empty();
         self.harness = if auto_primary {
             None
@@ -350,9 +340,7 @@ impl SubagentDraft {
             config.profiles.get(profile).map(|profile| profile.kind)
         };
         self.oracle_configured = config.subagents.oracle_configured();
-        self.supervisors_available = config.targets.get(target_id).is_some_and(|target| {
-            config.supervisors_available_for_target(None, target.execution_policy())
-        });
+        self.orchestrators_configured = config.orchestrators_configured();
         self.discovery = Some(SubagentDiscovery {
             result: Some(
                 if !auto_primary
@@ -383,26 +371,20 @@ impl SubagentDraft {
 impl DashboardState {
     /// The review step's delegation draft, profile, and target, when
     /// the open wizard offers the choice.
-    fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String, String)> {
+    fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String)> {
         let applies = matches!(&self.mode, Mode::New(_))
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review && wizard.subagent_choice_applies(self));
         if !applies {
             return None;
         }
-        let (profile, target_id) = match &self.mode {
-            Mode::New(wizard) => (
-                wizard.selected_profile_id(self)?,
-                nth_key(&self.config.targets, wizard.target),
-            ),
-            Mode::Resume(wizard) => (
-                wizard.destination_profile(self),
-                nth_key(&self.config.targets, wizard.target),
-            ),
+        let profile = match &self.mode {
+            Mode::New(wizard) => wizard.selected_profile_id(self)?,
+            Mode::Resume(wizard) => wizard.destination_profile(self),
             _ => unreachable!("checked above"),
         };
         match &mut self.mode {
-            Mode::New(wizard) => Some((&mut *wizard.subagents, profile, target_id)),
-            Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile, target_id)),
+            Mode::New(wizard) => Some((&mut *wizard.subagents, profile)),
+            Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile)),
             _ => None,
         }
     }
@@ -416,24 +398,13 @@ impl DashboardState {
             None
         };
         let config = self.config.clone();
-        let snapshot = self.profile_capabilities.clone();
         let oracle_choices = self.state.last_oracle_choices.clone();
-        let supervisor_choices = self.state.last_supervisor_choices.clone();
-        let (draft, profile, target_id) = self.review_subagent_draft()?;
+        let (draft, profile) = self.review_subagent_draft()?;
         let remembered_oracle = oracle_choices.get(&profile).copied().unwrap_or(true);
-        let remembered_supervisors = supervisor_choices.get(&profile).copied().unwrap_or(false);
         if creating {
-            draft.refresh_create(
-                &profile,
-                &target_id,
-                &config,
-                &snapshot,
-                remembered.as_ref(),
-                remembered_oracle,
-                remembered_supervisors,
-            );
+            draft.refresh_create(&profile, &config, remembered.as_ref(), remembered_oracle);
         } else {
-            draft.update_choices(&profile, &target_id, &config, &snapshot);
+            draft.update_choices(&profile, &config);
         }
         None
     }

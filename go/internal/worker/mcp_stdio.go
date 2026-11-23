@@ -12,12 +12,24 @@
 package worker
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
+
+	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
 // ProgressInterval is how often a long call reports that it is still
@@ -102,19 +114,216 @@ type mcpOutput struct {
 // lets in-flight concurrent calls finish. A reader that is also an io.Closer
 // is closed before those calls are joined, as Rust drops its reader there.
 func Serve(reader io.Reader, writer io.Writer, server MCPServer) error {
-	panic("unported: mj-worker/src/mcp_stdio.rs serve")
+	output := &mcpOutput{writer: writer}
+	var calls sync.WaitGroup
+	lines := bufio.NewReader(reader)
+	err := func() error {
+		// Closing the reader is Rust's drop of the line iterator, which ends
+		// the loop on every path, the early returns included.
+		if closer, ok := reader.(io.Closer); ok {
+			defer closer.Close()
+		}
+		for {
+			line, ok, err := mcpReadLine(lines)
+			if err != nil {
+				return fmt.Errorf("read MCP request: %w", err)
+			}
+			if !ok {
+				return nil
+			}
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			parsed, err := jsonvalue.Parse([]byte(line))
+			if err != nil {
+				if err := mcpWriteLine(output, mcpRPCError(nil, -32700, err.Error())); err != nil {
+					return err
+				}
+				continue
+			}
+			request, _ := parsed.(jsonvalue.Object)
+			id, ok := request.Get("id")
+			if !ok {
+				continue
+			}
+			method := ""
+			if value, ok := request.Get("method"); ok {
+				method, _ = value.(string)
+			}
+			var response any
+			switch method {
+			case "initialize":
+				protocolVersion, ok := mcpJSONPointer(request, "params", "protocolVersion")
+				if !ok {
+					protocolVersion = "2025-03-26"
+				}
+				response = mcpRPCResult(id, jsonvalue.Object{
+					{Key: "protocolVersion", Value: protocolVersion},
+					{Key: "capabilities", Value: jsonvalue.Object{
+						{Key: "tools", Value: jsonvalue.Object{{Key: "listChanged", Value: false}}},
+					}},
+					{Key: "serverInfo", Value: jsonvalue.Object{
+						{Key: "name", Value: server.Name},
+						{Key: "version", Value: core.PackageVersion},
+					}},
+				})
+			case "ping":
+				response = mcpRPCResult(id, jsonvalue.Object{})
+			case "tools/list":
+				tools := server.Tools
+				if tools == nil {
+					tools = []any{}
+				}
+				response = mcpRPCResult(id, jsonvalue.Object{{Key: "tools", Value: tools}})
+			case "tools/call":
+				params, present := request.Get("params")
+				token, hasToken := mcpJSONPointer(params, "_meta", "progressToken")
+				interval := server.ProgressInterval
+				calls.Add(1)
+				go func() {
+					defer calls.Done()
+					defer func() {
+						if recovered := recover(); recovered != nil {
+							slog.Warn("an MCP tool call thread panicked", "panic", fmt.Sprint(recovered))
+						}
+					}()
+					progress := mcpProgressHandle(output, token, hasToken, interval)
+					structured, isError, err := server.Call(params, present, progress)
+					response := mcpToolResponse(id, structured, isError, err)
+					if err := mcpWriteLine(output, response); err != nil {
+						slog.Warn("could not write an MCP tool response", "error", err)
+					}
+				}()
+				continue
+			default:
+				response = mcpRPCError(id, -32601, fmt.Sprintf("unknown MCP method %s", mcpDebugString(method)))
+			}
+			if err := mcpWriteLine(output, response); err != nil {
+				return err
+			}
+		}
+	}()
+	if err != nil {
+		// Rust drops the call handles on an early return: the calls run on
+		// without being joined.
+		return err
+	}
+	calls.Wait()
+	return nil
+}
+
+// mcpReadLine is one item of BufRead::lines: the next line without its
+// "\n" or "\r\n", false at end of input, and an error for text that is not
+// UTF-8.
+func mcpReadLine(reader *bufio.Reader) (string, bool, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", false, err
+	}
+	if line == "" && err != nil {
+		return "", false, nil
+	}
+	if !utf8.ValidString(line) {
+		return "", false, errors.New("stream did not contain valid UTF-8")
+	}
+	line = strings.TrimSuffix(line, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	return line, true, nil
+}
+
+// mcpJSONPointer is serde_json's Value::pointer for a path of object keys:
+// the value found by following path from value.
+func mcpJSONPointer(value any, path ...string) (any, bool) {
+	for _, key := range path {
+		object, ok := value.(jsonvalue.Object)
+		if !ok {
+			return nil, false
+		}
+		if value, ok = object.Get(key); !ok {
+			return nil, false
+		}
+	}
+	return value, true
+}
+
+// mcpDebugString is a string as Rust's `{:?}` shows it.
+func mcpDebugString(text string) string {
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	for _, r := range text {
+		switch r {
+		case '"':
+			quoted.WriteString(`\"`)
+		case '\\':
+			quoted.WriteString(`\\`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case 0:
+			quoted.WriteString(`\0`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&quoted, `\u{%x}`, r)
+			} else {
+				quoted.WriteRune(r)
+			}
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 // mcpProgressHandle binds a progress handle to this server's output stream.
 // Every notification it writes goes through the same lock as a response, so
 // lines never interleave.
 func mcpProgressHandle(output *mcpOutput, token any, hasToken bool, interval time.Duration) *Progress {
-	panic("unported: mj-worker/src/mcp_stdio.rs progress_handle")
+	return &Progress{
+		token:    token,
+		hasToken: hasToken,
+		interval: interval,
+		emit: func(value any) {
+			if err := mcpWriteLine(output, value); err != nil {
+				slog.Warn("could not write an MCP progress notification", "error", err)
+			}
+		},
+	}
 }
 
 // mcpToolResponse is the JSON-RPC response to one call's result.
 func mcpToolResponse(id any, structured any, isError bool, err error) any {
-	panic("unported: mj-worker/src/mcp_stdio.rs tool_response")
+	if err != nil {
+		return mcpRPCError(id, -32602, err.Error())
+	}
+	text, prettyErr := mcpPrettyJSON(structured)
+	if prettyErr != nil {
+		compact, _ := jsonvalue.Marshal(structured)
+		text = string(compact)
+	}
+	return mcpRPCResult(id, jsonvalue.Object{
+		{Key: "content", Value: []any{jsonvalue.Object{
+			{Key: "type", Value: "text"},
+			{Key: "text", Value: text},
+		}}},
+		{Key: "structuredContent", Value: structured},
+		{Key: "isError", Value: isError},
+	})
+}
+
+// mcpPrettyJSON is serde_json::to_string_pretty: two-space indentation,
+// members in order, and serde_json's string and number forms.
+func mcpPrettyJSON(value any) (string, error) {
+	compact, err := jsonvalue.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, compact, "", "  "); err != nil {
+		return "", err
+	}
+	return pretty.String(), nil
 }
 
 func mcpRPCResult(id any, result any) any {
@@ -148,18 +357,87 @@ const ConnectTimeout = 10 * time.Second
 // never answers turns into a bounded failure instead of an indefinite hang.
 // Workers run on Unix; elsewhere this says plainly that it cannot run.
 func SocketRequest[A any](socket string, request any, what string, replyTimeout time.Duration) (*A, error) {
-	panic("unported: mj-worker/src/mcp_stdio.rs socket_request")
+	if runtime.GOOS == "windows" {
+		return nil, fmt.Errorf("the %s socket %s needs a Unix platform", what, socket)
+	}
+	stream, err := mcpConnectWithTimeout(socket)
+	if err != nil {
+		return nil, fmt.Errorf("connect to the %s socket %s: %w", what, socket, err)
+	}
+	defer stream.Close()
+	connection := timeoutConn{conn: stream, read: replyTimeout}
+	body, err := jsonvalue.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := connection.Write(append(body, '\n')); err != nil {
+		return nil, fmt.Errorf("send the %s request: %w", what, err)
+	}
+	line, err := bufio.NewReader(connection).ReadString('\n')
+	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return nil, nil
+	case errors.Is(err, io.EOF) && line == "":
+		return nil, fmt.Errorf("the %s socket closed without a reply", what)
+	case err != nil && !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("read the %s reply: %w", what, err)
+	}
+	if !utf8.ValidString(line) {
+		return nil, fmt.Errorf("read the %s reply: stream did not contain valid UTF-8", what)
+	}
+	var reply A
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &reply); err != nil {
+		return nil, fmt.Errorf("parse the %s reply: %w", what, err)
+	}
+	return &reply, nil
 }
 
 // mcpConnectWithTimeout connects on a helper goroutine so the wait is
 // bounded. A goroutine still blocked in connect after the timeout is
 // abandoned; it exits once the connect resolves.
 func mcpConnectWithTimeout(socket string) (*net.UnixConn, error) {
-	panic("unported: mj-worker/src/mcp_stdio.rs connect_with_timeout")
+	type connected struct {
+		conn *net.UnixConn
+		err  error
+	}
+	result := make(chan connected, 1)
+	go func() {
+		conn, err := core.ConnectUnixStream(socket)
+		result <- connected{conn: conn, err: err}
+	}()
+	timeout := time.NewTimer(ConnectTimeout)
+	defer timeout.Stop()
+	select {
+	case outcome := <-result:
+		return outcome.conn, outcome.err
+	case <-timeout.C:
+		// The abandoned connect closes its stream if it ever succeeds.
+		go func() {
+			if outcome := <-result; outcome.conn != nil {
+				outcome.conn.Close()
+			}
+		}()
+		return nil, fmt.Errorf("no accept within %ds", int(ConnectTimeout/time.Second))
+	}
 }
 
 // mcpWriteLine serializes first and takes the lock for one write, so
 // concurrent responses never interleave.
 func mcpWriteLine(output *mcpOutput, value any) error {
-	panic("unported: mj-worker/src/mcp_stdio.rs write_line")
+	body, err := jsonvalue.Marshal(value)
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	if _, err := output.writer.Write(body); err != nil {
+		return fmt.Errorf("write MCP response: %w", err)
+	}
+	if flusher, ok := output.writer.(interface{ Flush() error }); ok {
+		if err := flusher.Flush(); err != nil {
+			return fmt.Errorf("flush MCP response: %w", err)
+		}
+	}
+	return nil
 }

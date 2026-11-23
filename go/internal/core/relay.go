@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	"github.com/BrokkAi/acp-go/jsonvalue"
 )
 
 // NativeSessionStartupTimeout is the observed harness startup allowance:
@@ -201,7 +203,12 @@ const (
 	RelayCommandRetentionProtocol uint32 = 73
 	// 74 reserves the next quiescent boundary for cancellable adoption cuts.
 	RelayLiveBaselineProtocol uint32 = 74
-	RelayProtocolVersion      uint32 = RelayLiveBaselineProtocol
+	// 75 reports the mail the relay holds at a ready checkpoint cut. (Rust
+	// 4273087e6, after this file's base; ported for mj-worker's relay.)
+	RelayCheckpointMailboxProtocol uint32 = 75
+	// 76 names the tool call in permission forms, which older readers reject.
+	RelayPermissionToolCallProtocol uint32 = 76
+	RelayProtocolVersion            uint32 = RelayPermissionToolCallProtocol
 	// Connection-only worker CPU measurements.
 	RelayCpuUsageProtocol uint32 = 29
 
@@ -493,8 +500,11 @@ func (s *RestoredRelaySeed) Validate() error {
 		}
 	}
 	if len(s.AssessmentState) > 0 && string(s.AssessmentState) != "null" {
-		var value any
-		if err := json.Unmarshal(s.AssessmentState, &value); err != nil {
+		// jsonvalue keeps integers exact, as serde_json::Value does; a
+		// float64 round trip re-encodes them as "N.0", which the checkpoint's
+		// integer fields refuse.
+		value, err := jsonvalue.Parse(s.AssessmentState)
+		if err != nil {
 			return err
 		}
 		if _, err := CheckpointDecode(value); err != nil {

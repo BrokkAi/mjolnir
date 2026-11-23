@@ -36,7 +36,7 @@ use mj_core::config::{
 use mj_core::state::{
     HostContainerSize, MaterializedQueuedPrompt, MoveOperation, MovePreparation,
     ResumeQueueDisposition, SessionResourceAllocation, allocation_cpus, allocation_memory,
-    default_container_size,
+    resolve_default_container_size,
 };
 
 #[cfg(test)]
@@ -106,7 +106,7 @@ pub(crate) enum WizardControl {
     ReviewAttachments,
     Subagents,
     Oracle,
-    Supervisors,
+    Orchestrators,
     CreateManagedWorktree,
     UseSandboxedTarget,
     DiscardQueue,

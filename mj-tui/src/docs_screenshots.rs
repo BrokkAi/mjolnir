@@ -208,10 +208,10 @@ fn documentation_dashboard() -> DashboardState {
         config,
         State {
             last_oracle_choices: Default::default(),
-            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: Default::default(),
@@ -264,6 +264,8 @@ fn documentation_dashboard() -> DashboardState {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            ec2_instance_type: None,
+            physical_memory: None,
             memory_pool: false,
             cpu_percent: Some(27),
             memory_used_bytes: 19 * 1024 * 1024 * 1024,

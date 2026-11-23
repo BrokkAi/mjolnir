@@ -12,6 +12,14 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             "/sessions/{session_id}/native-agents/{child_id}/history",
             get(native_agent_history),
         )
+        .route(
+            "/sessions/{session_id}/native-agents/{child_id}/items/{stable_id}/detail",
+            get(native_agent_tool_call_detail),
+        )
+        .route(
+            "/sessions/{session_id}/items/{stable_id}/detail",
+            get(tool_call_detail),
+        )
         .route("/events", get(events::events))
         .route("/github-token", get(github_token))
         .route("/profiles/login-errors", get(profile_login_errors))

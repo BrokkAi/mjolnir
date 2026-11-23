@@ -37,6 +37,7 @@ impl DashboardState {
             targets
                 .into_iter()
                 .map(|target| RuntimeHostCapacity {
+                    last_1h: None,
                     reading: HostCapacityRow::new(&target, &Default::default(), &[]),
                     refreshing: false,
                     disk_total_bytes: None,
@@ -434,7 +435,6 @@ pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
-        supervisors: false,
         notifications_ignored: false,
         project: None,
         target_runtime: None,
@@ -490,7 +490,6 @@ pub(crate) fn stopped_session() -> SessionRecord {
 pub(crate) fn running_session() -> SessionRecord {
     SessionRecord {
         oracle: true,
-        supervisors: false,
         project: None,
         state: SessionState::Running,
         ..stopped_session()
@@ -598,10 +597,12 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
         config(),
         State {
             last_oracle_choices: Default::default(),
-            last_supervisor_choices: Default::default(),
             operator_presence: Default::default(),
             last_subagent_policies: Default::default(),
             subagents: Default::default(),
+            environment_owners: [(session_id.clone(), session_id.clone())]
+                .into_iter()
+                .collect(),
             version: STATE_VERSION,
             sessions: [(session.id.clone(), session)].into_iter().collect(),
             mount_history: Default::default(),
@@ -768,6 +769,7 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     let parent = running_session();
     let mut child = running_session();
     child.id = "child-session".into();
+    child.notifications_ignored = true;
     let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
         child_session_id: child.id.clone(),
@@ -782,7 +784,7 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
         noticed_turn: None,
         reported_finish: None,
         handback_tool: false,
-        supervisor: false,
+        orchestrator: false,
     };
     let mut dashboard = dashboard_with_session(parent.clone());
     let mut state = dashboard.state.clone();

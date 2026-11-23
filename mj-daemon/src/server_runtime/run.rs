@@ -35,6 +35,7 @@ pub(super) fn install_captured_records(
 ) {
     controller.state.sessions = runtime.records.clone();
     controller.state.subagents = runtime.subagents.clone();
+    controller.state.environment_owners = runtime.environment_owners.clone();
     controller.state.last_subagent_policies = runtime.metadata.last_subagent_policies.clone();
     controller.state.operator_presence = runtime.metadata.operator_presence;
     controller.state.container_sizes = runtime.metadata.container_sizes.clone();
@@ -42,10 +43,6 @@ pub(super) fn install_captured_records(
         .state
         .last_oracle_choices
         .clone_from(&runtime.metadata.last_oracle_choices);
-    controller
-        .state
-        .last_supervisor_choices
-        .clone_from(&runtime.metadata.last_supervisor_choices);
     controller.state.mount_history = runtime.metadata.mount_history.clone();
 }
 

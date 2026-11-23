@@ -202,12 +202,20 @@ pub struct WorkerLaunchConfig {
     /// Explicit child identity; older launch files deliver handbacks unchecked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_kind: Option<crate::subagent::SubagentKind>,
-    /// Whether this child is a depth-1 supervisor.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisor: bool,
-    /// Whether this top-level session may spawn depth-1 supervisors.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supervisors_enabled: bool,
+    /// Whether this child is a depth-1 orchestrator.
+    #[serde(
+        rename = "supervisor",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub orchestrator: bool,
+    /// Whether this top-level session may spawn depth-1 orchestrators.
+    #[serde(
+        rename = "supervisors_enabled",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub orchestrators_enabled: bool,
     /// Legacy wire flag retained for older workers. New workers ignore it.
     /// Mailbox delivery and hooks are always present in protocol-41 workers.
     #[serde(default = "default_agent_mailboxes_enabled")]
@@ -491,13 +499,13 @@ impl ReviewMcpDelivery {
 pub fn resolve_subagent_mcp_role(
     subagents: &crate::subagent::SubagentPolicy,
     managed_subagent: bool,
-    supervisor: bool,
+    orchestrator: bool,
     handback_tool: bool,
     _legacy_agent_mailboxes_enabled: bool,
     message_mcp_granted: bool,
 ) -> Option<crate::subagent::SubagentMcpRole> {
-    if managed_subagent && supervisor {
-        return Some(crate::subagent::SubagentMcpRole::Supervisor);
+    if managed_subagent && orchestrator {
+        return Some(crate::subagent::SubagentMcpRole::Orchestrator);
     }
     subagents.parent_role().or_else(|| {
         if managed_subagent {
@@ -523,8 +531,7 @@ impl WorkerLaunchConfig {
     }
 
     /// Whether this session is offered the `mj-review` tools. The controller
-    /// writes `review_trigger` as push only for top-level sessions, never for
-    /// a sub-agent. This is the one owner of that fact.
+    /// enables `review_trigger` for workspace owners with push review.
     pub fn review_tools(&self) -> bool {
         offers_review_tools(self.review_trigger, self.harness)
     }
@@ -533,19 +540,13 @@ impl WorkerLaunchConfig {
     /// start pin for every session offered the review tools, and the push gate
     /// (or a notice that this harness cannot enforce one) for a primary.
     pub fn prepares_review(&self) -> bool {
-        self.review_trigger == crate::config::ReviewTrigger::Push
-            && self.reviewer_launch.is_none()
-            && (self.review_tools() || (!self.is_managed_subagent() && !self.handback_tool))
+        self.review_trigger == crate::config::ReviewTrigger::Push && self.reviewer_launch.is_none()
     }
 
     /// Whether pushes from this session are held to review: the pre-push
-    /// hook, `MJ_REVIEW_GATE` and the session-start pin. Only top-level
-    /// sessions are gated.
+    /// hook, `MJ_REVIEW_GATE` and the session-start pin.
     pub fn review_gate(&self) -> bool {
-        self.review_tools()
-            && !self.is_managed_subagent()
-            && !self.handback_tool
-            && self.reviewer_launch.is_none()
+        self.review_tools() && self.reviewer_launch.is_none()
     }
 
     /// Managed ownership is independent of the MCP role and historical handback tools.
@@ -561,7 +562,7 @@ impl WorkerLaunchConfig {
         resolve_subagent_mcp_role(
             &self.subagents,
             self.is_managed_subagent(),
-            self.supervisor,
+            self.orchestrator,
             self.handback_tool,
             self.agent_mailboxes_enabled,
             self.environment
@@ -797,6 +798,40 @@ mod tests {
         })
     }
 
+    #[test]
+    fn worker_launch_renamed_orchestrator_fields_keep_the_strict_legacy_wire_shape() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RetainedWorkerFields {
+            #[serde(default)]
+            supervisor: bool,
+            #[serde(default)]
+            supervisors_enabled: bool,
+        }
+
+        let mut launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        let baseline = serde_json::to_value(&launch).unwrap();
+        for (orchestrator, enabled) in [(true, false), (false, true)] {
+            launch.orchestrator = orchestrator;
+            launch.orchestrators_enabled = enabled;
+            let payload = serde_json::to_value(&launch).unwrap();
+            let fields: serde_json::Map<_, _> = payload
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(key, value)| baseline.get(*key) != Some(*value))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            let retained: RetainedWorkerFields = serde_json::from_value(fields.into()).unwrap();
+            assert_eq!(retained.supervisor, orchestrator);
+            assert_eq!(retained.supervisors_enabled, enabled);
+
+            let decoded: WorkerLaunchConfig = serde_json::from_value(payload).unwrap();
+            assert_eq!(decoded.orchestrator, orchestrator);
+            assert_eq!(decoded.orchestrators_enabled, enabled);
+        }
+    }
+
     /// A launch file written before per-turn review was removed still names
     /// `"turn"`. It must keep parsing, and reads as the push gate.
     #[test]
@@ -844,6 +879,7 @@ mod tests {
                     SubagentPolicy::None,
                     SubagentPolicy::Native,
                     SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: None,
                     },
@@ -862,8 +898,8 @@ mod tests {
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
-                // A sub-agent is never gated.
-                assert!(!launch.review_gate());
+                // Managed identity does not suppress an owning launch's gate.
+                assert_eq!(launch.review_gate(), expected);
                 assert_eq!(
                     launch.subagent_mcp_role(),
                     Some(crate::subagent::SubagentMcpRole::FetchOnly)
@@ -1120,6 +1156,7 @@ mod tests {
             (
                 serde_json::json!({"mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"}),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: Some(Box::new(crate::config::SubagentChoice {
                         model: "gpt-6-luna".into(),
                         effort: Some("max".into()),
@@ -1133,6 +1170,7 @@ mod tests {
             (
                 serde_json::json!({"mode":"all_models"}),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -1140,6 +1178,7 @@ mod tests {
             (
                 serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -1147,6 +1186,7 @@ mod tests {
             (
                 serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"adaptive"}),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -1154,6 +1194,7 @@ mod tests {
             (
                 serde_json::json!(true),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },

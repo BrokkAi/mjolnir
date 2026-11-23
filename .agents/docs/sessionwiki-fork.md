@@ -17,13 +17,12 @@ changes in the fork for coordinated validation, submit upstream, and switch
 Mjolnir to the published version after joint tests. Keep adapter behavior
 generally useful rather than Mjolnir-specific.
 
-`sessionwiki::adapters::{KimiCode, GrokBuild, Muse, Dsh}` own native history
-indexing, with one `in_home` adapter per enabled Mjolnir profile home. Kimi
-and Grok keep directory keys; Muse keeps its `session.jsonl` key. DSH searches
-both bridge JSON and native histories under the supplied home. The tool
-names remain `kimi-code`, `grok-build`, `muse` and `dsh`. Mjolnir retains its
-native import readers for resume fidelity; DSH search does not imply DSH
-import support. `MjolnirAdapter` still indexes Mjolnir's stored transcripts.
+SessionWiki's adapters own native history decoding. Mjolnir registers the
+Antigravity CLI adapter for `<profile.home>/antigravity-cli/brain` and indexes
+DSH and OpenCode for search. Claude Code, Codex rollouts, Kimi Code, Grok Build
+and Muse also share their adapter's dialogue, working directory and edit
+evidence with native import. Mjolnir owns resume eligibility, picker metadata
+and checkpoint creation. `MjolnirAdapter` indexes Mjolnir's stored transcripts.
 
 Version 0.34.25 offers `.keep_configured_paths()` on Grok and Muse adapters;
 Mjolnir selects it to preserve legacy keys through symlinked profile homes.
@@ -58,7 +57,7 @@ What the fork used to add, and where it is now:
   write, with a full pass. Standing aside from an older index too stranded it
   for good, since nothing else would ever bring it forward. Check
   `sessionwiki::index::SCHEMA_VERSION` on every bump. 0.30.1 to 0.33.1 kept
-  version 8; 0.34.0 to 0.34.27 keep version 9. SessionWiki itself refuses to
+  version 8; 0.34.0 to 0.34.28 keep version 9. SessionWiki itself refuses to
   rebuild a newer index from 0.34.1 on, so only a `sessionwiki` command older
   than that rebuilds Mjolnir's index back down.
 - **Full-pass marker.** `<data_dir>/sessionwiki-built` records the cache

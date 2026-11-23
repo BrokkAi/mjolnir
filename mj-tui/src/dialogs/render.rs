@@ -1677,6 +1677,16 @@ pub(crate) fn confirmation_body(
                 ));
                 lines.push(Line::raw("You can resume this session later."));
             }
+            if let Some(warning) = preflight.as_ref().and_then(|preflight| {
+                mj_core::suspend_consent::owning_children_suspend_warning(
+                    preflight.owning_children_to_suspend,
+                )
+            }) {
+                lines.push(Line::styled(
+                    warning,
+                    Style::default().fg(theme::palette().warning),
+                ));
+            }
             if *interrupting {
                 lines.push(Line::raw("The current turn will be interrupted."));
             }

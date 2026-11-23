@@ -396,7 +396,7 @@ fn transfer_same_host(
 
 /// Same-host framed `export-move-stream | receive-move-stream` pipeline so
 /// `.mj/keep/` (with `--skip`) travels identically on the `SameHost` route.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn transfer_same_host_stream(
     source: &TargetLocator,
     source_path: &Path,
@@ -1783,6 +1783,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs bash on the controller")]
     fn same_host_pipe_transfers_over_128kib_and_verifies_sha256() {
         let dir = tempfile::tempdir().expect("tempdir");
         let src_archive = dir.path().join("src.hel.zip");
@@ -1837,6 +1838,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs bash on the controller")]
     fn daemon_stream_fallback_transfers_over_128kib_with_zero_daemon_disk_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let src_archive = dir.path().join("src.hel.zip");
@@ -2220,6 +2222,7 @@ fi
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs bash on the controller")]
     fn process_stream_pipe_applies_env_cwd_and_remote_specs_carry_ssh_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dst_file = dir.path().join("env-out.txt");

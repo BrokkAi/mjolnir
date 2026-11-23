@@ -748,7 +748,7 @@ impl RuntimeState {
         self.push_surface_notice("", text, Some(public_text));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn public_notices(&self) -> Vec<RuntimeNotice> {
         self.notices
             .lock()

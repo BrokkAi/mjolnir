@@ -155,7 +155,7 @@ impl AsRef<SubagentCandidate> for SubagentCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     TopLevel,
-    Supervisor,
+    Orchestrator,
     Child,
 }
 
@@ -519,7 +519,7 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
         if !guardian_eligible(cand.harness, ctx.execution_policy) {
             continue;
         }
-        if ctx.placement == Placement::Supervisor && !cand.harness.supports_delegation_tools() {
+        if ctx.placement == Placement::Orchestrator && !cand.harness.supports_delegation_tools() {
             continue;
         }
         let lookup = ctx
@@ -1414,14 +1414,14 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_placement_excludes_harnesses_without_delegation_tools() {
+    fn orchestrator_placement_excludes_harnesses_without_delegation_tools() {
         let now = 1_700_000_000;
         let telemetry = crate::quota_telemetry::QuotaTelemetrySnapshot::default();
         let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
         let ctx = SchedulingContext {
             execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
-            placement: Placement::Supervisor,
-            category: Some("supervisor"),
+            placement: Placement::Orchestrator,
+            category: Some("orchestrator"),
             ranking_anchor: None,
             prefer: &[],
             telemetry: &telemetry,

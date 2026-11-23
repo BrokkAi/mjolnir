@@ -730,17 +730,6 @@ async fn run_bridge(
     shutdown: &tokio_util::sync::CancellationToken,
     guardian_endpoint: Option<Arc<crate::worker_runtime::guardian_endpoint::GuardianEndpoint>>,
 ) -> Result<Option<BridgeRestart>> {
-    // Before the process starts, not after: a selector the harness reads only
-    // at startup cannot be corrected once it has opened the session.
-    #[cfg(unix)]
-    if let Some(path) = &spec.bridge_spec_path {
-        crate::worker_runtime::repin_bridge_selectors(
-            path,
-            spec.harness,
-            spec.startup_model().as_deref(),
-        )
-        .context("pin this session's model into the ACP bridge launch")?;
-    }
     let mut spec = spec.clone();
     if spec.harness.keeps_logins_in_database() {
         let environment = spec.environment.clone();
@@ -752,13 +741,18 @@ async fn run_bridge(
             .context("prepare the OpenCode session's logins")??,
         );
     }
-    // Before the process starts, like the pinned selectors: agy reads its
-    // grants at startup.
+    // Agy reads its grants at startup. Publish the accepted model and
+    // temporary-directory record before the session bridge starts as well.
     {
         let staged = spec.clone();
-        mj_core::runtime::spawn_blocking(move || stage_antigravity_grants(&staged))
-            .await
-            .context("stage Antigravity permission grants task failed")??;
+        mj_core::runtime::spawn_blocking(move || {
+            stage_antigravity_grants(&staged)?;
+            #[cfg(unix)]
+            crate::worker_runtime::harness_launch::finalize_session_bridge(&staged)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("finalize ACP bridge launch task failed")??;
     }
     let spec = &spec;
     let mut command = Command::new(&spec.command);

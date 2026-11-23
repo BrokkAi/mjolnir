@@ -840,7 +840,7 @@ fn golden_mailbox_delivery_transcript() {
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
-            command_id: "mixed-event-wake".into(),
+            command_id: "mailbox-wake-mixed-events".into(),
             command: RelayCommand::MailboxWake { events },
             created_at_ms: 600,
             insert_at_front: false,
@@ -851,7 +851,7 @@ fn golden_mailbox_delivery_transcript() {
     apply_observation(
         &mut session,
         RelayObservation::CommandStarted {
-            command_id: "mixed-event-wake".into(),
+            command_id: "mailbox-wake-mixed-events".into(),
             started_at_ms: 700,
         },
     );
@@ -2292,7 +2292,7 @@ fn interrupted_mailbox_wake_with_continuation_returns_to_idle() {
     use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
 
     let mut session = MaterializedSession::empty("session");
-    let command_id = "mailbox-wake";
+    let command_id = "mailbox-wake-parent";
     let continuation_id = mj_core::continuation::restart_continuation_id(command_id);
     apply_observation(
         &mut session,
@@ -3121,7 +3121,7 @@ fn terminal_output_before_the_tool_call_attaches_when_the_call_arrives() {
     assert_eq!(session.transcript[0].stable_id, "terminal:term-1");
     assert!(matches!(
         &session.transcript[0].body,
-        TranscriptBody::TerminalOutput { record } if record.terminal_id == "term-1"
+        TranscriptBody::TerminalOutput { record, .. } if record.terminal_id == "term-1"
     ));
 
     apply_observation(&mut session, terminal_tool_call("call-1", "term-1"));
@@ -3186,7 +3186,7 @@ fn mismatched_raw_result_does_not_hide_a_genuine_orphan_failure() {
     assert_eq!(session.transcript.len(), 2);
     assert!(session.transcript.iter().any(|item| matches!(
         &item.body,
-        TranscriptBody::TerminalOutput { record }
+        TranscriptBody::TerminalOutput { record, .. }
             if record.output.text() == "orphan failure\n"
     )));
 }
@@ -3971,6 +3971,7 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
                 source_kind: crate::transcript::ToolSummarySourceKind::Title,
                 tool_kind: agent_client_protocol::v1::schema::ToolKind::Read,
                 summary_version: crate::transcript::TOOL_SUMMARY_VERSION,
+                ..Default::default()
             })),
         },
     }));
@@ -3980,15 +3981,13 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
         latest_content_event_ordinal: None,
         created_at_ms: 40,
         last_changed_at_ms: 40,
-        body: TranscriptBody::TerminalOutput {
-            record: TerminalOutputRecord {
-                terminal_id: "term-2".into(),
-                output: "orphaned output\n".into(),
-                truncated: false,
-                exit_code: None,
-                signal: Some("SIGKILL".into()),
-            },
-        },
+        body: TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: "term-2".into(),
+            output: "orphaned output\n".into(),
+            truncated: false,
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+        }),
     }));
     session.transcript.push(Arc::new(TranscriptItem {
         stable_id: "plan:4".into(),
@@ -4134,7 +4133,7 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
             apply_observation(
                 &mut session,
                 RelayObservation::CommandQueued {
-                    command_id: "mailbox-wake".into(),
+                    command_id: "mailbox-wake-parent".into(),
                     command: RelayCommand::MailboxWake {
                         events: vec![mj_core::mailbox::MailboxEvent {
                             key: "parent-message".into(),
@@ -4153,7 +4152,7 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
             apply_observation(
                 &mut session,
                 RelayObservation::CommandStarted {
-                    command_id: "mailbox-wake".into(),
+                    command_id: "mailbox-wake-parent".into(),
                     started_at_ms: 20,
                 },
             );
@@ -4162,13 +4161,13 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
                     .active_turn
                     .as_ref()
                     .unwrap()
-                    .belongs_to("mailbox-wake")
+                    .belongs_to("mailbox-wake-parent")
             );
             assert!(
                 !session
                     .transcript
                     .iter()
-                    .any(|item| item.stable_id == "user:mailbox-wake")
+                    .any(|item| item.stable_id == "user:mailbox-wake-parent")
             );
             if native_running {
                 apply_observation(&mut session, RelayObservation::SessionUpdate {
@@ -4184,10 +4183,10 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
                 &mut session,
                 RelayObservation::CommandInterrupted {
                     continuation_id: Some(mj_core::continuation::restart_continuation_id(
-                        "mailbox-wake",
+                        "mailbox-wake-parent",
                     )),
                     reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
-                    command_id: "mailbox-wake".into(),
+                    command_id: "mailbox-wake-parent".into(),
                     command: RelayCommandKind::Prompt,
                     message: "bridge restarted".into(),
                 },

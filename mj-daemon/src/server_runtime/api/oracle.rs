@@ -17,8 +17,12 @@ impl ApiBackend {
     ) -> Result<serde_json::Value> {
         ensure!(!message.trim().is_empty(), "the question cannot be empty");
         ensure!(
-            mj_controller::database::load_subagent(primary_id)?.is_none(),
-            "only top-level sessions may ask the oracle"
+            blocking("check oracle workspace ownership", {
+                let id = primary_id.to_owned();
+                move || mj_controller::database::session_owns_environment(&id)
+            })
+            .await?,
+            "only workspace owners may ask the oracle"
         );
         let question = format!("Question:\n{message}");
         // A replay of a start that already chose its model starts it again
@@ -83,7 +87,7 @@ impl ApiBackend {
             .start_subagent(mj_controller::controller::RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: SubagentKind::Oracle,
-                supervisor: false,
+                orchestrator: false,
                 reviewer_launch: None,
                 parent_session_id: primary_id.to_owned(),
                 task_name: "oracle".into(),

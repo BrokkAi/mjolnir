@@ -532,7 +532,7 @@ pairs (at most one model per provider):
 
 ```toml
 [subagents]
-max_concurrent = 6
+max_concurrent = 8
 
 [[subagents.primary]]
 model = "your-claude-model"
@@ -565,20 +565,22 @@ by that model when specified; omitted effort uses the harness default. Adaptive
 effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
-With both types configured, `spawn` takes `task_type`: `straightforward` for
-work with a clear method, such as locating code, running commands or tests, or
-implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
-design choices, or risk of subtle bugs. A subtle task gets a smarter, more
-expensive agent. Judge difficulty, not brief length. With only straightforward
-configured, `spawn` has no `task_type` and every child uses the straightforward
-choice. The parent is told to delegate straightforward work and to do work
-that needs judgment itself. Mjolnir chooses the enabled profile offering that
-task type's model and effort with the strongest quota headroom paced against
-its reset times. The agent cannot override the selection.
+With both types configured, set the `spawn` tool's `task_type` to
+`straightforward` for bounded work with a single clear path, such as locating
+and mapping code, running exact build, test, or gate commands, and small
+mechanical edits. Choose `subtle` for
+multi-file implementation, including settled designs, multi-stage operational
+runs or troubleshooting, ambiguous diagnosis, design choices, and work with a
+high risk of subtle bugs. Choose by scope and branching. With only
+straightforward configured, `spawn` omits `task_type` and every child uses that
+choice. The parent delegates bounded work and handles the more involved work
+itself. Mjolnir chooses the enabled profile offering that task type's model
+and effort with the strongest quota headroom paced against its reset times.
+The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
 a notice and uses `native` where supported or `none` on DSH and Antigravity.
-An explicit `--subagents mjolnir` or `--supervisors enabled` requires Mjolnir
+An explicit `--subagents mjolnir` or `--orchestrators` requires Mjolnir
 delegation to be available. `mj move --subagents native|mjolnir|none` retains
 the recorded policy when omitted, including any session override.
 `--subagent-straightforward M` and `--subagent-subtle M` independently override
@@ -602,7 +604,7 @@ or moves the session with the oracle off and a notice.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `max_concurrent` | integer | no | `6` | Most live sub-agents one session may have at once; between `1` and `64`. A sub-agent counts while it holds processes on the target, including while it is idle. A parked sub-agent, one whose turn ended and whose worker Mjolnir stopped, does not count (see [Parked sub-agents](/sessions/#parked-sub-agents)). |
+| `max_concurrent` | integer | no | `8` | Between `1` and `64` slots. Live workers sharing an environment count against its owner. Each live orchestrator with its own environment uses one slot under its parent, and its workers count against its own limit. Idle live workers hold a slot. [Parked sub-agents](/sessions/#parked-sub-agents), reviewers, and oracles do not count. |
 
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.

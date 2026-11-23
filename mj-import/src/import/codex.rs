@@ -434,6 +434,7 @@ pub(super) struct CodexSessionSummary {
     pub filtered: bool,
     /// Absent when no `session_meta` record in the header names a session.
     pub metadata: Option<CodexSessionMetadata>,
+    pub history_mode: CodexHistoryMode,
 }
 
 /// The picker's view of one rollout: `None` when the file is filtered out of
@@ -492,7 +493,13 @@ pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> 
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(ToOwned::to_owned);
-        if let Some(id) = id {
+        let history_mode = record
+            .pointer("/payload/history_mode")
+            .and_then(Value::as_str)
+            .map(parse_codex_history_mode)
+            .transpose()?
+            .unwrap_or(CodexHistoryMode::Legacy);
+        let metadata = if let Some(id) = id {
             validate_id("Codex session", &id)?;
             let cwd = record
                 .pointer("/payload/cwd")
@@ -506,28 +513,27 @@ pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> 
                 .filter(|branch| !branch.trim().is_empty())
                 .unwrap_or("HEAD")
                 .to_owned();
-            let history_mode = record
-                .pointer("/payload/history_mode")
-                .and_then(Value::as_str)
-                .map(parse_codex_history_mode)
-                .transpose()?
-                .unwrap_or(CodexHistoryMode::Legacy);
-            return Ok(CodexSessionSummary {
-                subagent,
-                filtered,
-                metadata: Some(CodexSessionMetadata {
-                    id,
-                    cwd,
-                    git_branch,
-                    history_mode,
-                }),
-            });
-        }
+            Some(CodexSessionMetadata {
+                id,
+                cwd,
+                git_branch,
+                history_mode,
+            })
+        } else {
+            None
+        };
+        return Ok(CodexSessionSummary {
+            subagent,
+            filtered,
+            metadata,
+            history_mode,
+        });
     }
     Ok(CodexSessionSummary {
         subagent,
         filtered,
         metadata: None,
+        history_mode: CodexHistoryMode::Legacy,
     })
 }
 

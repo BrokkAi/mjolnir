@@ -730,7 +730,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: needle ___  1 more ││                                                                                            │
-│⠁ Syncing session index…                    ││                                                                                            │
+│? Syncing session index…                    ││                                                                                            │
 │No sessions match · Esc clears the filter   ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
@@ -772,7 +772,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ S · /needlex · searching… × ──── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: needlex ___________││                                                                                            │
-│⠁ Syncing session index…                    ││                                                                                            │
+│? Syncing session index…                    ││                                                                                            │
 │Searching conversations…                    ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
@@ -814,7 +814,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: needle ____________││                                                                                            │
-│⠁ Syncing session index…                    ││                                                                                            │
+│? Syncing session index…                    ││                                                                                            │
 │No sessions match · Esc clears the filter   ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
@@ -856,7 +856,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /needle × ─────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: needle ___  1 more ││                                                                                            │
-│⠁ Syncing session index…                    ││                                      ✦  M J O L N I R                                      │
+│? Syncing session index…                    ││                                      ✦  M J O L N I R                                      │
 │No sessions match · Esc clears the filter   ││                                                                                            │
 │                                            ││                             Create a session to start building.                            │
 │                                            ││                                                                                            │
@@ -898,7 +898,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────╯│                                                                                                                      │
 ╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
 │New Open    1 more││                                                                                                                      │
-│⠁ Syncing session…││                                                   ✦  M J O L N I R                                                   │
+│? Syncing session…││                                                   ✦  M J O L N I R                                                   │
 │No sessions match ││                                                                                                                      │
 │· Esc clears the  ││                                          Create a session to start building.                                         │
 │filter            ││                                                                                                                      │
@@ -940,14 +940,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────╯│                                                                                                                      │
 ╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
 │New Open                                                                                                                                  │
-│⠁ Syncin                                                                                                                                  │
+│? Syncin                                                                                                                                  │
 │No sessi  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
 │· Esc cl  │                                                                                                                   │           │
 │filter    │  Live   Mjolnir · 0   Import · 0   Archived · 0                                                                   │           │
 │          │                                                                                                                   │           │
 │          │ Search: needle                                                                                                    │           │
 │          │                                                                                                                   │           │
-│          │ ╭ 1 match · ⠁ Syncing session index… ───────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ ╭ 1 match · ? Syncing session index… ───────────────────────────────────────────────────────────────────────────╮ │           │
 │          │ │  WORKSPACE                 LAST ACTIVE     SESSION                                                            │ │           │
 │          │ │elsewhere                 Aug 9, 2026     ? unrelated title                                                    │ │  ─────────╯
 │          │ │                                                                                                               │ │  ─────────╮
@@ -982,7 +982,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────╯│                                                                                                                      │
 ╭ S ·  × ▁   ▄   □ ╮│                                                                                                                      │
 │New Open    1 more││                                                                                                                      │
-│⠁ Syncing session…││                                                   ✦  M J O L N I R                                                   │
+│? Syncing session…││                                                   ✦  M J O L N I R                                                   │
 │No sessions match ││                                                                                                                      │
 │· Esc clears the  ││                                                                                                                      │
 │filter            ││       ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮                           │

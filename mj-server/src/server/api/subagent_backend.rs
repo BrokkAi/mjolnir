@@ -109,6 +109,36 @@ pub trait SubagentBackend: Send + Sync {
         })
     }
 
+    fn native_agent_tool_call_detail(
+        &self,
+        owner: String,
+        child: String,
+        stable_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::transcript::ToolCallDetailResult>>> {
+        Box::pin(async move {
+            mj_core::runtime::spawn_blocking(move || {
+                mj_store::database::load_native_agent_tool_call_detail(&owner, &child, &stable_id)
+            })
+            .await?
+        })
+    }
+
+    fn tool_call_detail(
+        &self,
+        session_id: String,
+        stable_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::transcript::ToolCallDetailResult>>> {
+        Box::pin(async move {
+            mj_core::runtime::spawn_blocking(move || {
+                mj_session_runtime::tool_detail::load_tool_call_detail_with_checkpoint_fallback(
+                    &session_id,
+                    &stable_id,
+                )
+            })
+            .await?
+        })
+    }
+
     fn native_agent_history(
         &self,
         owner: String,

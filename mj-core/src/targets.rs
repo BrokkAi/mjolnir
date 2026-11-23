@@ -710,8 +710,19 @@ pub struct DeploymentCapacityTarget {
     pub probe_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostMemoryUsage {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentCapacityUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ec2_instance_type: Option<String>,
+    /// Physical RAM when the measured allocation budget is a separate pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_memory: Option<HostMemoryUsage>,
     /// Whether `memory_total_bytes` is a pool set aside for sessions at boot
     /// (a Nitro host's sandbox memory) rather than the host's RAM. A pool is
     /// already net of the host's own needs, so admission applies no reserve
@@ -725,6 +736,15 @@ pub struct DeploymentCapacityUsage {
     /// Free space on the filesystems Mjolnir writes to, per machine probed:
     /// one for a host, one per instance for a fleet.
     pub storage: Vec<storage::HostStorageSample>,
+}
+
+impl DeploymentCapacityUsage {
+    pub fn host_memory(&self) -> HostMemoryUsage {
+        self.physical_memory.unwrap_or(HostMemoryUsage {
+            used_bytes: self.memory_used_bytes,
+            total_bytes: self.memory_total_bytes,
+        })
+    }
 }
 
 /// An additional directory made available to one session.
@@ -953,8 +973,8 @@ pub trait CommandExecutor {
     /// failure: the work continues, and the user is told what changed.
     fn notify_notice(&self, _notice: &str) {}
 
-    /// Stop the source's children only once destination preparation has succeeded.
-    fn before_move_source_stop(
+    /// Stop workers sharing the environment before its owner quiesces.
+    fn stop_borrowed_workers_before_quiesce(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })

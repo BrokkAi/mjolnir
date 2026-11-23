@@ -1,6 +1,6 @@
 === older important card before a newer question (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default ?2                         ≡ ││                                                                              │
+│ default ?1                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -45,7 +45,7 @@
 Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+↑ scroll │ ctrl+b then : / ? palette
 === multi-entry question notification card (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default ?2                         ≡ ││                                                                              │
+│ default ?1                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -87,7 +87,7 @@ Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+↑ scroll �
 │                                      ││                                                                              │
 │                                      ││ Go to Session   Clear & Next   Skip   Ignore Session                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Alt+g session · Alt+n next · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?2) · : / ? palette
+Alt+g session · Alt+n next · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?1) · : / ? palette
 notification header color: Rgb(158, 194, 238)
 open Rename action: None
 === Rename modal over dashboard (120x30) ===

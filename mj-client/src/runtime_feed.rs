@@ -102,6 +102,8 @@ pub struct RuntimeProjection {
     /// Legacy ordering shared with one-shot management responses.
     pub revision: u64,
     pub records: SnapshotMap<String, SessionRecord>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub environment_owners: SnapshotMap<String, String>,
     pub subagents: SnapshotMap<String, SubagentMetadata>,
     pub sessions: SnapshotMap<String, RuntimeSessionView>,
     #[serde(default)]
@@ -228,6 +230,9 @@ impl ScopedProjection {
             .filtered(|id, _| selection.keeps(full, &parents, id));
         result.subagent_parents = parents;
         let kept = &result.records;
+        result.environment_owners = full
+            .environment_owners
+            .filtered(|id, _| kept.contains_key(id));
         result
             .subagents
             .retain(|id, _| keeps_relation(full, id, kept.contains_key(id)));
@@ -300,6 +305,13 @@ impl ScopedProjection {
         }
 
         let records = &result.records;
+        follow_records(
+            &mut result.environment_owners,
+            &before.environment_owners,
+            &after.environment_owners,
+            records,
+            &moved,
+        );
         for id in before
             .sessions
             .changes(&after.sessions)
@@ -414,12 +426,14 @@ pub struct RuntimeContainerCapacity {
 }
 
 /// One host or fleet and whether the daemon owes it a manual refresh.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeHostCapacity {
     pub reading: mj_core::targets::HostCapacityRow,
     pub refreshing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_1h: Option<mj_core::targets::CapacityWindowSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,11 +642,6 @@ pub struct RuntimeMetadata {
     pub container_sizes: SnapshotMap<String, mj_core::state::HostContainerSize>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_oracle_choices: BTreeMap<String, bool>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub last_supervisor_choices: BTreeMap<String, bool>,
-    /// Whether each configured target can run depth-1 supervisors.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub supervisors_available: BTreeMap<String, bool>,
     /// The browser reads this directly from the capture. Native paths may
     /// contain bytes JSON cannot represent.
     #[serde(skip)]
@@ -1020,6 +1029,8 @@ pub type KeyChanges<T> = Vec<(String, Option<T>)>;
 pub struct RuntimeDelta {
     pub revision: Option<u64>,
     pub records: KeyChanges<SessionRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_owners: KeyChanges<String>,
     pub subagents: KeyChanges<SubagentMetadata>,
     pub sessions: KeyChanges<RuntimeSessionView>,
     #[serde(default)]
@@ -1052,6 +1063,7 @@ impl RuntimeDelta {
         Self {
             revision: (before.revision != after.revision).then_some(after.revision),
             records: changes(&before.records, &after.records),
+            environment_owners: changes(&before.environment_owners, &after.environment_owners),
             subagents: changes(&before.subagents, &after.subagents),
             sessions: changes(&before.sessions, &after.sessions),
             verdicts: changes(&before.verdicts, &after.verdicts),
@@ -1079,6 +1091,7 @@ impl RuntimeDelta {
     pub fn is_empty(&self) -> bool {
         self.revision.is_none()
             && self.records.is_empty()
+            && self.environment_owners.is_empty()
             && self.subagents.is_empty()
             && self.sessions.is_empty()
             && self.verdicts.is_empty()
@@ -1094,6 +1107,7 @@ impl RuntimeDelta {
             projection.revision = revision;
         }
         apply_keys(&mut projection.records, self.records);
+        apply_keys(&mut projection.environment_owners, self.environment_owners);
         apply_keys(&mut projection.subagents, self.subagents);
         apply_keys(&mut projection.sessions, self.sessions);
         apply_keys(&mut projection.verdicts, self.verdicts);
@@ -1280,6 +1294,59 @@ mod tests {
             connected: false,
             error: None,
         }
+    }
+
+    #[test]
+    fn ownership_only_delta_reaches_scoped_replica_and_ignores_hidden_rows() {
+        let mut before = RuntimeProjection::default();
+        let record = |id: &str, state: &str| {
+            serde_json::from_value::<SessionRecord>(serde_json::json!({
+                "id": id, "title": id, "state": state, "harness_kind": "codex",
+                "last_profile": "profile", "bundle_id": "project", "target_template_id": "local",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        before
+            .records
+            .insert("running".into(), record("running", "running"));
+        before
+            .records
+            .insert("stopped".into(), record("stopped", "stopped"));
+        let legacy_snapshot: RuntimeProjection =
+            serde_json::from_value(serde_json::to_value(&before).unwrap()).unwrap();
+        assert!(legacy_snapshot.environment_owners.is_empty());
+
+        let mut after = before.clone();
+        after
+            .environment_owners
+            .insert("running".into(), "owner".into());
+        after
+            .environment_owners
+            .insert("stopped".into(), "stopped".into());
+        let initial = ScopedProjection::new(&before, BTreeSet::new());
+        let next = initial.advance(&before, &after);
+        let delta = RuntimeDelta::between(&initial.projection, &next.projection);
+        assert!(delta.records.is_empty());
+        assert_eq!(
+            delta.environment_owners,
+            vec![("running".into(), Some("owner".into()))]
+        );
+        assert!(!delta.is_empty());
+        let delta: RuntimeDelta =
+            serde_json::from_value(serde_json::to_value(delta).unwrap()).unwrap();
+        let mut replica = initial.projection;
+        delta.apply(&mut replica);
+        assert_eq!(
+            replica.environment_owners,
+            next.projection.environment_owners
+        );
+
+        let mut deleted = after.clone();
+        deleted.environment_owners.remove("running");
+        let next = next.advance(&after, &deleted);
+        RuntimeDelta::between(&replica, &next.projection).apply(&mut replica);
+        assert!(replica.environment_owners.is_empty());
     }
 
     #[cfg(unix)]

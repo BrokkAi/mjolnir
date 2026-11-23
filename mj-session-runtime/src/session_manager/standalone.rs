@@ -6,7 +6,11 @@ use mj_core::guardian::{
     GuardianReviewRequest, GuardianReviewResult, MAX_PENDING_GUARDIAN_REVIEWS, Outcome,
     WOLF_STAGE1_ALLOW_THRESHOLD, safe_daemon_guardian_failure_reason,
 };
+use mj_core::state::MaterializedExecutionState;
+use mj_core::transcript::TranscriptItem;
 use mj_import::utility_llm::{GuardianUtilityOutcome, review_guardian_with_utility};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 use tokio::task::JoinError;
 
@@ -843,6 +847,15 @@ impl StandaloneSession {
             .await
     }
 
+    /// The command the worker's relay holds for a queued entry. Not tied to a
+    /// checkpoint cut; a caller that needs one proves it with a cut-bound read.
+    pub async fn read_queued_command(
+        &mut self,
+        command_id: String,
+    ) -> Result<Option<RelayCommand>> {
+        Ok(self.client.read_queued_command(command_id).await?.0)
+    }
+
     /// The worker-owned native-session-use evidence at a ready checkpoint barrier's cut.
     pub async fn read_checkpoint_native_use(
         &mut self,
@@ -1047,6 +1060,7 @@ impl StandaloneSession {
                         historical.sort_by(|a,b| (a.position, &a.stable_id).cmp(&(b.position, &b.stable_id)));
                         projection.transcript = historical;
                     }
+                    let hydrated = hydrate_referenced_tool_details(&mut projection, &events)?;
                     let mut projection_index = ProjectionIndex::new(&projection);
                     let mut credential_sync_signal = None;
                     let mut prepared = Vec::with_capacity(events.len());
@@ -1075,6 +1089,15 @@ impl StandaloneSession {
                         }
                     }
                     drop(projection_index);
+                    if !hydrated.is_empty() {
+                        for item in &mut projection.transcript {
+                            if let Some((summary, full)) = hydrated.get(&item.stable_id)
+                                && Arc::ptr_eq(item, full)
+                            {
+                                *item = Arc::clone(summary);
+                            }
+                        }
+                    }
                     apply_projection_page(&session_id, move |committed| {
                         for (ordinal, previous_digest, digest, mutation) in prepared {
                             match committed.apply(ordinal, &previous_digest, &digest, &mutation)? {
@@ -1123,6 +1146,40 @@ impl StandaloneSession {
             self.materialized.applied_event_digest == through_digest,
             "relay page digest does not match its claimed frontier"
         );
+        if event_count != 0 && self.materialized.execution == MaterializedExecutionState::Idle {
+            let session_id = self.materialized.session_id.clone();
+            match mj_core::runtime::spawn_blocking(move || {
+                crate::database::spill_and_trim_settled_tools_versioned(
+                    &session_id,
+                    delivered_through,
+                )
+            })
+            .await
+            .context("tool detail spill task failed")
+            .and_then(std::convert::identity)
+            {
+                Ok(spilled) if !spilled.is_empty() => {
+                    let mut spilled: HashMap<_, _> = spilled
+                        .into_iter()
+                        .map(|item| (item.stable_id.clone(), item))
+                        .collect();
+                    for item in &mut self.materialized.transcript {
+                        if let Some(compact) = spilled.remove(&item.stable_id)
+                            && item.last_changed_at_ms == compact.last_changed_at_ms
+                            && item.latest_content_event_ordinal
+                                == compact.latest_content_event_ordinal
+                        {
+                            *item = Arc::new(compact);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    session_id = %self.materialized.session_id, error = %format!("{error:#}"),
+                    "could not spill settled tool details at committed relay frontier"
+                ),
+            }
+        }
         Ok(RelayCursor {
             ordinal: delivered_through,
             digest: self.materialized.applied_event_digest.clone(),
@@ -1407,4 +1464,59 @@ async fn execute_guardian_review(
         request_id: request.request_id,
         decision,
     }
+}
+
+type TemporarilyHydratedItems = HashMap<String, (Arc<TranscriptItem>, Arc<TranscriptItem>)>;
+
+/// Supply full inputs only to mutations that can depend on them. Restore the
+/// compact Arc after projection if no observation actually changed the item.
+fn hydrate_referenced_tool_details(
+    projection: &mut MaterializedSession,
+    events: &[mj_core::relay::RelayEvent],
+) -> Result<TemporarilyHydratedItems> {
+    let mut hydrated = HashMap::new();
+    if !projection
+        .transcript
+        .iter()
+        .any(|item| item.body.detail_trimmed())
+    {
+        return Ok(hydrated);
+    }
+    let references = mj_transcript::projection::historical_references(events)?;
+    let mut ids: HashSet<_> = references.ids.into_iter().collect();
+    if !references.terminals.is_empty() {
+        let index = ProjectionIndex::new(projection);
+        for terminal in references.terminals {
+            ids.extend(
+                index
+                    .terminal_referrers(&terminal)
+                    .map(|item| item.stable_id.clone()),
+            );
+        }
+    }
+    for item in &mut projection.transcript {
+        if !item.body.detail_trimmed() || !ids.contains(&item.stable_id) {
+            continue;
+        }
+        match crate::database::read_stored_tool_detail(&projection.session_id, item) {
+            Ok(Some(body)) => {
+                let mut full = (**item).clone();
+                full.body = body;
+                let full = Arc::new(full);
+                hydrated.insert(
+                    item.stable_id.clone(),
+                    (Arc::clone(item), Arc::clone(&full)),
+                );
+                *item = full;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                session_id = %projection.session_id,
+                stable_id = %item.stable_id,
+                error = %format!("{error:#}"),
+                "could not hydrate trimmed tool detail before relay update"
+            ),
+        }
+    }
+    Ok(hydrated)
 }

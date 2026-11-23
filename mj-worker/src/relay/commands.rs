@@ -582,6 +582,7 @@ impl DurableRelay {
         Ok(InPlaceHarnessRestartDecision::Proceed)
     }
 
+    #[cfg(unix)]
     pub(crate) fn cancel_in_place_harness_restart(&mut self, operation_id: &str) {
         if self.in_place_harness_restart_in_flight.as_deref() == Some(operation_id) {
             self.in_place_harness_restart_in_flight = None;
@@ -637,6 +638,23 @@ impl DurableRelay {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidRequest,
                 "invalid command ID",
+                false,
+                None,
+            )));
+        }
+        // A wake is known by its ID wherever its type is gone: restored from a
+        // checkpoint or replayed, it is a plain prompt under its wake ID. So a
+        // wake needs that ID, and that ID names only a wake or such a prompt.
+        let wake_id = mj_core::continuation::carries_mailbox_wake(command_id);
+        let misnamed = match &command {
+            RelayCommand::MailboxWake { .. } => !wake_id,
+            RelayCommand::Prompt { .. } => false,
+            _ => wake_id,
+        };
+        if misnamed {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidRequest,
+                "a mailbox-wake command ID names only a mailbox wake or the prompt it was saved as",
                 false,
                 None,
             )));

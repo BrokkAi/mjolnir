@@ -115,11 +115,7 @@ fn save_new_session_with_preferences_to(
     }
     let policy = session.subagents.clone().unwrap_or_default();
     if remember_subagent_policy && policy.updates_remembered_choice(session.harness_kind) {
-        tx.execute(
-            "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
-             ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
-            params![session.last_profile, serde_json::to_string(&policy)?],
-        )?;
+        save_subagent_preference(&tx, &session.last_profile, policy)?;
     }
     if remember_launch_choices {
         tx.execute(
@@ -127,15 +123,21 @@ fn save_new_session_with_preferences_to(
              ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
             params![session.last_profile, session.oracle],
         )?;
-        if policy.uses_mjolnir() {
-            tx.execute(
-                "INSERT INTO supervisor_preference(profile_id, enabled) VALUES(?1, ?2)
-                 ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
-                params![session.last_profile, session.supervisors],
-            )?;
-        }
     }
     tx.commit()?;
+    Ok(())
+}
+
+fn save_subagent_preference(
+    tx: &Transaction<'_>,
+    profile: &str,
+    policy: mj_core::subagent::SubagentPolicy,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO subagent_preference(profile_id, policy) VALUES(?1, ?2)
+         ON CONFLICT(profile_id) DO UPDATE SET policy = excluded.policy",
+        params![profile, serde_json::to_string(&policy)?],
+    )?;
     Ok(())
 }
 
@@ -181,7 +183,7 @@ pub fn save_subagent_session(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
 ) -> Result<()> {
-    register_subagent_with_startup(session, subagent, Vec::new(), None, None)
+    register_subagent_with_startup(session, subagent, Vec::new(), None, None, false)
 }
 
 /// Publish the child and its complete initial input in the same transaction.
@@ -192,6 +194,29 @@ pub fn register_subagent_with_startup(
     startup: Vec<super::startup::StartupDelivery>,
     report_dir: Option<&str>,
     category: Option<&str>,
+    own_environment: bool,
+) -> Result<()> {
+    register_subagent_with_startup_admitted(
+        session,
+        subagent,
+        startup,
+        report_dir,
+        category,
+        own_environment,
+        |_, _| Ok(()),
+    )
+}
+
+/// Run the controller's admission policy against the latest committed state
+/// in the same serialized write that registers the child.
+pub fn register_subagent_with_startup_admitted(
+    session: &SessionRecord,
+    subagent: &mj_core::subagent::SubagentRecord,
+    startup: Vec<super::startup::StartupDelivery>,
+    report_dir: Option<&str>,
+    category: Option<&str>,
+    own_environment: bool,
+    admit: impl FnOnce(&State, &mj_core::subagent::SubagentRecord) -> Result<()> + Send + 'static,
 ) -> Result<()> {
     let session = session.clone();
     let subagent = subagent.clone();
@@ -200,10 +225,9 @@ pub fn register_subagent_with_startup(
     submit_database_write("save_subagent_session", move |_| {
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        super::session_restart::ensure_container_parent_available(
-            &tx,
-            &subagent.parent_session_id,
-        )?;
+        let committed =
+            committed_state()?.context("sub-agent admission requires the database writer")?;
+        admit(&committed.state, &subagent)?;
         let parent_state = tx.query_row(
             "SELECT state FROM sessions WHERE session_id=?1",
             [&subagent.parent_session_id],
@@ -213,6 +237,12 @@ pub fn register_subagent_with_startup(
             super::values::stored_session_state(&parent_state).can_receive_child_work(),
             "parent is no longer accepting child work"
         );
+        if !own_environment {
+            super::session_restart::ensure_container_parent_available(
+                &tx,
+                &subagent.parent_session_id,
+            )?;
+        }
         if subagent.kind == mj_core::subagent::SubagentKind::Oracle {
             let mut statement = tx.prepare(
                 "SELECT s.state FROM subagent_sessions c
@@ -233,7 +263,7 @@ pub fn register_subagent_with_startup(
         super::state_io::insert_session_with_parent(
             &tx,
             &session,
-            Some(&subagent.parent_session_id),
+            (!own_environment).then_some(subagent.parent_session_id.as_str()),
         )?;
         super::session_create::insert_create_intent(&tx, &session, false)?;
         super::usage::record_child_accounting(&tx, &subagent, category.as_deref())?;
@@ -289,6 +319,25 @@ pub fn load_subagent(child_session_id: &str) -> Result<Option<mj_core::subagent:
         .transpose()
 }
 
+pub fn set_subagent_resume_with_parent(
+    child_session_id: &str,
+    resume_with_parent: bool,
+) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    submit_database_write("set_subagent_resume_with_parent", move |connection| {
+        let changed = connection.execute(
+            "UPDATE subagent_sessions
+             SET record_json = CASE WHEN ?2
+                 THEN json_set(record_json, '$.resume_with_parent', json('true'))
+                 ELSE json_remove(record_json, '$.resume_with_parent')
+             END WHERE child_session_id = ?1",
+            params![child_session_id, resume_with_parent],
+        )?;
+        ensure!(changed == 1, "unknown sub-agent session {child_session_id}");
+        Ok(())
+    })
+}
+
 /// Whether a sub-agent child has handed back its report for its parent's
 /// newest task, from what the store holds; see
 /// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
@@ -331,6 +380,48 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
     statement
         .query_map([parent_session_id], |row| row.get::<_, String>(0))?
         .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
+        .collect()
+}
+
+/// A child's durable role and latest turn selection for the parent's listing.
+pub struct SubagentListingDetails {
+    pub relation: mj_core::subagent::SubagentRecord,
+    pub category: Option<String>,
+    pub selection: mj_core::storage::UsageSelection,
+}
+
+pub fn list_subagent_details(parent: &str) -> Result<Vec<SubagentListingDetails>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT c.record_json, a.category, t.model, t.effort
+         FROM subagent_sessions c
+         LEFT JOIN subagent_accounting a USING (child_session_id)
+         LEFT JOIN sessions s ON s.session_id = c.child_session_id
+         LEFT JOIN session_turn_selections t ON t.rowid = (
+             SELECT rowid FROM session_turn_selections
+             WHERE session_id = c.child_session_id ORDER BY rowid DESC LIMIT 1
+         ) AND (t.profile IS NULL OR t.profile = s.last_profile)
+         WHERE c.parent_session_id = ?1 ORDER BY c.rowid",
+    )?;
+    statement
+        .query_map([parent], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get(1)?,
+                mj_core::storage::UsageSelection {
+                    model: row.get(2)?,
+                    effort: row.get(3)?,
+                },
+            ))
+        })?
+        .map(|row| {
+            let (record, category, selection) = row?;
+            Ok(SubagentListingDetails {
+                relation: serde_json::from_str(&record).context("decode sub-agent record")?,
+                category,
+                selection,
+            })
+        })
         .collect()
 }
 
@@ -1486,16 +1577,6 @@ pub(super) fn rename_profile_references_at(
         "DELETE FROM oracle_preference WHERE profile_id = ?1",
         [old_id],
     )?;
-    tx.execute(
-        "INSERT INTO supervisor_preference(profile_id, enabled)
-         SELECT ?2, enabled FROM supervisor_preference WHERE profile_id = ?1
-         ON CONFLICT(profile_id) DO UPDATE SET enabled = excluded.enabled",
-        params![old_id, new_id],
-    )?;
-    tx.execute(
-        "DELETE FROM supervisor_preference WHERE profile_id = ?1",
-        [old_id],
-    )?;
     tx.commit()?;
     Ok(changed)
 }
@@ -2175,7 +2256,13 @@ pub fn delete_session(session_id: &str) -> Result<()> {
 
 pub(super) fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
     let connection = open(path)?;
+    mj_core::config::validate_id("session", session_id)?;
     connection.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
+    if let Err(error) =
+        tool_details::remove_session_tool_details(tool_details::data_dir_from(path), session_id)
+    {
+        tracing::warn!(session_id, error = %format!("{error:#}"), "session deleted but its tool detail file could not be removed");
+    }
     Ok(())
 }
 
@@ -2320,7 +2407,7 @@ mod ownership_tests {
         expected.state = SessionState::Disconnected;
         expected.native_session_id = None;
         expected.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: directory.path().join(&expected.id),
+            worker_root: PathBuf::from(format!("/workers/{}", expected.id)),
         }));
         save_session_to(&path, &expected).unwrap();
         let mut stopped = expected.clone();
@@ -2359,7 +2446,7 @@ mod ownership_tests {
         expected.native_session_id = None;
         expected.last_error = Some("previous diagnosis".into());
         expected.target = Some(Box::new(TargetLocator::LocalBare {
-            worker_root: directory.path().join(&expected.id),
+            worker_root: PathBuf::from(format!("/workers/{}", expected.id)),
         }));
         save_session_to(&path, &expected).unwrap();
         let mut connection = open(&path).unwrap();

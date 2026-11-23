@@ -6,8 +6,12 @@
 package worker
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -144,11 +148,69 @@ func kimiNativeToolCallID(toolCallID string) string {
 }
 
 func kimiRunningTaskID(rawOutput json.RawMessage) (string, bool) {
-	panic("unported: mj-worker/src/relay/background.rs kimi_running_task_id")
+	if len(rawOutput) == 0 {
+		return "", false
+	}
+	var value any
+	if json.Unmarshal(rawOutput, &value) != nil {
+		return "", false
+	}
+	output, ok := value.(string)
+	if !ok {
+		object, isObject := value.(map[string]any)
+		if !isObject {
+			return "", false
+		}
+		if output, ok = object["output"].(string); !ok {
+			return "", false
+		}
+	}
+	lines := relayRustLines(output)
+	if !slices.ContainsFunc(lines, func(line string) bool { return strings.TrimSpace(line) == "status: running" }) {
+		return "", false
+	}
+	for _, line := range lines {
+		if taskID, ok := strings.CutPrefix(strings.TrimSpace(line), "task_id:"); ok {
+			if taskID = strings.TrimSpace(taskID); taskID != "" {
+				return taskID, true
+			}
+		}
+	}
+	return "", false
+}
+
+// relayRustLines splits text as Rust's str::lines does: on "\n", dropping one
+// trailing "\r" from each line and the empty piece after a final newline.
+func relayRustLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 func kimiAgentDescription(title *string, rawInput json.RawMessage, taskID *string) string {
-	panic("unported: mj-worker/src/relay/background.rs kimi_agent_description")
+	if len(rawInput) > 0 {
+		var input map[string]any
+		if json.Unmarshal(rawInput, &input) == nil {
+			if description, ok := input["description"].(string); ok && strings.TrimSpace(description) != "" {
+				return description
+			}
+		}
+	}
+	if title != nil {
+		return *title
+	}
+	if taskID != nil {
+		return *taskID
+	}
+	return "Kimi background agent"
 }
 
 // SetBackgroundWorkPolicy chooses where commands the agent left running are
@@ -184,7 +246,49 @@ func (r *DurableRelay) nativeAgentCount() int {
 // detached is listed mid-turn. That terminal then represents the job, and
 // the Kimi task entry behind it is left out.
 func (r *DurableRelay) backgroundCommands() []core.BackgroundCommand {
-	panic("unported: mj-worker/src/relay/background.rs background_commands")
+	turnInFlight := r.turnInProgress()
+	detachedTerminals := r.detachedAgentTerminals()
+	commands := []core.BackgroundCommand{}
+	for _, id := range slices.Sorted(maps.Keys(r.activeAgentTerminals)) {
+		terminal := r.activeAgentTerminals[id]
+		if _, detached := detachedTerminals[terminal.TerminalID]; turnInFlight && !detached {
+			continue
+		}
+		commands = append(commands, core.BackgroundCommand{
+			ID:          backgroundTaskID("terminal", terminal.TerminalID),
+			StartedAtMs: terminal.StartedAtMs,
+			Command:     terminal.Command,
+			CanStop:     true,
+		})
+	}
+	if r.backgroundWork == BackgroundWorkPolicyAirTasks {
+		for _, key := range slices.Sorted(maps.Keys(r.airTasks)) {
+			if command := r.airTasks[key].command(); command != nil {
+				commands = append(commands, *command)
+			}
+		}
+	}
+	if r.backgroundWork == BackgroundWorkPolicyKimiTasks {
+		for _, id := range slices.Sorted(maps.Keys(r.kimiBackgroundTasks)) {
+			entry := r.kimiBackgroundTasks[id]
+			if _, bound := r.boundAgentTerminal(entry.parentToolCallID); !bound {
+				commands = append(commands, entry.command)
+			}
+		}
+		for _, toolCallID := range slices.Sorted(maps.Keys(r.kimiProvisionalTasks)) {
+			id := toolCallID
+			if _, bound := r.boundAgentTerminal(&id); !bound {
+				commands = append(commands, r.kimiProvisionalTasks[toolCallID].command)
+			}
+		}
+	}
+	slices.SortStableFunc(commands, func(left, right core.BackgroundCommand) int {
+		if order := cmp.Compare(left.StartedAtMs, right.StartedAtMs); order != 0 {
+			return order
+		}
+		return strings.Compare(left.Command, right.Command)
+	})
+	return commands
 }
 
 // boundAgentTerminal is the live hosted terminal an ACP launcher tool call
@@ -207,20 +311,157 @@ func (r *DurableRelay) boundAgentTerminal(toolCallID *string) (string, bool) {
 // which stay listed mid-turn. Only Kimi reports this; every other policy
 // yields an empty set.
 func (r *DurableRelay) detachedAgentTerminals() map[string]struct{} {
-	panic("unported: mj-worker/src/relay/background.rs detached_agent_terminals")
+	detached := map[string]struct{}{}
+	if r.backgroundWork != BackgroundWorkPolicyKimiTasks {
+		return detached
+	}
+	for _, entry := range r.kimiBackgroundTasks {
+		if terminal, bound := r.boundAgentTerminal(entry.parentToolCallID); bound {
+			detached[terminal] = struct{}{}
+		}
+	}
+	for toolCallID := range r.kimiProvisionalTasks {
+		id := toolCallID
+		if terminal, bound := r.boundAgentTerminal(&id); bound {
+			detached[terminal] = struct{}{}
+		}
+	}
+	return detached
 }
 
 // airUpdateSettlesTurn is whether update is the terminal edge of the task
 // that owns the open harness turn, which ends that turn (see
 // AirTaskChanged).
 func (r *DurableRelay) airUpdateSettlesTurn(sessionID string, update core.AirTaskUpdate) bool {
-	panic("unported: mj-worker/src/relay/background.rs air_update_settles_turn")
+	finished, ok := update.(core.AirTaskUpdateFinished)
+	if !ok {
+		return false
+	}
+	if r.backgroundWork != BackgroundWorkPolicyAirTasks ||
+		r.snapshot.Execution == core.RelayExecutionStateClosing ||
+		r.snapshot.Execution == core.RelayExecutionStateClosed {
+		return false
+	}
+	entry, ok := r.airTasks[airTaskKey(sessionID, finished.TaskID)]
+	if !ok {
+		return false
+	}
+	ordinal, ok := entry.turnOrdinal()
+	return ok && r.snapshot.ActivePrompt == nil &&
+		r.snapshot.HarnessTurn != nil && r.snapshot.HarnessTurn.FirstOrdinal == ordinal
 }
 
 // AirTaskChanged applies AIR lifecycle changes at the single owner of live
 // background work.
 func (r *DurableRelay) AirTaskChanged(sessionID string, update core.AirTaskUpdate) error {
-	panic("unported: mj-worker/src/relay/background.rs air_task_changed")
+	if r.backgroundWork != BackgroundWorkPolicyAirTasks ||
+		r.snapshot.Execution == core.RelayExecutionStateClosing ||
+		r.snapshot.Execution == core.RelayExecutionStateClosed {
+		return nil
+	}
+	var taskID string
+	switch update := update.(type) {
+	case core.AirTaskUpdateTurnSpawned:
+		taskID = update.TaskID
+	case core.AirTaskUpdateSpawned:
+		taskID = update.TaskID
+	case core.AirTaskUpdateChanged:
+		taskID = update.TaskID
+	case core.AirTaskUpdateFinished:
+		taskID = update.TaskID
+	}
+	key := airTaskKey(sessionID, taskID)
+	if entry, ok := r.airTasks[key]; ok &&
+		(entry.state.Kind == AirTaskStateKindTurn ||
+			entry.state.Kind == AirTaskStateKindHeldTurn ||
+			entry.state.Kind == AirTaskStateKindHeldTurnEnded) {
+		if finished, ok := update.(core.AirTaskUpdateFinished); ok {
+			var ordinal *uint64
+			if entry.state.Kind == AirTaskStateKindTurn {
+				ordinal = entry.state.TurnOrdinal
+				entry.state.TurnOrdinal = nil
+			} else {
+				entry.state = AirTaskState{Kind: AirTaskStateKindHeldTurnEnded}
+			}
+			// The pinned bridge accounts for trailing idles (#1455). The task
+			// identity owns completion, including after output.
+			if ordinal != nil && r.snapshot.ActivePrompt == nil &&
+				r.snapshot.HarnessTurn != nil && r.snapshot.HarnessTurn.FirstOrdinal == *ordinal {
+				stopReason := "cancelled"
+				switch {
+				case finished.Failed:
+					stopReason = promptErrorStopReason
+				case finished.Settled:
+					stopReason = "end_turn"
+				}
+				origin := "autonomous_task_ended"
+				if err := r.settleHarnessTurn(&origin, stopReason); err != nil {
+					return err
+				}
+			}
+		}
+		return r.persistActivityTransition()
+	}
+	switch update := update.(type) {
+	case core.AirTaskUpdateTurnSpawned:
+		liveRoot := !update.Replayed &&
+			r.harnessTurns == HarnessTurnPolicyClaudeAdapter &&
+			r.snapshot.NativeSessionID != nil && *r.snapshot.NativeSessionID == sessionID
+		var state AirTaskState
+		if liveRoot && r.snapshot.ActivePrompt != nil {
+			state = AirTaskState{Kind: AirTaskStateKindHeldTurn}
+		} else {
+			if liveRoot {
+				if err := r.openHarnessTurnIfAllowed(); err != nil {
+					return err
+				}
+			}
+			state = AirTaskState{Kind: AirTaskStateKindTurn}
+			if liveRoot && r.snapshot.HarnessTurn != nil {
+				first := r.snapshot.HarnessTurn.FirstOrdinal
+				state.TurnOrdinal = &first
+			}
+		}
+		r.airTasks[key] = &AirTaskEntry{sessionID: sessionID, taskID: update.TaskID, state: state}
+	case core.AirTaskUpdateSpawned:
+		startedAtMs := core.EpochMillis()
+		if entry, ok := r.airTasks[key]; ok {
+			if command := entry.command(); command != nil {
+				startedAtMs = command.StartedAtMs
+			}
+		}
+		r.airTasks[key] = &AirTaskEntry{
+			sessionID: sessionID,
+			taskID:    update.TaskID,
+			state: AirTaskState{
+				Kind: AirTaskStateKindBackground,
+				Background: core.BackgroundCommand{
+					ID:          backgroundTaskID("air", key),
+					StartedAtMs: startedAtMs,
+					Command:     update.Description,
+					CanStop:     update.CanStop,
+				},
+			},
+		}
+	case core.AirTaskUpdateChanged:
+		if entry, ok := r.airTasks[key]; ok && entry.state.Kind == AirTaskStateKindBackground {
+			if update.Description != nil {
+				entry.state.Background.Command = *update.Description
+			}
+			if update.CanStop != nil {
+				entry.state.Background.CanStop = *update.CanStop
+			}
+		}
+	case core.AirTaskUpdateFinished:
+		_, removed := r.airTasks[key]
+		delete(r.airTasks, key)
+		if removed && update.Settled &&
+			r.harnessTurns == HarnessTurnPolicyClaudeAdapter &&
+			r.snapshot.NativeAgentReplay == nil {
+			r.noteTaskSettled()
+		}
+	}
+	return r.persistActivityTransition()
 }
 
 func (r *DurableRelay) hasHeldClaudeTurn() bool {
@@ -232,16 +473,128 @@ func (r *DurableRelay) hasHeldClaudeTurn() bool {
 	return false
 }
 
+// promoteHeldClaudeTurn restores adapter order before queue promotion, under
+// the relay's owner lock.
 func (r *DurableRelay) promoteHeldClaudeTurn() error {
-	panic("unported: mj-worker/src/relay/background.rs promote_held_claude_turn")
+	if r.snapshot.ActivePrompt != nil {
+		return nil
+	}
+	for _, entry := range r.airTasks {
+		if entry.state.Kind == AirTaskStateKindHeldTurnEnded {
+			entry.state = AirTaskState{Kind: AirTaskStateKindTurn}
+		}
+	}
+	keys := slices.Sorted(maps.Keys(r.airTasks))
+	index := slices.IndexFunc(keys, func(key string) bool {
+		return r.airTasks[key].state.Kind == AirTaskStateKindHeldTurn
+	})
+	if index < 0 {
+		return nil
+	}
+	key := keys[index]
+	if err := r.openHarnessTurnIfAllowed(); err != nil {
+		return err
+	}
+	if turn := r.snapshot.HarnessTurn; turn != nil {
+		entry, ok := r.airTasks[key]
+		if !ok {
+			panic("held task exists")
+		}
+		first := turn.FirstOrdinal
+		entry.state = AirTaskState{Kind: AirTaskStateKindTurn, TurnOrdinal: &first}
+	}
+	return nil
 }
 
+// KimiNativeAgentsChanged replaces Kimi's native task level and reconciles
+// ACP launch or query evidence against task and launcher identities
+// retained by the wire.
 func (r *DurableRelay) KimiNativeAgentsChanged(agents map[string]KimiNativeAgentEntry) error {
-	panic("unported: mj-worker/src/relay/background.rs kimi_native_agents_changed")
+	var missing []string
+	for _, id := range slices.Sorted(maps.Keys(r.snapshot.NativeAgents)) {
+		if _, listed := agents[id]; !listed && r.snapshot.NativeAgents[id].State == core.NativeAgentStateRunning {
+			missing = append(missing, id)
+		}
+	}
+	for _, sessionID := range missing {
+		if _, err := r.RecordObservation(core.RelayObservationNativeAgent{Event: core.NativeAgentEventState{
+			SessionID: sessionID,
+			State:     core.NativeAgentStateDisconnected,
+		}}); err != nil {
+			return err
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(agents)) {
+		entry := agents[id]
+		if _, known := r.snapshot.NativeAgents[id]; !known {
+			if _, err := r.RecordObservation(core.RelayObservationNativeAgent{Event: core.NativeAgentEventSpawned{
+				SessionID: id,
+				Name:      entry.Task.Description,
+				Task:      entry.Task.Description,
+			}}); err != nil {
+				return err
+			}
+		}
+		if agent, known := r.snapshot.NativeAgents[id]; known && agent.State != entry.State {
+			if _, err := r.RecordObservation(core.RelayObservationNativeAgent{Event: core.NativeAgentEventState{
+				SessionID: id,
+				State:     entry.State,
+			}}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *DurableRelay) KimiBackgroundTasksChanged(tasks []KimiBackgroundTask, observedToolCallIDs, observedTaskIDs map[string]struct{}) error {
-	panic("unported: mj-worker/src/relay/background.rs kimi_background_tasks_changed")
+	if r.backgroundWork != BackgroundWorkPolicyKimiTasks ||
+		r.snapshot.Execution == core.RelayExecutionStateClosing ||
+		r.snapshot.Execution == core.RelayExecutionStateClosed {
+		return nil
+	}
+	if observedTaskIDs == nil {
+		observedTaskIDs = map[string]struct{}{}
+	}
+	if observedToolCallIDs == nil {
+		observedToolCallIDs = map[string]struct{}{}
+	}
+	r.kimiObservedTaskIDs = observedTaskIDs
+	r.kimiObservedToolIDs = observedToolCallIDs
+	for toolCallID, task := range r.kimiProvisionalTasks {
+		_, observedTool := r.kimiObservedToolIDs[kimiNativeToolCallID(toolCallID)]
+		observedTask := false
+		if task.nativeTaskID != nil {
+			_, observedTask = r.kimiObservedTaskIDs[*task.nativeTaskID]
+		}
+		if observedTool || observedTask {
+			delete(r.kimiProvisionalTasks, toolCallID)
+		}
+	}
+	confirmed := map[string]KimiTaskEntry{}
+	for _, task := range tasks {
+		if task.IsAgent {
+			continue
+		}
+		var parent *string
+		if task.ParentToolCallID != nil {
+			id := *task.ParentToolCallID
+			parent = &id
+		}
+		confirmed[task.TaskID] = KimiTaskEntry{
+			command: core.BackgroundCommand{
+				ID:          backgroundTaskID("kimi", task.TaskID),
+				StartedAtMs: task.StartedAtMs,
+				Command:     task.Description,
+				CanStop:     false,
+			},
+			parentToolCallID: parent,
+		}
+	}
+	r.kimiBackgroundTasks = confirmed
+	known := true
+	r.backgroundWorkKnown = &known
+	return r.persistActivityTransition()
 }
 
 func (r *DurableRelay) KimiBackgroundTasksUnavailable() error {
@@ -262,8 +615,46 @@ func (r *DurableRelay) noteTaskSettled() {
 	}
 }
 
+// BackgroundTaskStopTarget resolves a public task id only while it still
+// names stoppable background work in this process.
 func (r *DurableRelay) BackgroundTaskStopTarget(requestedID string) (core.BackgroundTaskStopTarget, error) {
-	panic("unported: mj-worker/src/relay/background.rs background_task_stop_target")
+	if child, ok := strings.CutPrefix(requestedID, "native-agent:"); ok {
+		agent, known := r.snapshot.NativeAgents[child]
+		if !known || agent.State != core.NativeAgentStateRunning || !agent.Capabilities.Cancel {
+			return nil, errors.New("native agent is no longer cancellable")
+		}
+		return core.BackgroundTaskStopTargetNativeAgent{SessionID: agent.SessionID}, nil
+	}
+	commands := r.backgroundCommands()
+	index := slices.IndexFunc(commands, func(command core.BackgroundCommand) bool { return command.ID == requestedID })
+	if index < 0 {
+		return nil, errors.New("background task is no longer running")
+	}
+	if !commands[index].CanStop {
+		return nil, errors.New("this background task cannot be stopped by its agent")
+	}
+	for _, terminalID := range slices.Sorted(maps.Keys(r.activeAgentTerminals)) {
+		if backgroundTaskID("terminal", terminalID) == requestedID {
+			return core.BackgroundTaskStopTargetHostedTerminal{TerminalID: terminalID}, nil
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(r.airTasks)) {
+		entry := r.airTasks[key]
+		command := entry.command()
+		if command == nil || command.ID != requestedID {
+			continue
+		}
+		if r.harnessTurns == HarnessTurnPolicyClaudeAdapter {
+			pending, ok := r.claudePendingStops[entry.sessionID]
+			if !ok {
+				pending = map[string]struct{}{}
+				r.claudePendingStops[entry.sessionID] = pending
+			}
+			pending[key] = struct{}{}
+		}
+		return core.BackgroundTaskStopTargetAirAsyncTask{SessionID: entry.sessionID, TaskID: entry.taskID}, nil
+	}
+	return nil, errors.New("background task is no longer running")
 }
 
 // ClaudeStopNotSent forgets a stop this process requested but could not
@@ -292,7 +683,22 @@ func (r *DurableRelay) isClaudeStopAcknowledgement(update *acpschema.SessionUpda
 }
 
 func (r *DurableRelay) consumeClaudeStopAcknowledgement(sessionID *string, update *acpschema.SessionUpdate) bool {
-	panic("unported: mj-worker/src/relay/background.rs consume_claude_stop_acknowledgement")
+	if !r.isClaudeStopAcknowledgementFor(sessionID, update) || sessionID == nil {
+		return false
+	}
+	pending, ok := r.claudePendingStops[*sessionID]
+	if !ok {
+		return false
+	}
+	// BTreeSet::pop_first: the smallest pending stop answers first.
+	consumed := len(pending) > 0
+	if consumed {
+		delete(pending, slices.Min(slices.Collect(maps.Keys(pending))))
+	}
+	if len(pending) == 0 {
+		delete(r.claudePendingStops, *sessionID)
+	}
+	return consumed
 }
 
 func (r *DurableRelay) AgentTerminalStarted(terminal core.ActiveAgentTerminal) error {
@@ -324,7 +730,25 @@ func (r *DurableRelay) admitAgentTerminal(terminal core.ActiveAgentTerminal) err
 }
 
 func (r *DurableRelay) agentTerminalStartFailed(id string) error {
-	panic("unported: mj-worker/src/relay/background.rs agent_terminal_start_failed")
+	failed := acpschema.ToolCallStatusFailed
+	_, settled := r.RecordSessionUpdate(acpschema.SessionUpdate{
+		Kind: acpschema.SessionUpdateKindToolCallUpdate,
+		ToolCallUpdate: &acpschema.ToolCallUpdate{
+			ToolCallID: acpschema.ToolCallId(core.FallbackTerminalToolCallID(id)),
+			Status:     &failed,
+		},
+	})
+	// A failed journal write must not retain a process that never existed.
+	released := r.AgentTerminalClosed(id)
+	r.serviceLiveBaselines()
+	switch {
+	case settled != nil && released != nil:
+		return relayWithContext(settled, fmt.Sprintf("withdrawing failed terminal: %v", released))
+	case settled != nil:
+		return settled
+	default:
+		return released
+	}
 }
 
 func (r *DurableRelay) AgentTerminalClosed(terminalID string) error {
@@ -338,7 +762,18 @@ func (r *DurableRelay) AgentTerminalClosed(terminalID string) error {
 // connection. IDs already carry the registry's connection identity. An old
 // FIFO retirement must preserve a replacement's synchronous reservations.
 func (r *DurableRelay) retireAgentTerminalConnection(connectionID string) error {
-	panic("unported: mj-worker/src/relay/background.rs retire_agent_terminal_connection")
+	for id := range r.activeAgentTerminals {
+		if terminalRegistryOwnsTerminal(connectionID, id) {
+			r.foregroundTools.Close(core.FallbackTerminalToolCallID(id))
+			delete(r.activeAgentTerminals, id)
+		}
+	}
+	for id := range r.closedAgentTerminals {
+		if terminalRegistryOwnsTerminal(connectionID, id) {
+			delete(r.closedAgentTerminals, id)
+		}
+	}
+	return r.persistActivityTransition()
 }
 
 func (r *DurableRelay) retireHarnessProcessState() error {
@@ -365,10 +800,123 @@ func (r *DurableRelay) forgetHarnessProcesses() {
 	}
 }
 
+// trackAgentTerminalToolCall remembers which hosted terminal a tool call
+// embedded. Kimi launches a detached shell through a terminal of ours and
+// reports the terminal id on the launcher card, which is the only link
+// between the ACP card and the process its native journal later names.
 func (r *DurableRelay) trackAgentTerminalToolCall(update *acpschema.SessionUpdate) {
-	panic("unported: mj-worker/src/relay/background.rs track_agent_terminal_tool_call")
+	var toolCallID string
+	var content []acpschema.ToolCallContent
+	switch {
+	case update.Kind == acpschema.SessionUpdateKindToolCall && update.ToolCall != nil:
+		toolCallID, content = string(update.ToolCall.ToolCallID), update.ToolCall.Content
+	case update.Kind == acpschema.SessionUpdateKindToolCallUpdate && update.ToolCallUpdate != nil:
+		toolCallID, content = string(update.ToolCallUpdate.ToolCallID), update.ToolCallUpdate.Content
+	default:
+		return
+	}
+	for _, item := range content {
+		if item.Kind == acpschema.ToolCallContentKindTerminal && item.Terminal != nil {
+			r.agentTerminalToolCalls[kimiNativeToolCallID(toolCallID)] = string(item.Terminal.TerminalID)
+		}
+	}
 }
 
+// trackKimiBackgroundAgent keeps positive ACP evidence until Kimi's native
+// journal proves which detached task the launcher created. Kimi completes
+// the launcher card immediately, so a completed status is not a
+// child-liveness boundary.
 func (r *DurableRelay) trackKimiBackgroundAgent(update *acpschema.SessionUpdate) {
-	panic("unported: mj-worker/src/relay/background.rs track_kimi_background_agent")
+	var (
+		toolCallID string
+		title      *string
+		status     *acpschema.ToolCallStatus
+		rawInput   json.RawMessage
+		rawOutput  json.RawMessage
+	)
+	switch {
+	case update.Kind == acpschema.SessionUpdateKindToolCall && update.ToolCall != nil:
+		call := update.ToolCall
+		callTitle := call.Title
+		// A tool call without a status is pending, its ACP default.
+		callStatus := acpschema.ToolCallStatusPending
+		if call.Status != nil {
+			callStatus = *call.Status
+		}
+		toolCallID, title, status = string(call.ToolCallID), &callTitle, &callStatus
+		rawInput, rawOutput = call.RawInput, call.RawOutput
+	case update.Kind == acpschema.SessionUpdateKindToolCallUpdate && update.ToolCallUpdate != nil:
+		call := update.ToolCallUpdate
+		toolCallID, title, status = string(call.ToolCallID), call.Title, call.Status
+		rawInput, rawOutput = call.RawInput, call.RawOutput
+	default:
+		return
+	}
+	if status != nil && *status == acpschema.ToolCallStatusFailed {
+		delete(r.kimiProvisionalTasks, toolCallID)
+		return
+	}
+	taskID, hasTaskID := kimiRunningTaskID(rawOutput)
+	explicitBackground := false
+	if len(rawInput) > 0 {
+		var input map[string]any
+		if json.Unmarshal(rawInput, &input) == nil {
+			background, ok := input["run_in_background"].(bool)
+			explicitBackground = ok && background
+		}
+	}
+	backgroundTitle := title != nil && strings.HasPrefix(*title, "Launching background ")
+	if !explicitBackground && !backgroundTitle && !hasTaskID {
+		return
+	}
+	_, observedTool := r.kimiObservedToolIDs[kimiNativeToolCallID(toolCallID)]
+	_, observedTask := r.kimiObservedTaskIDs[taskID]
+	if observedTool || (hasTaskID && observedTask) {
+		delete(r.kimiProvisionalTasks, toolCallID)
+		return
+	}
+	// Several TaskOutput/WaitFor calls may observe the same native task. Keep
+	// one provisional entry until its lifecycle stream catches up.
+	startedAtMs := core.EpochMillis()
+	if step := r.stepClock.StartedAtMs(); step != nil {
+		startedAtMs = *step
+	}
+	if hasTaskID {
+		for existingCall, task := range r.kimiProvisionalTasks {
+			if task.nativeTaskID != nil && *task.nativeTaskID == taskID {
+				startedAtMs = min(startedAtMs, task.command.StartedAtMs)
+				if existingCall != toolCallID {
+					delete(r.kimiProvisionalTasks, existingCall)
+				}
+			}
+		}
+	}
+	var nativeTaskID *string
+	if hasTaskID {
+		nativeTaskID = &taskID
+	}
+	command := kimiAgentDescription(title, rawInput, nativeTaskID)
+	if task, ok := r.kimiProvisionalTasks[toolCallID]; ok {
+		task.command.Command = command
+		if hasTaskID {
+			id := taskID
+			task.nativeTaskID = &id
+		}
+		r.kimiProvisionalTasks[toolCallID] = task
+		return
+	}
+	var provisionalTaskID *string
+	if hasTaskID {
+		id := taskID
+		provisionalTaskID = &id
+	}
+	r.kimiProvisionalTasks[toolCallID] = KimiProvisionalTask{
+		command: core.BackgroundCommand{
+			ID:          backgroundTaskID("kimi-provisional", toolCallID),
+			StartedAtMs: startedAtMs,
+			Command:     command,
+			CanStop:     false,
+		},
+		nativeTaskID: provisionalTaskID,
+	}
 }

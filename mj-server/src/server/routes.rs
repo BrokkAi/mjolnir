@@ -131,6 +131,10 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/snapshot", get(snapshot))
         .route("/api/sessions/{session_id}/row", get(session_row))
         .route(
+            "/api/sessions/{session_id}/items/{stable_id}/detail",
+            get(api::tool_call_detail),
+        )
+        .route(
             "/api/sessions/{session_id}/notification-message",
             get(notification_message),
         )

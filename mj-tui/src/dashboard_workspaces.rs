@@ -61,6 +61,21 @@ impl DashboardState {
         })
     }
 
+    pub(crate) fn subagent_workspace_chain(&self) -> Vec<ChildWorkspace> {
+        let mut chain = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut next = self.child_workspace.as_ref().cloned();
+        while let Some(workspace) = next {
+            if !seen.insert(workspace.parent_id.clone()) {
+                break;
+            }
+            next = self.child_workspace_for(&workspace.parent_id);
+            chain.push(workspace);
+        }
+        chain.reverse();
+        chain
+    }
+
     pub fn open_subagent_workspace(&mut self, parent_id: String) {
         self.open_child_workspace(parent_id, mj_core::subagent::SubagentKind::Worker);
     }
@@ -113,6 +128,14 @@ impl DashboardState {
         self.clamp_selections();
     }
 
+    pub(crate) fn default_sessions_state_filter_for(
+        scope: Option<&ChildWorkspace>,
+    ) -> Option<SessionStateFilter> {
+        scope
+            .filter(|workspace| workspace.kind == mj_core::subagent::SubagentKind::Worker)
+            .map(|_| SessionStateFilter::NotIdle)
+    }
+
     pub(crate) fn switch_child_scope(&mut self, next: Option<ChildWorkspace>) {
         if *self.child_workspace == next {
             return;
@@ -124,11 +147,10 @@ impl DashboardState {
             .sessions_filters_by_scope
             .remove(&next)
             .unwrap_or_else(|| {
-                next.filter(|workspace| workspace.kind == mj_core::subagent::SubagentKind::Worker)
-                    .map(|_| SessionsFilter {
-                        state: Some(SessionStateFilter::NotIdle),
-                        ..Default::default()
-                    })
+                Self::default_sessions_state_filter_for(next.as_ref()).map(|state| SessionsFilter {
+                    state: Some(state),
+                    ..Default::default()
+                })
             });
     }
 

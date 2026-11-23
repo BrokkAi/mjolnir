@@ -93,7 +93,7 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
 
     edit_field(&mut dialog, "subagents", "max_concurrent", "");
     apply_focused(&mut dialog, true).unwrap();
-    assert_eq!(summary(&dialog, "subagents"), "Up to 6 at once");
+    assert_eq!(summary(&dialog, "subagents"), "Up to 8 at once");
 }
 
 /// A long save error is shown whole: the notice grows to fit it instead of

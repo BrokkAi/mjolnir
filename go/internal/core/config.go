@@ -93,6 +93,49 @@ func isTrue(value bool) bool { return value }
 // isFalse is shared by every module of this package that skips a false flag.
 func isFalse(value bool) bool { return !value }
 
+// GuardianConfig is the global settings for Mjolnir's permission guardian.
+// (Ported from the Rust source after this package's base, for mj-client's
+// settings.)
+type GuardianConfig struct {
+	// Enabled is whether Mjolnir's guardian reviews tool permission requests
+	// that reach Mjolnir under configured approvals across all profiles.
+	Enabled bool `json:"enabled" toml:"enabled"`
+	// LocalClassifier is whether the daemon runs the local zero-shot Wolf
+	// Defender Jev ONNX approve-only Stage-1 classifier before escalating to
+	// Stage 2.
+	LocalClassifier bool `json:"local_classifier" toml:"local_classifier"`
+	// UseGPU is whether the local Wolf classifier may use a GPU execution
+	// provider when available; false keeps Stage-1 inference on CPU.
+	UseGPU bool `json:"use_gpu" toml:"use_gpu"`
+}
+
+// DefaultGuardianConfig is GuardianConfig's Default.
+func DefaultGuardianConfig() GuardianConfig {
+	return GuardianConfig{Enabled: true, LocalClassifier: true, UseGPU: true}
+}
+
+func (g GuardianConfig) IsDefault() bool { return g == DefaultGuardianConfig() }
+
+// MarshalJSON skips each switch while it is on (skip_serializing_if is_true).
+func (g GuardianConfig) MarshalJSON() ([]byte, error) {
+	var object serdeObject
+	object.fieldUnless(isTrue(g.Enabled), "enabled", g.Enabled)
+	object.fieldUnless(isTrue(g.LocalClassifier), "local_classifier", g.LocalClassifier)
+	object.fieldUnless(isTrue(g.UseGPU), "use_gpu", g.UseGPU)
+	return object.finish()
+}
+
+// UnmarshalJSON defaults every switch to on (serde default = default_true).
+func (g *GuardianConfig) UnmarshalJSON(data []byte) error {
+	type plain GuardianConfig
+	value := plain(DefaultGuardianConfig())
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*g = GuardianConfig(value)
+	return nil
+}
+
 type PhoneConfig struct {
 	Enabled         bool    `json:"enabled" toml:"enabled"`
 	Bind            string  `json:"bind" toml:"bind"`
@@ -654,100 +697,149 @@ func (r ReviewConfig) validate(profiles map[string]HarnessProfile) error {
 	return nil
 }
 
-func defaultSubagentLimit() int { return 6 }
+func defaultSubagentLimit() int { return 8 }
 
 func isDefaultSubagentLimit(value int) bool { return value == defaultSubagentLimit() }
 
 // SubagentConfig is the global policy for Mjolnir-managed child agents.
+// Sessions choose Native or Mjolnir; task model and effort choices are
+// global lists of equal-peer `(model, effort)` pairs.
 //
-// Sessions choose Native or Mjolnir; task model and effort choices are global,
-// except that a target whose harness runs without approvals (a container, or
-// `permissions = "yolo"`) can have its own choices.
+// (Ported from the Rust source after this package's base: the categories
+// became lists and the YOLO split was dropped.)
 type SubagentConfig struct {
-	Straightforward *SubagentChoice `json:"straightforward,omitempty" toml:"straightforward,omitempty"`
-	Subtle          *SubagentChoice `json:"subtle,omitempty" toml:"subtle,omitempty"`
+	// Primary is the choices for top-level primary auto-launch and
+	// orchestrators.
+	Primary         []SubagentChoice `json:"primary,omitempty" toml:"primary,omitempty"`
+	Straightforward []SubagentChoice `json:"straightforward,omitempty" toml:"straightforward,omitempty"`
+	Subtle          []SubagentChoice `json:"subtle,omitempty" toml:"subtle,omitempty"`
 	// Oracle is the read-only advisor behind `ask_oracle`. Optional, and
-	// independent of the other two.
-	Oracle *SubagentChoice `json:"oracle,omitempty" toml:"oracle,omitempty"`
-	// Enabled is a deprecated global switch retained for read compatibility
-	// with configurations written before the per-session choice existed. It
-	// is ignored and omitted from newly written configurations.
-	Enabled       bool `json:"enabled" toml:"enabled"`
-	MaxConcurrent int  `json:"max_concurrent" toml:"max_concurrent"`
-	// LegacyEligibleProfiles is the old allowlist, accepted for
-	// compatibility and dropped when saved.
-	LegacyEligibleProfiles map[string]bool `json:"eligible_profiles" toml:"eligible_profiles"`
-	// Yolo holds the choices for targets whose permissions are `yolo`.
-	// Ignored while UseSameOnAllTargets is true, but retained so re-checking
-	// and unchecking the box restores them.
-	Yolo SubagentChoices `json:"yolo" toml:"yolo"`
-	// UseSameOnAllTargets is whether every target uses the choices above.
-	// MaxConcurrent is always shared, whichever set a target uses.
-	UseSameOnAllTargets bool `json:"use_same_on_all_targets" toml:"use_same_on_all_targets"`
+	// independent of the other categories.
+	Oracle        []SubagentChoice `json:"oracle,omitempty" toml:"oracle,omitempty"`
+	MaxConcurrent int              `json:"max_concurrent" toml:"max_concurrent"`
 }
 
 func (s SubagentConfig) MarshalJSON() ([]byte, error) {
 	var object serdeObject
-	object.fieldUnless(s.Straightforward == nil, "straightforward", s.Straightforward)
-	object.fieldUnless(s.Subtle == nil, "subtle", s.Subtle)
-	object.fieldUnless(s.Oracle == nil, "oracle", s.Oracle)
+	object.fieldUnless(len(s.Primary) == 0, "primary", s.Primary)
+	object.fieldUnless(len(s.Straightforward) == 0, "straightforward", s.Straightforward)
+	object.fieldUnless(len(s.Subtle) == 0, "subtle", s.Subtle)
+	object.fieldUnless(len(s.Oracle) == 0, "oracle", s.Oracle)
 	object.fieldUnless(isDefaultSubagentLimit(s.MaxConcurrent), "max_concurrent", s.MaxConcurrent)
-	object.fieldUnless(s.Yolo.isDefault(), "yolo", s.Yolo)
-	object.fieldUnless(isTrue(s.UseSameOnAllTargets), "use_same_on_all_targets", s.UseSameOnAllTargets)
 	return object.finish()
 }
 
+// UnmarshalJSON reads serde's SubagentConfigInput: each category is one
+// choice or a list of them, and the retired keys (`enabled`,
+// `eligible_profiles`, `use_same_on_all_targets`, `yolo`) are accepted and
+// dropped so that old files still load.
 func (s *SubagentConfig) UnmarshalJSON(data []byte) error {
-	type plain SubagentConfig
-	value := plain(DefaultSubagentConfig())
-	if err := json.Unmarshal(data, &value); err != nil {
+	var input subagentConfigInput
+	if err := json.Unmarshal(data, &input); err != nil {
 		return err
 	}
-	*s = SubagentConfig(value)
+	config := DefaultSubagentConfig()
+	config.Primary = input.Primary.choices
+	config.Straightforward = input.Straightforward.choices
+	config.Subtle = input.Subtle.choices
+	config.Oracle = input.Oracle.choices
+	if input.MaxConcurrent != nil {
+		config.MaxConcurrent = *input.MaxConcurrent
+	}
+	*s = config
 	return nil
 }
 
-// SubagentChoices is the task choices one target mode uses.
-type SubagentChoices struct {
-	Straightforward *SubagentChoice `json:"straightforward,omitempty" toml:"straightforward,omitempty"`
-	Subtle          *SubagentChoice `json:"subtle,omitempty" toml:"subtle,omitempty"`
-	Oracle          *SubagentChoice `json:"oracle,omitempty" toml:"oracle,omitempty"`
+// retiredKeys is the keys this build reads only so that old files load. A
+// save removes them by name: they are absent from both serializations it
+// compares, as a default the user wrote out is too. "*" matches any key.
+var retiredKeys = [][]string{
+	{"show_stopped_sessions"},
+	{"continuation"},
+	{"mailbox"},
+	{"build_cache"},
+	{"startup"},
+	{"sessionwiki", "enabled"},
+	{"subagents", "enabled"},
+	{"subagents", "eligible_profiles"},
+	{"subagents", "use_same_on_all_targets"},
+	{"subagents", "yolo"},
+	{"quota", "runtime"},
+	{"profiles", "*", "muse_auto_review"},
+	{"profiles", "*", "subagents"},
 }
 
-func (s SubagentChoices) Choice(taskType SubagentTaskType) *SubagentChoice {
-	return subagentChoiceFor(taskType, s.Straightforward, s.Subtle, s.Oracle)
+// subagentConfigInput is serde's SubagentConfigInput, the shape
+// SubagentConfig is read through (`#[serde(from = ...)]`).
+type subagentConfigInput struct {
+	Primary         oneOrManyChoices `json:"primary"`
+	Straightforward oneOrManyChoices `json:"straightforward"`
+	Subtle          oneOrManyChoices `json:"subtle"`
+	Oracle          oneOrManyChoices `json:"oracle"`
+	MaxConcurrent   *int             `json:"max_concurrent"`
+	// The rest are accepted only so that old files still load.
+	Enabled             *bool            `json:"enabled"`
+	EligibleProfiles    *map[string]bool `json:"eligible_profiles"`
+	UseSameOnAllTargets *bool            `json:"use_same_on_all_targets"`
+	Yolo                *json.RawMessage `json:"yolo"`
 }
 
-// subagentChoiceFor picks the choice for taskType from one set.
-func subagentChoiceFor(taskType SubagentTaskType, straightforward, subtle, oracle *SubagentChoice) *SubagentChoice {
-	switch taskType {
-	case SubagentTaskTypeSubtle:
-		return subtle
-	case SubagentTaskTypeOracle:
-		return oracle
+// oneOrManyChoices is serde's untagged OneOrManyChoices: one choice table, or
+// a list of them. Null or absent is none.
+type oneOrManyChoices struct {
+	choices []SubagentChoice
+}
+
+func (o *oneOrManyChoices) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if bytes.Equal(trimmed, []byte("null")) {
+		o.choices = nil
+		return nil
 	}
-	return straightforward
+	var one SubagentChoice
+	if err := json.Unmarshal(data, &one); err == nil {
+		o.choices = []SubagentChoice{one}
+		return nil
+	}
+	var many []SubagentChoice
+	if err := json.Unmarshal(data, &many); err == nil {
+		o.choices = many
+		return nil
+	}
+	return errors.New("data did not match any variant of untagged enum OneOrManyChoices")
 }
 
-func (s SubagentChoices) isDefault() bool {
-	return s.Straightforward == nil && s.Subtle == nil && s.Oracle == nil
-}
-
-func (s SubagentChoices) validate(section string) error {
-	return validateSubagentChoices(section, s.Straightforward, s.Subtle, s.Oracle)
-}
-
-func validateSubagentChoices(section string, straightforward, subtle, oracle *SubagentChoice) error {
-	for _, task := range []struct {
-		name   string
-		choice *SubagentChoice
-	}{{"straightforward", straightforward}, {"subtle", subtle}, {"oracle", oracle}} {
-		if task.choice != nil && task.choice.Effort != nil && *task.choice.Effort == "adaptive" {
-			return fmt.Errorf("[%s.%s] adaptive effort is no longer supported", section, task.name)
+func validateSubagentCategory(task string, choices []SubagentChoice) error {
+	type pair struct {
+		model  string
+		effort string
+		has    bool
+	}
+	seenPairs := map[pair]bool{}
+	seenProviders := map[string]string{}
+	for _, choice := range choices {
+		if strings.TrimSpace(choice.Model) == "" {
+			return fmt.Errorf("[subagents.%s] model cannot be empty", task)
 		}
-	}
-	if subtle != nil && straightforward == nil {
-		return fmt.Errorf("[%s.subtle] requires [%s.straightforward]; configure straightforward alone or both", section, section)
+		if choice.Effort != nil && *choice.Effort == "adaptive" {
+			return fmt.Errorf("[subagents.%s] adaptive effort is no longer supported", task)
+		}
+		key := pair{model: NormalizeModel(strings.TrimSpace(choice.Model))}
+		if choice.Effort != nil {
+			key.effort, key.has = *choice.Effort, true
+		}
+		if seenPairs[key] {
+			return fmt.Errorf("[subagents.%s] duplicate model/effort entry (%s)", task, choice.Model)
+		}
+		seenPairs[key] = true
+		if provider := ModelProvider(choice.Model); provider != nil {
+			identity := fmt.Sprintf("%d/%s", QuotaProviderOrdinal(provider), provider.DisplayName())
+			if previous, ok := seenProviders[identity]; ok {
+				return fmt.Errorf("[subagents.%s] may configure at most one model per provider (both %s and %s belong to %s)",
+					task, previous, choice.Model, provider.DisplayName())
+			}
+			seenProviders[identity] = choice.Model
+		}
 	}
 	return nil
 }
@@ -788,75 +880,88 @@ func (s *SubagentChoice) UnmarshalJSON(data []byte) error {
 
 // DefaultSubagentConfig is SubagentConfig's Default.
 func DefaultSubagentConfig() SubagentConfig {
-	return SubagentConfig{MaxConcurrent: defaultSubagentLimit(), LegacyEligibleProfiles: map[string]bool{}, UseSameOnAllTargets: true}
+	return SubagentConfig{MaxConcurrent: defaultSubagentLimit()}
 }
 
-// Choice is the shared task choice, ignoring the YOLO split.
-func (s SubagentConfig) Choice(taskType SubagentTaskType) *SubagentChoice {
-	return subagentChoiceFor(taskType, s.Straightforward, s.Subtle, s.Oracle)
-}
+// PrimaryChoices is the choices configured for top-level primary
+// auto-launch and orchestrators.
+func (s SubagentConfig) PrimaryChoices() []SubagentChoice { return s.Primary }
 
-// ChoiceFor is the task choice a target with `yolo` permissions uses: its own
-// set when the split is enabled, else the shared set.
-func (s SubagentConfig) ChoiceFor(taskType SubagentTaskType, yolo bool) *SubagentChoice {
-	if yolo && !s.UseSameOnAllTargets {
-		return s.Yolo.Choice(taskType)
+// PrimaryConfigured is whether at least one primary choice is configured.
+func (s SubagentConfig) PrimaryConfigured() bool { return anyChoiceNamesAModel(s.Primary) }
+
+func anyChoiceNamesAModel(choices []SubagentChoice) bool {
+	for _, choice := range choices {
+		if strings.TrimSpace(choice.Model) != "" {
+			return true
+		}
 	}
-	return s.Choice(taskType)
+	return false
 }
 
-// EffectiveChoiceFor is a session's choice for taskType: its own override,
-// else the choice for this target mode.
-func (s SubagentConfig) EffectiveChoiceFor(policy SubagentPolicy, taskType SubagentTaskType, yolo bool) *SubagentChoice {
+// Choices is the configured choices for taskType.
+func (s SubagentConfig) Choices(taskType SubagentTaskType) []SubagentChoice {
+	switch taskType {
+	case SubagentTaskTypeSubtle:
+		return s.Subtle
+	case SubagentTaskTypeOracle:
+		return s.Oracle
+	}
+	return s.Straightforward
+}
+
+// EffectiveChoices is a session's effective choices for taskType: its own
+// override when set, else the global choices for that category.
+func (s SubagentConfig) EffectiveChoices(policy SubagentPolicy, taskType SubagentTaskType) []SubagentChoice {
 	if choice := policy.OverrideChoice(taskType); choice != nil {
-		return choice
+		return []SubagentChoice{*choice}
 	}
-	return s.ChoiceFor(taskType, yolo)
+	return s.Choices(taskType)
 }
 
-// OffersSubtleFor reports whether a parent with policy may spawn subtle
+// OffersSubtle reports whether a parent with policy may spawn subtle
 // children. Without a subtle choice, every child uses the straightforward
-// choice.
-func (s SubagentConfig) OffersSubtleFor(policy SubagentPolicy, yolo bool) bool {
-	return s.EffectiveChoiceFor(policy, SubagentTaskTypeSubtle, yolo) != nil
+// choices.
+func (s SubagentConfig) OffersSubtle(policy SubagentPolicy) bool {
+	return len(s.EffectiveChoices(policy, SubagentTaskTypeSubtle)) > 0
 }
 
-// OracleConfiguredFor reports whether sessions on this target mode can be
-// offered an oracle.
-func (s SubagentConfig) OracleConfiguredFor(yolo bool) bool {
-	choice := s.ChoiceFor(SubagentTaskTypeOracle, yolo)
-	return choice != nil && strings.TrimSpace(choice.Model) != ""
-}
+// OracleConfigured reports whether sessions can be offered an oracle.
+func (s SubagentConfig) OracleConfigured() bool { return anyChoiceNamesAModel(s.Oracle) }
 
-// IsConfiguredFor: straightforward is required; subtle is optional.
-func (s SubagentConfig) IsConfiguredFor(yolo bool) bool {
-	choice := s.ChoiceFor(SubagentTaskTypeStraightforward, yolo)
-	return choice != nil && strings.TrimSpace(choice.Model) != ""
-}
+// IsConfigured: straightforward is required; subtle is optional.
+func (s SubagentConfig) IsConfigured() bool { return anyChoiceNamesAModel(s.Straightforward) }
 
-// isDefault: the deprecated `enabled` key is never written, so a section
-// holding only that key is still a default section and stays out of the file.
 func (s SubagentConfig) isDefault() bool {
-	return s.MaxConcurrent == defaultSubagentLimit() && s.Straightforward == nil && s.Subtle == nil &&
-		s.Oracle == nil && s.Yolo.isDefault() && s.UseSameOnAllTargets
+	return s.MaxConcurrent == defaultSubagentLimit() && len(s.Primary) == 0 &&
+		len(s.Straightforward) == 0 && len(s.Subtle) == 0 && len(s.Oracle) == 0
 }
 
-func (s SubagentConfig) validate() error {
-	if err := validateSubagentChoices("subagents", s.Straightforward, s.Subtle, s.Oracle); err != nil {
-		return err
-	}
-	// Hidden choices are no-ops. They stay writable so re-checking the box
-	// never makes the configuration impossible to save.
-	if !s.UseSameOnAllTargets {
-		if err := s.Yolo.validate("subagents.yolo"); err != nil {
+// Validate checks every category's choices and the concurrency limit.
+func (s SubagentConfig) Validate() error {
+	for _, category := range []struct {
+		task    string
+		choices []SubagentChoice
+	}{
+		{"primary", s.Primary},
+		{"straightforward", s.Straightforward},
+		{"subtle", s.Subtle},
+		{"oracle", s.Oracle},
+	} {
+		if err := validateSubagentCategory(category.task, category.choices); err != nil {
 			return err
 		}
+	}
+	if len(s.Subtle) > 0 && len(s.Straightforward) == 0 {
+		return errors.New("[subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both")
 	}
 	if s.MaxConcurrent < 1 || s.MaxConcurrent > 64 {
 		return errors.New("[subagents] `max_concurrent` must be between 1 and 64")
 	}
 	return nil
 }
+
+func (s SubagentConfig) validate() error { return s.Validate() }
 
 // legacyBuildCacheConfig is the read-only legacy policy, folded into machine
 // settings when loading.
@@ -1027,21 +1132,21 @@ func sha256JSONHex(value any, what string) string {
 // ahead of a request; aggregating harnesses advertise hundreds of models.
 func (c Config) SelectedModels(id string) []string {
 	models := map[string]struct{}{}
-	add := func(choices ...*SubagentChoice) {
+	for _, choices := range [][]SubagentChoice{
+		c.Subagents.Primary, c.Subagents.Straightforward, c.Subagents.Subtle, c.Subagents.Oracle,
+	} {
 		for _, choice := range choices {
-			if choice != nil {
-				models[choice.Model] = struct{}{}
-			}
+			models[choice.Model] = struct{}{}
 		}
-	}
-	add(c.Subagents.Straightforward, c.Subagents.Subtle, c.Subagents.Oracle)
-	// Hidden YOLO choices do nothing, including their capability demand.
-	if !c.Subagents.UseSameOnAllTargets {
-		add(c.Subagents.Yolo.Straightforward, c.Subagents.Yolo.Subtle, c.Subagents.Yolo.Oracle)
 	}
 	_ = id
 	for _, choice := range c.Review.Reviewers {
 		models[choice.Model] = struct{}{}
+	}
+	if writer := c.Review.BriefWriter; writer != nil {
+		if choice := writer.Choice(); choice != nil {
+			models[choice.Model] = struct{}{}
+		}
 	}
 	return sortedKeys(models)
 }
@@ -1222,6 +1327,7 @@ var settingInputs = map[reflect.Type]reflect.Type{
 	reflect.TypeFor[Config]():           reflect.TypeFor[storedConfig](),
 	reflect.TypeFor[ReviewConfig]():     reflect.TypeFor[reviewConfigInput](),
 	reflect.TypeFor[TargetBuildCache](): reflect.TypeFor[buildCacheSettings](),
+	reflect.TypeFor[SubagentConfig]():   reflect.TypeFor[subagentConfigInput](),
 }
 
 // consumedSettings is the keys a type reads whole without a field of its own
@@ -1445,6 +1551,7 @@ type Config struct {
 	// Daemon is where the daemon runs: on this computer or in a container.
 	Daemon        DaemonConfig
 	Github        GithubConfig
+	Guardian      GuardianConfig
 	Review        ReviewConfig
 	Sessionwiki   SessionWikiConfig
 	Subagents     SubagentConfig
@@ -1522,6 +1629,7 @@ type storedConfig struct {
 	Phone               PhoneConfig    `json:"phone" toml:"phone"`
 	Daemon              DaemonConfig   `json:"daemon" toml:"daemon"`
 	Github              GithubConfig   `json:"github" toml:"github"`
+	Guardian            GuardianConfig `json:"guardian" toml:"guardian"`
 	Review              ReviewConfig   `json:"review" toml:"review"`
 	// Continuation is the legacy [continuation] section, read and ignored,
 	// never written.
@@ -1556,6 +1664,7 @@ func (s storedConfig) MarshalJSON() ([]byte, error) {
 	object.fieldUnless(s.Phone.isDefault(), "phone", s.Phone)
 	object.fieldUnless(s.Daemon.IsDefault(), "daemon", s.Daemon)
 	object.fieldUnless(s.Github.IsDefault(), "github", s.Github)
+	object.fieldUnless(s.Guardian.IsDefault(), "guardian", s.Guardian)
 	object.field("review", s.Review)
 	object.fieldUnless(s.Sessionwiki.isDefault(), "sessionwiki", s.Sessionwiki)
 	object.fieldUnless(s.Subagents.isDefault(), "subagents", s.Subagents)
@@ -1587,6 +1696,7 @@ func (s *storedConfig) UnmarshalJSON(data []byte) error {
 		Phone:        DefaultPhoneConfig(),
 		Daemon:       DefaultDaemonConfig(),
 		Github:       DefaultGithubConfig(),
+		Guardian:     DefaultGuardianConfig(),
 		Mailbox:      defaultLegacyMailboxConfig(),
 		Subagents:    DefaultSubagentConfig(),
 		BuildCache:   defaultLegacyBuildCacheConfig(),
@@ -1611,6 +1721,7 @@ func (s *storedConfig) UnmarshalJSON(data []byte) error {
 		"phone":                 &value.Phone,
 		"daemon":                &value.Daemon,
 		"github":                &value.Github,
+		"guardian":              &value.Guardian,
 		"review":                &value.Review,
 		"continuation":          &value.Continuation,
 		"mailbox":               &value.Mailbox,
@@ -1956,7 +2067,7 @@ func configFromStored(stored storedConfig) (Config, error) {
 			resolved[id] = target
 		}
 	}
-	// Versions 1 through 22 acquire this build's defaults in memory and
+	// Versions 1 through 23 acquire this build's defaults in memory and
 	// upgrade on the next ordinary save. Version 12 splits machines from
 	// runtimes; version 13 added automatic continuation (since removed);
 	// version 14 moves the global cache opt-out onto machines; version 15
@@ -1966,9 +2077,10 @@ func configFromStored(stored storedConfig) (Config, error) {
 	// the GitHub event switch to github.watch.enabled; 19 adds `enabled` to
 	// runtimes; 20 adds `[daemon]`; 21 adds review counts; 22 adds the
 	// session GitHub credential default; 23 adds target-specific sub-agent
-	// choices.
+	// choices; 24 generalizes [subagents] into multi-pair category lists and
+	// drops [subagents.yolo.*].
 	version := stored.Version
-	if version >= 1 && version <= 22 {
+	if version >= 1 && version <= 23 {
 		version = ConfigVersion
 	}
 	bundles := stored.Bundles
@@ -1986,6 +2098,7 @@ func configFromStored(stored storedConfig) (Config, error) {
 		Phone:           stored.Phone,
 		Daemon:          stored.Daemon,
 		Github:          github,
+		Guardian:        stored.Guardian,
 		Review:          stored.Review,
 		Sessionwiki:     stored.Sessionwiki,
 		Subagents:       stored.Subagents,
@@ -2033,6 +2146,7 @@ func storedConfigFrom(config Config) storedConfig {
 		Phone:        config.Phone,
 		Daemon:       config.Daemon,
 		Github:       config.Github,
+		Guardian:     config.Guardian,
 		Review:       config.Review,
 		Mailbox:      defaultLegacyMailboxConfig(),
 		Sessionwiki:  config.Sessionwiki,
@@ -2062,6 +2176,7 @@ func DefaultConfig() Config {
 		Phone:           DefaultPhoneConfig(),
 		Daemon:          DefaultDaemonConfig(),
 		Github:          DefaultGithubConfig(),
+		Guardian:        DefaultGuardianConfig(),
 		Subagents:       DefaultSubagentConfig(),
 		Jev:             DefaultJevConfig(),
 		Keys:            DefaultKeysConfig(),
@@ -2549,6 +2664,10 @@ func ConfigLoadFrom(path string) (Config, error) {
 	}
 	if err := rejectRemovedProfileOverrides(string(contents)); err != nil {
 		return Config{}, err
+	}
+	if hasLegacySubagentYoloChoices(document) {
+		slog.Warn("ignoring removed [subagents.yolo.*] settings; Mjolnir now uses unified [[subagents.*]] lists across all targets, and the next save removes them",
+			"config", path)
 	}
 	if removed := dropRemovedHarnessProfiles(document); len(removed) > 0 {
 		slog.Warn("ignoring profiles for a harness Mjolnir no longer supports; the next save removes them",
@@ -3067,6 +3186,57 @@ func marshalTOMLPretty(value any) (string, error) {
 // one line.
 func marshalTOML(value any) (string, error) {
 	return marshalTOMLWith(value, false)
+}
+
+// TOMLTableFromStr is `toml::from_str::<toml::Table>`, for crates above
+// core that edit a TOML document as generic values: tables are
+// map[string]any, arrays []any, integers int64, floats float64, and dates
+// their TOML text (see normalizeTOML).
+func TOMLTableFromStr(text string) (map[string]any, error) {
+	return parseTOMLDocument(text)
+}
+
+// TOMLTableToString is `toml::to_string` of a `toml::Table` (a BTreeMap, so
+// keys are written sorted): values first, then tables and arrays of tables.
+// A float64 keeps its fraction, as toml writes an f64. A date read by
+// TOMLTableFromStr is written back as a string.
+func TOMLTableToString(table map[string]any) (string, error) {
+	return marshalTOML(tomlKeepFloats(table))
+}
+
+// tomlKeepFloats marks every float64 so its JSON form keeps a fraction or an
+// exponent, which marshalTOML reads as a float rather than an integer.
+func tomlKeepFloats(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		marked := make(map[string]any, len(value))
+		for key, member := range value {
+			marked[key] = tomlKeepFloats(member)
+		}
+		return marked
+	case []any:
+		marked := make([]any, len(value))
+		for i, item := range value {
+			marked[i] = tomlKeepFloats(item)
+		}
+		return marked
+	case []map[string]any:
+		marked := make([]any, len(value))
+		for i, item := range value {
+			marked[i] = tomlKeepFloats(item)
+		}
+		return marked
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return value
+		}
+		text := strconv.FormatFloat(value, 'g', -1, 64)
+		if !strings.ContainsAny(text, ".eE") {
+			text += ".0"
+		}
+		return json.Number(text)
+	}
+	return value
 }
 
 // unmarshalTOML is toml::from_str: text decoded with BurntSushi/toml and read

@@ -20,19 +20,13 @@ fn load_native_agent_view_from(
     child: &str,
     limit: usize,
 ) -> Result<Option<NativeAgentView>> {
-    let body: Option<String> = connection
-        .query_row(
-            "SELECT body FROM native_agents WHERE owner=?1 AND child=?2 AND staging=0",
-            params![owner, child],
-            |row| row.get(0),
-        )
-        .optional()?;
-    body.map(|body| {
-        let mut view: NativeAgentView = serde_json::from_str(&body)?;
-        view.projection.transcript = transcript(connection, owner, child, 0, limit)?;
-        Ok(view)
-    })
-    .transpose()
+    native_agent_body(connection, owner, child)?
+        .map(|body| {
+            let mut view: NativeAgentView = serde_json::from_str(&body)?;
+            view.projection.transcript = transcript(connection, owner, child, 0, limit)?;
+            Ok(view)
+        })
+        .transpose()
 }
 
 pub fn load_native_agents(owner: &str, limit: usize) -> Result<Vec<NativeAgentView>> {
@@ -343,6 +337,59 @@ fn save(connection: &Connection, view: &NativeAgentView, staging: i64) -> Result
     Ok(())
 }
 
+fn native_agent_body(connection: &Connection, owner: &str, child: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT body FROM native_agents WHERE owner=?1 AND child=?2 AND staging=0",
+            params![owner, child],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub fn load_native_agent_tool_call_detail(
+    owner: &str,
+    child: &str,
+    stable_id: &str,
+) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+    let mut reader = open_reader(&database_path())?;
+    let connection = reader.transaction()?;
+    load_native_agent_tool_call_detail_from(&connection, owner, child, stable_id)
+}
+
+fn load_native_agent_tool_call_detail_from(
+    connection: &Connection,
+    owner: &str,
+    child: &str,
+    stable_id: &str,
+) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+    use mj_core::transcript::ToolCallDetailResult;
+
+    if native_agent_body(connection, owner, child)?.is_none() {
+        return Ok(None);
+    }
+    let item = connection
+        .query_row(
+            "SELECT body FROM native_agent_transcript
+         WHERE owner=?1 AND child=?2 AND staging=0 AND stable_id=?3",
+            params![owner, child, stable_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    item.map(|json| {
+        let TranscriptItem { body, .. } = serde_json::from_str(&json)?;
+        Ok(if body.detail_trimmed() {
+            ToolCallDetailResult::Unavailable {
+                summary: Some(body),
+                reason: "full tool detail is not stored locally".into(),
+            }
+        } else {
+            ToolCallDetailResult::Full { body }
+        })
+    })
+    .transpose()
+}
+
 pub fn native_agent_history(
     owner: &str,
     child: &str,
@@ -359,11 +406,8 @@ fn native_agent_history_from(
     child: &str,
     before: Option<(u64, String)>,
 ) -> Result<mj_core::native_agent::NativeAgentHistoryPage> {
-    let body: String = connection.query_row(
-        "SELECT body FROM native_agents WHERE owner=?1 AND child=?2 AND staging=0",
-        params![owner, child],
-        |row| row.get(0),
-    )?;
+    let body =
+        native_agent_body(connection, owner, child)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let view: NativeAgentView = serde_json::from_str(&body)?;
     let (position, stable_id) = before.unwrap_or((i64::MAX as u64, String::new()));
     let mut statement = connection.prepare("SELECT body FROM native_agent_transcript WHERE owner=?1 AND child=?2 AND staging=0 AND (position, stable_id) < (?3, ?4) ORDER BY position DESC, stable_id DESC LIMIT 201")?;
@@ -419,6 +463,61 @@ mod tests {
 
     fn text(child: &str, message: &str) -> NativeAgentEvent {
         NativeAgentEvent::Update { session_id: child.into(), update: Box::new(serde_json::from_value(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":message}})).unwrap()) }
+    }
+
+    #[test]
+    fn load_tool_call_detail_resolves_native_items_by_owner_and_committed_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        for owner in ["owner", "other"] {
+            save_session_to(&path, &test_session(owner, "project")).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        apply_native_agent_event(&connection, "owner", &event(1, spawn("child", None))).unwrap();
+        apply_native_agent_event(&connection, "other", &event(1, spawn("child", None))).unwrap();
+        let tool = NativeAgentEvent::Update {
+            session_id: "child".into(),
+            update: Box::new(
+                serde_json::from_value(json!({
+                    "sessionUpdate": "tool_call", "toolCallId": "edit", "title": "Edit",
+                    "status": "completed", "rawInput": {"path": "notes.txt"}
+                }))
+                .unwrap(),
+            ),
+        };
+        apply_native_agent_event(&connection, "owner", &event(2, tool.clone())).unwrap();
+        let history = native_agent_history_from(&connection, "owner", "child", None).unwrap();
+        let [item] = history.items.as_slice() else {
+            panic!("expected one tool")
+        };
+        let id = &item.stable_id;
+        let lookup = |owner| {
+            load_native_agent_tool_call_detail_from(&connection, owner, "child", id).unwrap()
+        };
+
+        assert_eq!(
+            lookup("owner"),
+            Some(mj_core::transcript::ToolCallDetailResult::Full {
+                body: item.body.clone()
+            })
+        );
+        assert_eq!(lookup("other"), None);
+        apply_native_agent_event(
+            &connection,
+            "other",
+            &event(3, NativeAgentEvent::ReplayBegin),
+        )
+        .unwrap();
+        apply_native_agent_event(&connection, "other", &event(4, spawn("child", None))).unwrap();
+        apply_native_agent_event(&connection, "other", &event(5, tool)).unwrap();
+        assert_eq!(lookup("other"), None);
+        apply_native_agent_event(
+            &connection,
+            "other",
+            &event(6, NativeAgentEvent::ReplayCommit),
+        )
+        .unwrap();
+        assert_eq!(lookup("other"), lookup("owner"));
     }
 
     #[test]

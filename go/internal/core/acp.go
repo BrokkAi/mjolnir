@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -726,11 +727,50 @@ type RuntimeEventBridgeRetired struct {
 	TerminalConnectionID string
 }
 
-// RuntimeEventNativeGoalResumeSent is ordered before the native request and
-// its updates on the worker FIFO.
+// NativeGoalResumeAck is the one-shot acknowledgement the worker event
+// dispatcher fires after RuntimeEventNativeGoalResumeSent has been recorded
+// on the relay in FIFO order behind all preceding observations. Copies share
+// it (Rust clones an Arc); the zero value acknowledges nothing.
+type NativeGoalResumeAck struct {
+	sender *nativeGoalResumeAckSender
+}
+
+type nativeGoalResumeAckSender struct {
+	mu   sync.Mutex
+	sent chan struct{}
+}
+
+// NewNativeGoalResumeAckPair is NativeGoalResumeAck::new_pair: the
+// acknowledgement and the channel that is closed once it fires.
+func NewNativeGoalResumeAckPair() (NativeGoalResumeAck, <-chan struct{}) {
+	sent := make(chan struct{})
+	return NativeGoalResumeAck{sender: &nativeGoalResumeAckSender{sent: sent}}, sent
+}
+
+// Acknowledge fires the acknowledgement; only the first call has an effect.
+func (a NativeGoalResumeAck) Acknowledge() {
+	if a.sender == nil {
+		return
+	}
+	a.sender.mu.Lock()
+	defer a.sender.mu.Unlock()
+	if a.sender.sent != nil {
+		close(a.sender.sent)
+		a.sender.sent = nil
+	}
+}
+
+// String is the Debug impl.
+func (NativeGoalResumeAck) String() string { return "NativeGoalResumeAck(..)" }
+
+// RuntimeEventNativeGoalResumeSent is ordered on the worker FIFO before
+// `_session/goal` is sent, and acknowledged only after the relay has
+// recorded the reservation. It is worker-local (serde skip): it neither
+// encodes nor decodes.
 type RuntimeEventNativeGoalResumeSent struct {
-	ResumeID uint64        `json:"resume_id"`
-	Goal     *GoalSnapshot `json:"goal"`
+	ResumeID uint64
+	Goal     *GoalSnapshot
+	Applied  NativeGoalResumeAck
 }
 
 type RuntimeEventNativeGoalResumeRejected struct {
@@ -1047,9 +1087,8 @@ func (RuntimeEventBridgeRetired) MarshalJSON() ([]byte, error) {
 	return nil, errors.New("the enum variant RuntimeEvent::BridgeRetired cannot be serialized")
 }
 
-func (v RuntimeEventNativeGoalResumeSent) MarshalJSON() ([]byte, error) {
-	type body RuntimeEventNativeGoalResumeSent
-	return agentTaggedJSON("type", "native_goal_resume_sent", body(v))
+func (RuntimeEventNativeGoalResumeSent) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("the enum variant RuntimeEvent::NativeGoalResumeSent cannot be serialized")
 }
 
 func (v RuntimeEventNativeGoalResumeRejected) MarshalJSON() ([]byte, error) {
@@ -1268,8 +1307,6 @@ func UnmarshalRuntimeEvent(data []byte) (RuntimeEvent, error) {
 		return nil, err
 	}
 	switch tag {
-	case "native_goal_resume_sent":
-		return agentDecodeInto[RuntimeEventNativeGoalResumeSent, RuntimeEvent](data)
 	case "native_goal_resume_rejected":
 		return agentDecodeInto[RuntimeEventNativeGoalResumeRejected, RuntimeEvent](data)
 	case "native_agent":

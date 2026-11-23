@@ -28,7 +28,7 @@ On · local classifier
 Code Review
 Off
 Sub-agents
-Up to 6 at once
+Up to 8 at once
 Quota checks
 Host
 SessionWiki
@@ -163,10 +163,10 @@ Maximum concurrent children
 
 Enter a whole number from 1 to 64.
 
-Primary and supervisor
+Primary and orchestrator
 0 entries
 
-Optional. Top-level primary sessions (bare `mj new`) and supervisors.
+Optional. Top-level primary sessions (bare `mj new`) and orchestrators.
 
 Straightforward
 0 entries
@@ -187,7 +187,7 @@ Unsaved changes. Save writes them to the configuration file.
 
 Discard
 Save
-control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+control Maximum concurrent children: "99" (text, placeholder "8 (default)")
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === subagent categories are lists of pairs (390x844) ===
 Settings
@@ -207,10 +207,10 @@ Maximum concurrent children
 
 Enter a whole number from 1 to 64.
 
-Primary and supervisor
+Primary and orchestrator
 0 entries
 
-Optional. Top-level primary sessions (bare `mj new`) and supervisors.
+Optional. Top-level primary sessions (bare `mj new`) and orchestrators.
 
 Straightforward
 0 entries
@@ -231,7 +231,7 @@ Unsaved changes. Save writes them to the configuration file.
 
 Discard
 Save
-control Maximum concurrent children: "99" (text, placeholder "6 (default)")
+control Maximum concurrent children: "99" (text, placeholder "8 (default)")
 layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/subagents"}
 === a Subtle pair chooses its model (390x844) ===
 Settings

@@ -435,34 +435,41 @@ fn project_states(
         .collect();
     let mut questions = BTreeSet::new();
     let mut native_forms = BTreeMap::new();
-    // Native children never receive semantic assessments. Only an actual
-    // harness form reaches their owner and its managed ancestors.
+    // Native children never receive semantic assessments. A harness form
+    // marks their owner and its managed ancestors as waiting, but publishes
+    // only on the first unmuted session in that chain.
     for (source, native) in runtime.native_agents.iter().filter(|(_, native)| {
         native.pending_input
             && native.agent.state == mj_core::native_agent::NativeAgentState::Running
     }) {
         let mut current = native.agent.owner_session_id.as_str();
         let mut visited = BTreeSet::new();
-        while visited.insert(current.to_owned())
-            && runtime
+        let mut needs_publication_owner = true;
+        while visited.insert(current) {
+            let Some(record) = runtime
                 .records
                 .get(current)
-                .is_some_and(|record| record.state.is_active())
-        {
+                .filter(|record| record.state.is_active())
+            else {
+                break;
+            };
             questions.insert(current.to_owned());
-            // A session's own request takes precedence over any descendant.
-            native_forms
-                .entry(current)
-                .and_modify(
-                    |selected: &mut (&String, &mj_core::native_agent::NativeAgentSummary)| {
-                        if current == native.agent.owner_session_id
-                            && selected.1.agent.owner_session_id != current
-                        {
-                            *selected = (source, native);
-                        }
-                    },
-                )
-                .or_insert((source, native));
+            if needs_publication_owner && !record.notifications_ignored {
+                // A session's own request takes precedence over any descendant.
+                native_forms
+                    .entry(current)
+                    .and_modify(
+                        |selected: &mut (&String, &mj_core::native_agent::NativeAgentSummary)| {
+                            if current == native.agent.owner_session_id
+                                && selected.1.agent.owner_session_id != current
+                            {
+                                *selected = (source, native);
+                            }
+                        },
+                    )
+                    .or_insert((source, native));
+                needs_publication_owner = false;
+            }
             let Some(parent) = runtime.subagents.get(current) else {
                 break;
             };
@@ -470,6 +477,7 @@ fn project_states(
         }
     }
     let mut holders = BTreeMap::new();
+    let mut waiting_holders = BTreeMap::new();
     for (id, person_owned) in runtime
         .transcripts
         .iter()
@@ -494,37 +502,51 @@ fn project_states(
                 .map(|question| (&question.role, !question.request.goes_to_parent()))
         }))
     {
-        if !runtime
+        let Some(record) = runtime
             .records
             .get(id)
-            .is_some_and(|record| record.state.is_active())
-        {
+            .filter(|record| record.state.is_active())
+        else {
             continue;
-        }
+        };
         questions.insert(id.clone());
-        if person_owned || !runtime.subagents.contains_key(id) {
+        let owns_form = person_owned || !runtime.subagents.contains_key(id);
+        if owns_form {
             // A form answered here takes precedence over any descendant.
-            holders.insert(id.clone(), id.clone());
+            waiting_holders.insert(id.clone(), id.clone());
+            if !record.notifications_ignored {
+                holders.insert(id.clone(), id.clone());
+            }
         }
         if !person_owned {
             continue;
         }
+        let mut needs_publication_owner = record.notifications_ignored;
         let mut current = id.as_str();
         let mut visited = BTreeSet::from([current]);
         while let Some(parent) = runtime.subagents.get(current) {
             current = &parent.parent_session_id;
-            if !visited.insert(current)
-                || !runtime
-                    .records
-                    .get(current)
-                    .is_some_and(|record| record.state.is_active())
-            {
+            if !visited.insert(current) {
                 break;
             }
+            let Some(ancestor) = runtime
+                .records
+                .get(current)
+                .filter(|record| record.state.is_active())
+            else {
+                continue;
+            };
+            // Every active ancestor still shows what it is waiting for.
             questions.insert(current.to_owned());
-            holders
+            waiting_holders
                 .entry(current.to_owned())
                 .or_insert_with(|| id.clone());
+            if needs_publication_owner && !ancestor.notifications_ignored {
+                holders
+                    .entry(current.to_owned())
+                    .or_insert_with(|| id.clone());
+                needs_publication_owner = false;
+            }
         }
     }
     let mut cards = BTreeMap::new();
@@ -701,10 +723,23 @@ fn project_states(
                 Some(NotificationKind::Important) => Important,
                 None => state,
             };
-            if let Some(card) = card
+            // Waiting state can propagate through several rows. A row with
+            // only inherited state has no notification to publish.
+            if let Some(mut card) = card
                 && !record.notifications_ignored
-                && !runtime.subagents.contains_key(id)
             {
+                if questions.contains(id)
+                    && card.form.is_none()
+                    && card
+                        .entries
+                        .iter()
+                        .all(|entry| entry.kind == NotificationKind::Important)
+                {
+                    if card.entries.is_empty() {
+                        return (id.clone(), state);
+                    }
+                    card.badge = NotificationKind::Important;
+                }
                 cards.insert(id.clone(), card);
             }
             let state = if state == Idle && unread_frontier(runtime, id).is_some() {
@@ -754,11 +789,11 @@ fn project_states(
             target.map(|target| (id.clone(), target))
         })
         .collect();
-    holders.retain(|id, _| ids.contains(id) && attention.get(id) == Some(&NeedsInput));
+    waiting_holders.retain(|id, _| ids.contains(id) && attention.get(id) == Some(&NeedsInput));
     AttentionProjection {
         states: attention,
         targets,
-        holders,
+        holders: waiting_holders,
         cards,
     }
 }
@@ -1110,6 +1145,45 @@ mod tests {
         let resurfaced = project_states(&runtime, BTreeSet::from(["parent".into()]));
         assert_eq!(resurfaced.cards["parent"].since_ms, 42);
 
+        let mut nested = runtime.clone();
+        nested.subagents.insert(
+            "child".into(),
+            super::super::tests::runtime_test_subagent("child", "parent").into(),
+        );
+        let mut nested_view = view.clone();
+        nested_view.agent.owner_session_id = "child".into();
+        nested.native_agents.remove(&id);
+        nested.native_agents.insert(
+            nested_view.agent.view_id(),
+            NativeAgentSummary::of(&nested_view),
+        );
+        let ids = BTreeSet::from(["child".into(), "parent".into()]);
+        let projection = project_states(&nested, ids.clone());
+        assert_eq!(projection.states["parent"], SessionAttention::NeedsInput);
+        assert_eq!(
+            projection
+                .cards
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["child"]
+        );
+        nested
+            .records
+            .get_mut("child")
+            .unwrap()
+            .notifications_ignored = true;
+        let projection = project_states(&nested, ids);
+        assert_eq!(
+            projection
+                .cards
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["parent"]
+        );
+        assert_eq!(projection.cards["parent"].holder.as_deref(), Some("child"));
+
         view.apply_activity(120, Some(vec![]));
         assert!(view.pending_input_times.is_empty());
         view.agent.state = NativeAgentState::Completed;
@@ -1252,7 +1326,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             },
         );
         let mut child = RelaySnapshot::new("child".into()).operational_state();
@@ -1348,7 +1422,7 @@ mod tests {
                 noticed_turn: None,
                 reported_finish: None,
                 handback_tool: false,
-                supervisor: false,
+                orchestrator: false,
             },
         );
         for step in 0..144 {
@@ -2167,7 +2241,7 @@ mod tests {
                     noticed_turn: None,
                     reported_finish: None,
                     handback_tool: false,
-                    supervisor: false,
+                    orchestrator: false,
                 },
             );
         }
@@ -2213,6 +2287,84 @@ mod tests {
                 .map(String::as_str),
             Some("child")
         );
+        // Reproject after each toggle, as the live daemon does. The waiting
+        // route remains available on every ancestor as the card moves.
+        runtime.subagents.remove("grandparent");
+        let mut published = RuntimeProjection::default();
+        for (child, parent, grandparent, owner) in [
+            (true, false, false, Some("parent")),
+            (true, true, false, Some("grandparent")),
+            (true, true, true, None),
+            (false, false, false, Some("child")),
+            (true, false, false, Some("parent")),
+        ] {
+            for (id, ignored) in [
+                ("child", child),
+                ("parent", parent),
+                ("grandparent", grandparent),
+            ] {
+                runtime.records.get_mut(id).unwrap().notifications_ignored = ignored;
+            }
+            update(&published, &mut runtime);
+            let cards = runtime.metadata.notification_cards.as_ref().unwrap();
+            assert_eq!(
+                cards.keys().map(String::as_str).collect::<Vec<_>>(),
+                owner.into_iter().collect::<Vec<_>>()
+            );
+            if let Some(owner) = owner {
+                assert_eq!(cards[owner].holder.as_deref(), Some("child"));
+                assert!(cards[owner].form.is_some());
+            }
+            for id in ["child", "parent", "grandparent"] {
+                assert_eq!(
+                    runtime.metadata.session_attention[id],
+                    SessionAttention::NeedsInput
+                );
+                assert_eq!(runtime.metadata.form_holders[id], "child");
+            }
+            published = runtime.clone();
+        }
+        let mut inactive_parent = runtime.clone();
+        inactive_parent.records.get_mut("parent").unwrap().state = SessionState::Stopped;
+        update(&runtime, &mut inactive_parent);
+        let cards = inactive_parent
+            .metadata
+            .notification_cards
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            cards.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["grandparent"]
+        );
+        assert_eq!(cards["grandparent"].holder.as_deref(), Some("child"));
+
+        let mut worker =
+            mj_core::relay::RelaySnapshot::new("grandparent".into()).operational_state();
+        worker.relay_protocol_version = Some(mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL);
+        worker.notification_stack = mj_core::attention::NotificationStack {
+            revision: 1,
+            entries: vec![NotificationStackEntry {
+                completed_at_ms: 20,
+                completed_ordinal: 4,
+                kind: NotificationKind::Important,
+                message: EntryMessage::None,
+            }],
+        }
+        .into();
+        runtime.sessions.get_mut("grandparent").unwrap().operational = Some(worker.into());
+        let projection = project_states(&runtime, runtime.records.keys().cloned().collect());
+        assert_eq!(
+            projection.states["grandparent"],
+            SessionAttention::NeedsInput
+        );
+        assert_eq!(
+            projection.cards["grandparent"].badge,
+            NotificationKind::Important
+        );
+        assert!(projection.cards["grandparent"].form.is_none());
+        assert!(projection.cards["parent"].form.is_some());
+        runtime.sessions.get_mut("grandparent").unwrap().operational = None;
+
         // The parent's self entry takes precedence, while the grandparent
         // still names the child that actually holds the descendant form.
         let mut own = MaterializedSession::empty("parent");

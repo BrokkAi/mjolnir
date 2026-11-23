@@ -329,7 +329,6 @@ impl RuntimeState {
         let _startup_admission = self.startup_enqueue.lock().await;
         let create = CreateSessionRequest {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: false,

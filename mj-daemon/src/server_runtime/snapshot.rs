@@ -94,6 +94,46 @@ pub(super) fn viewer_capacity(
         .collect()
 }
 
+pub(crate) fn host_capacity_for_target<'a>(
+    metadata: &'a mj_client::runtime_feed::RuntimeMetadata,
+    target_id: &str,
+) -> Option<&'a mj_client::runtime_feed::RuntimeHostCapacity> {
+    metadata
+        .host_capacities
+        .iter()
+        .find(|host| host.reading.target_ids.iter().any(|id| id == target_id))
+}
+
+pub(crate) struct TargetContainerSizing {
+    pub(super) remembered: Option<mj_core::state::HostContainerSize>,
+    pub(super) capacity: Option<mj_core::state::HostContainerCapacity>,
+    pub(crate) default: mj_core::state::HostContainerSize,
+}
+
+pub(crate) fn target_container_sizing(
+    template: &mj_core::config::TargetTemplate,
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    host: Option<&mj_client::runtime_feed::RuntimeHostCapacity>,
+) -> Option<TargetContainerSizing> {
+    let container = template.container()?;
+    let remembered = mj_core::config::container_size_host(template)
+        .and_then(|host| metadata.container_sizes.get(host))
+        .copied();
+    let capacity = host
+        .and_then(|host| metadata.container_capacities.get(&host.reading.id))
+        .map(|host| host.capacity);
+    let default = mj_core::state::resolve_default_container_size(
+        container.default_host_container_size(),
+        remembered,
+        capacity.map(|capacity| capacity.total),
+    );
+    Some(TargetContainerSizing {
+        remembered,
+        capacity,
+        default,
+    })
+}
+
 /// Turn one lifecycle operation into the projection a phone follows.
 pub(super) fn viewer_operation(
     view: &crate::daemon::RuntimeLifecycleView,
@@ -510,26 +550,15 @@ pub(super) fn viewer_snapshot_selected(
             continue;
         };
         target.resource_allocation_kind = template.into();
-        if mj_core::config::is_container_target(template) {
-            let host_capacity = capacity
-                .iter()
-                .find(|host| host.target_ids.iter().any(|id| id == &target.id))
-                .and_then(|host| host.container_capacity);
-            let limits = host_capacity.map(|host| mj_core::state::HostContainerSize {
-                cpus: host.total.cpus,
-                memory_bytes: host.total.memory_bytes,
-            });
-            target.remembered_container_size = mj_core::config::container_size_host(template)
-                .and_then(|host| controller.state.container_sizes.get(host))
-                .copied();
-            target.container_host_limits = limits;
-            target.container_capacity = host_capacity;
-            let size =
-                mj_core::state::default_container_size(target.remembered_container_size, limits);
+        let host = host_capacity_for_target(metadata, &target.id);
+        if let Some(sizing) = target_container_sizing(template, metadata, host) {
+            target.remembered_container_size = sizing.remembered;
+            target.container_host_limits = sizing.capacity.map(|capacity| capacity.total);
+            target.container_capacity = sizing.capacity;
             target.default_resource_allocation =
                 Some(mj_core::state::SessionResourceAllocation::Container {
-                    cpus: size.cpus,
-                    memory_bytes: size.memory_bytes,
+                    cpus: sizing.default.cpus,
+                    memory_bytes: sizing.default.memory_bytes,
                 });
         } else {
             target.remembered_container_size = None;

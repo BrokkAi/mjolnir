@@ -164,7 +164,7 @@ fn numeric_settings_round_trip_use_their_default_and_refuse_text() {
             "subagents",
             "max_concurrent",
             |c| u64::try_from(c.subagents.max_concurrent).unwrap(),
-            6,
+            8,
         ),
     ];
     for (section, key, read, default) in fields {

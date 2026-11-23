@@ -13,13 +13,13 @@
 //! symlink/path-containment checks, persisting the archive atomically only once
 //! both parts arrive complete and verified.
 
-use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;
+use mj_core::session_keep::{MoveKeep, normalize_keep_path};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -61,7 +61,7 @@ pub fn write_move_stream<W: Write>(
         .with_context(|| format!("stat archive {}", archive_path.display()))?
         .len();
 
-    let normalized_skips = normalize_skip_paths(skip)?;
+    let keep = MoveKeep::new(keep_dir.unwrap_or(Path::new("")).to_path_buf(), skip)?;
 
     // Build the keep tar into a temporary file on disk so we know its exact
     // length prefix without buffering large scratch trees in memory.
@@ -70,7 +70,7 @@ pub fn write_move_stream<W: Write>(
         ensure_no_symlinked_keep_ancestors(dir)?;
         if dir.exists() {
             let mut temp = NamedTempFile::new().context("create temp keep tar")?;
-            let bytes = build_keep_tar(dir, &normalized_skips, &mut temp)?;
+            let bytes = build_keep_tar(&keep, &mut temp)?;
             temp.as_file().sync_all().context("sync temp keep tar")?;
             keep_tar_temp = Some(temp);
             bytes
@@ -361,39 +361,6 @@ fn copy_exact_with_hash<R: Read, W: Write>(
     Ok(expected)
 }
 
-fn normalize_skip_paths(skip: &[PathBuf]) -> Result<BTreeSet<PathBuf>> {
-    let mut out = BTreeSet::new();
-    for raw in skip {
-        let norm = normalize_relative_path(raw)?;
-        out.insert(norm);
-    }
-    Ok(out)
-}
-
-fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::Normal(part) => out.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                bail!("invalid relative path in keep stream: {}", path.display());
-            }
-        }
-    }
-    ensure!(
-        !out.as_os_str().is_empty(),
-        "empty relative path in keep stream"
-    );
-    Ok(out)
-}
-
-fn is_skipped(rel: &Path, skips: &BTreeSet<PathBuf>) -> bool {
-    skips
-        .iter()
-        .any(|skip| rel == skip || rel.starts_with(skip))
-}
-
 /// Verify that neither `keep_dir` nor its checkout-owned ancestors (its
 /// immediate parent, and `.mj` when under `.../.mj/keep/<session-id>`) are
 /// symlinks (including dangling symlinks).
@@ -438,16 +405,12 @@ fn ensure_no_symlinked_keep_ancestors(keep_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn build_keep_tar<W: Write>(
-    keep_dir: &Path,
-    skips: &BTreeSet<PathBuf>,
-    writer: &mut W,
-) -> Result<u64> {
+fn build_keep_tar<W: Write>(keep: &MoveKeep, writer: &mut W) -> Result<u64> {
     let mut counting = CountingWriter::new(writer);
     {
         let mut builder = tar::Builder::new(&mut counting);
         builder.follow_symlinks(false);
-        append_keep_dir_recursive(&mut builder, keep_dir, Path::new(""), skips)?;
+        append_keep_dir_recursive(&mut builder, keep, Path::new(""))?;
         builder.finish().context("finish keep tar")?;
     }
     Ok(counting.bytes)
@@ -455,15 +418,10 @@ fn build_keep_tar<W: Write>(
 
 fn append_keep_dir_recursive<W: Write>(
     builder: &mut tar::Builder<W>,
-    root: &Path,
+    keep: &MoveKeep,
     rel: &Path,
-    skips: &BTreeSet<PathBuf>,
 ) -> Result<()> {
-    let current = if rel.as_os_str().is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    };
+    let current = keep.directory().join(rel);
     let mut entries: Vec<_> = fs::read_dir(&current)
         .with_context(|| format!("read keep directory {}", current.display()))?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -477,7 +435,7 @@ fn append_keep_dir_recursive<W: Write>(
         } else {
             rel.join(entry.file_name())
         };
-        if is_skipped(&entry_rel, skips) {
+        if keep.skips(&entry_rel) {
             continue;
         }
         let meta = fs::symlink_metadata(&entry_path)
@@ -492,7 +450,7 @@ fn append_keep_dir_recursive<W: Write>(
             builder
                 .append_dir(&entry_rel, &entry_path)
                 .with_context(|| format!("append keep dir {}", entry_rel.display()))?;
-            append_keep_dir_recursive(builder, root, &entry_rel, skips)?;
+            append_keep_dir_recursive(builder, keep, &entry_rel)?;
         } else if file_type.is_file() {
             let mut file = File::open(&entry_path)
                 .with_context(|| format!("open keep file {}", entry_path.display()))?;
@@ -557,7 +515,7 @@ pub fn extract_keep_tar_strict(tar_path: &Path, dest: &Path) -> Result<()> {
             .path()
             .context("read keep tar entry path")?
             .into_owned();
-        let rel = normalize_relative_path(&raw_path)?;
+        let rel = normalize_keep_path(&raw_path)?;
         let target = dest.join(&rel);
 
         // Verify every intermediate component inside `dest` via `symlink_metadata`
@@ -721,6 +679,7 @@ impl<W: Write> Write for CountingWriter<W> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    #[cfg(unix)]
     use std::thread;
 
     #[cfg(unix)]
@@ -868,7 +827,8 @@ mod tests {
         let tar_path = dir.path().join("keep.tar");
         {
             let mut tar_file = File::create(&tar_path).expect("create tar");
-            build_keep_tar(&src_keep, &BTreeSet::new(), &mut tar_file).expect("build tar");
+            build_keep_tar(&MoveKeep::new(src_keep, &[]).unwrap(), &mut tar_file)
+                .expect("build tar");
         }
 
         let dst_keep = dir.path().join("dst_keep");

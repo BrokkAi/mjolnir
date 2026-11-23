@@ -18,6 +18,7 @@ package worker
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -183,7 +184,7 @@ func (s MicrovmStartRequest) MarshalJSON() ([]byte, error) {
 	type plain MicrovmStartRequest
 	p := plain(s)
 	p.Argv, p.Env, p.Volumes = microvmNonNil(p.Argv), microvmNonNil(p.Env), microvmNonNil(p.Volumes)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // UnmarshalJSON requires the members serde requires.
@@ -214,7 +215,7 @@ func (r MicrovmExecRequest) MarshalJSON() ([]byte, error) {
 	type plain MicrovmExecRequest
 	p := plain(r)
 	p.Argv, p.Env = microvmNonNil(p.Argv), microvmNonNil(p.Env)
-	return json.Marshal(p)
+	return microvmMarshalJSON(p)
 }
 
 // UnmarshalJSON requires the argv, as serde does.
@@ -329,7 +330,7 @@ func MicrovmDecodeRequest(data []byte) (MicrovmRequest, error) {
 // microvmTagged writes body (a JSON object) with the serde tag member
 // `"op":op` first, as an internally tagged enum is written.
 func microvmTagged(op string, body any) ([]byte, error) {
-	encoded, err := json.Marshal(body)
+	encoded, err := microvmMarshalJSON(body)
 	if err != nil {
 		return nil, err
 	}
@@ -435,12 +436,24 @@ func NewMicrovmFrameSender(transport MicrovmTransport) *MicrovmFrameSender {
 
 // Send writes one frame.
 func (s *MicrovmFrameSender) Send(kind MicrovmFrameKind, payload []byte) error {
-	panic("unported: mj-worker/src/microvm/protocol.rs FrameSender::send")
+	if len(payload) > MicrovmMaxFrameSize {
+		return errors.New("microvm protocol frame is too large")
+	}
+	frame := make([]byte, 5+len(payload))
+	frame[0] = byte(kind)
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload)))
+	copy(frame[5:], payload)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.transport.Write(frame); err != nil {
+		return microvmIOError(err)
+	}
+	return nil
 }
 
 // SendJSON writes one frame whose payload is value encoded as JSON.
 func (s *MicrovmFrameSender) SendJSON(kind MicrovmFrameKind, value any) error {
-	payload, err := json.Marshal(value)
+	payload, err := microvmMarshalJSON(value)
 	if err != nil {
 		return fmt.Errorf("encode microvm protocol message: %w", err)
 	}
@@ -480,8 +493,45 @@ func NewMicrovmFrameReader(transport io.Reader) *MicrovmFrameReader {
 // NextFrame returns the next frame, or nil on a clean end of stream between
 // frames.
 func (r *MicrovmFrameReader) NextFrame() (*MicrovmFrame, error) {
-	panic("unported: mj-worker/src/microvm/protocol.rs FrameReader::next_frame")
+	var header [5]byte
+	if _, err := io.ReadFull(r.inner, header[:1]); err != nil {
+		if err == io.EOF {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read microvm protocol frame: %w", microvmReadExactError(err))
+	}
+	if _, err := io.ReadFull(r.inner, header[1:]); err != nil {
+		return nil, fmt.Errorf("read microvm protocol frame header: %w", microvmReadExactError(err))
+	}
+	kind, err := microvmFrameKindFromByte(header[0])
+	if err != nil {
+		return nil, err
+	}
+	length := int(binary.BigEndian.Uint32(header[1:]))
+	if length > MicrovmMaxFrameSize {
+		return nil, fmt.Errorf("microvm protocol frame of %d bytes exceeds the %d byte limit", length, MicrovmMaxFrameSize)
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r.inner, payload); err != nil {
+		return nil, fmt.Errorf("read microvm protocol frame payload: %w", microvmReadExactError(err))
+	}
+	return &MicrovmFrame{Kind: kind, Payload: payload}, nil
 }
+
+// microvmReadExactError is a failed io.ReadFull as Rust's read_exact
+// reports it: an early end of stream is "failed to fill whole buffer".
+func microvmReadExactError(err error) error {
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return microvmUnexpectedEOF{}
+	}
+	return microvmIOError(err)
+}
+
+type microvmUnexpectedEOF struct{}
+
+func (microvmUnexpectedEOF) Error() string { return "failed to fill whole buffer" }
+
+func (microvmUnexpectedEOF) Unwrap() error { return io.ErrUnexpectedEOF }
 
 // Expect returns the next frame; end of stream is an error because the
 // conversation is not over.
@@ -513,12 +563,50 @@ func NewMicrovmTarFrameReader(frames *MicrovmFrameReader) *MicrovmTarFrameReader
 // Finish consumes whatever remains of the stream, so the connection is
 // left at the frame after TarEnd.
 func (r *MicrovmTarFrameReader) Finish() error {
-	panic("unported: mj-worker/src/microvm/protocol.rs TarFrameReader::finish")
+	sink := make([]byte, 4096)
+	for !r.finished {
+		count, err := r.Read(sink)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			break
+		}
+	}
+	return nil
 }
 
 // Read is the io.Reader over the tar frames.
 func (r *MicrovmTarFrameReader) Read(buffer []byte) (int, error) {
-	panic("unported: mj-worker/src/microvm/protocol.rs TarFrameReader::read")
+	for {
+		if r.offset < len(r.current) {
+			count := copy(buffer, r.current[r.offset:])
+			r.offset += count
+			return count, nil
+		}
+		if r.finished {
+			return 0, io.EOF
+		}
+		frame, err := r.frames.Expect("tar data")
+		if err != nil {
+			return 0, errors.New(err.Error())
+		}
+		switch frame.Kind {
+		case MicrovmFrameKindTar:
+			r.current = frame.Payload
+			r.offset = 0
+		case MicrovmFrameKindTarEnd:
+			r.finished = true
+			return 0, io.EOF
+		case MicrovmFrameKindError:
+			return 0, errors.New(microvmLossy(frame.Payload))
+		default:
+			return 0, fmt.Errorf("unexpected %s frame inside a tar stream", frame.Kind)
+		}
+	}
 }
 
 // MicrovmTarFrameWriter writes a tar stream as tar frames.
@@ -553,7 +641,19 @@ func (w *MicrovmTarFrameWriter) flushPending() error {
 // Write is the io.Writer of the tar stream. Unlike Rust's partial write,
 // it takes all of data, as io.Writer requires.
 func (w *MicrovmTarFrameWriter) Write(data []byte) (int, error) {
-	panic("unported: mj-worker/src/microvm/protocol.rs TarFrameWriter::write")
+	written := 0
+	for len(data) > 0 {
+		count := min(len(data), MicrovmChunkSize-len(w.pending))
+		w.pending = append(w.pending, data[:count]...)
+		data = data[count:]
+		written += count
+		if len(w.pending) >= MicrovmChunkSize {
+			if err := w.flushPending(); err != nil {
+				return written, err
+			}
+		}
+	}
+	return written, nil
 }
 
 // Flush does nothing: frame boundaries are not stream boundaries; Finish

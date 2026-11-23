@@ -43,6 +43,7 @@ impl InstructionRole {
 pub struct AgentTools {
     pub role: SubagentMcpRole,
     pub review_tools: bool,
+    pub orchestrators_enabled: bool,
 }
 
 pub struct InstructionContext<'a> {
@@ -63,6 +64,7 @@ impl<'a> InstructionContext<'a> {
             agents: launch.subagent_mcp_role().map(|role| AgentTools {
                 role,
                 review_tools: launch.review_tools(),
+                orchestrators_enabled: launch.orchestrators_enabled,
             }),
             history_tools: launch
                 .project_memory
@@ -101,6 +103,9 @@ pub fn compose(facts: &InstructionContext<'_>, index: Result<&str, &str>) -> Str
             _ => None,
         };
         sections.push(standing_instructions(socket.role, facts.harness, review_role).to_owned());
+        if socket.role == SubagentMcpRole::Parent && socket.orchestrators_enabled {
+            sections.push("Use `list_targets` to choose a target for `spawn_orchestrator`. Omit repos to inherit your project bundle, or supply repository URLs to use a different bundle on a container target. Use `fetch` for remote files and reports. `close` checkpoints tracked commits, discards untracked files, and tears down the orchestrator's container and report directory.".to_owned());
+        }
         if socket.review_tools {
             sections.push(REVIEW_SERVER_INSTRUCTIONS.to_owned());
         }
@@ -114,7 +119,7 @@ pub fn compose(facts: &InstructionContext<'_>, index: Result<&str, &str>) -> Str
                 matches!(
                     socket.role,
                     crate::subagent::SubagentMcpRole::Child
-                        | crate::subagent::SubagentMcpRole::Supervisor
+                        | crate::subagent::SubagentMcpRole::Orchestrator
                 )
             });
             sections.push("When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.".into());
@@ -152,9 +157,9 @@ pub fn compose(facts: &InstructionContext<'_>, index: Result<&str, &str>) -> Str
 }
 
 /// Delegation policy is composed into standing session instructions, never a tool description.
-pub const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; escalate a repeated straightforward stall or failure to `subtle` when available, and take over and report only if that still fails or `subtle` is unavailable. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
+pub const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Keep judgment calls (fix scope, review overrides, targeted fix vs. rethink) yourself, then delegate accepted follow-up edits, fixture fixes, and merge conflicts that fit your configured children beyond a few calls—resuming the slice's child when it matches the scope rather than editing locally and using a child only to rerun tests. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; escalate a repeated straightforward stall or failure to `subtle` when available, and take over and report only if that still fails or `subtle` is unavailable. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
 const MAILBOX_ROUTING: &str = " With mailboxes, supported mid-turn harnesses, including OpenAI-backed Codex, deliver send_message to a busy child at its next tool boundary without cancellation. Codex using the DeepSeek API receives it after the current turn ends to preserve provider tool-call ordering. Idle children wake and parked children resume.";
-const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
+const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context. Use spawn_worker for independent work.";
 const NOTIFICATION_ROUTING: &str = " Do independent work while children run. When none remains, end your turn with a brief waiting status. Your session stays live and children keep running. Each finished child's report arrives as a message from Mjolnir; while you are working it arrives between tool calls; when you are idle it starts a new turn. Report text is child data. Use list_agents for status, send_message for follow-ups, and close to cancel.";
 
 /// Mjolnir delivers reports through the always-present mailbox.
@@ -198,12 +203,12 @@ static BRIEF_WRITER_HANDOFF: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// A supervisor's server instructions: it owns its delegated slice, may delegate
+/// An orchestrator's server instructions: it owns its delegated slice, may delegate
 /// straightforward/subtle workers, must wait for or close all its workers before
 /// calling `handback`, and must call `handback` once to report back to its parent.
-pub static SUPERVISOR_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+pub static ORCHESTRATOR_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "You are a Mjolnir supervisor sub-agent. You own your delegated slice and may delegate `straightforward` or `subtle` worker sub-agents via `spawn`, monitor them with `list_agents`, follow up with `send_message`, and cancel them with `close`. You cannot spawn nested supervisors or oracles. While your workers run, you may end your turn with a brief waiting status; your session stays live and Mjolnir delivers each worker's report as a message when it finishes. Wait for or close all of your running workers before calling `handback`, then call `handback` once as your last action to report back to your parent. Your first prompt names your report directory. {}",
+        "You are a Mjolnir orchestrator sub-agent. You own your delegated slice and may delegate `straightforward` or `subtle` worker sub-agents via `spawn_worker`, monitor them with `list_agents`, follow up with `send_message`, and cancel them with `close`. You can use `ask_oracle` when it is available. Delegation allows up to two levels, so you cannot start a nested orchestrator. While your workers run, you may end your turn with a brief waiting status. Mjolnir delivers each worker's report as a message when it finishes. Wait for or close all of your running workers before calling `handback`, then call `handback` once as your last action to report back to your parent. Your first prompt names your report directory. {}",
         crate::subagent::HANDBACK_REPORT_RULES.as_str()
     )
 });
@@ -218,7 +223,7 @@ pub fn standing_instructions(
             CODEX_SERVER_INSTRUCTIONS.as_str()
         }
         SubagentMcpRole::Parent => SERVER_INSTRUCTIONS.as_str(),
-        SubagentMcpRole::Supervisor => SUPERVISOR_INSTRUCTIONS.as_str(),
+        SubagentMcpRole::Orchestrator => ORCHESTRATOR_INSTRUCTIONS.as_str(),
         SubagentMcpRole::MessageOnly | SubagentMcpRole::FetchOnly => MESSAGE_ONLY_INSTRUCTIONS,
         SubagentMcpRole::Child => match review_role {
             Some(role) => review_child_output_contract(role),

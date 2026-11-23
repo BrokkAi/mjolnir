@@ -18,7 +18,7 @@ fn live_sessions(ids: &[&str]) -> LiveSessions {
 }
 use tokio::sync::mpsc;
 
-fn view(id: &str, completed: bool) -> ManagedSessionView {
+pub(super) fn view(id: &str, completed: bool) -> ManagedSessionView {
     let mut materialized = MaterializedSession::empty(id);
     materialized.transcript = vec![
         Arc::new(TranscriptItem {
@@ -2857,6 +2857,7 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
     child_controller.state.subagents.insert(
         "one".into(),
         mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: "one".into(),
@@ -2872,7 +2873,7 @@ async fn quota_prepare_ignores_stale_profile_for_top_level_only() {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: true,
-            supervisor: false,
+            orchestrator: false,
         }
         .into(),
     );

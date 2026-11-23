@@ -763,6 +763,52 @@ mod tests {
     }
 
     #[test]
+    fn promoted_question_push_uses_the_card_owner_mute_preference() {
+        use mj_client::runtime_feed::{CardForm, CardFormSource};
+        for (parent_muted, child_muted, owner, expected) in [
+            (false, true, "parent", Some("parent")),
+            (true, true, "parent", None),
+            (false, false, "child", Some("child")),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut db = open(&dir.path().join("push.sqlite3")).unwrap();
+            push_subscribe_with(&db, subscription()).unwrap();
+            let mut runtime = runtime(true);
+            assert!(claim(&mut db, &runtime, 0).is_empty());
+            for (id, muted) in [("parent", parent_muted), ("child", child_muted)] {
+                let mut record = crate::database::tests::session(id, "project");
+                record.notifications_ignored = muted;
+                runtime.records.insert(id.into(), record);
+            }
+            show(&mut runtime, owner, vec![]);
+            let card = runtime
+                .metadata
+                .notification_cards
+                .as_mut()
+                .unwrap()
+                .get_mut(owner)
+                .unwrap();
+            card.holder = Some("child".into());
+            card.form = Some(CardForm {
+                source: CardFormSource::Elicitation,
+                raised_at_ms: 1,
+                request_id: "approval".into(),
+                message: "Approve?".into(),
+            });
+            let due = claim(&mut db, &runtime, 1);
+            assert_eq!(due.len(), usize::from(expected.is_some()));
+            let (_, events) = alert_events_since_with(&db, Some(0)).unwrap();
+            assert_eq!(events.len(), due.len());
+            if let Some(expected) = expected {
+                let notice: Notice = serde_json::from_str(&due[0].payload).unwrap();
+                assert_eq!(notice.session_id.as_deref(), Some(expected));
+                assert_eq!(events[0].destination, "child");
+                assert_eq!(notice.url, "/#conversation/child");
+            }
+        }
+    }
+
+    #[test]
     fn alert_decision_is_independent_of_presence_devices_and_reused_form_ids() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("alerts.sqlite3");
@@ -790,16 +836,6 @@ mod tests {
         let mut holder = crate::database::tests::session("child", "project");
         holder.notifications_ignored = true;
         runtime.records.insert("child".into(), holder);
-        assert!(claim(&mut db, &runtime, 1).is_empty());
-        assert!(
-            alert_events_since_with(&db, Some(0)).unwrap().1.is_empty(),
-            "a muted holder cannot notify through its parent's card"
-        );
-        runtime
-            .records
-            .get_mut("child")
-            .unwrap()
-            .notifications_ignored = false;
         assert!(claim(&mut db, &runtime, 1).is_empty());
         let (high, events) = alert_events_since_with(&db, Some(0)).unwrap();
         assert_eq!(events.len(), 1);
@@ -1002,6 +1038,7 @@ mod tests {
         let mut db = open(&path).unwrap();
         let subscription = subscription();
         push_subscribe_with(&db, subscription.clone()).unwrap();
+        super::super::schema::restore_pre153_transcript_layout(&db);
         db.execute_batch(
             "DROP TABLE push_entry_deliveries;
              DROP TABLE push_entries;

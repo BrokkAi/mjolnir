@@ -26,12 +26,40 @@ fn close_roots(state: &mj_core::state::State, workspace_id: &str) -> Vec<String>
     active
         .iter()
         .filter(|id| {
-            !state.subagents.values().any(|child| {
-                &child.child_session_id == *id && active.contains(&child.parent_session_id)
-            })
+            state
+                .environment_owner_id(id)
+                .is_none_or(|owner| owner == id.as_str() || !active.contains(owner))
         })
         .cloned()
         .collect()
+}
+
+pub(super) async fn pmap_sessions<F: std::future::Future<Output = Result<()>> + Send + 'static>(
+    ids: Vec<String>,
+    operation: impl Fn(String) -> F,
+    dispatched: impl FnOnce(),
+    while_waiting: impl std::future::Future<Output = std::convert::Infallible>,
+) -> Vec<String> {
+    let mut jobs = tokio::task::JoinSet::new();
+    for id in ids {
+        let task = operation(id.clone());
+        jobs.spawn(async move { task.await.with_context(|| format!("session {id}")) });
+    }
+    dispatched();
+    tokio::pin!(while_waiting);
+    let mut failures = Vec::new();
+    while !jobs.is_empty() {
+        tokio::select! {
+            result = jobs.join_next() => match result {
+                Some(Ok(Ok(()))) => {},
+                Some(Ok(Err(error))) => failures.push(format!("{error:#}")),
+                Some(Err(error)) => failures.push(format!("session task failed: {error}")),
+                None => break,
+            },
+            impossible = &mut while_waiting => match impossible {},
+        }
+    }
+    failures
 }
 
 impl RuntimeState {
@@ -97,47 +125,35 @@ impl RuntimeState {
             }
         })
         .await?;
-        let mut jobs = tokio::task::JoinSet::new();
-        for session_id in roots {
-            let state = self.clone();
-            let cancelled = cancelled.clone();
-            jobs.spawn(async move {
-                ensure!(
-                    !cancelled.load(Ordering::Acquire),
-                    "workspace close cancelled"
-                );
-                state
-                    .suspend_session(session_id.clone())
-                    .await
-                    .with_context(|| format!("stop session {session_id}"))
-            });
-        }
-        // Release handoff admission before waiting on session suspends so a
-        // stuck session cannot block a daemon upgrade.
-        drop(upgrade_work);
-        let mut failures = Vec::new();
-        let mut cancellation_poll = tokio::time::interval(Duration::from_millis(100));
-        while !jobs.is_empty() {
-            tokio::select! {
-                result = jobs.join_next() => match result {
-                    Some(Ok(Ok(()))) => {},
-                    Some(Ok(Err(error))) => failures.push(format!("{error:#}")),
-                    Some(Err(error)) => failures.push(format!("workspace close task failed: {error}")),
-                    None => break,
-                },
-                _ = cancellation_poll.tick() => {
+        let failures = pmap_sessions(
+            roots,
+            {
+                let state = self.clone();
+                let cancelled = cancelled.clone();
+                move |session_id| {
+                    let state = state.clone();
+                    let cancelled = cancelled.clone();
+                    async move {
+                        ensure!(!cancelled.load(Ordering::Acquire), "workspace close cancelled");
+                        state.suspend_workspace_member(session_id).await
+                    }
+                }
+            },
+            move || drop(upgrade_work),
+            async {
+                let mut poll = tokio::time::interval(Duration::from_millis(100));
+                loop {
+                    poll.tick().await;
                     if cancelled.load(Ordering::Acquire) {
                         for session_id in &sessions {
-                            // A close past its commit refuses this and
-                            // finishes its teardown (#1218).
                             if let Err(error) = self.cancel_lifecycle_with_intent(session_id).await {
                                 tracing::debug!(%session_id, %error, "workspace close cancellation cannot interrupt this session");
                             }
                         }
                     }
                 }
-            }
-        }
+            },
+        ).await;
         // Once the person cancels, a session that stopped before its commit
         // did what was asked, and one past it finished. Either way the answer
         // is the cancellation; each session's record says how its own close
@@ -199,16 +215,29 @@ mod tests {
             ("parent", "a", SessionState::Running),
             ("child", "a", SessionState::Running),
             ("independent", "a", SessionState::Running),
+            ("owner-child", "a", SessionState::Parked),
             ("history", "a", SessionState::Stopped),
             ("other", "b", SessionState::Running),
         ] {
             let session = super::super::tests::runtime_test_session(id, workspace, status);
             state.sessions.insert(id.into(), session);
+            state.environment_owners.insert(id.into(), id.into());
         }
         let child = super::super::tests::runtime_test_subagent("child", "parent");
         state.subagents.insert("child".into(), child.into());
-        assert_eq!(close_roots(&state, "a"), ["independent", "parent"]);
+        state
+            .environment_owners
+            .insert("child".into(), "parent".into());
+        let owned = super::super::tests::runtime_test_subagent("owner-child", "parent");
+        state.subagents.insert("owner-child".into(), owned.into());
+        assert_eq!(
+            close_roots(&state, "a"),
+            ["independent", "owner-child", "parent"]
+        );
         state.sessions.get_mut("parent").unwrap().state = SessionState::Stopped;
-        assert_eq!(close_roots(&state, "a"), ["child", "independent"]);
+        assert_eq!(
+            close_roots(&state, "a"),
+            ["child", "independent", "owner-child"]
+        );
     }
 }

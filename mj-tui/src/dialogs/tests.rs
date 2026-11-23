@@ -28,7 +28,6 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
     };
     let retry = DashboardAction::CreateSession {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_container_size: false,
         subagents: None,
@@ -1224,35 +1223,35 @@ fn golden_dashboard_dialogs() {
         ],
         ..Default::default()
     };
+    let role_model = |role, model: ModelUsageEstimate| AgentUsageEstimate {
+        role,
+        cost_usd_ticks: model.cost_usd_ticks,
+        models: vec![model],
+    };
+    let codex_models = &report.sessions[1].models;
+    let split_sol = |cost| ModelUsageEstimate {
+        cost_usd_ticks: Ok(cost),
+        ..codex_models[0].clone()
+    };
     report.agent_usage = vec![
         AgentUsageEstimate {
             role: UsageAgentRole::Primary,
             models: vec![
                 report.sessions[0].models[0].clone(),
-                report.sessions[1].models[1].clone(),
+                codex_models[1].clone(),
             ],
             cost_usd_ticks: Ok(72_000_000_000),
         },
-        AgentUsageEstimate {
-            role: UsageAgentRole::Subagent,
-            models: vec![
-                ModelUsageEstimate {
-                    model: Some("gpt-6.1-sol".into()),
-                    cost_usd_ticks: Ok(50_000_000_000),
-                    ..Default::default()
-                },
-                report.sessions[1].models[3].clone(),
-            ],
-            cost_usd_ticks: Ok(51_050_000_000),
-        },
-        AgentUsageEstimate {
-            role: UsageAgentRole::Reviewer,
-            models: vec![
-                report.sessions[1].models[2].clone(),
-                report.sessions[1].models[4].clone(),
-            ],
-            cost_usd_ticks: Err(UnknownCost),
-        },
+        role_model(UsageAgentRole::Orchestrator, split_sol(20_000_000_000)),
+        role_model(UsageAgentRole::Subtle, split_sol(15_000_000_000)),
+        role_model(UsageAgentRole::Straightforward, split_sol(10_000_000_000)),
+        role_model(UsageAgentRole::Oracle, split_sol(5_000_000_000)),
+        role_model(UsageAgentRole::Reviewer, codex_models[2].clone()),
+        role_model(UsageAgentRole::Subagent, codex_models[3].clone()),
+        role_model(
+            UsageAgentRole::UnclassifiedSubagent,
+            codex_models[4].clone(),
+        ),
     ];
     // Dollars per hour; the 20th bar also ran a model with no known rate, and
     // the 14th ran only such models.
@@ -1281,9 +1280,16 @@ fn golden_dashboard_dialogs() {
         usage.handle_key(key(KeyCode::Tab));
     }
     usage.handle_key(key(KeyCode::Home));
-    for _ in 0..8 {
+    for _ in 0..15 {
         usage.handle_key(key(KeyCode::Down));
     }
+    append_dialog_render(
+        &mut output,
+        "Usage by session All with remaining agent roles",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
     append_dialog_render(
         &mut output,
         "Usage narrow last model total",
@@ -1331,24 +1337,21 @@ fn golden_dashboard_dialogs() {
         .models
         .retain(|model| model.model.as_deref() != Some("claude-opus-5-5"));
     codex_report.agent_usage = vec![
-        AgentUsageEstimate {
-            role: UsageAgentRole::Primary,
-            models: vec![codex_report.sessions[0].models[1].clone()],
-            cost_usd_ticks: Ok(10_000_000_000),
-        },
-        AgentUsageEstimate {
-            role: UsageAgentRole::Subagent,
-            models: vec![
-                codex_report.sessions[0].models[0].clone(),
-                codex_report.sessions[0].models[2].clone(),
-            ],
-            cost_usd_ticks: Ok(31_050_000_000),
-        },
+        role_model(UsageAgentRole::Primary, codex_models[1].clone()),
+        role_model(UsageAgentRole::Orchestrator, split_sol(10_000_000_000)),
+        role_model(UsageAgentRole::Subtle, split_sol(10_000_000_000)),
+        role_model(UsageAgentRole::Straightforward, split_sol(5_000_000_000)),
+        role_model(UsageAgentRole::Oracle, split_sol(5_000_000_000)),
         AgentUsageEstimate {
             role: UsageAgentRole::Reviewer,
-            models: vec![codex_report.sessions[0].models[3].clone()],
-            cost_usd_ticks: Err(UnknownCost),
+            models: Vec::new(),
+            cost_usd_ticks: Ok(0),
         },
+        role_model(UsageAgentRole::Subagent, codex_models[3].clone()),
+        role_model(
+            UsageAgentRole::UnclassifiedSubagent,
+            codex_models[4].clone(),
+        ),
     ];
     usage.apply_session_usage_result(profile_request, Ok(codex_report.clone()));
     // Hard-won: #1501: unknown totals hid the known per-model sums in both views.
@@ -2047,7 +2050,6 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let retry = DashboardAction::CreateSession {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_container_size: false,
         subagents: None,

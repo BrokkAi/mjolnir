@@ -422,6 +422,7 @@ fn explicit_worktree_creation_rejects_plain_directories() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.clone(), id.clone())].into(),
             sessions: [(id.clone(), record)].into_iter().collect(),
             ..State::default()
         },
@@ -800,6 +801,7 @@ fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(id.clone(), id.clone())].into(),
             sessions: [(id.clone(), record)].into_iter().collect(),
             ..State::default()
         },
@@ -860,6 +862,7 @@ fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
     let mut controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -960,6 +963,7 @@ fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     let controller = Controller {
         config: Config::default(),
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1049,6 +1053,7 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -1126,6 +1131,7 @@ fn raw_non_git_directory_keeps_its_local_path_source() {
     let controller = Controller {
         config,
         state: State {
+            environment_owners: [(session_id.clone(), session_id.clone())].into(),
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2484,6 +2490,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     let controller = Controller {
         config: Config::default(),
         state: State {
+            environment_owners: [(session_id.into(), session_id.into())].into(),
             sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
@@ -2780,6 +2787,10 @@ fn raw_checkout_inspection_uses_recorded_access_after_template_removal() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn origin_seeded_clone_restores_and_retires_after_source_repository_deletion() {
     let temp = tempfile::tempdir().unwrap();
     let origin = temp.path().join("origin.git");
@@ -3340,6 +3351,10 @@ fn scoped_linked_worktree_removal_preserves_siblings_and_locked_registrations() 
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn legacy_linked_worktree_origin_delta_capture_and_restore_as_clone() {
     use mj_checkpoint::archive::SystemGit;
     use mj_checkpoint::checkpoint::managed_clone_snapshot_input;
@@ -3628,6 +3643,10 @@ fn plan_workspace_to_raw_origin_delta_skips_source_origin_refresh_and_launch_bra
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn legacy_worktree_archive_resumes_onto_fresh_managed_clone_fetching_missing_base_and_detaching_on_branch_collision()
  {
     let temp = tempfile::tempdir().unwrap();
@@ -4048,6 +4067,8 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
         Command::new("git")
             .args([
                 "clone",
+                "-c",
+                "core.autocrlf=false",
                 &origin.to_string_lossy(),
                 &checkout.to_string_lossy()
             ])
@@ -4093,6 +4114,8 @@ fn legacy_raw_conversion_packs_against_selected_non_origin_remote() {
         Command::new("git")
             .args([
                 "clone",
+                "-c",
+                "core.autocrlf=false",
                 &upstream.to_string_lossy(),
                 &restored.to_string_lossy()
             ])

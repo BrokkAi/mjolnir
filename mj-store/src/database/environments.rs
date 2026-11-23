@@ -115,6 +115,32 @@ pub fn session_environment(session_id: &str) -> Result<Option<EnvironmentRecord>
         .map(Option::flatten)
 }
 
+pub(super) const ENVIRONMENT_OWNER_QUERY: &str =
+    "SELECT b.session_id, e.owner_session_id FROM environment_bindings b
+     JOIN environments e ON e.environment_id = b.environment_id";
+
+pub fn session_environment_owner(session_id: &str) -> Result<Option<String>> {
+    let connection = open_reader(&database_path())?;
+    session_environment_owner_with(&connection, session_id)
+}
+
+pub(super) fn session_environment_owner_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            &format!("{ENVIRONMENT_OWNER_QUERY} WHERE b.session_id = ?1"),
+            [session_id],
+            |row| row.get(1),
+        )
+        .optional()?)
+}
+
+pub fn session_owns_environment(session_id: &str) -> Result<bool> {
+    Ok(session_environment_owner(session_id)?.as_deref() == Some(session_id))
+}
+
 pub fn environment_workers(environment_id: &str) -> Result<Vec<EnvironmentWorker>> {
     let connection = open_reader(&database_path())?;
     read_environment_workers(&connection, environment_id)
@@ -184,44 +210,21 @@ pub(super) fn capture_session_environment(
     session: &SessionRecord,
     parent: Option<&str>,
 ) -> Result<()> {
-    let bound: Option<String> = transaction
+    let bound: Option<(String, String)> = transaction
         .query_row(
-            "SELECT environment_id FROM environment_bindings WHERE session_id=?1",
+            "SELECT b.environment_id, e.owner_session_id
+             FROM environment_bindings b JOIN environments e USING (environment_id)
+             WHERE b.session_id=?1",
             [&session.id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let id = if let Some(mut id) = bound {
-        let parent: Option<String> = transaction
-            .query_row(
-                "SELECT parent_session_id FROM subagent_sessions WHERE child_session_id=?1",
-                [&session.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if session.target.is_some()
-            && let Some(parent) = parent
-        {
-            let current: String = transaction.query_row(
-                "SELECT environment_id FROM environment_bindings WHERE session_id=?1",
-                [parent],
-                |row| row.get(0),
-            )?;
-            if current != id {
-                let current_owner = read_environment(transaction, &current)?
-                    .context("parent environment disappeared")?;
-                ensure!(
-                    current_owner.phase == EnvironmentPhase::Active,
-                    "parent environment is retiring; worker admission is closed"
-                );
-                transaction.execute(
-                    "UPDATE environment_bindings SET environment_id=?2 WHERE session_id=?1",
-                    params![session.id, current],
-                )?;
-                id = current;
-            }
+    let id = if let Some((id, owner)) = bound {
+        if owner == session.id || session.target.is_none() {
+            id
+        } else {
+            rebind_borrower(transaction, &session.id, id)?
         }
-        id
     } else {
         let parent = match parent {
             Some(parent) => Some(parent.to_owned()),
@@ -342,6 +345,41 @@ pub(super) fn capture_session_environment(
     }
 
     Ok(())
+}
+
+fn rebind_borrower(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    bound_id: String,
+) -> Result<String> {
+    let parent: Option<String> = transaction
+        .query_row(
+            "SELECT parent_session_id FROM subagent_sessions WHERE child_session_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(parent) = parent else {
+        return Ok(bound_id);
+    };
+    let current: String = transaction.query_row(
+        "SELECT environment_id FROM environment_bindings WHERE session_id=?1",
+        [parent],
+        |row| row.get(0),
+    )?;
+    if current != bound_id {
+        let environment =
+            read_environment(transaction, &current)?.context("parent environment disappeared")?;
+        ensure!(
+            environment.phase == EnvironmentPhase::Active,
+            "parent environment is retiring; worker admission is closed"
+        );
+        transaction.execute(
+            "UPDATE environment_bindings SET environment_id=?2 WHERE session_id=?1",
+            params![session_id, current],
+        )?;
+    }
+    Ok(current)
 }
 
 /// Closing admission and selecting the writers are one serialized decision.
@@ -984,7 +1022,96 @@ pub fn record_prepared_environment_instance(environment_id: &str, instance_id: &
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{session, test_subagent};
     use super::*;
+
+    #[test]
+    fn registration_and_placement_keep_owned_environments_separate() {
+        const CHILD: &str = "MJ_ISOLATED_OWNED_ENVIRONMENT_REGISTRATION";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "registration_and_placement_keep_owned_environments_separate",
+            ))
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = install_isolated_test_writer();
+        let mut parent = session("parent", "project");
+        let mut owned = session("owned", "other-project");
+        let borrowed = session("borrowed", "project");
+        let target = |placement: &str, id: &str| {
+            Box::new(TargetLocator::LocalBare {
+                worker_root: PathBuf::from("/workers").join(placement).join(id),
+            })
+        };
+        parent.state = SessionState::Running;
+        parent.target = Some(target("initial", &parent.id));
+        save_session(&parent).unwrap();
+        owned.target = None;
+        let relation = test_subagent(&parent.id, &owned.id);
+        register_subagent_with_startup(&owned, &relation, Vec::new(), None, None, true).unwrap();
+        save_subagent_session(&borrowed, &test_subagent(&parent.id, &borrowed.id)).unwrap();
+        assert!(session_owns_environment(&owned.id).unwrap());
+        assert!(!session_owns_environment(&borrowed.id).unwrap());
+        assert_eq!(
+            session_environment_owner(&borrowed.id).unwrap().as_deref(),
+            Some(parent.id.as_str())
+        );
+        let owned_environment = session_environment(&owned.id).unwrap().unwrap().id;
+        let borrowed_environment = session_environment(&borrowed.id).unwrap().unwrap().id;
+
+        parent.target = Some(target("moved", &parent.id));
+        save_session(&parent).unwrap();
+        let new_parent_environment = session_environment(&parent.id).unwrap().unwrap().id;
+        assert_ne!(borrowed_environment, new_parent_environment);
+        owned.target = Some(target("initial", &owned.id));
+        save_session(&owned).unwrap();
+        save_session(&borrowed).unwrap();
+        assert_eq!(
+            session_environment(&owned.id).unwrap().unwrap().id,
+            owned_environment
+        );
+        assert_eq!(
+            session_environment(&borrowed.id).unwrap().unwrap().id,
+            new_parent_environment
+        );
+
+        assert!(
+            !load_subagent(&owned.id)
+                .unwrap()
+                .unwrap()
+                .resume_with_parent
+        );
+        set_subagent_resume_with_parent(&owned.id, true).unwrap();
+        save_state(&load_state().unwrap()).unwrap();
+        let mut expected = relation;
+        expected.resume_with_parent = true;
+        assert_eq!(load_subagent(&owned.id).unwrap().unwrap(), expected);
+        set_subagent_resume_with_parent(&owned.id, false).unwrap();
+        expected.resume_with_parent = false;
+        assert_eq!(load_subagent(&owned.id).unwrap().unwrap(), expected);
+
+        for state in [SessionState::Closing, SessionState::Stopped] {
+            parent.state = state;
+            save_session(&parent).unwrap();
+            let refused = session("refused", "other-project");
+            let relation = test_subagent(&parent.id, &refused.id);
+            let error =
+                register_subagent_with_startup(&refused, &relation, Vec::new(), None, None, true)
+                    .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("parent is no longer accepting child work")
+            );
+            assert!(load_session_record(&refused.id).unwrap().is_none());
+            assert!(session_environment_owner(&refused.id).unwrap().is_none());
+        }
+    }
 
     // Hard-won: deleting an unreachable child erased the last evidence of a live shared-workspace writer.
     #[test]
@@ -1050,6 +1177,7 @@ mod tests {
         connection.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE sessions SET harness_kind='removed-harness' WHERE session_id='33333333333333333333333333333333';
             PRAGMA ignore_check_constraints=OFF;").unwrap();
         super::super::schema::drop_environment_schema(&connection);
+        super::super::schema::restore_pre153_transcript_layout(&connection);
         connection.execute_batch("DELETE FROM schema_migrations WHERE version>=122;
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;

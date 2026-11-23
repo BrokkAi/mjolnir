@@ -48,7 +48,10 @@ use super::rendering::{
 
 #[cfg(test)]
 use super::composer::{AttachmentResult, MAX_ATTACHMENT_TASKS};
-use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
+use super::transcript::{
+    ToolDetailRevision, ToolDiffstatRequest, entry_tool_detail_revision,
+    materialized_prefix_entries, render_transcript,
+};
 use super::{
     BackgroundTaskControl, ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatFooter,
     ChatRegions, ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
@@ -81,6 +84,12 @@ const SESSION_ACTOR_RECONNECT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 enum ChatIoUpdate {
+    ToolCallDetail {
+        generation: u64,
+        stable_id: String,
+        revision: ToolDetailRevision,
+        result: Result<Box<ChatEntry>, String>,
+    },
     EarlierMessages {
         generation: u64,
         result: std::result::Result<
@@ -202,6 +211,14 @@ enum PrefixRebuild {
 
 fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixRebuild {
     match update {
+        ChatIoUpdate::ToolCallDetail {
+            generation,
+            stable_id,
+            revision,
+            result,
+        } => {
+            chat.apply_tool_detail(generation, stable_id, revision, result);
+        }
         ChatIoUpdate::EarlierMessages { generation, result } => {
             if let Some(reader) = chat.earlier.as_mut().filter(|r| r.generation == generation) {
                 reader.loading = false;

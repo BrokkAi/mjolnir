@@ -323,6 +323,7 @@ pub(super) fn stop_borrower(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn retire_session_environment(
     session: &SessionRecord,
     config: &Config,
@@ -840,6 +841,7 @@ mod tests {
             worker_root: directory.path().join(&child.id),
         }));
         let relation = mj_core::subagent::SubagentRecord {
+            resume_with_parent: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             child_session_id: child.id.clone(),
@@ -855,7 +857,7 @@ mod tests {
             noticed_turn: None,
             reported_finish: None,
             handback_tool: false,
-            supervisor: false,
+            orchestrator: false,
         };
         database::save_subagent_session(&child, &relation).unwrap();
         let mut grandchild = child.clone();

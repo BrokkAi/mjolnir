@@ -151,9 +151,9 @@ pub(crate) struct NewArgs {
     /// Oracle availability for this session.
     #[arg(long, value_parser = ["enabled", "disabled"])]
     oracle: Option<String>,
-    /// Supervisor sub-agent availability for this session (requires Mjolnir delegation).
-    #[arg(long, value_parser = ["enabled", "disabled"])]
-    supervisors: Option<String>,
+    /// Enable orchestrators (requires Mjolnir delegation).
+    #[arg(long)]
+    orchestrators: bool,
     /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
     subagent_straightforward: Option<String>,
@@ -199,10 +199,9 @@ pub(crate) struct NewArgs {
     /// Withhold GitHub credentials from this session and its children.
     #[arg(long)]
     no_github_credentials: bool,
-    /// Deliver notifications for this session. Without this flag a session
-    /// started from the command line ignores notifications.
+    /// Ignore notifications for this session.
     #[arg(long)]
-    with_notifications: bool,
+    ignore_notifications: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -1155,6 +1154,7 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
         args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
+        args.orchestrators,
     )
 }
 
@@ -1181,6 +1181,7 @@ pub(crate) fn oracle_override(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn subagent_policy(
     mode: Option<&str>,
     straightforward: Option<&str>,
@@ -1189,6 +1190,7 @@ pub(crate) fn subagent_policy(
     subtle_effort: Option<&str>,
     retired_model: Option<&str>,
     retired_effort: Option<&str>,
+    orchestrators: bool,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
     const REMEDY: &str = "Configure [subagents.straightforward] and optionally [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
@@ -1206,13 +1208,17 @@ pub(crate) fn subagent_policy(
     if straightforward_effort == Some("adaptive") || subtle_effort == Some("adaptive") {
         bail!("adaptive sub-agent effort is not supported");
     }
-    if straightforward.is_some() || subtle.is_some() {
+    if orchestrators && matches!(mode, Some("native" | "none")) {
+        bail!("--orchestrators requires Mjolnir delegation (--subagents mjolnir)");
+    }
+    if straightforward.is_some() || subtle.is_some() || orchestrators && mode.is_none() {
         if mode.is_some_and(|mode| mode != "mjolnir") {
             bail!(
                 "per-type sub-agent overrides require --subagents mjolnir or an omitted --subagents"
             );
         }
         return Ok(Some(SubagentPolicy::Mjolnir {
+            orchestrators,
             straightforward: straightforward.map(|model| {
                 Box::new(mj_core::config::SubagentChoice {
                     model: model.to_owned(),
@@ -1230,6 +1236,7 @@ pub(crate) fn subagent_policy(
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
         Some("mjolnir") => Some(SubagentPolicy::Mjolnir {
+            orchestrators,
             straightforward: None,
             subtle: None,
         }),
@@ -1301,6 +1308,7 @@ pub(crate) fn session_review(
 
 /// Create a session and deliver its optional first prompt.
 pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<String>) -> Result<()> {
+    let subagents = new_subagent_policy(&args)?;
     let prompt = read_prompt(args.prompt.clone(), args.prompt_file.clone())?;
     let (client, workspace_id, target_id, project_directory, options) =
         infer_new_session_inputs(&args, requested_workspace.as_deref()).await?;
@@ -1315,12 +1323,8 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     .await?;
     let request = StartSessionRequest {
         remember_container_size: false,
-        subagents: new_subagent_policy(&args)?,
+        subagents,
         oracle: args.oracle.as_deref().map(|choice| choice == "enabled"),
-        supervisors: args
-            .supervisors
-            .as_deref()
-            .map(|choice| choice == "enabled"),
         oracle_choice: oracle_override(
             args.subagent_oracle.as_deref(),
             args.subagent_oracle_effort.as_deref(),
@@ -1330,7 +1334,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
         no_github_credentials: args.no_github_credentials,
-        notifications_ignored: !args.with_notifications,
+        notifications_ignored: args.ignore_notifications,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -2629,6 +2633,11 @@ pub(crate) fn format_suspend_dry_run(
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "dry run for session {}", preflight.session_id);
+    if let Some(warning) = mj_core::suspend_consent::owning_children_suspend_warning(
+        preflight.owning_children_to_suspend,
+    ) {
+        let _ = writeln!(out, "{warning}");
+    }
     if let Some(est) = &preflight.dry_run {
         match (est.git_delta_bytes, &est.git_delta_unavailable_reason) {
             (Some(bytes), _) => {
@@ -4375,6 +4384,20 @@ mod tests {
     }
 
     #[test]
+    fn new_delivers_notifications_unless_ignored() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--bundle", "product"];
+            argv.extend_from_slice(extra);
+            let Some(Command::New(args)) = Cli::try_parse_from(argv).unwrap().command else {
+                panic!("expected the new command");
+            };
+            args.ignore_notifications
+        };
+        assert!(!parse(&[]));
+        assert!(parse(&["--ignore-notifications"]));
+    }
+
+    #[test]
     fn no_later_history_needs_at() {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         let parse = |extra: &[&str]| {
@@ -4634,12 +4657,28 @@ mod tests {
                     args.subagent_subtle_effort.as_deref(),
                     args.subagent_model.as_deref(),
                     args.subagent_effort.as_deref(),
+                    args.orchestrators,
                 ),
                 _ => panic!("new or move command"),
             }
         };
         for command in ["new", "move"] {
             let parse = |extra: &[&str]| parse_command(command, extra);
+            assert!(
+                parse(&["--orchestrators"])
+                    .unwrap()
+                    .unwrap()
+                    .orchestrators_enabled()
+            );
+            assert!(
+                parse(&["--subagents", "mjolnir", "--orchestrators"])
+                    .unwrap()
+                    .unwrap()
+                    .orchestrators_enabled()
+            );
+            assert!(parse(&["--subagents", "native", "--orchestrators"]).is_err());
+            assert!(parse(&["--subagents", "none", "--orchestrators"]).is_err());
+            assert!(parse(&["--supervisors", "enabled"]).is_err());
             let oracle = |extra: &[&str]| {
                 let mut argv = vec!["mj", command, "--profile", "codex", "--target", "raw"];
                 if command == "new" {
@@ -4699,6 +4738,7 @@ mod tests {
             assert_eq!(
                 parse(&["--subagents", "mjolnir"]).unwrap(),
                 Some(SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None
                 })
@@ -4720,6 +4760,7 @@ mod tests {
                 assert_eq!(
                     parse(&args).unwrap(),
                     Some(SubagentPolicy::Mjolnir {
+                        orchestrators: false,
                         straightforward: None,
                         subtle: Some(Box::new(mj_core::config::SubagentChoice {
                             model: "gpt-6-luna".into(),
@@ -6024,6 +6065,8 @@ mod tests {
                 condition,
             };
         let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            ec2_instance_type: None,
+            physical_memory: None,
             id: id.into(),
             host: id.into(),
             target_ids: targets.iter().map(|id| (*id).to_owned()).collect(),

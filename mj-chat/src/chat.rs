@@ -623,6 +623,8 @@ pub struct ChatState {
     /// Completed tool calls the user has opened in the Rich transcript.
     /// Presentation state is local to this chat and keyed by durable entry.
     expanded_tool_calls: BTreeSet<u64>,
+    tool_detail_generation: u64,
+    pending_tool_detail_requests: Vec<ChatEntry>,
     /// Open mailbox events and incoming messages, keyed by durable identity.
     expanded_mailbox_events: BTreeSet<transcript::MailboxDisclosureId>,
     /// Screen-coordinate targets rebuilt with every transcript frame.
@@ -809,6 +811,8 @@ impl ChatState {
             render_cache: TranscriptRenderCache::default(),
             transcript_scrollbar: TranscriptScrollbarState::default(),
             expanded_tool_calls: BTreeSet::new(),
+            tool_detail_generation: 0,
+            pending_tool_detail_requests: Vec::new(),
             expanded_mailbox_events: BTreeSet::new(),
             transcript_click_targets: Vec::new(),
             transcript_link_frame: None,
@@ -1049,11 +1053,16 @@ impl ChatState {
         available_commands: &[AvailableCommand],
         goal: &mj_core::goal::GoalState,
     ) {
+        let switched_session = self.session_id != session.session_id;
+        if switched_session {
+            self.adopt_session_id(&session.session_id);
+        }
         self.goal_state.clone_from(goal);
         let started = std::time::Instant::now();
         self.reconcile_submissions(session);
         self.reconcile_notices(session);
-        let rebuild_projection = session.applied_event_ordinal != self.latest_seq
+        let rebuild_projection = switched_session
+            || session.applied_event_ordinal != self.latest_seq
             || session.pending_elicitations != self.pending_elicitations;
         let phase = match session.execution {
             MaterializedExecutionState::Idle => WorkerPhase::Idle,
@@ -1095,6 +1104,7 @@ impl ChatState {
             if self.has_inline_submissions() {
                 self.sync_inline_submissions();
             }
+            self.refresh_expanded_tool_details();
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.

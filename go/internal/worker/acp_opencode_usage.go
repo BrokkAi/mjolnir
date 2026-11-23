@@ -6,6 +6,8 @@
 package worker
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/BrokkAi/acp-go/schema"
@@ -44,5 +46,31 @@ func ReportsWholeTurns(agentVersion *string) bool {
 // (Rust opencode_usage::normalize; prefixed because grok_usage::normalize is
 // normalize.)
 func OpencodeUsageNormalize(usage *core.TokenUsage, usageMeta schema.Meta) error {
-	panic("unported: mj-worker/src/acp/opencode_usage.rs normalize")
+	if usageMeta != nil {
+		if _, declared := usageMeta.Get(usageScopeKey); declared {
+			return nil
+		}
+	}
+	read, write := acpFeaturesU64Or(usage.CachedReadTokens, 0), acpFeaturesU64Or(usage.CachedWriteTokens, 0)
+	if read+write < read {
+		return errors.New("OpenCode cache token overflow")
+	}
+	cache := read + write
+	if usage.InputTokens+cache < usage.InputTokens {
+		return errors.New("OpenCode input token overflow")
+	}
+	input := usage.InputTokens + cache
+	thought := acpFeaturesU64Or(usage.ThoughtTokens, 0)
+	if usage.OutputTokens+thought < usage.OutputTokens {
+		return errors.New("OpenCode output token overflow")
+	}
+	output := usage.OutputTokens + thought
+	if input+output < input || input+output != usage.TotalTokens {
+		return fmt.Errorf("OpenCode reported %d input and %d output tokens including cache and reasoning, "+
+			"but %d in total", input, output, usage.TotalTokens)
+	}
+	usage.InputTokens = input
+	usage.OutputTokens = output
+	usage.Scope = core.UsageScopeTurn
+	return nil
 }

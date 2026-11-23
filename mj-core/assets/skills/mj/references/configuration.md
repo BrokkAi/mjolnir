@@ -533,7 +533,7 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn_worker` tool. Create and Move offer
 Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
 as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
 no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
@@ -547,7 +547,7 @@ pairs (at most one model per provider):
 
 ```toml
 [subagents]
-max_concurrent = 6
+max_concurrent = 8
 
 [[subagents.primary]]
 model = "your-claude-model"
@@ -580,20 +580,22 @@ by that model when specified; omitted effort uses the harness default. Adaptive
 effort is no longer supported. Each configured choice must be offered by an enabled profile before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
-With both types configured, `spawn` takes `task_type`: `straightforward` for
-work with a clear method, such as locating code, running commands or tests, or
-implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
-design choices, or risk of subtle bugs. A subtle task gets a smarter, more
-expensive agent. Judge difficulty, not brief length. With only straightforward
-configured, `spawn` has no `task_type` and every child uses the straightforward
-choice. The parent is told to delegate straightforward work and to do work
-that needs judgment itself. Mjolnir chooses the enabled profile offering that
-task type's model and effort with the strongest quota headroom paced against
-its reset times. The agent cannot override the selection.
+With both types configured, set the `spawn_worker` tool's `task_type` to
+`straightforward` for bounded work with a single clear path, such as locating
+and mapping code, running exact build, test, or gate commands, and small
+mechanical edits. Choose `subtle` for
+multi-file implementation, including settled designs, multi-stage operational
+runs or troubleshooting, ambiguous diagnosis, design choices, and work with a
+high risk of subtle bugs. Choose by scope and branching. With only
+straightforward configured, `spawn_worker` omits `task_type` and every child uses that
+choice. The parent delegates bounded work and handles the more involved work
+itself. Mjolnir chooses the enabled profile offering that task type's model
+and effort with the strongest quota headroom paced against its reset times.
+The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
 a notice and uses `native` where supported or `none` on DSH and Antigravity.
-An explicit `--subagents mjolnir` or `--supervisors enabled` requires Mjolnir
+An explicit `--subagents mjolnir` or `--orchestrators` requires Mjolnir
 delegation to be available. `mj move --subagents native|mjolnir|none` retains
 the recorded policy when omitted, including any session override.
 `--subagent-straightforward M` and `--subagent-subtle M` independently override
@@ -617,7 +619,7 @@ or moves the session with the oracle off and a notice.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `max_concurrent` | integer | no | `6` | Most live sub-agents one session may have at once; between `1` and `64`. A sub-agent counts while it holds processes on the target, including while it is idle. A parked sub-agent, one whose turn ended and whose worker Mjolnir stopped, does not count (see [Parked sub-agents](/sessions/#parked-sub-agents)). |
+| `max_concurrent` | integer | no | `8` | Between `1` and `64` slots. Live workers sharing an environment count against its owner. Each live orchestrator with its own environment uses one slot under its parent, and its workers count against its own limit. Idle live workers hold a slot. [Parked sub-agents](/sessions/#parked-sub-agents), reviewers, and oracles do not count. |
 
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
@@ -749,7 +751,7 @@ working everywhere.
 
 Use `mj new --no-github-credentials` to withhold GitHub authentication from a
 session and all its Mjolnir children, including oracles and reviewers. The API
-creation payload and child `spawn` tool accept `no_github_credentials: true`.
+creation payload and child `spawn_worker` tool accept `no_github_credentials: true`.
 A child can also opt out individually; it cannot undo its parent's opt-out.
 This choice is saved with the session and survives restart, resume and Move.
 `--no-github-events` independently controls watcher delivery.
@@ -938,7 +940,7 @@ host.
 
 ### Persistent EC2 hosts
 
-`mj ec2 create <instance-type> --zone <zone>` provisions an SSH machine with a
+`mj ec2 create <instance-type> --zone <zone> --cpus <count> --memory-gib <GiB>` provisions an SSH machine with a
 Podman target. `mj ec2 list --region <region>` lists hosts and
 `mj ec2 destroy <name> --region <region>` removes one. Instances outlive sessions.
 The former `aws-ec2` machine kind is read only for historical records and cannot
@@ -1033,7 +1035,7 @@ added afterward use the normal enabled default.
 Nitro sandboxes keep a guest-local mbx cache. Set `remote = "s3://bucket/prefix"`
 in `[machines.<id>.build_cache]` to read trusted CI's cache. Optional
 `remote_region` defaults to the Nitro host's region. New hosts can use
-`mj ec2 create --runtime nitro --mbx-remote s3://bucket/prefix` with optional
+`mj ec2 create --runtime nitro --cpus <count> --memory-gib <GiB> --mbx-remote s3://bucket/prefix` with optional
 `--mbx-remote-region` to create or reuse and attach the instance profile.
 For an existing host, use `aws ec2 associate-iam-instance-profile` and set
 the configuration keys. A manually attached role needs both

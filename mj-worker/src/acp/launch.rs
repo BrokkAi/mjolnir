@@ -108,7 +108,8 @@ pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Optio
 pub struct SubagentMcpSocket {
     pub path: PathBuf,
     pub role: mj_core::subagent::SubagentMcpRole,
-    pub agent_mailboxes_enabled: bool,
+    pub oracle: bool,
+    pub orchestrators_enabled: bool,
     /// Whether a parent's spawn tool offers the subtle task type.
     pub subtle_subagents: bool,
     /// Whether this launch offers the `mj-review` server beside `mj-agents`.
@@ -349,7 +350,7 @@ pub(super) fn session_request_meta(
             allowed.extend(
                 socket
                     .role
-                    .tool_names()
+                    .tool_names(socket.oracle, socket.orchestrators_enabled)
                     .iter()
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
             );
@@ -423,8 +424,6 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
         spec.harness.id().to_owned(),
         "--role".into(),
         socket.role.id().to_owned(),
-        "--agent-mailboxes-enabled".into(),
-        socket.agent_mailboxes_enabled.to_string(),
     ];
     if !socket.subtle_subagents {
         // Only the non-default value is passed, for older workers.
@@ -477,7 +476,14 @@ pub(super) fn owned_acp_mcp_tools(spec: &LaunchSpec) -> Vec<(String, Vec<String>
     if let (Some(McpServer::Stdio(server)), Some(socket)) =
         (subagent_acp_mcp(spec), &spec.subagent_mcp_socket)
     {
-        owned.push((server.name, names(socket.role.tool_names())));
+        owned.push((
+            server.name,
+            names(
+                &socket
+                    .role
+                    .tool_names(socket.oracle, socket.orchestrators_enabled),
+            ),
+        ));
     }
     if let Some(McpServer::Stdio(server)) = review_acp_mcp(spec) {
         owned.push((server.name, names(mj_core::subagent::REVIEW_MCP_TOOLS)));

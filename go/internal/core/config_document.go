@@ -137,18 +137,44 @@ func editInPlace(existing, loaded, updated string) (string, bool) {
 	}
 	// These keys are accepted only for legacy reads and must not survive the
 	// comment-preserving path merely because they are absent from both
-	// projections.
-	if subagents := tomlEditAsTableLike(document.root.get("subagents")); subagents != nil {
-		subagents.remove("enabled")
-	}
-	if profiles := tomlEditAsTableLike(document.root.get("profiles")); profiles != nil {
-		for _, id := range profiles.keys() {
-			if profile := tomlEditAsTableLike(profiles.get(id)); profile != nil {
-				profile.remove("subagents")
-			}
-		}
+	// projections. (The named list is ported from the Rust source after this
+	// package's base.)
+	for _, path := range retiredKeys {
+		removeRetired(document.root, path, after)
 	}
 	return document.String(), true
+}
+
+// removeRetired removes the retired key at path from table, and a table the
+// removal empties when the save writes nothing there.
+func removeRetired(table tomlEditTableLike, path []string, written map[string]any) {
+	if len(path) == 0 {
+		return
+	}
+	first, rest := path[0], path[1:]
+	keys := []string{first}
+	if first == "*" {
+		keys = table.keys()
+	}
+	for _, key := range keys {
+		if len(rest) == 0 {
+			table.remove(key)
+			continue
+		}
+		var writtenChild map[string]any
+		if written != nil {
+			writtenChild, _ = written[key].(map[string]any)
+		}
+		child := tomlEditAsTableLike(table.get(key))
+		if child == nil {
+			continue
+		}
+		hadKeys := len(child.keys()) > 0
+		removeRetired(child, rest, writtenChild)
+		if hadKeys && len(child.keys()) == 0 && writtenChild == nil {
+			table.remove(key)
+		}
+	}
 }
 
 // dropLegacyDefaultImages removes the historical default `image` from every

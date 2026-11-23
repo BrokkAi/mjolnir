@@ -30,9 +30,11 @@ pub struct BrowserTranscriptEntry {
     /// Submission identity for replacing a client-local pending row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_id: Option<String>,
-    /// Stable identity for multiple messages delivered at the same relay ordinal.
+    /// Stable identity for rows with a durable message or tool identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stable_id: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tool_detail_trimmed: bool,
     pub id: u64,
     pub updated_seq: u64,
     pub role: &'static str,

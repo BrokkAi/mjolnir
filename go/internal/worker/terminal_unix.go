@@ -18,7 +18,25 @@ import (
 // with exactly spawn's environment, a null stdin and piped stdout and
 // stderr.
 func spawnTerminalShell(line string, spawn *TerminalSpawn) (*exec.Cmd, io.ReadCloser, io.ReadCloser, error) {
-	panic("unported: mj-worker/src/terminal.rs spawn_shell")
+	environment := map[string]string{}
+	for _, pair := range spawn.Env {
+		environment[pair[0]] = pair[1]
+	}
+	delete(environment, "GH_TOKEN")
+	delete(environment, "GITHUB_TOKEN")
+	command := childCommand("sh", []string{"-c", line}, environment)
+	command.Dir = spawn.Cwd
+	// ACP has no terminal-input method, so nothing ever writes to the child;
+	// a null stdin (exec's default) also rules out the write-while-draining
+	// deadlock.
+	//
+	// Own the group so a kill reaches descendants holding the pipes open.
+	setOwnProcessGroup(command)
+	stdout, stderr, err := startWithOutputPipes(command)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("spawn client terminal: %s: %w", line, err)
+	}
+	return command, stdout, stderr, nil
 }
 
 // setOwnProcessGroup puts command's child in a process group of its own

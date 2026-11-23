@@ -1860,7 +1860,7 @@ func TestALegacySubagentsEnabledKeyStillLoadsAndIsDroppedOnSave(t *testing.T) {
 	configTestWrite(t, path, fmt.Sprintf("version = %d\n[subagents]\nenabled = true\n", ConfigVersion))
 
 	config := configTestLoad(t, path)
-	if config.Subagents.MaxConcurrent != 6 {
+	if config.Subagents.MaxConcurrent != 8 {
 		t.Fatal(config.Subagents.MaxConcurrent)
 	}
 
@@ -1868,7 +1868,7 @@ func TestALegacySubagentsEnabledKeyStillLoadsAndIsDroppedOnSave(t *testing.T) {
 	saved := configTestReadFile(t, path)
 	configTestLacks(t, saved, "enabled")
 	configTestLacks(t, saved, "[subagents]")
-	if configTestLoad(t, path).Subagents.MaxConcurrent != 6 {
+	if configTestLoad(t, path).Subagents.MaxConcurrent != 8 {
 		t.Fatal("max concurrent")
 	}
 
@@ -1890,7 +1890,7 @@ func TestVersionEightEnablesParentOnlySubagentsByDefault(t *testing.T) {
 
 	config := configTestLoad(t, path)
 
-	if config.Version != ConfigVersion || config.Subagents.MaxConcurrent != 6 {
+	if config.Version != ConfigVersion || config.Subagents.MaxConcurrent != 8 {
 		t.Fatalf("version %d max concurrent %d", config.Version, config.Subagents.MaxConcurrent)
 	}
 }
@@ -2733,7 +2733,7 @@ func TestLegacyProfileSubagentsLoadWithoutMigrationAndDisappearOnSave(t *testing
 	configTestWrite(t, path, fmt.Sprintf("version = %d\n[profiles.legacy]\nkind = \"codex\"\nhome = %s\nsubagents = { mode = \"single_model\", model = \"old\", effort = \"adaptive\" }\n",
 		ConfigVersion, debugString(root)))
 	config := configTestLoad(t, path)
-	if config.Subagents.IsConfiguredFor(false) {
+	if config.Subagents.IsConfigured() {
 		t.Fatal("legacy choices are not migrated")
 	}
 	configTestSave(t, config, path)
@@ -2759,103 +2759,102 @@ func TestLegacyProfileSubagentsLoadWithoutMigrationAndDisappearOnSave(t *testing
 }
 
 func TestSubtleSubagentsAreOptionalButNeverConfiguredAlone(t *testing.T) {
-	choice := func(model string) *SubagentChoice { return &SubagentChoice{Model: model} }
+	choice := func(model string) SubagentChoice { return SubagentChoice{Model: model} }
 	config := DefaultConfig()
-	config.Subagents.Straightforward = choice("plain")
+	config.Subagents.Straightforward = []SubagentChoice{choice("plain")}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !config.Subagents.IsConfiguredFor(false) {
+	if !config.Subagents.IsConfigured() {
 		t.Fatal("straightforward alone is configured")
 	}
 	policy := SubagentPolicy{Mode: SubagentPolicyMjolnir}
-	if config.Subagents.OffersSubtleFor(policy, false) {
+	if config.Subagents.OffersSubtle(policy) {
 		t.Fatal("no subtle choice")
 	}
 	// A session override can add the subtle type for one session.
-	withSubtle := SubagentPolicy{Mode: SubagentPolicyMjolnir, Subtle: choice("smart")}
-	if !config.Subagents.OffersSubtleFor(withSubtle, false) {
+	smart := choice("smart")
+	withSubtle := SubagentPolicy{Mode: SubagentPolicyMjolnir, Subtle: &smart}
+	if !config.Subagents.OffersSubtle(withSubtle) {
 		t.Fatal("the session's subtle choice")
 	}
-	config.Subagents.Subtle = choice("smart")
+	config.Subagents.Subtle = []SubagentChoice{choice("smart")}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !config.Subagents.OffersSubtleFor(policy, false) {
+	if !config.Subagents.OffersSubtle(policy) {
 		t.Fatal("the global subtle choice")
 	}
 
 	config.Subagents.Straightforward = nil
-	if config.Subagents.IsConfiguredFor(false) {
+	if config.Subagents.IsConfigured() {
 		t.Fatal("subtle alone is not configured")
 	}
 	configTestContains(t, configTestValidateError(t, config), "[subagents.subtle] requires [subagents.straightforward]")
 }
 
-func TestYoloSubagentChoicesAreIgnoredWhileSharedButKeptForLater(t *testing.T) {
-	choice := func(model string) *SubagentChoice { return &SubagentChoice{Model: model} }
-	model := func(config Config, yolo bool) string {
-		t.Helper()
-		chosen := config.Subagents.ChoiceFor(SubagentTaskTypeStraightforward, yolo)
-		if chosen == nil {
-			t.Fatal("no choice")
-		}
-		return chosen.Model
-	}
-	config := DefaultConfig()
-	config.Subagents.Straightforward = choice("shared")
-	config.Subagents.Yolo.Straightforward = choice("yolo")
-	config.Subagents.Yolo.Subtle = choice("yolo-smart")
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	// Checked: the YOLO values do nothing, including their subtle rule.
-	if model(config, true) != "shared" {
-		t.Fatal("shared choices")
-	}
-	config.Subagents.Yolo.Straightforward = nil
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if model(config, true) != "shared" {
-		t.Fatal("shared choices")
-	}
+func TestSubagentConfigAcceptsSingularAndArrayAndDropsLegacyYolo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	configTestWrite(t, path, `
+version = 23
 
-	// Unchecked: the retained YOLO values become active and are validated.
-	config.Subagents.UseSameOnAllTargets = false
-	config.Subagents.Yolo.Straightforward = choice("yolo")
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
+[subagents]
+use_same_on_all_targets = false
+max_concurrent = 8
+
+[subagents.straightforward]
+model = "gpt-5.4-mini"
+effort = "high"
+
+[[subagents.primary]]
+model = "claude-opus-4-6"
+effort = "high"
+
+[[subagents.primary]]
+model = "gpt-5.4"
+effort = "xhigh"
+
+[subagents.yolo.straightforward]
+model = "kimi-k2.5"
+`)
+	loaded := configTestLoad(t, path)
+	if loaded.Subagents.MaxConcurrent != 8 {
+		t.Fatalf("max concurrent %d", loaded.Subagents.MaxConcurrent)
 	}
-	if model(config, true) != "yolo" || model(config, false) != "shared" {
-		t.Fatal("split choices")
+	if len(loaded.Subagents.Straightforward) != 1 || loaded.Subagents.Straightforward[0].Model != "gpt-5.4-mini" {
+		t.Fatalf("straightforward %+v", loaded.Subagents.Straightforward)
 	}
-	config.Subagents.Yolo.Straightforward = nil
-	configTestContains(t, configTestValidateError(t, config), "[subagents.yolo.subtle] requires [subagents.yolo.straightforward]")
+	if len(loaded.Subagents.Primary) != 2 {
+		t.Fatalf("primary %+v", loaded.Subagents.Primary)
+	}
+	if !loaded.Subagents.PrimaryConfigured() || !loaded.Subagents.IsConfigured() {
+		t.Fatal("configured")
+	}
+	configTestSave(t, loaded, path)
+	saved := configTestReadFile(t, path)
+	configTestLacks(t, saved, "yolo")
+	configTestLacks(t, saved, "use_same_on_all_targets")
+	configTestContains(t, saved, "version = 24")
 }
 
-func TestInactiveYoloChoicesSurviveASaveAndReload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
+func TestSubagentConfigRejectsSameProviderInOneCategory(t *testing.T) {
 	config := DefaultConfig()
-	config.Subagents.Yolo.Straightforward = &SubagentChoice{Model: "yolo", Effort: configTestPtr("high")}
-	configTestSave(t, config, path)
-	saved := configTestReadFile(t, path)
-	configTestContains(t, saved, "[subagents.yolo.straightforward]")
-	configTestLacks(t, saved, "use_same_on_all_targets")
-	loaded := configTestLoad(t, path)
-	if !loaded.Subagents.UseSameOnAllTargets || loaded.Subagents.Yolo.Straightforward == nil ||
-		loaded.Subagents.Yolo.Straightforward.Model != "yolo" {
-		t.Fatalf("subagents %+v", loaded.Subagents)
+	config.Subagents.Primary = []SubagentChoice{
+		{Model: "claude-opus-4-6", Effort: configTestPtr("high")},
+		{Model: "claude-sonnet-4-6", Effort: configTestPtr("high")},
 	}
+	err := configTestValidateError(t, config)
+	configTestContains(t, err, "[subagents.primary] may configure at most one model per provider")
+	configTestContains(t, err, "Anthropic")
 }
 
 func TestOracleConfigurationIsIndependentAndRejectsAdaptiveEffort(t *testing.T) {
 	config := DefaultConfig()
-	config.Subagents.Oracle = &SubagentChoice{Model: "advisor", Effort: configTestPtr("high")}
+	config.Subagents.Oracle = []SubagentChoice{{Model: "advisor", Effort: configTestPtr("high")}}
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if !config.Subagents.OracleConfiguredFor(false) {
+	if !config.Subagents.OracleConfigured() {
 		t.Fatal("the oracle is configured")
 	}
 	encoded, err := serdeJSON(config)
@@ -2866,17 +2865,17 @@ func TestOracleConfigurationIsIndependentAndRejectsAdaptiveEffort(t *testing.T) 
 	if err := unmarshalJSONGeneric(encoded, &value); err != nil {
 		t.Fatal(err)
 	}
-	if value["subagents"].(map[string]any)["oracle"].(map[string]any)["model"] != "advisor" {
+	if value["subagents"].(map[string]any)["oracle"].([]any)[0].(map[string]any)["model"] != "advisor" {
 		t.Fatal(string(encoded))
 	}
 	var decoded Config
 	if err := decoded.UnmarshalJSON(encoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Subagents.Oracle == nil || !decoded.Subagents.Oracle.equal(*config.Subagents.Oracle) {
+	if len(decoded.Subagents.Oracle) != 1 || !decoded.Subagents.Oracle[0].equal(config.Subagents.Oracle[0]) {
 		t.Fatal("the oracle survives JSON")
 	}
-	config.Subagents.Oracle.Effort = configTestPtr("adaptive")
+	config.Subagents.Oracle[0].Effort = configTestPtr("adaptive")
 	configTestContains(t, configTestValidateError(t, config), "[subagents.oracle]")
 }
 

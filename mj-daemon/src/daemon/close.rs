@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Clone, Copy, serde::Serialize, PartialEq, Eq)]
+enum SuspendInvocation {
+    Standalone,
+    Workspace,
+    Parent,
+    Recovery,
+}
+
 impl RuntimeState {
     pub fn request_close(&self, session_id: &str) {
         self.owner().close_requested.insert(session_id.to_owned());
@@ -69,6 +77,8 @@ impl RuntimeState {
                     "Move queue admission is incomplete; retry Move on the same destination before suspending"
                 );
                 let mut controller = Controller::load()?;
+                let owns_environment = controller.state.owns_environment(&session_id)
+                    .context("session has no environment binding")?;
                 let record = controller
                     .state
                     .sessions
@@ -80,7 +90,9 @@ impl RuntimeState {
                     SessionState::Running
                         | SessionState::Disconnected
                         | SessionState::Checkpointing
-                ) {
+                ) || (record.state == SessionState::Parked && owns_environment
+                    && record.target.is_some() && consent.as_ref().is_some_and(|consent| !consent.without_checkpoint))
+                {
                     record.state = SessionState::Closing;
                     record.last_error = None;
                     record.updated_at = chrono::Utc::now().to_rfc3339();
@@ -138,7 +150,7 @@ impl RuntimeState {
             session_id,
             consent,
             control,
-            super::lifecycle::LifecycleOrigin::Person,
+            SuspendInvocation::Standalone,
         )
         .await
     }
@@ -153,103 +165,253 @@ impl RuntimeState {
                 session_id,
                 consent,
                 LifecycleControl::default(),
-                super::lifecycle::LifecycleOrigin::Automatic,
+                SuspendInvocation::Recovery,
             )
             .await?;
         Self::wait_lifecycle_result(started.result).await?;
         Ok(())
     }
 
-    async fn start_suspend_session_origin(
+    pub(super) async fn suspend_workspace_member(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<()> {
+        let started = self
+            .start_suspend_session_origin(
+                session_id,
+                Default::default(),
+                LifecycleControl::default(),
+                SuspendInvocation::Workspace,
+            )
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    fn start_suspend_session_origin(
         self: &Arc<Self>,
         session_id: String,
         consent: mj_core::suspend_consent::SuspendConsent,
         control: LifecycleControl,
-        origin: super::lifecycle::LifecycleOrigin,
-    ) -> Result<StartedLifecycle> {
-        ensure!(
-            !control.cancelled.load(Ordering::Acquire),
-            "phone action cancelled"
-        );
-        let key = serde_json::to_string(&consent)?;
-        let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        self.admit_prepared_lifecycle(
-            session_id,
-            LifecycleKind::Suspend,
-            super::lifecycle::LifecycleStart {
-                origin,
-                ..super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
-            },
-            Some(acceptance),
-            move |state, session_id, _, session_admission| async move {
-                let result = async {
-                    if origin == super::lifecycle::LifecycleOrigin::Person
-                        && !consent.without_checkpoint
-                    {
+        invocation: SuspendInvocation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<StartedLifecycle>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let origin = if invocation == SuspendInvocation::Recovery {
+                super::lifecycle::LifecycleOrigin::Automatic
+            } else {
+                super::lifecycle::LifecycleOrigin::Person
+            };
+            ensure!(
+                !control.cancelled.load(Ordering::Acquire),
+                "phone action cancelled"
+            );
+            let key = if invocation == SuspendInvocation::Parent {
+                serde_json::to_string(&(&consent, invocation))?
+            } else {
+                serde_json::to_string(&consent)?
+            };
+            let (accepted, acceptance) = tokio::sync::watch::channel(None);
+            self.admit_prepared_lifecycle(
+                session_id,
+                LifecycleKind::Suspend,
+                super::lifecycle::LifecycleStart {
+                    origin,
+                    ..super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
+                },
+                Some(acceptance),
+                move |state, session_id, _, session_admission| async move {
+                    let result = async {
                         let controller = blocking(Controller::load).await?;
-                        if controller
+                        let record = controller
                             .state
                             .sessions
                             .get(&session_id)
-                            .is_some_and(|record| {
-                                record.target.is_some()
-                                    && matches!(
-                                        record.state,
-                                        SessionState::Running
-                                            | SessionState::Disconnected
-                                            | SessionState::Checkpointing,
-                                    )
-                            })
-                            && !controller.state.subagents.contains_key(&session_id)
+                            .context("unknown session")?;
+                        let owns_environment = controller
+                            .state
+                            .owns_environment(&session_id)
+                            .context("session has no environment binding")?;
+                        let owned_child = owns_environment
+                            && controller.state.subagents.contains_key(&session_id);
+                        if invocation == SuspendInvocation::Parent
+                            && !controller.state.can_suspend_owned_child(&session_id)
                         {
+                            accepted.send_replace(Some(Ok(())));
+                            return Ok(DaemonLifecycleResult::Done);
+                        }
+                        if owned_child && invocation == SuspendInvocation::Standalone {
+                            let id = session_id.clone();
+                            blocking(move || {
+                                mj_controller::database::set_subagent_resume_with_parent(&id, false)
+                            })
+                            .await?;
+                        }
+                        if origin == super::lifecycle::LifecycleOrigin::Person
+                            && !consent.without_checkpoint
+                        {
+                            if owns_environment
+                                && record.target.is_some()
+                                && matches!(
+                                    record.state,
+                                    SessionState::Running
+                                        | SessionState::Disconnected
+                                        | SessionState::Checkpointing
+                                        | SessionState::Parked
+                                )
+                            {
+                                let executor = DaemonStageReportingExecutor::new(
+                                    CancellableProcessExecutor::new(control.cancelled.clone()),
+                                    state.clone(),
+                                    session_id.clone(),
+                                );
+                                executor.begin_resumable_work()?;
+                                let inventory = controller.preflight_origin_delta_suspension(
+                                    &session_id,
+                                    &consent,
+                                    &executor,
+                                );
+                                executor.end_resumable_work("accept managed clone suspend")?;
+                                inventory?;
+                                mj_core::runtime::off_async_worker(|| {
+                                    controller.record_origin_delta_suspend_acceptance(&session_id)
+                                })?;
+                            }
+                        } else if consent.without_checkpoint && !consent.confirm_no_checkpoint {
+                            let sid = session_id.clone();
+                            let executor = DaemonStageReportingExecutor::new(
+                                CancellableProcessExecutor::new(control.cancelled.clone()),
+                                state.clone(),
+                                session_id.clone(),
+                            );
+                            blocking(move || {
+                                let controller = Controller::load()?;
+                                controller.ensure_without_checkpoint_allowed(&sid, false, &executor)
+                            })
+                            .await?;
+                        }
+                        if invocation == SuspendInvocation::Parent {
+                            // Persist parent-resume eligibility before committing the
+                            // Closing intent so daemon restart during or right after child
+                            // suspension still resumes the child with its parent.
+                            let id = session_id.clone();
+                            blocking(move || {
+                                mj_controller::database::set_subagent_resume_with_parent(&id, true)
+                            })
+                            .await?;
+                        }
+                        if let Err(error) = state
+                            .persist_suspension_intent(&session_id, Some(&consent))
+                            .await
+                        {
+                            if invocation == SuspendInvocation::Parent {
+                                let id = session_id.clone();
+                                let _ = blocking(move || {
+                                    mj_controller::database::set_subagent_resume_with_parent(
+                                        &id, false,
+                                    )
+                                })
+                                .await;
+                            }
+                            return Err(error);
+                        }
+                        accepted.send_replace(Some(Ok(())));
+                        let children = if matches!(
+                            invocation,
+                            SuspendInvocation::Standalone | SuspendInvocation::Recovery
+                        ) {
+                            let id = session_id.clone();
+                            blocking(move || {
+                                Ok(Controller::load()?.state.suspendable_owned_child_ids(&id))
+                            })
+                            .await?
+                        } else {
+                            Vec::new()
+                        };
+                        if !children.is_empty() {
                             let executor = DaemonStageReportingExecutor::new(
                                 CancellableProcessExecutor::new(control.cancelled.clone()),
                                 state.clone(),
                                 session_id.clone(),
                             );
                             executor.begin_resumable_work()?;
-                            let inventory = controller.preflight_origin_delta_suspension(
-                                &session_id,
-                                &consent,
-                                &executor,
-                            );
-                            executor.end_resumable_work("accept managed clone suspend")?;
-                            inventory?;
-                            mj_core::runtime::off_async_worker(|| {
-                                controller.record_origin_delta_suspend_acceptance(&session_id)
-                            })?;
+                            let failures = super::close_workspace::pmap_sessions(
+                                children,
+                                |child_id| {
+                                    let state = state.clone();
+                                    async move {
+                                        let consent = mj_core::suspend_consent::SuspendConsent {
+                                            discard_untracked:
+                                                mj_core::suspend_consent::UntrackedConsent::Any,
+                                            ..Default::default()
+                                        };
+                                        let started = state
+                                            .start_suspend_session_origin(
+                                                child_id,
+                                                consent,
+                                                LifecycleControl::default(),
+                                                SuspendInvocation::Parent,
+                                            )
+                                            .await?;
+                                        Self::wait_lifecycle_result(started.result).await?;
+                                        Ok(())
+                                    }
+                                },
+                                || {},
+                                std::future::pending(),
+                            )
+                            .await;
+                            executor
+                                .end_resumable_work("continue parent suspend after children")?;
+                            if !failures.is_empty() {
+                                state.push_public_notice(
+                                    &session_id,
+                                    format!(
+                                        "Some child sessions could not suspend. {}",
+                                        failures.join("; ")
+                                    ),
+                                );
+                            }
                         }
-                    } else if consent.without_checkpoint && !consent.confirm_no_checkpoint {
-                        let sid = session_id.clone();
-                        let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(control.cancelled.clone()),
-                            state.clone(),
-                            session_id.clone(),
-                        );
-                        blocking(move || {
-                            let controller = Controller::load()?;
-                            controller.ensure_without_checkpoint_allowed(&sid, false, &executor)
-                        })
-                        .await?;
+                        let outcome = state
+                            .suspend_admitted(
+                                &session_admission,
+                                session_id.clone(),
+                                control,
+                                consent,
+                            )
+                            .await;
+                        if invocation == SuspendInvocation::Parent {
+                            let id = session_id.clone();
+                            let stopped = blocking(move || {
+                                Ok(mj_controller::database::read_durable_session_record(&id)?
+                                    .is_some_and(|record| record.state == SessionState::Stopped))
+                            })
+                            .await
+                            .unwrap_or(false);
+                            if !stopped {
+                                let id = session_id.clone();
+                                let _ = blocking(move || {
+                                    mj_controller::database::set_subagent_resume_with_parent(
+                                        &id, false,
+                                    )
+                                })
+                                .await;
+                            }
+                        }
+                        outcome
                     }
-                    state
-                        .persist_suspension_intent(&session_id, Some(&consent))
-                        .await?;
-                    accepted.send_replace(Some(Ok(())));
-                    state
-                        .suspend_admitted(&session_admission, session_id.clone(), control, consent)
-                        .await
-                }
-                .await;
-                if result.is_err() {
-                    state
-                        .tell_live_parent_about_stopped_subagents(&session_id)
-                        .await;
-                }
-                result
-            },
-        )
-        .await
+                    .await;
+                    if result.is_err() {
+                        state
+                            .tell_live_parent_about_stopped_subagents(&session_id)
+                            .await;
+                    }
+                    result
+                },
+            )
+            .await
+        })
     }
 
     /// Stop every active Mjolnir sub-agent of a parent whose suspend or
@@ -271,7 +433,7 @@ impl RuntimeState {
     ///
     /// Every child must be stopped before the parent can retire shared files.
     /// A failed stop leaves its logical and physical ownership available for retry.
-    pub(super) async fn stop_subagents_for_suspend(
+    pub(super) async fn stop_borrowed_workers(
         self: &Arc<Self>,
         parent_session_id: &str,
     ) -> Result<()> {
@@ -281,19 +443,22 @@ impl RuntimeState {
             .owner()
             .controller()
             .state
-            .active_child_session_ids(parent_session_id);
+            .active_borrowers(parent_session_id);
         let mut liveness = std::collections::BTreeMap::new();
         for child_id in &children {
             liveness.insert(child_id.clone(), self.work_liveness(child_id).await);
         }
-        let stopped = blocking({
+        let (stopped, children) = blocking({
             let parent_session_id = parent_session_id.to_owned();
             move || {
                 let controller = Controller::load()?;
+                let peers =
+                    mj_controller::database::bound_environment_member_ids(&parent_session_id)?;
                 let stopped = controller
                     .state
-                    .active_child_session_ids(&parent_session_id)
+                    .active_borrowers(&parent_session_id)
                     .iter()
+                    .filter(|id| peers.contains(id))
                     .map(|child_id| {
                         let child_liveness = liveness
                             .get(child_id)
@@ -333,7 +498,22 @@ impl RuntimeState {
                         &announced,
                     )?;
                 }
-                Ok(stopped)
+                let active: BTreeSet<_> = stopped
+                    .iter()
+                    .map(|child| &child.child_session_id)
+                    .collect();
+                let children = active
+                    .iter()
+                    .filter(|id| {
+                        controller
+                            .state
+                            .subagents
+                            .get(**id)
+                            .is_some_and(|child| !active.contains(&child.parent_session_id))
+                    })
+                    .map(|id| (*id).clone())
+                    .collect();
+                Ok((stopped, children))
             }
         })
         .await
@@ -348,21 +528,10 @@ impl RuntimeState {
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );
-        let children = stopped
-            .into_iter()
-            .map(|child| child.child_session_id)
-            .collect();
         self.stop_subagents(children, LifecycleKind::StopSubagent, None)
             .await
             .context("stop sub-agents before suspending their parent")?;
         Ok(())
-    }
-
-    async fn stop_subagents_and_remove_reports(
-        self: &Arc<Self>,
-        parent_session_id: &str,
-    ) -> Result<()> {
-        self.stop_subagents_for_suspend(parent_session_id).await
     }
 
     /// An automatic close keeps every sub-agent. Their workers run in this
@@ -390,7 +559,7 @@ impl RuntimeState {
         })
     }
 
-    /// [`Self::stop_subagents_for_suspend`] as the step a close runs once the
+    /// [`Self::stop_borrowed_workers`] as the step a close runs once the
     /// parent's checkpoint is verified. With `commit`, the close first commits
     /// through its lifecycle control (see [`Self::commit_close`]).
     pub(super) fn stop_subagents_before_close(
@@ -404,9 +573,7 @@ impl RuntimeState {
             if let Some(control) = commit {
                 Self::commit_close(&control)?;
             }
-            state
-                .stop_subagents_and_remove_reports(&parent_session_id)
-                .await
+            state.stop_borrowed_workers(&parent_session_id).await
         })
     }
 
@@ -563,6 +730,72 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub(crate) async fn close_orchestrator(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<serde_json::Value> {
+        let before = blocking({
+            let session_id = session_id.clone();
+            move || {
+                mj_controller::database::read_durable_session_record(&session_id)?
+                    .context("unknown orchestrator")
+            }
+        })
+        .await?;
+        let consent = mj_core::suspend_consent::SuspendConsent {
+            discard_untracked: mj_core::suspend_consent::UntrackedConsent::Any,
+            ..Default::default()
+        };
+        let started = self
+            .start_suspend_session(session_id.clone(), consent)
+            .await?;
+        let result = Self::wait_lifecycle_result(started.result).await?;
+        let deferred = matches!(result, DaemonLifecycleResult::DeferredCleanup);
+        let after = blocking({
+            let session_id = session_id.clone();
+            move || {
+                mj_controller::database::read_durable_session_record(&session_id)?
+                    .context("closed orchestrator disappeared")
+            }
+        })
+        .await?;
+        let dropped_untracked = if let Some(checkpoint) = after.checkpoint
+            && before.checkpoint.as_ref() != Some(&checkpoint)
+        {
+            blocking(move || {
+                let manifest =
+                    mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path)?;
+                let prefix = mj_checkpoint::snapshot::DROPPED_UNTRACKED_NOTICE_PREFIX;
+                let dropped = manifest
+                    .repositories
+                    .into_iter()
+                    .filter_map(|repo| {
+                        let metadata = repo.metadata;
+                        let notice = metadata
+                            .origin_delta?
+                            .notices
+                            .into_iter()
+                            .find(|notice| notice.starts_with(prefix))?;
+                        Some(format!("{}: {notice}", metadata.id))
+                    })
+                    .collect::<Vec<_>>();
+                Ok(dropped)
+            })
+            .await?
+        } else {
+            Vec::new()
+        };
+        let mut response = serde_json::json!({
+            "child_session_id": session_id,
+            "closed": !deferred && after.state == SessionState::Stopped,
+            "status": if deferred { "cleanup_pending" } else if before.state == SessionState::Stopped { "already_stopped" } else { "closed" },
+        });
+        if !dropped_untracked.is_empty() {
+            response["dropped_untracked"] = serde_json::json!(dropped_untracked);
+        }
+        Ok(response)
+    }
+
     /// A parent's close request, admitted once per (parent, request) so a
     /// replay after a daemon restart joins the close already in flight
     /// instead of starting another.
@@ -581,6 +814,14 @@ impl RuntimeState {
                 super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
                     .automatic(),
                 move |state, session_id, _cancelled, session_admission| async move {
+                    let id = session_id.clone();
+                    blocking(move || {
+                        if mj_controller::database::session_owns_environment(&id)? {
+                            mj_controller::database::set_subagent_resume_with_parent(&id, false)?;
+                        }
+                        Ok(())
+                    })
+                    .await?;
                     state
                         .suspend_admitted(
                             &session_admission,
@@ -651,15 +892,21 @@ impl RuntimeState {
         {
             return Ok(DaemonLifecycleResult::Done);
         }
-        let route = close_route(
-            controller.state.sessions.get(session_id),
-            controller.state.subagents.contains_key(session_id),
-        );
+        let session = controller
+            .state
+            .sessions
+            .get(session_id)
+            .context("unknown session")?;
+        let owns_environment = controller
+            .state
+            .owns_environment(session_id)
+            .context("session has no environment binding")?;
+        let route = close_route(session, owns_environment);
         if matches!(route, CloseRoute::Done | CloseRoute::DeferredCleanup) {
             if let Some(control) = commit {
                 Self::commit_close(control)?;
             }
-            self.stop_subagents_and_remove_reports(session_id).await?;
+            self.stop_borrowed_workers(session_id).await?;
             return Ok(if route == CloseRoute::DeferredCleanup {
                 DaemonLifecycleResult::DeferredCleanup
             } else {
@@ -667,7 +914,7 @@ impl RuntimeState {
             });
         }
         let deferred = match route {
-            CloseRoute::Subagent => {
+            CloseRoute::Borrower => {
                 controller
                     .suspend_subagent_controlled(
                         session_admission,
@@ -702,7 +949,7 @@ impl RuntimeState {
                 if let Some(control) = commit {
                     Self::commit_close(control)?;
                 }
-                self.stop_subagents_and_remove_reports(session_id).await?;
+                self.stop_borrowed_workers(session_id).await?;
                 let outcome = controller.suspend_without_checkpoint(session_id, true, executor)?;
                 for warning in outcome.warnings {
                     tracing::warn!(session_id, %warning, "suspend without checkpoint warning");

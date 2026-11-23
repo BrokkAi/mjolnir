@@ -832,7 +832,11 @@ func (v *WorkspaceSnapshot) UnmarshalJSON(data []byte) error {
 }
 
 type RuntimeSessionView struct {
-	Attention core.SessionAttention `json:"attention"`
+	// MaterializedOnly marks a retained projection for a session with no
+	// relay view. Never serialized. (Added by the client-rest port: the
+	// runtime feed's scoping reads it.)
+	MaterializedOnly bool                  `json:"-"`
+	Attention        core.SessionAttention `json:"attention"`
 	// PolicyConfigKeys are config selectors owned by the target permission
 	// policy.
 	PolicyConfigKeys           []string                                         `json:"policy_config_keys" serde:"default"`
@@ -4903,7 +4907,52 @@ const ResumeCandidateTitleChars = 200
 // build rows here, so a row reads the same whichever of them held the
 // record.
 func ResumeCandidateOf(record *core.SessionRecord, config *core.Config) ResumeCandidate {
-	panic("unported: mj-client/src/daemon.rs ResumeCandidate::of")
+	timestampMs := func(timestamp string) *int64 {
+		parsed, ok := core.ParseChronoRFC3339(timestamp)
+		if !ok {
+			return nil
+		}
+		millis := parsed.UnixMilli()
+		return &millis
+	}
+	title := []rune(record.ListedTitle())
+	if len(title) > ResumeCandidateTitleChars {
+		title = title[:ResumeCandidateTitleChars]
+	}
+	var lastActivityMs *int64
+	if record.Checkpoint != nil {
+		lastActivityMs = timestampMs(record.Checkpoint.CreatedAt)
+	}
+	if lastActivityMs == nil {
+		lastActivityMs = timestampMs(record.UpdatedAt)
+	}
+	var publication *core.PublicationState
+	if state, ok := record.PublicationState(); ok {
+		publication = &state
+	}
+	var checkpointArchive *string
+	if record.Checkpoint != nil && record.State == core.SessionStateStopped {
+		archive := record.Checkpoint.ArchivePath
+		checkpointArchive = &archive
+	}
+	// An omitted managed checkout kind is a worktree, as serde's default
+	// reads it.
+	owned := record.RecordCheckout().ManagedWorktree()
+	worktreeCheckout := owned != nil &&
+		(owned.Kind == core.ManagedCheckoutKindWorktree || owned.Kind == "")
+	return ResumeCandidate{
+		SessionID:         record.ID,
+		State:             record.State,
+		LastProfile:       record.LastProfile,
+		Title:             string(title),
+		Origin:            record.ProjectTarget(config, record.TargetTemplateID),
+		Project:           record.ProjectName(config),
+		HasCheckpoint:     record.Checkpoint != nil,
+		LastActivityMs:    lastActivityMs,
+		Publication:       publication,
+		CheckpointArchive: checkpointArchive,
+		WorktreeCheckout:  worktreeCheckout,
+	}
 }
 
 type DaemonStatus struct {
@@ -5143,7 +5192,67 @@ func ReadFrame[T any](r io.Reader) (T, error) {
 // it. All fragments belong to the same response; disconnects discard partial
 // state.
 func ReadResponse(r io.Reader) (ResponseEnvelope, error) {
-	panic("unported: mj-client/src/daemon.rs read_response")
+	response, err := ReadFrame[ResponseEnvelope](r)
+	if err != nil {
+		return ResponseEnvelope{}, err
+	}
+	if _, chunked := response.Result.Ok.(DaemonReplyReplyChunk); response.Result.Err != nil || !chunked {
+		return response, nil
+	}
+	protocolVersion := response.ProtocolVersion
+	requestID := response.RequestID
+	var body []byte
+	for {
+		if response.ProtocolVersion != protocolVersion || response.RequestID != requestID {
+			return ResponseEnvelope{}, errors.New("daemon crossed reply fragment identities")
+		}
+		chunk, ok := response.Result.Ok.(DaemonReplyReplyChunk)
+		if response.Result.Err != nil || !ok {
+			return ResponseEnvelope{}, errors.New("daemon interrupted a chunked reply")
+		}
+		if len(chunk.Bytes) == 0 {
+			return ResponseEnvelope{}, errors.New("empty reply fragment")
+		}
+		body = append(body, chunk.Bytes...)
+		if chunk.Finished {
+			break
+		}
+		if response, err = ReadFrame[ResponseEnvelope](r); err != nil {
+			return ResponseEnvelope{}, err
+		}
+	}
+	reply, err := UnmarshalDaemonReplyJSON(body)
+	if err != nil {
+		return ResponseEnvelope{}, err
+	}
+	if !DaemonReplyIsChunked(reply) {
+		return ResponseEnvelope{}, errors.New("daemon chunked a reply that is never chunked")
+	}
+	return ResponseEnvelope{
+		ProtocolVersion: protocolVersion,
+		RequestID:       requestID,
+		Result:          DaemonOk(reply),
+	}, nil
+}
+
+// daemonWatch closes stream when ctx ends, as dropping the Rust future that
+// owns an exchange drops its connection. The returned release stops watching
+// and reports whether the stream is still intact; after false the stream is
+// closed and must never be reused.
+func daemonWatch(ctx context.Context, stream net.Conn) (release func() bool) {
+	return context.AfterFunc(ctx, func() { _ = stream.Close() })
+}
+
+// daemonAbandon drops a stream whose exchange failed, so it can never carry
+// another request, and reports why: the caller's cancellation when ctx
+// ended, otherwise err.
+func daemonAbandon(ctx context.Context, stream net.Conn, release func() bool, err error) error {
+	release()
+	_ = stream.Close()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // DaemonClient is one authenticated control connection to a daemon.
@@ -5175,7 +5284,40 @@ func DaemonClientConnect(ctx context.Context, metadata DaemonMetadata) (*DaemonC
 // before any request carries the token. The tunnel may have exited since an
 // earlier proof, and another process may now hold its port.
 func daemonClientConnectProven(ctx context.Context, metadata DaemonMetadata) (*DaemonClient, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::connect_proven")
+	client, err := DaemonClientConnect(ctx, metadata)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := client.takeStream()
+	if err != nil {
+		return nil, err
+	}
+	proven, err := proveStream(ctx, stream, client.metadata.Token)
+	if err != nil {
+		_ = stream.Close()
+		return nil, err
+	}
+	if !proven {
+		_ = stream.Close()
+		return nil, fmt.Errorf("the SSH tunnel's local port %s did not prove it reaches the daemon", client.metadata.Address)
+	}
+	client.stream = stream
+	return client, nil
+}
+
+// Close drops the control connection, as dropping the Rust client does.
+func (c *DaemonClient) Close() {
+	if c.stream != nil {
+		_ = c.stream.Close()
+		c.stream = nil
+	}
+}
+
+// replace makes this client the reconnected one, dropping its own
+// connection (Rust's `*self = reconnect().await?`).
+func (c *DaemonClient) replace(next *DaemonClient) {
+	c.Close()
+	*c = *next
 }
 
 // Connector is the connector-owned SSH origin; never inferred from
@@ -5202,7 +5344,21 @@ func (c *DaemonClient) Endpoint(ctx context.Context) (DaemonEndpoint, error) {
 // management requests must reach daemons of any protocol version, and the
 // frozen subset encodes identically across all of them.
 func (c *DaemonClient) Request(ctx context.Context, action DaemonAction) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::request")
+	connector := c.connector
+	previous := c.metadata
+	return c.requestWithReconnect(ctx, action, func(ctx context.Context) (*DaemonClient, error) {
+		if connector != nil {
+			return connector.refresh(ctx, previous)
+		}
+		for {
+			if client, err := ConnectExisting(ctx); err == nil {
+				return client, nil
+			}
+			if err := daemonSleep(ctx, 250*time.Millisecond); err != nil {
+				return nil, err
+			}
+		}
+	})
 }
 
 func (c *DaemonClient) requestWithReconnect(
@@ -5210,14 +5366,98 @@ func (c *DaemonClient) requestWithReconnect(
 	action DaemonAction,
 	reconnect func(context.Context) (*DaemonClient, error),
 ) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::request_with_reconnect")
+	for {
+		response, err := c.requestOnce(ctx, action)
+		if err != nil {
+			return nil, err
+		}
+		_, pending := response.(DaemonReplyUpgradePending)
+		if _, prepare := action.(DaemonActionPrepareUpgrade); !pending || prepare {
+			return response, nil
+		}
+		// Only an explicit refusal guarantees non-admission. Never replay
+		// arbitrary mutations after a lost acknowledgement.
+		if err := daemonSleep(ctx, 100*time.Millisecond); err != nil {
+			return nil, err
+		}
+		client, err := reconnect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.replace(client)
+	}
+}
+
+// daemonSleep waits for duration, or for ctx to end.
+func daemonSleep(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Upload streams raw bytes on this connection. The returned blob is
 // connection-scoped; consume it before disconnecting. Delivery failures are
-// never replayed.
+// never replayed. Cancelling ctx drops the connection; a read blocked in
+// reader still ends only when reader returns.
 func (c *DaemonClient) Upload(ctx context.Context, reader io.Reader) (string, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::upload")
+	stream, err := c.takeStream()
+	if err != nil {
+		return "", err
+	}
+	release := daemonWatch(ctx, stream)
+	digest := sha256.New()
+	requestID := c.nextRequestID
+	c.nextRequestID++
+	buffer := make([]byte, 64*1024)
+	send := func(bytes []byte, sha *string) error {
+		return WriteFrame(stream, RequestEnvelope{
+			ProtocolVersion: c.metadata.ProtocolVersion,
+			RequestID:       requestID,
+			Token:           c.metadata.Token,
+			Action:          DaemonActionUploadChunk{Bytes: bytes, Sha256: sha},
+		})
+	}
+	for {
+		n, readErr := reader.Read(buffer)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", daemonAbandon(ctx, stream, release, readErr)
+		}
+		if n > 0 {
+			digest.Write(buffer[:n])
+			if err := send(append([]byte(nil), buffer[:n]...), nil); err != nil {
+				return "", daemonAbandon(ctx, stream, release, err)
+			}
+		}
+		if readErr != nil {
+			// The end of the source: an empty fragment carries the digest of
+			// every byte sent.
+			sum := core.LowerHex(digest.Sum(nil))
+			if err := send([]byte{}, &sum); err != nil {
+				return "", daemonAbandon(ctx, stream, release, err)
+			}
+			break
+		}
+	}
+	if !release() {
+		_ = stream.Close()
+		return "", ctx.Err()
+	}
+	response, err := c.finishExchange(ctx, stream, requestID)
+	if err != nil {
+		return "", err
+	}
+	if response.Result.Err != nil {
+		return "", errors.New(*response.Result.Err)
+	}
+	if blob, ok := response.Result.Ok.(DaemonReplyBlobUploaded); ok {
+		return blob.Blob, nil
+	}
+	return "", fmt.Errorf("unexpected blob upload reply %s", daemonReplyDebug(response.Result.Ok))
 }
 
 // UploadAndConsume uploads and consumes on one connection. Only explicit
@@ -5261,11 +5501,108 @@ func (c *DaemonClient) uploadAndConsumeObservedWithReconnect(
 	phase func(ctx context.Context, uploading bool) error,
 	cancel <-chan struct{},
 ) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::upload_and_consume_observed_with_reconnect")
+	start, err := reader.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, err
+	}
+	if err := phase(ctx, true); err != nil {
+		return nil, err
+	}
+	// The upload and the reconnection run under a context that cancel also
+	// ends, as Rust selects on cancel around both.
+	errUploadCancelled := errors.New("upload cancelled")
+	cancellable, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	go func() {
+		select {
+		case <-cancel:
+			stop(errUploadCancelled)
+		case <-cancellable.Done():
+		}
+	}()
+	interrupted := func(err error) error {
+		if ctx.Err() == nil && errors.Is(context.Cause(cancellable), errUploadCancelled) {
+			return errUploadCancelled
+		}
+		return err
+	}
+	cancelled := func() bool {
+		select {
+		case <-cancel:
+			return true
+		default:
+			return false
+		}
+	}
+	for {
+		// Cancellation is checked first, before the upload takes the
+		// connection.
+		if cancelled() {
+			return nil, errUploadCancelled
+		}
+		blob, err := c.Upload(cancellable, reader)
+		if err != nil {
+			return nil, interrupted(err)
+		}
+		if err := phase(ctx, false); err != nil {
+			return nil, err
+		}
+		reply, err := c.requestOnce(ctx, action(blob))
+		if err != nil {
+			return nil, err
+		}
+		if _, pending := reply.(DaemonReplyUpgradePending); !pending {
+			return reply, nil
+		}
+		if err := phase(ctx, true); err != nil {
+			return nil, err
+		}
+		if cancelled() {
+			return nil, errUploadCancelled
+		}
+		if err := daemonSleep(cancellable, 100*time.Millisecond); err != nil {
+			return nil, interrupted(err)
+		}
+		client, err := reconnect(cancellable)
+		if err != nil {
+			return nil, interrupted(err)
+		}
+		c.replace(client)
+		if _, err := reader.Seek(start, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
 }
 
 func (c *DaemonClient) requestOnce(ctx context.Context, action DaemonAction) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::request_once")
+	stream, err := c.takeStream()
+	if err != nil {
+		return nil, err
+	}
+	release := daemonWatch(ctx, stream)
+	requestID := c.nextRequestID
+	c.nextRequestID++
+	err = WriteFrame(stream, RequestEnvelope{
+		ProtocolVersion: c.metadata.ProtocolVersion,
+		RequestID:       requestID,
+		Token:           c.metadata.Token,
+		Action:          action,
+	})
+	if err != nil {
+		return nil, daemonAbandon(ctx, stream, release, transportLost(err))
+	}
+	if !release() {
+		_ = stream.Close()
+		return nil, ctx.Err()
+	}
+	response, err := c.finishExchange(ctx, stream, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if response.Result.Err != nil {
+		return nil, DaemonRefusal{Message: *response.Result.Err}
+	}
+	return response.Result.Ok, nil
 }
 
 // takeStream hands the connection to one exchange. The exchange owns framing
@@ -5282,7 +5619,24 @@ func (c *DaemonClient) takeStream() (net.Conn, error) {
 }
 
 func (c *DaemonClient) finishExchange(ctx context.Context, stream net.Conn, requestID uint64) (ResponseEnvelope, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::finish_exchange")
+	release := daemonWatch(ctx, stream)
+	response, err := ReadResponse(stream)
+	if err != nil {
+		return ResponseEnvelope{}, daemonAbandon(ctx, stream, release, transportLost(err))
+	}
+	if response.ProtocolVersion != c.metadata.ProtocolVersion {
+		return ResponseEnvelope{}, daemonAbandon(ctx, stream, release, errors.New("daemon changed protocol"))
+	}
+	if response.RequestID != requestID {
+		return ResponseEnvelope{}, daemonAbandon(ctx, stream, release,
+			fmt.Errorf("daemon crossed request IDs: expected %d, received %d", requestID, response.RequestID))
+	}
+	if !release() {
+		_ = stream.Close()
+		return ResponseEnvelope{}, ctx.Err()
+	}
+	c.stream = stream
+	return response, nil
 }
 
 func (c *DaemonClient) Identity(ctx context.Context) (DaemonIdentity, error) {
@@ -5709,7 +6063,59 @@ func (c *DaemonClient) AdoptRecovery(
 	adoption RecoveryAdoptionRequest,
 	progress func(RecoveryAdoptionProgress),
 ) error {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::adopt_recovery")
+	stream, err := c.takeStream()
+	if err != nil {
+		return err
+	}
+	release := daemonWatch(ctx, stream)
+	requestID := c.nextRequestID
+	c.nextRequestID++
+	err = WriteFrame(stream, RequestEnvelope{
+		ProtocolVersion: c.metadata.ProtocolVersion,
+		RequestID:       requestID,
+		Token:           c.metadata.Token,
+		Action:          DaemonActionAdoptRecovery{Request: adoption},
+	})
+	if err != nil {
+		return daemonAbandon(ctx, stream, release, transportLost(err))
+	}
+	for {
+		response, err := ReadResponse(stream)
+		if err != nil {
+			return daemonAbandon(ctx, stream, release, fmt.Errorf(
+				"adoption connection ended before completion; check mj sessions, then rerun recover adopt if needed: %w",
+				transportLost(err)))
+		}
+		if response.ProtocolVersion != c.metadata.ProtocolVersion {
+			return daemonAbandon(ctx, stream, release, errors.New("daemon changed protocol"))
+		}
+		if response.RequestID != requestID {
+			return daemonAbandon(ctx, stream, release,
+				fmt.Errorf("daemon crossed request IDs: expected %d, received %d", requestID, response.RequestID))
+		}
+		if response.Result.Err == nil {
+			switch reply := response.Result.Ok.(type) {
+			case DaemonReplyAdoptionWaiting:
+				progress(RecoveryAdoptionProgressWaiting{Blockers: reply.Blockers, DestroyCommand: reply.DestroyCommand})
+				continue
+			case DaemonReplyAdoptionInstalled:
+				progress(RecoveryAdoptionProgressInstalled{SessionID: reply.SessionID})
+				continue
+			}
+		}
+		if !release() {
+			_ = stream.Close()
+			return ctx.Err()
+		}
+		c.stream = stream
+		if response.Result.Err != nil {
+			return errors.New(*response.Result.Err)
+		}
+		if _, done := response.Result.Ok.(DaemonReplyDone); done {
+			return nil
+		}
+		return fmt.Errorf("unexpected recovery-adoption reply %s", daemonReplyDebug(response.Result.Ok))
+	}
 }
 
 func (c *DaemonClient) DestroyRecovery(ctx context.Context, sessionID, targetID, confirmation string, allInstances bool) error {
@@ -5948,14 +6354,48 @@ func (c *DaemonClient) StopBackgroundTask(ctx context.Context, sessionID, backgr
 
 // StartSessionLifecycle submits once and retains the receipt; a lost reply
 // does not permit replay.
+//
+// Any failure other than the daemon's refusal is a
+// LifecycleAdmissionUnconfirmed carrying the failure's text, but not its
+// type, as Rust's anyhow context does.
 func (c *DaemonClient) StartSessionLifecycle(ctx context.Context, request SessionLifecycleRequest) (LifecycleReceipt, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::start_session_lifecycle")
+	sessionID := SessionLifecycleRequestSessionID(request)
+	reply, err := c.Request(ctx, DaemonActionStartSessionLifecycle{Request: request})
+	if err != nil {
+		var refusal DaemonRefusal
+		if errors.As(err, &refusal) {
+			return LifecycleReceipt{}, err
+		}
+		return LifecycleReceipt{}, fmt.Errorf("%s: %w", err, LifecycleAdmissionUnconfirmed{SessionID: sessionID})
+	}
+	if accepted, ok := reply.(DaemonReplyLifecycleAccepted); ok {
+		return accepted.Receipt, nil
+	}
+	return LifecycleReceipt{}, fmt.Errorf("unexpected lifecycle acceptance reply %s: %w",
+		daemonReplyDebug(reply), LifecycleAdmissionUnconfirmed{SessionID: sessionID})
 }
 
 // WaitSessionLifecycle observes exactly this operation. Abandoning the
 // observer never cancels it.
+//
+// A failure to observe is a LifecycleObservationUnavailable carrying the
+// failure's text, but not its type: a refused observation is not the
+// operation's refusal. Only a captured operation failure is a DaemonRefusal.
 func (c *DaemonClient) WaitSessionLifecycle(ctx context.Context, receipt LifecycleReceipt) (DaemonReply, error) {
-	panic("unported: mj-client/src/daemon.rs DaemonClient::wait_session_lifecycle")
+	reply, err := c.Request(ctx, DaemonActionWaitSessionLifecycle{Receipt: receipt})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", err, LifecycleObservationUnavailable{Receipt: receipt})
+	}
+	switch reply := reply.(type) {
+	case DaemonReplyDone, DaemonReplyMoveOutcome:
+		return reply, nil
+	case DaemonReplyLifecycleFailed:
+		return nil, DaemonRefusal{Message: reply.Detail}
+	case DaemonReplyLifecycleObservationUnavailable:
+		return nil, LifecycleObservationUnavailable{Receipt: reply.Receipt}
+	}
+	return nil, fmt.Errorf("unexpected lifecycle completion reply %s: %w",
+		daemonReplyDebug(reply), LifecycleObservationUnavailable{Receipt: receipt})
 }
 
 func (c *DaemonClient) SuspendSession(ctx context.Context, sessionID string) error {
@@ -6114,6 +6554,9 @@ func (m *ManagementClient) ProtocolVersion() uint32 {
 func (m *ManagementClient) Metadata() DaemonMetadata {
 	return m.inner.metadata
 }
+
+// Close drops the management connection, as dropping the Rust client does.
+func (m *ManagementClient) Close() { m.inner.Close() }
 
 func (m *ManagementClient) Identity(ctx context.Context) (DaemonIdentity, error) {
 	return m.inner.Identity(ctx)
@@ -6399,6 +6842,10 @@ func reconnectAfterUploadRefusal(ctx context.Context) (*DaemonClient, error) {
 // `{reply:?}` does.
 func daemonReplyDebug(reply DaemonReply) string {
 	name := strings.TrimPrefix(fmt.Sprintf("%T", reply), "client.DaemonReply")
+	// A unit variant prints as its bare name.
+	if value := reflect.ValueOf(reply); value.Kind() == reflect.Struct && value.NumField() == 0 {
+		return name
+	}
 	return fmt.Sprintf("%s%+v", name, reply)
 }
 

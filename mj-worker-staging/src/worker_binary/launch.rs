@@ -1,13 +1,12 @@
 use super::*;
 
-/// Every top-level session of every harness gets the message-only `mj-agents`
-/// server, and that server carries ask_oracle; a child never does.
+/// Workspace owners can use their configured oracle.
 pub fn oracle_launch_enabled(
     session: &mj_core::state::SessionRecord,
-    managed_child: bool,
+    owns_environment: bool,
     choices: &mj_core::config::SubagentConfig,
 ) -> bool {
-    !managed_child && !session.effective_oracle(choices).is_empty()
+    owns_environment && !session.effective_oracle(choices).is_empty()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -120,6 +119,7 @@ pub fn apply_jev_settings(launch: &mut WorkerLaunchConfig, config: &mj_core::con
 #[cfg(test)]
 pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
     let child = is_child.then(|| mj_core::subagent::SubagentRecord {
+        resume_with_parent: false,
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
         child_session_id: session.id.clone(),
@@ -135,7 +135,7 @@ pub fn subagent_tools_enabled(session: &mj_core::state::SessionRecord, is_child:
         noticed_turn: None,
         reported_finish: None,
         handback_tool: true,
-        supervisor: false,
+        orchestrator: false,
     });
     session
         .subagents
@@ -174,6 +174,28 @@ pub struct LaunchWorkspace<'a> {
     pub session_id: &'a str,
     pub container: Option<&'a Path>,
     pub parent_worktree: Option<&'a mj_core::state::ManagedWorktree>,
+    pub owner: Option<&'a mj_core::state::SessionRecord>,
+    pub working_directories: &'a [&'a Path],
+}
+
+pub fn launch_workspace_paths(
+    checkout: &mj_core::state::Checkout<'_>,
+    bundle: Option<&ProjectBundle>,
+    backend: &targets::TargetLocator,
+    worker_workspace: &LaunchWorkspace<'_>,
+) -> Result<(String, Vec<String>)> {
+    Ok(
+        if let Some(project_directory) = checkout.project_directory() {
+            (project_directory.to_string_lossy().into_owned(), Vec::new())
+        } else {
+            workspace_paths(
+                backend,
+                bundle.context("session bundle is missing")?,
+                worker_workspace.session_id,
+                worker_workspace.container,
+            )?
+        },
+    )
 }
 
 #[doc(hidden)]
@@ -220,19 +242,16 @@ pub fn worker_launch_config_with_checkout(
     let session_id = session.id.as_str();
     let execution_policy = target.execution_policy;
     let target_profile_home = target_profile_home(backend, session_id, profile);
-    let workspace = if let Some(project_directory) = checkout.project_directory() {
-        (project_directory.to_string_lossy().into_owned(), Vec::new())
-    } else {
-        workspace_paths(
-            backend,
-            bundle.context("session bundle is missing")?,
-            worker_workspace.session_id,
-            worker_workspace.container,
-        )?
-    };
+    let workspace = launch_workspace_paths(checkout, bundle, backend, &worker_workspace)?;
+    let cwd = worker_workspace
+        .working_directories
+        .iter()
+        .fold(PathBuf::from(&workspace.0), |cwd, directory| {
+            mj_core::target_path::join(&cwd, directory)
+        });
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
     additional_directories.extend(
-        mj_core::state::applied_container_settings(session)
+        mj_core::state::applied_container_settings(worker_workspace.owner.unwrap_or(session))
             .additional_mounts
             .iter()
             .map(|resource| resource.destination.clone()),
@@ -477,8 +496,8 @@ pub fn worker_launch_config_with_checkout(
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             subagent_kind: None,
-            supervisor: false,
-            supervisors_enabled: false,
+            orchestrator: false,
+            orchestrators_enabled: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
             initial_model: None,
@@ -501,7 +520,7 @@ pub fn worker_launch_config_with_checkout(
             harness_runtime: harness_runtime_policy(backend),
             environment,
             excluded_environment,
-            cwd: PathBuf::from(&workspace.0),
+            cwd,
             additional_directories,
             native_session_id: session.native_session_id.clone(),
             project_memory: project_memory.clone(),

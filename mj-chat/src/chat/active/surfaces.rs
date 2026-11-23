@@ -33,6 +33,7 @@ impl ActiveChat {
             prompt_focused,
             transcript_selected,
         );
+        self.dispatch_tool_details();
     }
 
     pub(super) fn select_elicitation_surface(&mut self, surface: super::super::ElicitationSurface) {

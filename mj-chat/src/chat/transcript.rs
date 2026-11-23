@@ -205,6 +205,23 @@ impl Default for ToolDisplay {
 }
 
 #[derive(Debug)]
+enum HydratedToolDetail {
+    Loading,
+    Full(Box<ChatEntry>),
+    Unavailable(String),
+}
+
+pub(super) type ToolDetailRevision = (i64, Option<u64>);
+
+pub(super) fn entry_tool_detail_revision(entry: &ChatEntry) -> Option<ToolDetailRevision> {
+    entry
+        .source
+        .0
+        .as_ref()
+        .map(|item| (item.last_changed_at_ms, item.latest_content_event_ordinal))
+}
+
+#[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
     theme: theme::UiTheme,
     /// Whether the rows were drawn with the ASCII symbol set; a change of
@@ -217,6 +234,8 @@ pub(super) struct TranscriptRenderCache {
     collapse: Vec<EntryCollapse>,
     collapse_input_fingerprint: u64,
     expanded_mailbox_events: BTreeSet<MailboxDisclosureId>,
+    // The active conversation owns these bodies and drops them on a session switch.
+    hydrated_tool_details: BTreeMap<String, (ToolDetailRevision, HydratedToolDetail)>,
 }
 
 /// A frame-local target for toggling a tool or mailbox event. The
@@ -614,18 +633,52 @@ fn cached_entry_lines<'cache>(
             (lines, Some(track))
         } else {
             (
-                match collapse {
-                    EntryCollapse::None => render_transcript_entry_with_options(
-                        entry,
-                        width,
-                        cache.mode,
-                        cache.tools.view(),
-                    ),
-                    EntryCollapse::Hidden | EntryCollapse::Omitted => Vec::new(),
-                    EntryCollapse::Expanded => render_transcript_entry_expanded(entry, width),
-                    EntryCollapse::Summary { end, .. } => {
-                        collapsed_streak_lines(&entries[index..end], width, cache.mode)
+                {
+                    let detail_entry = cache.detail_entry(entry, collapse);
+                    let mut rows = match collapse {
+                        EntryCollapse::None => render_transcript_entry_with_options(
+                            detail_entry,
+                            width,
+                            cache.mode,
+                            cache.tools.view(),
+                        ),
+                        EntryCollapse::Hidden | EntryCollapse::Omitted => Vec::new(),
+                        EntryCollapse::Expanded => {
+                            render_transcript_entry_expanded(detail_entry, width)
+                        }
+                        EntryCollapse::Summary { end, .. } => {
+                            collapsed_streak_lines(&entries[index..end], width, cache.mode)
+                        }
+                    };
+                    if !rows.is_empty()
+                        && (cache.mode == TranscriptRenderMode::Raw
+                            || collapse == EntryCollapse::Expanded)
+                    {
+                        let notice = match cache.tool_detail(entry) {
+                            Some(HydratedToolDetail::Loading) => {
+                                Some("Loading tool details…".to_owned())
+                            }
+                            Some(HydratedToolDetail::Unavailable(reason)) => {
+                                Some(format!("Tool details unavailable: {reason}"))
+                            }
+                            _ => None,
+                        };
+                        if let Some(notice) = notice {
+                            let blank = rows.len() - 1;
+                            rows.splice(
+                                blank..blank,
+                                wrap_styled_line(
+                                    Line::styled(
+                                        format!("  {}", sanitize_terminal_text(&notice)),
+                                        theme::muted(),
+                                    ),
+                                    width,
+                                    2,
+                                ),
+                            );
+                        }
                     }
+                    rows
                 },
                 None,
             )
@@ -660,11 +713,32 @@ impl Default for TranscriptRenderCache {
             collapse: Vec::new(),
             collapse_input_fingerprint: 0,
             expanded_mailbox_events: BTreeSet::new(),
+            hydrated_tool_details: BTreeMap::new(),
         }
     }
 }
 
 impl TranscriptRenderCache {
+    fn tool_detail(&self, entry: &ChatEntry) -> Option<&HydratedToolDetail> {
+        if !entry.tool_detail_trimmed {
+            return None;
+        }
+        let revision = entry_tool_detail_revision(entry)?;
+        let (cached_revision, state) = self
+            .hydrated_tool_details
+            .get(entry.stable_id.as_deref()?)?;
+        (*cached_revision == revision).then_some(state)
+    }
+
+    fn detail_entry<'a>(&'a self, entry: &'a ChatEntry, collapse: EntryCollapse) -> &'a ChatEntry {
+        if (self.mode == TranscriptRenderMode::Raw || collapse == EntryCollapse::Expanded)
+            && let Some(HydratedToolDetail::Full(full)) = self.tool_detail(entry)
+        {
+            return full;
+        }
+        entry
+    }
+
     /// Drops every cached row. The cache is indexed by entry position, so any
     /// change that moves entries between positions has to clear it: a cached
     /// row whose revision happens to match the entry that moved into its slot
@@ -678,6 +752,112 @@ impl TranscriptRenderCache {
 }
 
 impl ChatState {
+    pub(super) fn reset_tool_details(&mut self) {
+        self.tool_detail_generation = self.tool_detail_generation.wrapping_add(1);
+        self.pending_tool_detail_requests.clear();
+        self.render_cache.hydrated_tool_details.clear();
+        self.expanded_tool_calls.clear();
+        self.invalidate_render_cache();
+    }
+
+    fn queue_tool_detail(&mut self, index: usize, retry: bool) {
+        let entry = &self.entries[index];
+        if !entry.tool_detail_trimmed {
+            return;
+        }
+        let (Some(stable_id), Some(revision)) =
+            (&entry.stable_id, entry_tool_detail_revision(entry))
+        else {
+            return;
+        };
+        if self
+            .render_cache
+            .tool_detail(entry)
+            .is_some_and(|state| !retry || !matches!(state, HydratedToolDetail::Unavailable(_)))
+        {
+            return;
+        }
+        self.render_cache
+            .hydrated_tool_details
+            .insert(stable_id.clone(), (revision, HydratedToolDetail::Loading));
+        self.pending_tool_detail_requests.push(entry.clone());
+        self.invalidate_tool_detail_rows(index);
+    }
+
+    pub(super) fn refresh_expanded_tool_details(&mut self) {
+        if self.expanded_tool_calls.is_empty() {
+            return;
+        }
+        for index in 0..self.entries.len() {
+            if self
+                .expanded_tool_calls
+                .contains(&self.entries[index].start_seq)
+            {
+                self.queue_tool_detail(index, false);
+            }
+        }
+    }
+
+    pub(super) fn apply_tool_detail(
+        &mut self,
+        generation: u64,
+        stable_id: String,
+        revision: ToolDetailRevision,
+        result: Result<Box<ChatEntry>, String>,
+    ) {
+        if generation != self.tool_detail_generation {
+            return;
+        }
+        let Some(index) = self.entries.iter().position(|entry| {
+            entry.stable_id.as_deref() == Some(&stable_id)
+                && entry_tool_detail_revision(entry) == Some(revision)
+        }) else {
+            return;
+        };
+        if !matches!(
+            self.render_cache.tool_detail(&self.entries[index]),
+            Some(HydratedToolDetail::Loading)
+        ) {
+            return;
+        }
+        let state = match result {
+            Ok(full) => HydratedToolDetail::Full(full),
+            Err(reason) => HydratedToolDetail::Unavailable(reason),
+        };
+        self.invalidate_tool_detail_rows(index);
+        self.render_cache
+            .hydrated_tool_details
+            .insert(stable_id, (revision, state));
+    }
+
+    fn invalidate_tool_detail_rows(&mut self, index: usize) {
+        if let Some(cached) = self.render_cache.entries.get_mut(index) {
+            *cached = None;
+        }
+        self.render_cache_generation = self.render_cache_generation.wrapping_add(1);
+    }
+
+    fn queue_visible_raw_tool_details(&mut self, top: AnchorRow, visible_rows: usize) {
+        let mut remaining = visible_rows;
+        let mut skip = top.row;
+        let mut requests = Vec::new();
+        for index in top.entry..self.entries.len() {
+            if remaining == 0 {
+                break;
+            }
+            let rows = cached_entry_lines(&self.entries, &mut self.render_cache, index);
+            let visible = rows.len().saturating_sub(skip);
+            if visible > 0 && self.entries[index].tool_detail_trimmed {
+                requests.push(index);
+            }
+            remaining = remaining.saturating_sub(visible);
+            skip = 0;
+        }
+        for index in requests {
+            self.queue_tool_detail(index, false);
+        }
+    }
+
     /// Where the reader is, independent of the tail-first loading window.
     pub fn transcript_position(&self) -> TranscriptPosition {
         match self.anchor.clone() {
@@ -1508,11 +1688,10 @@ impl ChatState {
         visible_rows: usize,
     ) {
         self.transcript_click_targets.clear();
-        if self.render_mode != TranscriptRenderMode::Rich
-            || visible_rows == 0
-            || inner.width == 0
-            || top.entry >= self.entries.len()
-        {
+        if visible_rows == 0 || inner.width == 0 || top.entry >= self.entries.len() {
+            return;
+        }
+        if self.render_mode == TranscriptRenderMode::Raw {
             return;
         }
 
@@ -1569,7 +1748,10 @@ impl ChatState {
                             entries[index].start_seq,
                         );
                     }
-                    EntryCollapse::None if entries[index].role == ChatRole::Tool => {
+                    EntryCollapse::None
+                        if entries[index].role == ChatRole::Tool
+                            || entries[index].tool_detail_trimmed =>
+                    {
                         add_whole_tool_rows(
                             targets,
                             inner,
@@ -1653,7 +1835,8 @@ impl ChatState {
                     _ => return None,
                 };
                 return track_transcript_entry(
-                    &self.entries[index],
+                    self.render_cache
+                        .detail_entry(&self.entries[index], collapse),
                     usize::from(self.render_cache.width),
                     mode,
                     tool,
@@ -1704,6 +1887,11 @@ impl ChatState {
             }
         } else if !self.expanded_tool_calls.insert(target.start_seq) {
             self.expanded_tool_calls.remove(&target.start_seq);
+        } else if let Some(index) = self.entries.iter().position(|entry| {
+            entry.start_seq == target.start_seq
+                && (entry.role == ChatRole::Tool || entry.tool_detail_trimmed)
+        }) {
+            self.queue_tool_detail(index, true);
         }
 
         // A tool toggle can replace its whole layout; reset an anchor inside
@@ -1874,7 +2062,10 @@ impl ChatState {
                 .map(|track| track.copies.clone())
                 .unwrap_or_else(|| {
                     view.map(|(mode, tool)| {
-                        track_transcript_entry(&self.entries[index], width, mode, tool).copies
+                        let entry = self
+                            .render_cache
+                            .detail_entry(&self.entries[index], self.render_cache.collapse[index]);
+                        track_transcript_entry(entry, width, mode, tool).copies
                     })
                     .unwrap_or_default()
                 });

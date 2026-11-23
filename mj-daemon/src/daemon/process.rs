@@ -835,6 +835,7 @@ pub(super) async fn run_daemon_runtime(
     // Everything a client can use is initialized before this atomic
     // publication. From here on every exit, including an error from the test
     // hook or the event loop, flows through the same bounded epilogue.
+    let tool_detail_backfill = mj_core::runtime::spawn(backfill_tool_details(cancellation.clone()));
     let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
     let mut auto_afk_outcome = None;
     let mut outcome = async {
@@ -1016,6 +1017,9 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    if let Err(error) = tool_detail_backfill.await {
+        tracing::warn!(%error, "tool detail backfill task failed");
+    }
     epilogue.record(
         &mut outcome,
         "join auto AFK timer",
@@ -1310,6 +1314,61 @@ pub(super) fn tombstone_session_ids(controller: &Controller) -> Vec<String> {
         })
         .map(|session| session.id.clone())
         .collect()
+}
+
+/// Stop between batches on either handoff or normal shutdown. Every committed
+/// batch is durable progress, so the next daemon can rediscover any remainder.
+async fn backfill_tool_details(cancellation: CancellationToken) {
+    let drain = mj_controller::upgrade::gate().wait_until_draining();
+    tokio::pin!(drain);
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return,
+        () = &mut drain => return,
+        () = mj_controller::upgrade::wait_for_startup_recovery() => {}
+    }
+
+    let result = async {
+        let mut session_after = String::new();
+        'sessions: loop {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => break,
+                () = &mut drain => break,
+                () = tokio::task::yield_now() => {}
+            }
+            let next = mj_core::runtime::spawn_blocking(move || {
+                mj_controller::database::next_tool_detail_backfill_session(&session_after)
+            }).await??;
+            let Some((session_id, frontier)) = next else { break };
+            session_after = session_id.clone();
+            let mut row_after = None;
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break 'sessions,
+                    () = &mut drain => break 'sessions,
+                    () = tokio::task::yield_now() => {}
+                }
+                let id = session_id.clone();
+                let result = mj_core::runtime::spawn_blocking(move || {
+                    mj_controller::database::backfill_tool_details_batch(&id, frontier, row_after)
+                }).await?;
+                match result {
+                    Ok(Some(cursor)) => row_after = Some(cursor),
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%session_id, error = %format!("{error:#}"), "could not backfill tool details");
+                        break;
+                    }
+                }
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    }.await;
+    if let Err(error) = result {
+        tracing::warn!(error = %format!("{error:#}"), "could not scan sessions for tool detail backfill");
+    }
 }
 
 /// A service can observe cancellation and finish before the serving loop

@@ -40,6 +40,11 @@ fn begin_worker_restart_for(
             record.is_some_and(|s| s.target.as_deref() == Some(&intent.target)),
             "worker restart target changed before admission"
         );
+        if unpark {
+            super::session_restart::ensure_container_parent_available(&tx, &session_id)?;
+        } else {
+            super::session_restart::ensure_no_peer_container_upgrade(&tx, &session_id)?;
+        }
         let claimed = tx.execute(
             "INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase)
              VALUES (?1,?2,?3,?4,'prepared') ON CONFLICT(session_id) DO NOTHING",
@@ -55,12 +60,6 @@ fn begin_worker_restart_for(
                 .map_or((None, None), |(previous, next)| {
                     (Some(previous), Some(next))
                 });
-            let parent: String = tx.query_row(
-                "SELECT parent_session_id FROM subagent_sessions WHERE child_session_id=?1",
-                [&session_id],
-                |row| row.get(0),
-            )?;
-            super::session_restart::ensure_container_parent_available(&tx, &parent)?;
             ensure!(
                 tx.execute(
                     "UPDATE sessions SET state='running', last_error=NULL, updated_at=?2,
@@ -176,12 +175,19 @@ fn finish_worker_restart_with(
     Ok(())
 }
 
-/// A proved dead wake releases its boot and becomes retryable atomically.
+pub enum SubagentUnparkFailure<'a> {
+    Retryable {
+        detail: &'a str,
+        evidence: Option<&'a mj_core::subagent::WakeFailure>,
+    },
+    WorkingDirectoryUnavailable(&'a str),
+}
+
+/// Settle a failed wake and its boot intent in one transaction.
 pub fn fail_subagent_unpark(
     session_id: &str,
     operation_id: &str,
-    detail: &str,
-    evidence: Option<&mj_core::subagent::WakeFailure>,
+    failure: SubagentUnparkFailure<'_>,
 ) -> Result<()> {
     let owner = crate::worker_lifecycle::require(session_id)?;
     ensure!(
@@ -190,21 +196,153 @@ pub fn fail_subagent_unpark(
     );
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
-    let failure = match evidence {
-        Some(evidence) => evidence.encode(detail)?,
-        None => detail.to_owned(),
+    let (state, detail) = match failure {
+        SubagentUnparkFailure::Retryable { detail, evidence } => (
+            SessionState::Parked,
+            match evidence {
+                Some(evidence) => evidence.encode(detail)?,
+                None => detail.to_owned(),
+            },
+        ),
+        SubagentUnparkFailure::WorkingDirectoryUnavailable(detail) => {
+            (SessionState::Error, detail.to_owned())
+        }
     };
     submit_database_write("fail_subagent_unpark", move |connection| {
         let tx = connection.transaction()?;
         ensure!(tx.execute(
-            "UPDATE sessions SET state='parked', last_error=?3, updated_at=?4
+            "UPDATE sessions SET state=?5, last_error=?3, updated_at=?4
              WHERE session_id=?1 AND state='running'
              AND EXISTS (SELECT 1 FROM worker_restart_intents WHERE session_id=?1 AND operation_id=?2)
              AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
-            params![session_id, operation_id, failure, chrono::Utc::now().to_rfc3339()],
+            params![session_id, operation_id, detail, chrono::Utc::now().to_rfc3339(), state.as_str()],
         )? == 1, "failed wake no longer owns the running child");
         finish_worker_restart_with(&tx, &session_id, &operation_id)?;
         tx.commit()?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{session, test_subagent};
+    use super::*;
+    use crate::recovery_gate::{BackgroundWork, RecoveryGate};
+    use crate::worker_lifecycle::WorkerPermit;
+
+    #[test]
+    fn worker_restart_and_session_restart_gate_only_same_environment_peers() {
+        const CHILD: &str = "MJ_ISOLATED_ENVIRONMENT_PEER_GATES";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "worker_restart_and_session_restart_gate_only_same_environment_peers",
+            ))
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+
+        let _writer = install_isolated_test_writer();
+        let gate = Arc::new(RecoveryGate::default());
+        let mut parent = session("parent-session", "project");
+        parent.state = SessionState::Running;
+        save_session(&parent).unwrap();
+        let mut owned = session("owned-session", "project");
+        owned.state = SessionState::Parked;
+        let mut owned_relation = test_subagent(&parent.id, &owned.id);
+        owned_relation.orchestrator = true;
+        register_subagent_with_startup(&owned, &owned_relation, Vec::new(), None, None, true)
+            .unwrap();
+        let mut borrowed = session("borrowed", "project");
+        borrowed.state = SessionState::Parked;
+        save_subagent_session(&borrowed, &test_subagent(&parent.id, &borrowed.id)).unwrap();
+        let mut nested = session("nested", "project");
+        nested.state = SessionState::Parked;
+        // The owned session has a separate set of borrowers.
+        save_subagent_session(&nested, &test_subagent(&owned.id, &nested.id)).unwrap();
+
+        let begin_upgrade = |record: &SessionRecord| {
+            let plan = crate::targets::container_upgrade_test_plan(&record.id);
+            begin_container_upgrade(&record.id, "upgrade-test", Arc::default(), plan, None)
+                .unwrap();
+        };
+        let commit_upgrade = |record: &SessionRecord| {
+            try_commit_container_upgrade(&record.id, "upgrade-test")
+                .unwrap()
+                .is_committed()
+        };
+        let restart = |record: &SessionRecord, unpark| {
+            let attempt = gate
+                .try_start(&record.id, BackgroundWork::WorkerReplacement)
+                .unwrap();
+            let permit = WorkerPermit::acquire(&record.id, &attempt).unwrap();
+            let intent = WorkerRestartIntent {
+                operation_id: "test-restart".into(),
+                target: record.target.as_deref().unwrap().clone(),
+                desired_build: "fixture".into(),
+            };
+            permit.scope_blocking(|| {
+                if unpark {
+                    begin_subagent_unpark(&record.id, &intent, None)?;
+                } else {
+                    begin_worker_restart(&record.id, &intent)?;
+                }
+                finish_worker_restart(&record.id, &intent.operation_id)
+            })
+        };
+
+        begin_upgrade(&parent);
+        assert!(container_upgrade_owns_target(&borrowed.id).unwrap());
+        assert!(!container_upgrade_owns_target(&owned.id).unwrap());
+        // A parked worker may wake before commit. The resulting running peer
+        // prevents the upgrade from crossing into recreation.
+        restart(&borrowed, true).unwrap();
+        assert!(!commit_upgrade(&parent));
+        save_session(&borrowed).unwrap();
+        assert!(commit_upgrade(&parent));
+        restart(&parent, false).unwrap();
+        assert!(
+            restart(&borrowed, true)
+                .unwrap_err()
+                .to_string()
+                .contains("being upgraded")
+        );
+        assert!(
+            restart(&borrowed, false)
+                .unwrap_err()
+                .to_string()
+                .contains("being upgraded")
+        );
+        restart(&owned, false).unwrap();
+        restart(&owned, true).unwrap();
+        let mut new_child = session("new-child", "project");
+        new_child.target = None;
+        let relation = test_subagent(&parent.id, &new_child.id);
+        assert!(
+            save_subagent_session(&new_child, &relation)
+                .unwrap_err()
+                .to_string()
+                .contains("being upgraded")
+        );
+        register_subagent_with_startup(&new_child, &relation, Vec::new(), None, None, true)
+            .unwrap();
+        finish_session_restart(&parent.id, "upgrade-test").unwrap();
+
+        begin_upgrade(&owned);
+        assert!(commit_upgrade(&owned));
+        assert!(
+            restart(&nested, true)
+                .unwrap_err()
+                .to_string()
+                .contains("being upgraded")
+        );
+        restart(&parent, false).unwrap();
+        restart(&borrowed, true).unwrap();
+        let mut new_borrower = session("new-borrower", "project");
+        new_borrower.target = None;
+        save_subagent_session(&new_borrower, &test_subagent(&parent.id, &new_borrower.id)).unwrap();
+    }
 }

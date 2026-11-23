@@ -296,7 +296,7 @@ fn last_materialized_context_boundary(
 /// with `ProjectionWindow::trim`.
 fn turn_start_sql() -> String {
     format!(
-        "(stable_id GLOB '{}*' OR (stable_id NOT GLOB '{}*' AND json_extract(body_json, '$.kind')='user'))",
+        "(stable_id GLOB '{}*' OR (stable_id NOT GLOB '{}*' AND item_kind='user'))",
         mj_core::transcript::HARNESS_TURN_ITEM_PREFIX,
         mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX,
     )
@@ -760,7 +760,7 @@ pub(super) fn load_materialized_turn_summary_from(
         "SELECT COUNT(*)
          FROM materialized_transcript_items
          WHERE session_id = ?1 AND position >= ?2 AND position <= ?3
-           AND json_extract(body_json, '$.kind') = 'tool'",
+           AND item_kind = 'tool'",
         params![session_id, turn_start_position, turn_completed_position],
         |row| row.get::<_, u64>(0),
     )?;
@@ -844,6 +844,27 @@ pub(super) fn hydrate_terminal_outputs(
     Ok(())
 }
 
+const FILTERED_TRANSCRIPT_MATCH: &str = "session_id = ?1 AND update_ordinal > ?2
+    AND (json_array_length(?4) = 0 OR item_kind IN (SELECT value FROM json_each(?4)))
+    AND (?5 = 0 OR (settled = 1 AND (?6 IS NULL OR update_ordinal < ?6)))";
+
+fn filtered_transcript_page_sql() -> String {
+    format!(
+        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                last_changed_at_ms, body_json
+         FROM materialized_transcript_items
+         WHERE {FILTERED_TRANSCRIPT_MATCH}
+           AND update_ordinal <= (
+               SELECT MAX(update_ordinal) FROM (
+                   SELECT update_ordinal FROM materialized_transcript_items
+                   WHERE {FILTERED_TRANSCRIPT_MATCH}
+                   ORDER BY update_ordinal, position, stable_id LIMIT ?3
+               )
+           )
+         ORDER BY update_ordinal, position, stable_id"
+    )
+}
+
 pub(super) fn load_materialized_transcript_filtered_from(
     path: &Path,
     session_id: &str,
@@ -865,36 +886,16 @@ pub(super) fn load_materialized_transcript_filtered_from(
     let role_kinds_json = serde_json::to_string(&role_kinds)?;
     let open_agent_seq = if finished_only {
         connection.query_row(
-            "SELECT MIN(COALESCE(latest_content_event_ordinal, position))
-                 FROM materialized_transcript_items
-                 WHERE session_id = ?1
-                   AND COALESCE(latest_content_event_ordinal, position) > ?2
-                   AND json_extract(body_json, '$.kind') = 'agent'
-                   AND json_extract(body_json, '$.streaming') = 1",
+            "SELECT MIN(update_ordinal) FROM materialized_transcript_items
+             WHERE session_id = ?1 AND update_ordinal > ?2 AND item_kind = 'agent' AND settled = 0",
             params![session_id, after_seq],
             |row| row.get::<_, Option<u64>>(0),
         )?
     } else {
         None
     };
-    let mut statement = connection.prepare(
-        "WITH matches AS (
-             SELECT *, COALESCE(latest_content_event_ordinal, position) AS seq
-             FROM materialized_transcript_items WHERE session_id = ?1
-             AND COALESCE(latest_content_event_ordinal, position) > ?2
-             AND (json_array_length(?4) = 0 OR json_extract(body_json, '$.kind')
-                  IN (SELECT value FROM json_each(?4)))
-             AND (?5 = 0 OR (
-                 json_extract(body_json, '$.kind') = 'agent'
-                 AND json_extract(body_json, '$.streaming') = 0
-                 AND (?6 IS NULL OR COALESCE(latest_content_event_ordinal, position) < ?6)
-             ))
-         ), boundary AS (SELECT MAX(seq) AS seq FROM (SELECT seq FROM matches ORDER BY seq LIMIT ?3))
-         SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
-                last_changed_at_ms, body_json
-         FROM matches WHERE seq <= (SELECT seq FROM boundary)
-         ORDER BY seq, stable_id",
-    )?;
+    let page_sql = filtered_transcript_page_sql();
+    let mut statement = connection.prepare(&page_sql)?;
     let rows = statement
         .query_map(
             params![
@@ -939,30 +940,25 @@ pub(super) fn load_materialized_transcript_filtered_from(
             },
         )
         .collect::<Result<Vec<_>>>()?;
+    // A sequence is indivisible as a cursor. Preserve the historical stable-ID
+    // order within each tie while reading both ranges in index order.
+    items.sort_by(|a, b| (a.seq(), &a.stable_id).cmp(&(b.seq(), &b.stable_id)));
     let latest_seq = connection.query_row(
-        "SELECT COALESCE(MAX(COALESCE(latest_content_event_ordinal, position)), 0)
-         FROM materialized_transcript_items
-         WHERE session_id = ?1",
+        "SELECT COALESCE(MAX(update_ordinal), 0)
+         FROM materialized_transcript_items WHERE session_id = ?1",
         [session_id],
         |row| row.get::<_, u64>(0),
     )?;
     let last_seq = items.last().map_or(after_seq, |item| item.seq());
     let more: bool = connection.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM materialized_transcript_items
-             WHERE session_id = ?1
-               AND COALESCE(latest_content_event_ordinal, position) > ?2
-               AND (json_array_length(?3) = 0 OR json_extract(body_json, '$.kind')
-                    IN (SELECT value FROM json_each(?3)))
-               AND (?4 = 0 OR (
-                   json_extract(body_json, '$.kind') = 'agent'
-                   AND json_extract(body_json, '$.streaming') = 0
-                   AND (?5 IS NULL OR COALESCE(latest_content_event_ordinal, position) < ?5)
-               ))
-         )",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+                  WHERE {FILTERED_TRANSCRIPT_MATCH})"
+        ),
         params![
             session_id,
             last_seq,
+            rusqlite::types::Null,
             role_kinds_json,
             i64::from(finished_only),
             open_agent_seq
@@ -990,185 +986,535 @@ pub(super) fn load_materialized_transcript_filtered_from(
     }))
 }
 
-/// How many transcript rows one retention pass rewrites.
-///
-/// The daemon is the single database writer, so a pass that rewrote every row
-/// of a long session would stall every other write behind it. A capped pass
-/// leaves the rest for the next checkpoint, which is the next time any of it
-/// becomes redundant anyway.
-pub(super) const RETENTION_BATCH_ITEMS: usize = 4_096;
+/// Use the same bounded pass for turn completion, checkpoint retention, and backfill.
+pub(super) const RETENTION_BATCH_ITEMS: usize = 32;
 
-/// Rows below this are already small enough that rewriting them would cost
-/// more than it reclaims.
+/// Smaller rows already cost little to keep inline.
 pub(super) const RETENTION_BODY_FLOOR_BYTES: usize = 4 * 1024;
 
-/// Drop tool output that a verified checkpoint already holds.
-///
-/// The projection only ever grew: the only deletes were a per-item remove, a
-/// whole-session wipe, and the `sessions` cascade. One measured session reached
-/// 28,066 items and 635 MiB, of which 561 MB was tool-call content.
-///
-/// A checkpoint archive carries the complete transcript up to its event
-/// frontier, and one checkpoint per session is retained, so every item at or
-/// below `event_frontier` is durably recorded elsewhere. What stays here is
-/// what the transcript still shows: which tool ran, on what, with what result,
-/// and each edit's diffstat. See
-/// [`mj_transcript::transcript::compact_tool_call_for_retention`].
+pub fn spill_and_trim_settled_tools_through(
+    session_id: &str,
+    frontier_ordinal: u64,
+) -> Result<Vec<(String, TranscriptBody)>> {
+    spill_and_trim_settled_tools_versioned(session_id, frontier_ordinal).map(spilled_bodies)
+}
+
+pub fn spill_and_trim_settled_tools_through_from(
+    path: &Path,
+    session_id: &str,
+    frontier_ordinal: u64,
+) -> Result<Vec<(String, TranscriptBody)>> {
+    let mut connection = open(path)?;
+    drain_tool_detail_batches(|after| {
+        spill_tool_detail_batch(
+            &mut connection,
+            tool_details::data_dir_from(path),
+            session_id,
+            frontier_ordinal,
+            after,
+            RETENTION_BATCH_ITEMS,
+        )
+    })
+    .map(|batch| spilled_bodies(batch.items))
+}
+
+fn spilled_bodies(items: Vec<TranscriptItem>) -> Vec<(String, TranscriptBody)> {
+    items
+        .into_iter()
+        .map(|item| (item.stable_id, item.body))
+        .collect()
+}
+
+/// Return the durable identity and version with each changed body so actors
+/// can reconcile the result with their own committed window.
+pub fn spill_and_trim_settled_tools_versioned(
+    session_id: &str,
+    frontier_ordinal: u64,
+) -> Result<Vec<TranscriptItem>> {
+    drain_tool_detail_batches(|after| {
+        submit_tool_detail_batch(session_id, frontier_ordinal, after.cloned())
+    })
+    .map(|batch| batch.items)
+}
+
 pub fn compact_materialized_transcript_through(
     session_id: &str,
     event_frontier: u64,
 ) -> Result<TranscriptRetention> {
-    let session_id = session_id.to_owned();
-    submit_database_write("compact_materialized_transcript", move |_| {
-        compact_materialized_transcript_in(&database_path(), &session_id, event_frontier)
-    })
+    Ok(submit_tool_detail_batch(session_id, event_frontier, None)?.retention)
 }
 
-/// Compact every eligible tool output at or before `event_frontier`, walking
-/// `(position, stable_id)` batches until no further candidates remain.
 pub fn compact_materialized_transcript_all_through(
     session_id: &str,
     event_frontier: u64,
 ) -> Result<TranscriptRetention> {
-    let session_id = session_id.to_owned();
-    submit_database_write("compact_materialized_transcript_all", move |_| {
-        compact_materialized_transcript_all_in(
-            &database_path(),
-            &session_id,
-            event_frontier,
-            RETENTION_BATCH_ITEMS,
-        )
+    drain_tool_detail_batches(|after| {
+        let mut batch = submit_tool_detail_batch(session_id, event_frontier, after.cloned())?;
+        batch.items.clear();
+        Ok(batch)
     })
+    .map(|batch| batch.retention)
 }
 
+#[cfg(test)]
 pub(super) fn compact_materialized_transcript_in(
     path: &Path,
     session_id: &str,
     event_frontier: u64,
 ) -> Result<TranscriptRetention> {
-    compact_materialized_transcript_batch_in(
-        path,
+    Ok(spill_tool_detail_batch(
+        &mut open(path)?,
+        tool_details::data_dir_from(path),
         session_id,
         event_frontier,
         None,
         RETENTION_BATCH_ITEMS,
-    )
-    .map(|(retention, _)| retention)
+    )?
+    .retention)
 }
 
+#[cfg(test)]
 pub(super) fn compact_materialized_transcript_all_in(
     path: &Path,
     session_id: &str,
     event_frontier: u64,
     batch_size: usize,
 ) -> Result<TranscriptRetention> {
-    let mut total = TranscriptRetention::default();
-    let mut cursor: Option<(i64, String)> = None;
-    loop {
-        let (batch, next_cursor) = compact_materialized_transcript_batch_in(
-            path,
+    let mut connection = open(path)?;
+    drain_tool_detail_batches(|after| {
+        spill_tool_detail_batch(
+            &mut connection,
+            tool_details::data_dir_from(path),
             session_id,
             event_frontier,
-            cursor.as_ref().map(|(pos, id)| (*pos, id.as_str())),
+            after,
             batch_size,
-        )?;
-        total.items = total.items.saturating_add(batch.items);
-        total.bytes = total.bytes.saturating_add(batch.bytes);
-        if !batch.remaining {
-            total.remaining = false;
+        )
+    })
+    .map(|batch| batch.retention)
+}
+
+type ToolDetailCursor = (u64, String);
+
+#[derive(Default)]
+struct SpilledToolBatch {
+    retention: TranscriptRetention,
+    items: Vec<TranscriptItem>,
+    next: Option<ToolDetailCursor>,
+}
+
+fn drain_tool_detail_batches(
+    mut spill: impl FnMut(Option<&ToolDetailCursor>) -> Result<SpilledToolBatch>,
+) -> Result<SpilledToolBatch> {
+    let mut total = SpilledToolBatch::default();
+    loop {
+        let batch = spill(total.next.as_ref())?;
+        total.retention.items += batch.retention.items;
+        total.retention.bytes += batch.retention.bytes;
+        total.items.extend(batch.items);
+        total.next = batch.next;
+        if total.next.is_none() {
             return Ok(total);
         }
-        let Some(next) = next_cursor else {
-            total.remaining = false;
-            return Ok(total);
-        };
-        cursor = Some(next);
     }
 }
 
-fn compact_materialized_transcript_batch_in(
-    path: &Path,
+fn submit_tool_detail_batch(
     session_id: &str,
-    event_frontier: u64,
-    after: Option<(i64, &str)>,
+    frontier_ordinal: u64,
+    after: Option<ToolDetailCursor>,
+) -> Result<SpilledToolBatch> {
+    let session_id = session_id.to_owned();
+    submit_database_write("spill_tool_details", move |connection| {
+        spill_tool_detail_batch(
+            connection,
+            tool_details::data_dir_from(&database_path()),
+            &session_id,
+            frontier_ordinal,
+            after.as_ref(),
+            RETENTION_BATCH_ITEMS,
+        )
+    })
+}
+
+const SPILLABLE_TOOLS: &str = "settled = 1 AND detail_offset IS NULL
+    AND item_kind IN ('tool', 'terminal_output')";
+
+/// Find the next session with work at its durable frontier. A scan timeout or
+/// shutdown needs no persisted cursor: committed rows are excluded on retry.
+pub fn next_tool_detail_backfill_session(after: &str) -> Result<Option<(String, u64)>> {
+    let connection = open_reader(&database_path())?;
+    let sql = format!(
+        "SELECT session_id, applied_event_ordinal FROM materialized_sessions AS s
+         WHERE session_id > ?1 AND EXISTS (
+             SELECT 1 FROM materialized_transcript_items AS i
+             WHERE i.session_id = s.session_id AND {SPILLABLE_TOOLS} AND length(body_json) > ?2
+         )
+         ORDER BY session_id LIMIT 1"
+    );
+    Ok(connection
+        .query_row(&sql, params![after, RETENTION_BODY_FLOOR_BYTES], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?)
+}
+
+/// Spill one maintenance batch, releasing the writer before scanning again.
+pub fn backfill_tool_details_batch(
+    session_id: &str,
+    frontier: u64,
+    after: Option<ToolDetailCursor>,
+) -> Result<Option<ToolDetailCursor>> {
+    Ok(submit_tool_detail_batch(session_id, frontier, after)?.next)
+}
+
+fn spill_tool_detail_batch(
+    connection: &mut Connection,
+    data_dir: &Path,
+    session_id: &str,
+    frontier: u64,
+    after: Option<&ToolDetailCursor>,
     batch_size: usize,
-) -> Result<(TranscriptRetention, Option<(i64, String)>)> {
-    let mut connection = open(path)?;
-    let candidates = {
-        let mut statement = connection.prepare(
-            "SELECT position, stable_id, body_json
+) -> Result<SpilledToolBatch> {
+    // Hold the SQLite write reservation across selection and append even when
+    // working against an explicit database without the daemon's writer queue.
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let unsettled_tool: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+         WHERE session_id = ?1 AND settled = 0 AND item_kind = 'tool')",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    // A still-open fallback terminal tool (`tool:hel-terminal:...`) may yet be
+    // claimed on close by a completed provider tool whose rawOutput matches
+    // (e.g. Kimi Bash). Defer spilling until that fallback terminal finishes.
+    if unsettled_tool
+        && transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+             WHERE session_id = ?1 AND settled = 0 AND item_kind = 'tool'
+               AND stable_id LIKE 'tool:hel-terminal:%')",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(SpilledToolBatch::default());
+    }
+    let mut candidates = {
+        let (after_position, after_id) = after.map_or((0, ""), |(pos, id)| (*pos, id.as_str()));
+        let mut query = transaction.prepare(&format!(
+            "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                    last_changed_at_ms, body_json
              FROM materialized_transcript_items
-             WHERE session_id = ?1
-               AND position <= ?2
-               AND length(body_json) > ?3
-               AND json_extract(
-                   CASE WHEN json_valid(body_json) THEN body_json ELSE '{}' END,
-                   '$.kind'
-               ) = 'tool'
-               AND (?4 IS NULL OR position > ?4 OR (position = ?4 AND stable_id > ?5))
-             ORDER BY position, stable_id
-             LIMIT ?6",
-        )?;
-        let (after_position, after_stable_id) = match after {
-            Some((pos, id)) => (Some(pos), id),
-            None => (None, ""),
-        };
-        statement
+             WHERE session_id = ?1 AND position <= ?2 AND update_ordinal <= ?2
+               AND {SPILLABLE_TOOLS} AND length(body_json) > ?3 AND (?4 = 0 OR item_kind = 'tool')
+               AND (position, stable_id) > (?5, ?6)
+             ORDER BY position, stable_id LIMIT ?7"
+        ))?;
+        query
             .query_map(
                 params![
                     session_id,
-                    event_frontier,
-                    RETENTION_BODY_FLOOR_BYTES as i64,
+                    frontier,
+                    RETENTION_BODY_FLOOR_BYTES,
+                    unsettled_tool,
                     after_position,
-                    after_stable_id,
-                    batch_size as i64 + 1
+                    after_id,
+                    batch_size + 1
                 ],
                 |row| {
                     Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, Option<u64>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let remaining = candidates.len() > batch_size;
-    let mut retention = TranscriptRetention {
-        remaining,
-        ..TranscriptRetention::default()
-    };
-    let mut last_cursor = None;
-    let transaction =
-        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    for (position, stable_id, body_json) in candidates.into_iter().take(batch_size) {
-        last_cursor = Some((position, stable_id.clone()));
-        let mut body: TranscriptBody = match serde_json::from_str(&body_json) {
+    let mut batch = SpilledToolBatch::default();
+    if candidates.len() > batch_size {
+        candidates.pop();
+        let last = &candidates[batch_size - 1];
+        batch.next = Some((last.1, last.0.clone()));
+        batch.retention.remaining = true;
+    }
+    let mut pending = Vec::new();
+    for (
+        stable_id,
+        position,
+        latest_content_event_ordinal,
+        created_at_ms,
+        last_changed_at_ms,
+        body_json,
+    ) in candidates
+    {
+        let mut body = match serde_json::from_str::<TranscriptBody>(&body_json) {
             Ok(body) => body,
-            // A row this cannot read is a row it must not rewrite.
             Err(error) => {
                 tracing::warn!(%session_id, %stable_id, %error, "skipping unreadable transcript body");
                 continue;
             }
         };
-        if !mj_transcript::transcript::compact_tool_call_for_retention(&mut body) {
+        if body.is_legacy_compacted_tool()
+            || !mj_transcript::transcript::compact_transcript_body_for_retention(&mut body)
+        {
             continue;
         }
         let compacted = serde_json::to_string(&body)
             .with_context(|| format!("serialize compacted transcript body {stable_id}"))?;
-        if compacted.len() >= body_json.len() {
-            continue;
+        if compacted.len() < body_json.len() {
+            let item = TranscriptItem {
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body,
+            };
+            pending.push((item, body_json, compacted));
         }
-        transaction.execute(
-            "UPDATE materialized_transcript_items SET body_json = ?3
-             WHERE session_id = ?1 AND stable_id = ?2",
-            params![session_id, stable_id, compacted],
+    }
+    let frames = tool_details::append_tool_details_batch(
+        data_dir,
+        session_id,
+        pending
+            .iter()
+            .map(|(item, body, _)| (item.stable_id.as_str(), body.as_str())),
+    )?;
+    for ((item, body_json, compacted), (offset, len)) in pending.into_iter().zip(frames) {
+        let changed = transaction.execute(
+            "UPDATE materialized_transcript_items SET body_json = ?1, detail_offset = ?2, detail_len = ?3
+             WHERE session_id = ?4 AND stable_id = ?5 AND last_changed_at_ms = ?6
+               AND latest_content_event_ordinal IS ?7",
+            params![compacted, offset, len, session_id, item.stable_id,
+                    item.last_changed_at_ms, item.latest_content_event_ordinal],
         )?;
-        retention.items += 1;
-        retention.bytes += body_json.len() - compacted.len();
+        if changed == 1 {
+            batch.retention.items += 1;
+            batch.retention.bytes += body_json.len() - compacted.len();
+            batch.items.push(item);
+        }
     }
     transaction.commit()?;
-    Ok((retention, last_cursor))
+    Ok(batch)
+}
+
+/// Read the current detail by stable identity without paging the transcript.
+pub fn load_tool_call_detail(
+    session_id: &str,
+    stable_id: &str,
+) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+    load_tool_call_detail_from(&database_path(), session_id, stable_id)
+}
+
+pub fn load_tool_call_detail_from(
+    path: &Path,
+    session_id: &str,
+    stable_id: &str,
+) -> Result<Option<mj_core::transcript::ToolCallDetailResult>> {
+    use mj_core::transcript::ToolCallDetailResult;
+
+    let connection = open_reader(path)?;
+    let row = connection
+        .query_row(
+            "SELECT body_json, detail_offset, detail_len FROM materialized_transcript_items
+             WHERE session_id = ?1 AND stable_id = ?2",
+            params![session_id, stable_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((json, offset, len)) = row else {
+        return Ok(None);
+    };
+    let data_dir = tool_details::data_dir_from(path);
+    let summary: TranscriptBody = serde_json::from_str(&json)?;
+    let mut body = match (offset, len) {
+        (Some(offset), Some(len)) => {
+            match tool_details::read_tool_detail(data_dir, session_id, stable_id, offset, len) {
+                Ok(body) => body,
+                Err(error) => {
+                    return Ok(Some(ToolCallDetailResult::Unavailable {
+                        summary: Some(summary),
+                        reason: format!("{error:#}"),
+                    }));
+                }
+            }
+        }
+        (None, _) if !summary.has_trimmed_detail() => summary.clone(),
+        _ => {
+            return Ok(Some(ToolCallDetailResult::Unavailable {
+                summary: Some(summary),
+                reason: "full tool detail is not stored locally".into(),
+            }));
+        }
+    };
+    if let Err(reason) =
+        hydrate_full_tool_terminal_outputs(&connection, data_dir, session_id, stable_id, &mut body)?
+    {
+        return Ok(Some(ToolCallDetailResult::Unavailable {
+            summary: Some(summary),
+            reason,
+        }));
+    }
+    Ok(Some(ToolCallDetailResult::Full { body }))
+}
+
+/// Join authoritative standalone terminal rows referenced by a full tool detail,
+/// resolving their `.mjtd` cold frames when spilled independently.
+fn hydrate_full_tool_terminal_outputs(
+    connection: &Connection,
+    data_dir: &Path,
+    session_id: &str,
+    stable_id: &str,
+    body: &mut TranscriptBody,
+) -> Result<std::result::Result<(), String>> {
+    let TranscriptBody::Tool {
+        terminal_outputs,
+        terminal_refs,
+        ..
+    } = body
+    else {
+        return Ok(Ok(()));
+    };
+    let ids = terminal_refs
+        .iter()
+        .chain(terminal_outputs.iter().map(|record| &record.terminal_id))
+        .map(|id| format!("terminal:{id}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.is_empty() {
+        return Ok(Ok(()));
+    }
+    let mut context = Vec::new();
+    let mut statement = connection.prepare(
+        "SELECT body_json, detail_offset, detail_len FROM materialized_transcript_items
+         WHERE session_id = ?1 AND stable_id = ?2",
+    )?;
+    for id in ids {
+        let row = statement
+            .query_row(params![session_id, &id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<u64>>(1)?,
+                    row.get::<_, Option<u32>>(2)?,
+                ))
+            })
+            .optional()?;
+        let Some((json, offset, len)) = row else {
+            continue;
+        };
+        let terminal_body = match (offset, len) {
+            (Some(offset), Some(len)) => {
+                match tool_details::read_tool_detail(data_dir, session_id, &id, offset, len) {
+                    Ok(body) => body,
+                    Err(error) => return Ok(Err(format!("{error:#}"))),
+                }
+            }
+            _ => {
+                let inline = decode_transcript_body(&json, session_id)?;
+                if inline.has_trimmed_detail() {
+                    return Ok(Err(
+                        "full referenced terminal detail is not stored locally".into()
+                    ));
+                }
+                inline
+            }
+        };
+        context.push(TranscriptItem {
+            stable_id: id,
+            position: 0,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: terminal_body,
+        });
+    }
+    if context.is_empty() {
+        return Ok(Ok(()));
+    }
+    let tool_item = TranscriptItem {
+        stable_id: stable_id.to_owned(),
+        position: 0,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: body.clone(),
+    };
+    let outputs =
+        mj_core::transcript::TerminalOutputs::of(std::iter::once(&tool_item).chain(context.iter()));
+    let joined = outputs.for_tool(stable_id).into_owned();
+    if let TranscriptBody::Tool {
+        terminal_outputs, ..
+    } = body
+    {
+        *terminal_outputs = joined;
+    }
+    Ok(Ok(()))
+}
+
+/// Read the spill associated with a specific projected revision. A newer
+/// inline update or an already-trimmed legacy row has no matching detail.
+pub fn read_stored_tool_detail(
+    session_id: &str,
+    item: &TranscriptItem,
+) -> Result<Option<TranscriptBody>> {
+    read_stored_tool_detail_from(&database_path(), session_id, item)
+}
+
+pub fn read_stored_tool_detail_from(
+    path: &Path,
+    session_id: &str,
+    item: &TranscriptItem,
+) -> Result<Option<TranscriptBody>> {
+    let connection = open_reader(path)?;
+    let pointer = connection
+        .query_row(
+            "SELECT detail_offset, detail_len FROM materialized_transcript_items
+         WHERE session_id = ?1 AND stable_id = ?2 AND last_changed_at_ms = ?3
+           AND latest_content_event_ordinal IS ?4 AND detail_offset IS NOT NULL",
+            params![
+                session_id,
+                item.stable_id,
+                item.last_changed_at_ms,
+                item.latest_content_event_ordinal
+            ],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u32>(1)?)),
+        )
+        .optional()?;
+    pointer
+        .map(|(offset, len)| {
+            tool_details::read_tool_detail(
+                tool_details::data_dir_from(path),
+                session_id,
+                &item.stable_id,
+                offset,
+                len,
+            )
+        })
+        .transpose()
+}
+
+const ACTOR_UNSETTLED_ITEMS_SQL: &str =
+    "SELECT position FROM materialized_transcript_items INDEXED BY materialized_transcript_unsettled
+     WHERE session_id = ?1 AND position < ?2 AND settled = 0";
+
+fn actor_unsettled_turns_sql() -> String {
+    let turn_start = turn_start_sql();
+    format!(
+        "WITH unsettled AS ({ACTOR_UNSETTLED_ITEMS_SQL})
+         SELECT COALESCE((
+                    SELECT MAX(position) FROM materialized_transcript_items
+                    WHERE session_id = ?1 AND position <= u.position AND {turn_start}
+                ), 0),
+                COALESCE((
+                    SELECT MIN(position) FROM materialized_transcript_items
+                    WHERE session_id = ?1 AND position > u.position AND {turn_start}
+                ), ?2)
+         FROM unsettled u"
+    )
 }
 
 /// How many transcript items a polled projection carries.
@@ -1214,27 +1560,13 @@ pub(super) fn load_materialized_actor_projection_from(
         params![session_id, boundary],
         |row| row.get(0),
     )?;
-    // Find old unsettled turns in one JSON pass, then read only their ranges.
-    let ranges = {
-        let mut statement = connection.prepare(&format!(
-            "WITH starts AS MATERIALIZED (
-                SELECT position FROM materialized_transcript_items WHERE session_id=?1
-                AND {turn_start}
-             ), unsettled AS (
-                SELECT position FROM materialized_transcript_items WHERE session_id=?1 AND position<?2
-                AND ((json_extract(body_json, '$.kind') IN ('agent','thought') AND json_extract(body_json, '$.streaming')=1)
-                  OR (json_extract(body_json, '$.kind')='tool' AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))
-             )
-             SELECT DISTINCT COALESCE((SELECT MAX(position) FROM starts WHERE position<=u.position),0),
-                 COALESCE((SELECT MIN(position) FROM starts WHERE position>u.position),?2)
-             FROM unsettled u ORDER BY 1"
-        ))?;
-        statement
-            .query_map(params![session_id, start], |row| {
-                Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    // Find old unsettled turns, then read only their distinct ranges.
+    let ranges = connection
+        .prepare(&actor_unsettled_turns_sql())?
+        .query_map(params![session_id, start], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
     let mut transcript = Vec::new();
     for (begin, end) in ranges {
         let before = mj_core::storage::TranscriptCursor {
@@ -1396,7 +1728,7 @@ pub(super) fn load_projection_references_from(
     projection: &MaterializedSession,
     events: &[mj_core::relay::RelayEvent],
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    let mj_transcript::projection::HistoricalReferences { mut ids } =
+    let mj_transcript::projection::HistoricalReferences { mut ids, .. } =
         mj_transcript::projection::historical_references(events)?;
     let retained = projection
         .transcript
@@ -2718,4 +3050,109 @@ pub(super) fn load_continuation_evidence_from(
             body: decode_transcript_body(&body_json, session_id)?,
         }))
     }))
+}
+
+#[cfg(test)]
+mod query_plan_tests {
+    use super::*;
+
+    #[test]
+    fn transcript_page_and_old_unsettled_scan_use_metadata_indexes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open(&path).unwrap();
+        let explain = |sql: &str, arguments: &[&dyn rusqlite::ToSql]| {
+            connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(arguments, |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("\n")
+        };
+        let page = explain(
+            &filtered_transcript_page_sql(),
+            &[&"session", &0, &10, &"[]", &1, &20],
+        );
+        assert!(
+            page.contains("materialized_transcript_update_ordinal"),
+            "{page}"
+        );
+        assert!(!page.contains("TEMP B-TREE"), "{page}");
+        let open = explain(ACTOR_UNSETTLED_ITEMS_SQL, &[&"session", &20]);
+        assert!(open.contains("materialized_transcript_unsettled"), "{open}");
+        assert!(
+            !open.contains("SCAN") && !open.contains("TEMP B-TREE"),
+            "{open}"
+        );
+        let ranges = explain(&actor_unsettled_turns_sql(), &[&"session", &20]);
+        assert!(
+            ranges.contains("materialized_transcript_unsettled"),
+            "{ranges}"
+        );
+        assert!(!ranges.contains("TEMP B-TREE"), "{ranges}");
+    }
+}
+
+#[cfg(test)]
+mod tool_detail_tests {
+    use super::*;
+    use mj_core::transcript::{TerminalOutputRecord, ToolCallDetailResult};
+
+    #[test]
+    fn load_tool_call_detail_reads_inline_spills_and_reports_missing_or_corrupt_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hel.sqlite3");
+        let session_id = "session-detail";
+        let stable_id = "terminal:parked";
+        save_session_to(&path, &test_session(session_id, "project")).unwrap();
+        let full = TranscriptBody::terminal_output(TerminalOutputRecord {
+            terminal_id: "parked".into(),
+            output: "captured output\n".repeat(8192).into(),
+            truncated: false,
+            exit_code: Some(1),
+            signal: None,
+        });
+        let mut projection = MaterializedSession::empty(session_id);
+        projection.applied_event_ordinal = 1;
+        projection.applied_event_digest = "a".repeat(64);
+        projection.transcript.push(Arc::new(TranscriptItem {
+            stable_id: stable_id.into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 100,
+            last_changed_at_ms: 100,
+            body: full.clone(),
+        }));
+        save_materialized_session_to(&path, &projection).unwrap();
+        let lookup = || load_tool_call_detail_from(&path, session_id, stable_id).unwrap();
+        assert!(
+            load_tool_call_detail_from(&path, session_id, "missing")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            lookup(),
+            Some(ToolCallDetailResult::Full { body: full.clone() })
+        );
+
+        let spilled = spill_and_trim_settled_tools_through_from(&path, session_id, 1).unwrap();
+        let [(id, summary)] = spilled.as_slice() else {
+            panic!("expected one spill")
+        };
+        assert_eq!(id, stable_id);
+        assert!(summary.detail_trimmed());
+        assert_eq!(lookup(), Some(ToolCallDetailResult::Full { body: full }));
+        let frame_path = directory.path().join("tool-details/session-detail.mjtd");
+        std::fs::write(&frame_path, b"corrupt spill").unwrap();
+        let unavailable = lookup();
+        assert!(
+            matches!(unavailable, Some(ToolCallDetailResult::Unavailable { summary: Some(body), .. }) if body == *summary)
+        );
+        std::fs::remove_file(frame_path).unwrap();
+        assert!(
+            matches!(lookup(), Some(ToolCallDetailResult::Unavailable { summary: Some(body), reason }) if body == *summary && reason.contains(".mjtd"))
+        );
+    }
 }

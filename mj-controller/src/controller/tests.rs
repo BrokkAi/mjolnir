@@ -12,6 +12,27 @@ use mj_core::state::{State, TargetLocator};
 use super::test_support::{IsolatedTest, test_name};
 use super::*;
 
+/// Persist the fixture records and read their bindings from the environment ledger.
+fn save_fixture_state(controller: &mut Controller) {
+    crate::database::save_state(&controller.state).unwrap();
+    controller.state.environment_owners = crate::database::load_state().unwrap().environment_owners;
+}
+
+fn save_fixture_session(controller: &mut Controller, session: SessionRecord) {
+    crate::database::save_session(&session).unwrap();
+    let owner = crate::database::session_environment_owner(&session.id)
+        .unwrap()
+        .expect("saving a session binds it to an environment");
+    controller
+        .state
+        .environment_owners
+        .insert(session.id.clone(), owner);
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+}
+
 /// One profile, one bundle with nothing checked out locally, and one
 /// container target, which is all `register_session_with_resources` reads.
 fn registration_config() -> Config {
@@ -808,7 +829,6 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
         skip_remembering_subagent_policy: false,
@@ -880,6 +900,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
     let parent = controller.state.sessions.get_mut(parent_id).unwrap();
     parent.state = SessionState::Running;
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -893,7 +914,7 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: true,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.clone(),
             task_name: "without credentials".into(),
@@ -1286,7 +1307,6 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.to_uppercase()),
                 branch: Some("town/run-1".into()),
@@ -1324,7 +1344,6 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
             "start commit with base",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 base: Some("v1.0".into()),
@@ -1379,7 +1398,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             no_later_history: true,
             ..launch_options(Vec::new())
@@ -1390,7 +1408,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     refusal(
         register(SessionLaunchOptions {
             oracle: None,
-            supervisors: None,
             oracle_choice: None,
             at: Some(at.into()),
             base: Some("origin/main".into()),
@@ -1402,7 +1419,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
 
     let id = register(SessionLaunchOptions {
         oracle: None,
-        supervisors: None,
         oracle_choice: None,
         at: Some(at.to_uppercase()),
         base: Some(base.to_uppercase()),
@@ -1446,7 +1462,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             "without later history",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 at: Some(at.into()),
                 no_later_history: true,
@@ -2084,6 +2099,7 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
     };
     let mut options = launch_options(Vec::new());
     options.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2152,6 +2168,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         base_commit: None,
     }));
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2163,13 +2180,13 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         .state
         .sessions
         .insert(parent_id.to_owned(), parent);
-    crate::database::save_state(&controller.state).unwrap();
+    save_fixture_state(&mut controller);
 
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2313,6 +2330,7 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         base_commit: None,
     }));
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -2324,12 +2342,12 @@ fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started
         .state
         .sessions
         .insert(parent_id.to_owned(), parent);
-    crate::database::save_state(&controller.state).unwrap();
+    save_fixture_state(&mut controller);
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2675,6 +2693,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.path().to_path_buf());
         session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None,
         });
@@ -2694,13 +2713,13 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             .sessions
             .insert(id.to_owned(), session(id, opted_out));
     }
-    crate::database::save_state(&controller.state).unwrap();
+    save_fixture_state(&mut controller);
 
     let child_id = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
             task_name: "Review calc.py".into(),
@@ -2923,13 +2942,13 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             "durable target",
             SessionLaunchOptions {
                 oracle: None,
-                supervisors: None,
                 oracle_choice: None,
                 // Set at creation, since a lifecycle transition does not own
                 // this column (see `update_lifecycle_fields`); this test
                 // reloads the controller before registering a child, and the
                 // child registration below needs the parent's own choice.
                 subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 }),
@@ -2992,7 +3011,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
         .register_subagent(super::subagents::RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: id.clone(),
             task_name: "child".into(),
@@ -3110,7 +3129,7 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
         .state
         .sessions
         .insert(session.id.clone(), session.clone());
-    crate::database::save_state(&controller.state).unwrap();
+    save_fixture_state(&mut controller);
     let mut edited = controller.config.clone();
     edited.targets.clear();
     edited.save().unwrap();
@@ -3137,11 +3156,7 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
         .unwrap();
     // Simulate a pre-upgrade remote record whose template was already removed.
     session.id = "abcdef0123456789abcdef0123456789".into();
-    controller
-        .state
-        .sessions
-        .insert(session.id.clone(), session.clone());
-    crate::database::save_session(&session).unwrap();
+    save_fixture_session(&mut controller, session.clone());
     let error = controller
         .session_export_layout(&session.id, &UnusedExecutor)
         .err()
@@ -3274,6 +3289,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
             last_subagent_policies: std::collections::BTreeMap::from([(
                 "codex".into(),
                 SubagentPolicy::Mjolnir {
+                    orchestrators: false,
                     straightforward: None,
                     subtle: None,
                 },
@@ -3295,6 +3311,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         Some(SubagentPolicy::Native)
     );
     let fixed = SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     };
@@ -3364,6 +3381,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     );
     let mut legacy = controller.state.sessions[&native].clone();
     legacy.subagents = Some(SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3372,6 +3390,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     assert_eq!(
         restarted.state.sessions[&native].subagents,
         Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         })
@@ -3379,6 +3398,7 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     assert_eq!(
         restarted.state.sessions[&single].subagents,
         Some(SubagentPolicy::Mjolnir {
+            orchestrators: false,
             straightforward: None,
             subtle: None
         })
@@ -3425,7 +3445,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         state: Default::default(),
     };
     controller.state.sessions.insert(parent_id.into(), parent);
-    crate::database::save_state(&controller.state).unwrap();
+    save_fixture_state(&mut controller);
     let mut launch = controller
         .reviewer_launch_config(parent_id, "resolved-reviewer", 0, &[])
         .unwrap();
@@ -3446,7 +3466,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
-        supervisor: false,
+        orchestrator: false,
         reviewer_launch: Some(launch.clone()),
         parent_session_id: parent_id.into(),
         task_name: "review".into(),
@@ -3522,7 +3542,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "oracle".into(),
@@ -3579,11 +3599,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .join("workers")
             .join(muse_parent_id),
     }));
-    controller
-        .state
-        .sessions
-        .insert(muse_parent_id.into(), muse_parent.clone());
-    crate::database::save_session(&muse_parent).unwrap();
+    save_fixture_session(&mut controller, muse_parent);
     let mut muse_profile = controller.config.profiles["resolved-reviewer"].clone();
     muse_profile.kind = HarnessKind::Muse;
     controller
@@ -3594,7 +3610,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: muse_parent_id.into(),
             task_name: "oracle".into(),
@@ -3638,6 +3654,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .unwrap();
     let parent = controller.state.sessions.get_mut(parent_id).unwrap();
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3645,7 +3662,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
             task_name: "ordinary child".into(),
@@ -3686,6 +3703,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .unwrap();
     child_record.state = SessionState::Running;
     child_record.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3693,7 +3711,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let request = RegisterSubagentRequest {
         no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
-        supervisor: false,
+        orchestrator: false,
         reviewer_launch: Some(launch),
         parent_session_id: worker.child_session_id.clone(),
         task_name: "child's review".into(),
@@ -3720,7 +3738,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .register_subagent(RegisterSubagentRequest {
             no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
-            supervisor: false,
+            orchestrator: false,
             reviewer_launch: None,
             ..request
         })
@@ -3777,6 +3795,7 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        orchestrators: false,
         straightforward: None,
         subtle: None,
     });
@@ -3790,14 +3809,14 @@ fn ordinary_children_get_no_review_tools_when_the_parent_reviews() {
         }]),
     }));
     controller.state.sessions.insert(parent_id.into(), parent);
-    crate::database::save_state(&controller.state).unwrap();
+    save_fixture_state(&mut controller);
 
     let register_worker = |controller: &mut Controller, request_key: &str| {
         controller
             .register_subagent(RegisterSubagentRequest {
                 no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
-                supervisor: false,
+                orchestrator: false,
                 reviewer_launch: None,
                 parent_session_id: parent_id.into(),
                 task_name: request_key.into(),

@@ -60,3 +60,4 @@ mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
 tar.workspace = true
 http-body-util = "0.1"
 tempfile.workspace = true
+tracing-subscriber.workspace = true

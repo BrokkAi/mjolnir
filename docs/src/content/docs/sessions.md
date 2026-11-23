@@ -681,11 +681,11 @@ take turns re-indexing everything until you upgrade the command. When a newer
 SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
 until you upgrade Mjolnir.
 
-This build links the `brokk-sessionwiki` crate, version 0.34.27. Install the
+This build links the `brokk-sessionwiki` crate, version 0.34.28. Install the
 matching tool with:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.34.27
+cargo install --locked brokk-sessionwiki@0.34.28
 ```
 
 If you installed the `sessionwiki` package for an earlier Mjolnir build, remove
