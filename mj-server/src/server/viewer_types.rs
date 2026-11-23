@@ -905,7 +905,7 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_mode_active: Option<bool>,
     /// The review the daemon is running for this session, if any. A phone
-    /// renders the same review the terminal does and resolves it the same way.
+    /// shows its status as the daemon delivers the verdict automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_review: Option<Box<ViewerTurnReview>>,
     /// The Mjolnir commands this session accepts, published rather than hardcoded
@@ -979,7 +979,7 @@ pub struct ViewerTurnReview {
     /// One row per reviewing agent: its label and where it has got to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<ViewerReviewRole>,
-    /// Present once the review has reached a verdict the user must answer.
+    /// Present once the review has reached a verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<ViewerReviewVerdict>,
 }

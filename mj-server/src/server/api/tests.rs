@@ -1356,6 +1356,7 @@ struct FakeBackend {
     /// repeats once exhausted, so a wait loop settles rather than spinning.
     turn_states: Mutex<Vec<Option<TurnState>>>,
     prompt_ordinal: u64,
+    prompt_refusal: Option<mj_core::refusal::Refusal>,
     prompts: Mutex<Vec<(String, String)>>,
     message_requests: Mutex<Vec<CapturedSessionMessageRequest>>,
     submissions: Arc<Mutex<Vec<(String, mj_core::relay::RelayCommand)>>>,
@@ -1624,7 +1625,10 @@ impl SubagentBackend for FakeBackend {
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>> {
         Box::pin(async move {
             self.prompts.lock().unwrap().push((session_id, text));
-            Ok(self.prompt_ordinal)
+            match &self.prompt_refusal {
+                Some(refusal) => Err(refusal.clone().into()),
+                None => Ok(self.prompt_ordinal),
+            }
         })
     }
     fn record_user_prompt(
@@ -2553,6 +2557,31 @@ async fn prompts_and_user_messages_wait_for_lifecycle_work_to_finish() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn public_prompt_returns_the_worker_queue_refusal_as_conflict() {
+    let message = "The session queue is full. Wait for queued prompts to run or remove queued input, then try again.";
+    let backend = Arc::new(FakeBackend {
+        prompt_refusal: Some(mj_core::refusal::Refusal::precondition(message)),
+        ..Default::default()
+    });
+    let (app, _, _, _) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"do the work"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["error"], message);
 }
 
 #[tokio::test(start_paused = true)]
@@ -5888,6 +5917,57 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
     assert_eq!(
         decode_fetched_path(response.headers()[FETCHED_PATH_HEADER].as_bytes()).as_deref(),
         Some(resolved)
+    );
+}
+
+#[tokio::test]
+async fn diff_route_preserves_repeated_paths_and_export_selects_the_full_patch() {
+    let backend = Arc::new(FakeBackend {
+        diff: Some(r#"{"diff":"+new\n","base":"aaaa","head":"bbbb","tracked_files":[{"path":"tracked","insertions":1,"deletions":0,"binary":false}],"untracked_files":["new.txt"],"untracked_total":1}"#.into()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app.clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true&path=-literal&path=src%2Ffile+%26+notes&path="))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["tracked_files"][0]["path"], "tracked");
+    assert_eq!(body["untracked_files"][0], "new.txt");
+    assert_eq!(body["untracked_total"], 1);
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"patch"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/x-diff; charset=utf-8"
+    );
+    assert_eq!(
+        backend.diff_options.lock().unwrap().as_slice(),
+        [
+            DiffOptions {
+                base: Some("HEAD^".into()),
+                json: true,
+                paths: vec!["-literal".into(), "src/file & notes".into(), String::new()],
+                full_patch: false,
+            },
+            DiffOptions {
+                full_patch: true,
+                ..DiffOptions::default()
+            },
+        ]
     );
 }
 

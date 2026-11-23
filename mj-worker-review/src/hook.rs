@@ -87,7 +87,7 @@ documentation_only_push() {
     *[!0]*) return 1 ;;
   esac
   [ ! -s "$tmp.bases" ] || return 1
-  empty_tree=$(git hash-object -w -t tree --stdin < /dev/null) || return 1
+  empty_tree=$(git hash-object -t tree --stdin < /dev/null) || return 1
   documentation_only "$empty_tree" "$1"
 }
 if [ "${MJ_REVIEW_GATE:-}" = "1" ]; then
@@ -329,7 +329,18 @@ mod tests {
             "README.md",
             b"An independent documentation history\n",
         );
+        let empty_tree = git(&root, &["hash-object", "-t", "tree", "/dev/null"]);
+        let (prefix, suffix) = empty_tree.split_at(2);
+        let empty_object = root.join(".git/objects").join(prefix).join(suffix);
+        assert!(
+            !empty_object.exists(),
+            "the fixture has no stored empty tree"
+        );
         assert_eq!(push(&root, true, &["HEAD:refs/heads/docs"]).status, 0);
+        assert!(
+            !empty_object.exists(),
+            "the hook need not store the empty tree"
+        );
         // Another published branch is no license to delete the destination's code.
         assert_ne!(push(&root, true, &["+HEAD:refs/heads/main"]).status, 0);
     }

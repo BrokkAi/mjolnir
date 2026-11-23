@@ -258,7 +258,8 @@ pub(super) async fn apply_phone_action(
                         prompt: phone_prompt_blocks(text, images),
                     },
                 )
-                .await?;
+                .await
+                .map_err(prompt_submission_error)?;
             Ok(())
         }
         ControllerAction::RunShell {

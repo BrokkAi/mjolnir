@@ -2386,52 +2386,6 @@ pub(super) fn purge_borrowed_descendants_in_tx(
     Ok(ids)
 }
 
-/// Overwrite the unsent chat input carried across a detach. Unlike the read
-/// receipt this is not monotonic: a draft can shrink, and an empty string
-/// clears it.
-pub fn set_session_draft_input(session_id: &str, draft: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let draft = draft.to_owned();
-    submit_database_write("set_session_draft_input", move |_| {
-        set_session_draft_input_at(&database_path(), &session_id, &draft)
-    })
-}
-
-pub(super) fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &str) -> Result<()> {
-    let mut connection = open(path)?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let updated = tx.execute(
-        "UPDATE sessions SET draft_input = ?2 WHERE session_id = ?1",
-        params![session_id, draft],
-    )?;
-    ensure!(updated == 1, "unknown session {session_id}");
-    tx.commit()?;
-    Ok(())
-}
-
-/// Append recovered input on the writer lane, preserving every preceding
-/// durable edit instead of combining with a stale daemon snapshot.
-pub fn append_session_draft_input(session_id: &str, text: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let text = text.to_owned();
-    submit_database_write("append_session_draft_input", move |connection| {
-        let tx = connection.transaction()?;
-        let existing: String = tx.query_row(
-            "SELECT draft_input FROM sessions WHERE session_id=?1",
-            [&session_id],
-            |row| row.get(0),
-        )?;
-        let merged = mj_core::draft::merge_drafts(&existing, &text)?;
-        let updated = tx.execute(
-            "UPDATE sessions SET draft_input=?2 WHERE session_id=?1",
-            params![session_id, merged],
-        )?;
-        ensure!(updated == 1, "unknown session {session_id}");
-        tx.commit()?;
-        Ok(())
-    })
-}
-
 /// Retire a submitted shared draft without erasing a newer client's edit.
 pub fn clear_session_draft_input_if_matches(session_id: &str, expected: &str) -> Result<()> {
     let session_id = session_id.to_owned();

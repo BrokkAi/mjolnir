@@ -7055,11 +7055,56 @@ async function openChangedFiles(session) {
   close.onclick = () => dialog.close();
   controls.append(close);
   dialog.append(status, error, list, diffView, controls);
+  const url = `/api/v1/sessions/${encodeURIComponent(session.id)}/diff?json=true`;
+  let selection = 0;
+  async function loadPatch(path) {
+    const current = ++selection;
+    status.textContent = 'Loading diff…';
+    error.textContent = '';
+    diffView.textContent = '';
+    try {
+      const result = await request(`${url}&path=${encodeURIComponent(path)}`);
+      if (!dialog.open || selection !== current) return;
+      diffView.textContent = result.diff;
+      status.textContent = result.diff ? '' : 'No diff for this path';
+    } catch (failure) {
+      if (!dialog.open || selection !== current) return;
+      status.textContent = '';
+      error.textContent = failure.message;
+    }
+  }
   try {
-    const result = await request(`/api/v1/sessions/${encodeURIComponent(session.id)}/diff?json=true`);
+    const result = await request(url);
     if (!dialog.open) return;
-    const paths = changedFilePaths(result?.diff);
-    if (!paths.length) {
+    const tracked = result.tracked_files || [];
+    const untracked = result.untracked_files || [];
+    if (result.tracked_files || result.untracked_files) {
+      for (const file of tracked) {
+        const item = el('li');
+        const open = button(file.path, 'secondary diffstat-path');
+        open.type = 'button';
+        open.onclick = () => loadPatch(file.path);
+        const counts = file.binary ? 'binary' : `+${file.insertions} −${file.deletions}`;
+        item.append(open, el('span', 'dim', counts));
+        list.append(item);
+      }
+      for (const path of untracked) {
+        const item = el('li');
+        item.append(el('span', 'diffstat-path', path), el('span', 'dim', 'untracked'));
+        list.append(item);
+      }
+      const remaining = result.untracked_total - untracked.length;
+      if (remaining > 0) {
+        list.append(el('li', 'dim', `… and ${remaining} more untracked files`));
+      }
+      if (untracked.length || remaining > 0) {
+        list.after(el('p', 'dim', 'Use mj fetch to read untracked files.'));
+      }
+      status.textContent = tracked.length ? 'Select a file to view its diff.' : '';
+      return;
+    }
+    const paths = changedFilePaths(result.diff);
+    if (!result.diff) {
       status.textContent = 'No changes';
       diffView.remove();
       list.remove();
