@@ -40,6 +40,17 @@ documentation_only() {
     ':(top,exclude,glob)COPYIN[G]' ':(top,exclude,glob)AUTHOR[S]' \
     ':(top,exclude,glob)CONTRIBUTOR[S]' ':(top,exclude,glob)CHANGELO[G]' \
     ':(top,exclude,glob)NEW[S]' || return 1
+  # File format alone cannot distinguish documentation from embedded runtime prompts.
+  # Require a conventional documentation location or filename as well.
+  git diff --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
+    "$1" "$2" -- ':(top)**' \
+    ':(top,exclude,glob)**/docs/**' ':(top,exclude,glob)**/doc/**' \
+    ':(top,exclude,glob)**/.agents/plans/**' \
+    ':(top,exclude,glob)**/READM[E]*' ':(top,exclude,glob)**/LICENS[E]*' \
+    ':(top,exclude,glob)**/COPYIN[G]*' ':(top,exclude,glob)**/AUTHOR[S]*' \
+    ':(top,exclude,glob)**/CONTRIBUTOR[S]*' ':(top,exclude,glob)**/CHANGELO[G]*' \
+    ':(top,exclude,glob)**/NEW[S]*' ':(top,exclude,glob)**/CONTRIBUTIN[G]*' \
+    ':(top,exclude,glob)**/CODE_OF_CONDUC[T]*' ':(top,exclude,glob)**/SECURIT[Y]*' || return 1
   # A documentation extension cannot exempt executables, links, or binary data.
   git diff --raw --numstat --no-abbrev --no-ext-diff --no-textconv --no-renames --ignore-submodules=none \
     "$1" "$2" -- > "$tmp.diff" || return 1
@@ -412,6 +423,8 @@ mod tests {
             "assets/skills/mj/SKILL.md",
             ".github/instructions/code.instructions.md",
             ".claude/rules/conventions.md",
+            "assets/instructions/review_rubric.md",
+            "src/guardian/policy.md",
             "README/build.sh",
             "LICENSE/main.rs",
             "nested.md/main.rs",
@@ -430,16 +443,17 @@ mod tests {
             );
             git(&root, &["reset", "--hard", &base]);
         }
-        commit_file(&root, "binary.md", b"binary\0data\n");
+        commit_file(&root, "docs/binary.md", b"binary\0data\n");
         assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
         git(&root, &["reset", "--hard", &base]);
-        commit_file(&root, "executable.md", b"#!/bin/sh\nexit 0\n");
-        git(&root, &["update-index", "--chmod=+x", "executable.md"]);
+        commit_file(&root, "docs/executable.md", b"#!/bin/sh\nexit 0\n");
+        git(&root, &["update-index", "--chmod=+x", "docs/executable.md"]);
         git(&root, &["commit", "-qm", "make documentation executable"]);
         assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
         git(&root, &["reset", "--hard", &base]);
-        std::os::unix::fs::symlink("tracked.txt", root.join("link.md")).unwrap();
-        git(&root, &["add", "link.md"]);
+        fs::create_dir_all(root.join("docs")).unwrap();
+        std::os::unix::fs::symlink("../tracked.txt", root.join("docs/link.md")).unwrap();
+        git(&root, &["add", "docs/link.md"]);
         git(&root, &["commit", "-qm", "add a symbolic link"]);
         assert_ne!(push(&root, true, &["HEAD:refs/heads/main"]).status, 0);
         git(&root, &["reset", "--hard", &base]);
