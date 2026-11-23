@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::event_outcome::{ApiTurnOutcome, TurnResultKind};
 #[cfg(test)]
 use mj_core::usage::ProviderCost;
 use mj_core::usage::{TokenUsage, UsageScope, pricing};
@@ -306,6 +307,21 @@ pub(super) fn attribute(
     Ok(())
 }
 
+fn attributed_turn_cost_ticks(usage: &TokenUsage, selected: UsageSelection) -> Result<Option<u64>> {
+    let mut attributed = BTreeMap::new();
+    attribute(usage, selected, &mut attributed)?;
+    let mut sum = 0u64;
+    let mut known = !attributed.is_empty();
+    for (selection, totals) in attributed {
+        if let Some(part) = estimate_model_cost(usage, selection.model.as_deref(), &totals)? {
+            sum = sum.checked_add(part).context("turn cost overflow")?;
+        } else {
+            known = false;
+        }
+    }
+    Ok(known.then_some(sum))
+}
+
 fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummary> {
     let mut summary = UsageSummary::default();
     let mut groups = BTreeMap::new();
@@ -333,20 +349,7 @@ fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummar
                     .as_ref()
                     .and_then(|details| details.cost.as_ref().filter(|cost| !cost.is_partial));
                 let estimated = if provider_cost.is_none() {
-                    let mut attributed = BTreeMap::new();
-                    attribute(&usage, selection.clone(), &mut attributed)?;
-                    let mut sum = 0u64;
-                    let mut known = !attributed.is_empty();
-                    for (selection, totals) in attributed {
-                        let part =
-                            estimate_model_cost(&usage, selection.model.as_deref(), &totals)?;
-                        if let Some(part) = part {
-                            sum = sum.checked_add(part).context("turn cost overflow")?;
-                        } else {
-                            known = false;
-                        }
-                    }
-                    known.then_some(sum)
+                    attributed_turn_cost_ticks(&usage, selection.clone())?
                 } else {
                     None
                 };
@@ -502,6 +505,8 @@ pub struct RecentPlacementRow {
     pub session_id: String,
     pub profile_id: String,
     pub category: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub created_at_epoch_seconds: i64,
 }
 
@@ -522,6 +527,168 @@ const OBSERVED_CATEGORIES: &[&str] = &[
     "orchestrator",
     "primary",
 ];
+
+pub fn canonical_observed_category(category: &str) -> Option<&'static str> {
+    let category = category.trim();
+    if category.eq_ignore_ascii_case("supervisor") {
+        return Some("orchestrator");
+    }
+    OBSERVED_CATEGORIES
+        .iter()
+        .copied()
+        .find(|observed| observed.eq_ignore_ascii_case(category))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CellCostKey {
+    pub category: String,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellCostObservation {
+    pub total_api_usd: f64,
+    pub sample_count: usize,
+}
+
+fn turn_cost_ticks(usage: &TokenUsage, model: Option<&str>) -> Result<Option<u64>> {
+    if usage.scope != UsageScope::Turn {
+        return Ok(None);
+    }
+    if let Some(cost) = usage
+        .provider_details
+        .as_ref()
+        .and_then(|d| d.cost.as_ref())
+        && !cost.is_partial
+    {
+        return Ok(Some(cost.usd_ticks));
+    }
+    attributed_turn_cost_ticks(
+        usage,
+        UsageSelection {
+            model: model.map(str::to_owned),
+            effort: None,
+        },
+    )
+}
+
+pub fn load_cell_cost_observations(
+    max_per_cell: usize,
+) -> Result<BTreeMap<CellCostKey, CellCostObservation>> {
+    load_cell_cost_observations_from(&database_path(), max_per_cell)
+}
+
+pub fn load_cell_cost_observations_from(
+    path: &Path,
+    max_per_cell: usize,
+) -> Result<BTreeMap<CellCostKey, CellCostObservation>> {
+    if max_per_cell == 0 {
+        return Ok(BTreeMap::new());
+    }
+    let connection = open_reader(path)?;
+    cell_cost_observations(&connection, max_per_cell)
+}
+
+fn cell_cost_observations(
+    connection: &Connection,
+    max_per_cell: usize,
+) -> Result<BTreeMap<CellCostKey, CellCostObservation>> {
+    let mut sessions = connection.prepare(
+        "WITH categorized AS MATERIALIZED (
+            SELECT DISTINCT session_id FROM session_turn_selections WHERE category IS NOT NULL
+         )
+         SELECT c.session_id FROM categorized c
+         LEFT JOIN sessions s ON s.session_id = c.session_id
+         JOIN session_contexts sc ON sc.session_id = c.session_id
+         WHERE s.session_id IS NULL OR s.state IN ('stopped', 'error', 'lost')
+         ORDER BY sc.created_at DESC, c.session_id DESC",
+    )?;
+    let mut selections = connection.prepare(
+        "SELECT category, model, effort FROM session_turn_selections WHERE session_id = ?1",
+    )?;
+    let mut turns =
+        connection.prepare("SELECT body FROM session_turn_usage WHERE session_id = ?1")?;
+    let mut results = BTreeMap::<CellCostKey, CellCostObservation>::new();
+    'sessions: for session_id in sessions.query_map([], |row| row.get::<_, String>(0))? {
+        let session_id = session_id?;
+        let mut categories = BTreeSet::new();
+        let mut models = BTreeSet::new();
+        let mut efforts = BTreeSet::new();
+        let mut rows = selections.query([&session_id])?;
+        while let Some(row) = rows.next()? {
+            let category: Option<String> = row.get(0)?;
+            let model: Option<String> = row.get(1)?;
+            let effort: Option<String> = row.get(2)?;
+            categories.extend(category.as_deref().and_then(canonical_observed_category));
+            models.extend(
+                model
+                    .as_deref()
+                    .map(str::trim)
+                    .map(pricing::normalize_model)
+                    .filter(|model| !model.is_empty()),
+            );
+            efforts.extend(
+                effort
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|effort| !effort.is_empty())
+                    .map(str::to_ascii_lowercase),
+            );
+        }
+        if categories.is_empty() || models.len() != 1 || efforts.len() > 1 {
+            continue;
+        }
+        let model = models.pop_first().expect("one normalized model");
+        let effort = efforts.pop_first();
+        let needing_keys: Vec<_> = categories
+            .into_iter()
+            .map(|category| CellCostKey {
+                category: category.to_owned(),
+                model: model.clone(),
+                effort: effort.clone(),
+            })
+            .filter(|key| {
+                results
+                    .get(key)
+                    .is_none_or(|obs| obs.sample_count < max_per_cell)
+            })
+            .collect();
+        if needing_keys.is_empty() {
+            continue;
+        }
+
+        let mut session_ticks: Option<u64> = None;
+        for body in turns.query_map([&session_id], |row| row.get::<_, String>(0))? {
+            let Ok(outcome) = serde_json::from_str::<ApiTurnOutcome>(&body?) else {
+                continue 'sessions;
+            };
+            let Some(usage) = outcome.usage.as_ref() else {
+                if outcome.outcome.kind == TurnResultKind::Completed {
+                    continue 'sessions;
+                }
+                // A quota interruption can have no usage of its own.
+                continue;
+            };
+            let Ok(Some(ticks)) = turn_cost_ticks(usage, Some(&model)) else {
+                continue 'sessions;
+            };
+            session_ticks = Some(session_ticks.unwrap_or(0).saturating_add(ticks));
+        }
+        if let Some(ticks) = session_ticks {
+            let session_usd = ticks as f64 / mj_core::usage::USD_TICKS_PER_DOLLAR as f64;
+            for key in needing_keys {
+                let entry = results.entry(key).or_insert(CellCostObservation {
+                    total_api_usd: 0.0,
+                    sample_count: 0,
+                });
+                entry.total_api_usd += session_usd;
+                entry.sample_count += 1;
+            }
+        }
+    }
+    Ok(results)
+}
 
 /// Load session placements created at or after `since_epoch_seconds` from
 /// `sessions` + `session_contexts` + `subagent_accounting`.
@@ -549,10 +716,17 @@ fn recent_placements_since(
             sc.session_id,
             COALESCE(s.last_profile, sc.profile_id),
             COALESCE(sa.category, 'primary'),
-            sc.created_at
+            sc.created_at,
+            sts.model,
+            sts.effort
          FROM session_contexts sc
          LEFT JOIN sessions s ON s.session_id = sc.session_id
          LEFT JOIN subagent_accounting sa ON sa.child_session_id = sc.session_id
+         LEFT JOIN session_turn_selections sts ON sts.rowid = (
+             SELECT rowid FROM session_turn_selections
+             WHERE session_id = sc.session_id AND model IS NOT NULL
+             ORDER BY rowid DESC LIMIT 1
+         )
          WHERE sc.created_at >= ?1
            AND COALESCE(s.last_profile, sc.profile_id) IS NOT NULL
          ORDER BY sc.created_at ASC",
@@ -564,11 +738,13 @@ fn recent_placements_since(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get(4)?,
+                row.get(5)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut placements = Vec::with_capacity(rows.len());
-    for (session_id, profile_id, category, created_at) in rows {
+    for (session_id, profile_id, category, created_at, model, effort) in rows {
         let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&created_at) else {
             continue;
         };
@@ -578,6 +754,8 @@ fn recent_placements_since(
                 session_id,
                 profile_id,
                 category,
+                model,
+                effort,
                 created_at_epoch_seconds: ts,
             });
         }
@@ -662,23 +840,19 @@ fn category_burn_observations(
             let mut session_ticks: u64 = 0;
             let mut has_cost = false;
             for (body, model) in turns {
-                let Ok(outcome) =
-                    serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body)
-                else {
+                let Ok(outcome) = serde_json::from_str::<ApiTurnOutcome>(&body) else {
                     continue;
                 };
-                if let Some(usage) = outcome.usage.as_ref() {
-                    let mut totals = BTreeMap::new();
-                    let values = counters(usage);
-                    let _ = add_counters(&mut totals, &values);
-                    if let Ok(Some(est)) = estimate_model_cost(usage, model.as_deref(), &totals) {
-                        session_ticks = session_ticks.saturating_add(est);
-                        has_cost = true;
-                    }
+                if let Some(usage) = outcome.usage.as_ref()
+                    && let Ok(Some(est)) = turn_cost_ticks(usage, model.as_deref())
+                {
+                    session_ticks = session_ticks.saturating_add(est);
+                    has_cost = true;
                 }
             }
             if has_cost {
-                usd_samples.push(session_ticks as f64 / mj_core::usage::USD_TICKS_PER_DOLLAR as f64);
+                usd_samples
+                    .push(session_ticks as f64 / mj_core::usage::USD_TICKS_PER_DOLLAR as f64);
             }
         }
         if usd_samples.len() >= min_samples && duration_hours.len() >= min_samples {
@@ -1259,6 +1433,12 @@ mod tests {
              VALUES ('new-child', 'new-primary', 'worker', 'subtle')",
             [],
         )?;
+        conn.execute(
+            "INSERT INTO session_turn_selections(session_id, command_id, model, effort)
+             VALUES ('new-child', 'first', 'gpt-6.2-sol', 'high'),
+                    ('new-child', 'second', 'gpt-6.2-astra', NULL)",
+            [],
+        )?;
         drop(conn);
 
         let rebuilt = load_recent_placements_since_from(&path, base_ts)?;
@@ -1269,12 +1449,16 @@ mod tests {
                     session_id: "new-primary".into(),
                     profile_id: "codex1".into(),
                     category: "primary".into(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds: base_ts + 10,
                 },
                 RecentPlacementRow {
                     session_id: "new-child".into(),
                     profile_id: "codex1".into(),
                     category: "subtle".into(),
+                    model: Some("gpt-6.2-astra".into()),
+                    effort: None,
                     created_at_epoch_seconds: base_ts + 20,
                 },
             ]
@@ -1289,16 +1473,237 @@ mod tests {
                     session_id: "new-primary".into(),
                     profile_id: "codex1".into(),
                     category: "primary".into(),
+                    model: None,
+                    effort: None,
                     created_at_epoch_seconds: base_ts + 10,
                 },
                 RecentPlacementRow {
                     session_id: "new-child".into(),
                     profile_id: "codex1".into(),
                     category: "subtle".into(),
+                    model: Some("gpt-6.2-astra".into()),
+                    effort: None,
                     created_at_epoch_seconds: base_ts + 20,
                 }
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cell_cost_observations_prefers_provider_cost_caps_per_cell_and_handles_efforts() -> Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("cells.sqlite3");
+        let conn = open(&path)?;
+        let ws: String =
+            conn.query_row("SELECT workspace_id FROM workspaces LIMIT 1", [], |r| {
+                r.get(0)
+            })?;
+        let sol = "gpt-6.2-sol";
+        let opus = "claude-opus-5-5";
+        let haiku = "claude-haiku-5-5";
+        let cases = [
+            (
+                "claude-breakdown",
+                "stopped",
+                "subtle",
+                None,
+                None,
+                0,
+                false,
+            ),
+            ("minority", "lost", "reviewer", None, None, 0, false),
+            ("destroyed", "stopped", "reviewer", None, None, 4, false),
+            ("older", "stopped", "subtle", Some("high"), None, 9, false),
+            ("partial", "error", "subtle", Some("high"), None, 9, true),
+            (
+                "latest",
+                "stopped",
+                " Subtle ",
+                None,
+                Some(("openai/gpt-6.2-sol", " High ")),
+                2,
+                false,
+            ),
+            (
+                "mixed-effort",
+                "stopped",
+                "subtle",
+                Some("high"),
+                Some((sol, "xhigh")),
+                9,
+                false,
+            ),
+            (
+                "mixed-model",
+                "stopped",
+                "subtle",
+                Some("high"),
+                Some(("gpt-6.2-astra", "high")),
+                9,
+                false,
+            ),
+            (
+                "last-request",
+                "stopped",
+                "subtle",
+                Some("high"),
+                None,
+                9,
+                false,
+            ),
+            (
+                "missing-usage",
+                "stopped",
+                "subtle",
+                Some("high"),
+                None,
+                9,
+                false,
+            ),
+            (
+                "invalid-outcome",
+                "stopped",
+                "subtle",
+                Some("high"),
+                None,
+                9,
+                false,
+            ),
+            ("running", "running", "subtle", Some("high"), None, 9, false),
+        ];
+        for (i, (id, state, category, effort, followup, dollars, partial)) in
+            cases.into_iter().enumerate()
+        {
+            let ts = format!("2026-11-23T00:00:{i:02}Z");
+            conn.execute(
+                "INSERT INTO session_contexts(session_id, bundle_id, workspace_id, created_at, profile_id)
+                 VALUES (?1, 'b1', ?2, ?3, 'codex')", params![id, ws, ts],
+            )?;
+            conn.execute(
+                "INSERT INTO sessions(session_id, title, harness_kind, last_profile, target_template_id, state, updated_at)
+                 VALUES (?1, 't', 'codex', 'codex', 'local', ?2, ?3)", params![id, state, ts],
+            )?;
+            let model = if id == "claude-breakdown" { opus } else { sol };
+            conn.execute(
+                "INSERT INTO session_turn_selections(session_id, command_id, model, effort, category)
+                 VALUES (?1, 'turn', ?2, ?3, ?4)", params![id, model, effort, category],
+            )?;
+            if let Some((model, effort)) = followup {
+                conn.execute(
+                    "INSERT INTO session_turn_selections(session_id, command_id, model, effort)
+                     VALUES (?1, 'last', ?2, ?3)",
+                    params![id, model, effort],
+                )?;
+            }
+            let mut usage = serde_json::json!({
+                "scope": "turn", "total_tokens": 500_000, "input_tokens": 500_000,
+                "output_tokens": 0
+            });
+            if id == "claude-breakdown" {
+                let model_usage = serde_json::json!({
+                    "scope": "turn", "total_tokens": 250_000, "input_tokens": 250_000,
+                    "output_tokens": 0
+                });
+                usage["provider_details"] = serde_json::json!({
+                    "model_usage": { (opus): model_usage, (haiku): model_usage }
+                });
+            } else {
+                let cost = mj_core::usage::ProviderTurnCost::from_usd_ticks(
+                    dollars * mj_core::usage::USD_TICKS_PER_DOLLAR,
+                    partial,
+                );
+                usage["provider_details"] = serde_json::json!({"cost": cost});
+            }
+            let body = serde_json::json!({
+                "command_id": "turn",
+                "completed_ordinal": 1,
+                "completed_at_ms": 600_000,
+                "outcome": {"kind": "completed", "stop_reason": "EndTurn"},
+                "usage": usage
+            });
+            conn.execute(
+                "INSERT INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body)
+                 VALUES (?1, 'turn', 1, 0, ?2)", params![id, body.to_string()],
+            )?;
+
+            let second_body = match id {
+                "partial" | "last-request" | "missing-usage" => {
+                    let mut body = body;
+                    body["command_id"] = serde_json::json!("last");
+                    body["completed_ordinal"] = serde_json::json!(2);
+                    if id == "last-request" {
+                        body["usage"]["scope"] = serde_json::json!("last_request");
+                    } else {
+                        body["usage"] = serde_json::Value::Null;
+                        if id == "partial" {
+                            body["outcome"] = serde_json::json!({
+                                "kind": "failed", "reason": "quota_limit"
+                            });
+                        }
+                    }
+                    Some(body.to_string())
+                }
+                "invalid-outcome" => Some("{}".into()),
+                _ => None,
+            };
+            if let Some(body) = second_body {
+                conn.execute(
+                    "INSERT INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body)
+                     VALUES (?1, 'last', 2, 0, ?2)", params![id, body],
+                )?;
+            }
+        }
+        drop(conn);
+        super::super::sessions::delete_session_from(&path, "destroyed")?;
+
+        assert_eq!(
+            load_cell_cost_observations_from(&path, 2)?,
+            BTreeMap::from([
+                (
+                    CellCostKey {
+                        category: "subtle".into(),
+                        model: opus.into(),
+                        effort: None,
+                    },
+                    CellCostObservation {
+                        // 250k input tokens each at $4.00/M and $0.10/M.
+                        total_api_usd: 1.025,
+                        sample_count: 1,
+                    },
+                ),
+                (
+                    CellCostKey {
+                        category: "subtle".into(),
+                        model: sol.into(),
+                        effort: Some("high".into())
+                    },
+                    CellCostObservation {
+                        total_api_usd: 3.0,
+                        sample_count: 2
+                    }
+                ),
+                (
+                    CellCostKey {
+                        category: "reviewer".into(),
+                        model: sol.into(),
+                        effort: None
+                    },
+                    CellCostObservation {
+                        total_api_usd: 4.0,
+                        sample_count: 2
+                    }
+                ),
+            ])
+        );
+        let placements = load_recent_placements_since_from(&path, 0)?;
+        let latest = placements
+            .iter()
+            .find(|p| p.session_id == "latest")
+            .unwrap();
+        assert_eq!(latest.model.as_deref(), Some("openai/gpt-6.2-sol"));
+        assert_eq!(latest.effort.as_deref(), Some(" High "));
         Ok(())
     }
 

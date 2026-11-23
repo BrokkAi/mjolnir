@@ -10,8 +10,8 @@ use sha2::Digest;
 pub(in crate::controller) enum RetainedWorker {
     Live,
     Missing,
-    Installed,
-    Reserved(crate::upgrade::Work),
+    Installed(Option<String>),
+    Reserved(crate::upgrade::Work, Option<String>),
 }
 
 const REPAIR: WorkerRestartMessages = WorkerRestartMessages {
@@ -32,7 +32,9 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
         let (worker_state, mut swap_admission) = match worker_state {
-            RetainedWorker::Reserved(admission) => (RetainedWorker::Installed, Some(admission)),
+            RetainedWorker::Reserved(admission, staged) => {
+                (RetainedWorker::Installed(staged), Some(admission))
+            }
             state => (state, None),
         };
         executor.notify_notice(
@@ -63,6 +65,7 @@ impl Controller {
                             launch: None,
                             prepared: true,
                             discard_queued_prompts: if discard_queue { Some(new_command_id("resume-clear-queue")?) } else { None },
+                            staged_aws_profile: None,
                             swap_admission: None,
                             messages: &REPAIR,
                         },
@@ -114,7 +117,9 @@ impl Controller {
                 // other start path does. An installed worker had its files
                 // staged just before, and a reserved swap replaces a worker
                 // that was receiving pushes.
-                if swap_admission.is_none() && !matches!(&worker_state, RetainedWorker::Installed) {
+                let staged = if let RetainedWorker::Installed(staged) = &worker_state {
+                    staged.clone()
+                } else {
                     self.prepare_worker_files_for(
                         session_id,
                         &backend,
@@ -122,10 +127,14 @@ impl Controller {
                         executor,
                         super::super::worker_binary::WorkerFilePreparation::RefreshProfileOnly,
                         super::super::worker_binary::LaunchHistory::Stored,
-                    )?;
-                }
-                let launch = self.current_worker_launch_config(session_id, &backend)?;
-                if !matches!(&worker_state, RetainedWorker::Installed) {
+                    )?.aws_profile
+                };
+                let mut state = self.state.clone();
+                state.sessions.get_mut(session_id).unwrap().staged_aws_profile.clone_from(&staged);
+                let launch = crate::worker_launch::current_worker_launch_config(
+                    &self.config, &state, session_id, &backend,
+                )?;
+                if !matches!(&worker_state, RetainedWorker::Installed(_)) {
                     let worker = WorkerInstall::for_target(&backend, executor)?;
                     prepare_managed_harness_for_upgrade(executor, &backend, session_id, &worker, &launch)?;
                 }
@@ -137,8 +146,9 @@ impl Controller {
                         worker_root: &root,
                         reconnect: &reconnect,
                         launch: Some(&launch),
-                        prepared: matches!(&worker_state, RetainedWorker::Installed),
+                        prepared: matches!(&worker_state, RetainedWorker::Installed(_)),
                         discard_queued_prompts: if discard_queue { Some(new_command_id("resume-clear-queue")?) } else { None },
+                        staged_aws_profile: Some(staged.as_deref()),
                         swap_admission: swap_admission.take(),
                         messages: &REPAIR,
                     },
@@ -311,7 +321,7 @@ impl Controller {
             &remote_seed,
         )?;
         self.prepare_subagent_report_dir(session_id, &backend, executor)?;
-        self.prepare_worker_files(
+        let staged = self.prepare_worker_files(
             session_id,
             &backend,
             &root,
@@ -354,7 +364,7 @@ impl Controller {
         executor.end_resumable_work("resume recovered parent")?;
         self.repair_existing_environment(
             session_id,
-            RetainedWorker::Installed,
+            RetainedWorker::Installed(staged),
             discard_queue,
             executor,
         )
@@ -891,7 +901,7 @@ impl Controller {
             }
         }
         self.prepare_subagent_report_dir(session_id, &backend, executor)?;
-        self.prepare_worker_files(
+        let staged = self.prepare_worker_files(
             session_id,
             &backend,
             &root,
@@ -934,8 +944,13 @@ impl Controller {
         );
         match String::from_utf8_lossy(&liveness.stdout).trim() {
             "alive" | "starting" => {
-                self.restart_worker_after_checkout_recovery(session_id, discard_queue, executor)
-                    .await
+                self.restart_worker_after_checkout_recovery(
+                    session_id,
+                    discard_queue,
+                    staged,
+                    executor,
+                )
+                .await
             }
             "dead" => {
                 self.recover_missing_parent_data(session_id, discard_queue, executor)
@@ -1035,7 +1050,7 @@ impl Controller {
             mj_checkpoint::checkpoint::relay_seed_for_restore(&canonical, true, queue_policy)?;
         executor.begin_resumable_work()?;
         self.prepare_subagent_report_dir(session_id, &backend, executor)?;
-        self.prepare_worker_files(
+        let staged = self.prepare_worker_files(
             session_id,
             &backend,
             &root,
@@ -1115,7 +1130,7 @@ impl Controller {
         executor.end_resumable_work("start reconstructed parent runtime")?;
         Box::pin(self.repair_existing_environment(
             session_id,
-            RetainedWorker::Installed,
+            RetainedWorker::Installed(staged),
             discard_queue,
             executor,
         ))

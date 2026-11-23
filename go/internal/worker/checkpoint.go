@@ -89,6 +89,36 @@ func ExportFromSpecReader(reader io.Reader) (checkpoint.TargetCheckpoint, error)
 	return exportCheckpoint(&spec)
 }
 
+// SuspendPreflightFromSpecFile is the hidden target CLI entry point:
+// `mj worker suspend-preflight --spec PATH|-`.
+func SuspendPreflightFromSpecFile(path string) (core.WorkerSuspendPreflightResult, error) {
+	var spec core.WorkerSuspendPreflightSpec
+	if path == checkpoint.ExportSpecStdin {
+		read, err := checkpoint.ReadJSONFrom[core.WorkerSuspendPreflightSpec](os.Stdin, "suspend preflight spec")
+		if err != nil {
+			return core.WorkerSuspendPreflightResult{}, err
+		}
+		spec = read
+	} else {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return core.WorkerSuspendPreflightResult{}, fmt.Errorf("read suspend preflight spec %s: %w", path, err)
+		}
+		if err := json.Unmarshal(body, &spec); err != nil {
+			return core.WorkerSuspendPreflightResult{}, fmt.Errorf("decode suspend preflight spec: %w", err)
+		}
+	}
+	return RunSuspendPreflight(&spec, checkpoint.SystemGit{})
+}
+
+// RunSuspendPreflight inventories each repository of spec read-only: its
+// untracked files, nested repositories, untracked stashes, operation in
+// progress, blockers and `.mj/keep/` entries, and, for a dry run, the Git
+// delta a suspend would transfer (or why it cannot be estimated).
+func RunSuspendPreflight(spec *core.WorkerSuspendPreflightSpec, git checkpoint.GitCommandRunner) (core.WorkerSuspendPreflightResult, error) {
+	panic("unported: mj-worker/src/checkpoint.rs run_suspend_preflight")
+}
+
 func CaptureFromSpecReader(reader io.Reader) (checkpoint.CapturedCheckpoint, error) {
 	spec, err := checkpoint.ReadJSONFrom[checkpoint.CheckpointCaptureSpec](reader, "checkpoint capture spec")
 	if err != nil {

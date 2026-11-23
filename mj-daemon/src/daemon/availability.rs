@@ -605,6 +605,92 @@ mod tests {
         assert!(state.request(), "a new request can wake the runner again");
     }
 
+    #[test]
+    fn availability_offers_stopped_apple_container_targets_and_excludes_broken_ones() {
+        use mj_core::config::{ContainerTemplate, Machine, SshConnection};
+        use mj_setup::{
+            doctor::CheckStatus,
+            setup::{RuntimeKind, RuntimeProbe},
+        };
+
+        let ssh = SshConnection {
+            host: "mac.example.test".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![],
+        };
+        let machine = Machine::Ssh {
+            ssh: ssh.clone(),
+            workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+            build_cache: None,
+        };
+        let container = ContainerTemplate {
+            image: "example.invalid/agent:latest".into(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            memory_hard_limit: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+            build_cache: None,
+        };
+        let config = Config {
+            machines: BTreeMap::from([("mac".into(), machine.clone())]),
+            targets: BTreeMap::from([
+                (
+                    "apple".into(),
+                    TargetTemplate::AppleContainer {
+                        container: container.clone(),
+                    },
+                ),
+                (
+                    "remote-apple".into(),
+                    TargetTemplate::SshAppleContainer { ssh, container },
+                ),
+            ]),
+            ..Config::default()
+        };
+        let mut engines = InstalledEngines {
+            checked_at: Some(Instant::now()),
+            path: std::env::var_os("PATH"),
+            missing: BTreeMap::from([("container", false)]),
+            ..InstalledEngines::default()
+        };
+        for status in [CheckStatus::Warning, CheckStatus::Fixable] {
+            let runtime = RuntimeProbe {
+                kind: RuntimeKind::AppleContainer,
+                status,
+                detail: match status {
+                    CheckStatus::Warning => "Apple container service is stopped.",
+                    _ => "Apple container check exited with status 64.",
+                }
+                .into(),
+                remediation: None,
+            };
+            let report = AvailabilityReport {
+                profiles: BTreeMap::new(),
+                targets: config.targets.clone(),
+                local: vec![runtime.clone()],
+                machines: vec![MachineProbe {
+                    machine_id: "mac".into(),
+                    machine: machine.clone(),
+                    outcome: MachineProbeOutcome::Answered(vec![runtime]),
+                }],
+                added_profiles: vec![],
+                added_runtimes: BTreeMap::new(),
+            };
+            let verdicts = project(Some(&report), &config, &mut engines);
+            for id in ["apple", "remote-apple"] {
+                let verdict = &verdicts.targets[id];
+                match status {
+                    CheckStatus::Warning => assert_eq!(*verdict, AvailabilityVerdict::Available),
+                    _ => assert!(verdict.missing_reason().unwrap().contains("status 64")),
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_completed_availability_check_refreshes_the_engine_installation_fact() {

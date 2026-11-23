@@ -1806,7 +1806,7 @@ fn spawn_apple_container_startup(
             ) {
                 return Ok(None);
             }
-            mj_controller::targets::ensure_apple_container_runtime(&executor).map(Some)
+            mj_controller::targets::ensure_apple_container_runtime(None, &executor).map(Some)
         });
         let result = tokio::select! {
             result = &mut startup => result

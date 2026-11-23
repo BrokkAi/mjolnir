@@ -982,22 +982,26 @@ GET  /api/v1/sessions/{session_id}/files?path=src/main.rs
 POST /api/v1/sessions/{session_id}/export
 ```
 
-`diff` answers `text/x-diff` — a unified diff of everything the session changed
-against the commit it started from, committed and uncommitted work alike,
-including files the agent never told git about.
+`diff` answers `text/x-diff` with a diffstat of tracked changes against the
+session's launch base and a separate list of untracked files. Add one or more
+`path` query parameters to receive a unified patch for those tracked paths,
+including committed, staged, and unstaged changes. For example,
+`GET /api/v1/sessions/{session_id}/diff?path=src/main.rs&path=README.md`.
+Paths are literal and relative to the checkout root. Untracked paths are
+refused with `409`. Use `mj fetch` to read them.
 
-Add `?base=<revision>` to choose an explicit comparison commit without changing
-the recorded launch baseline. Git revisions such as `HEAD~2` are accepted;
-unknown revisions return `409`. Add `json=true` to receive `application/json`
-with `diff`, `base`, `head`, and `head_descends_from_base` fields. `base` and
-`head` are resolved commit IDs; the patch still includes uncommitted and
-untracked files. `head_descends_from_base` is `false` when the session's HEAD is
-no longer a descendant of the base — the agent rebased, amended, or reset — so
-the diff carries history changes as well as session work; a worker from before
-this field omits it. For example,
-`GET /api/v1/sessions/{session_id}/diff?base=HEAD~2&json=true` reports both the
-chosen baseline and the current checked-out commit. JSON metadata requires an
-updated session worker; older workers return an explicit upgrade refusal.
+Add `base=<revision>` to choose an explicit comparison commit without changing
+the recorded launch baseline. Git revisions such as `HEAD~2` are accepted.
+Unknown revisions return `409`. Add `json=true` to receive `application/json`
+with `diff`, `base`, `head`, and `head_descends_from_base`. A summary also
+includes `tracked_files` with paths and line counts (or a binary marker),
+`untracked_files` with up to 500 sorted paths, and `untracked_total` with the
+full count. Empty file lists may be omitted.
+
+`base` and `head` are resolved commit IDs. `head_descends_from_base` is
+`false` after a rebase, amend, or reset that leaves the base outside HEAD's
+history, so the comparison can include history changes as well as session
+work. Older workers may omit fields or require an upgrade for these options.
 
 `files` reads a file or a directory on the session's target. A file answers
 `application/octet-stream` with its bytes; a directory answers
@@ -1038,7 +1042,8 @@ automatically after daemon replacement.
 { "kind": "bundle" }
 ```
 
-- `patch` answers the same `text/x-diff` body as `diff`.
+- `patch` answers a unified patch of all tracked changes as `text/x-diff`.
+  Use `mj fetch` to read untracked files.
 - `branch` pushes the session's current HEAD to the repository's push remote
   (`remote.pushDefault`, else `origin`) and answers
   `{ "branch": "review/one", "remote": "origin" }`.
@@ -1099,7 +1104,7 @@ viewer does not act on these requests.
 | `mj message --session <id> <text>` | `POST /sessions/{id}/message` (from your own shell, with no `sender_session_id`) |
 | `mj wait --session <id>` | `POST /sessions/{id}/wait` |
 | `mj transcript --session <id>` | `GET /sessions/{id}/transcript` |
-| `mj diff --session <id>` | `GET /sessions/{id}/diff` |
+| `mj diff --session <id> [<path>...]` | `GET /sessions/{id}/diff`, with one `path` query parameter per selected file |
 | `mj export --session <id> --kind patch\|branch\|bundle` | `POST /sessions/{id}/export` |
 | `mj fetch --session <id> --path <path> [--ls]` | `GET /sessions/{id}/files?path=[&list=true]` |
 | `mj suspend --session <id>` | `POST /sessions/{id}/suspend` |

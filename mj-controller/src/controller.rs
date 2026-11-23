@@ -100,8 +100,8 @@ use crate::targets::{self, AdditionalMount, CommandExecutor, SshTarget};
 pub use crate::targets::image_refresh_plan;
 pub use crate::targets::path_exists_on_managed_target;
 pub use backend::backend_locator;
+pub use backend::is_missing_command;
 pub use backend::validate_resource_allocation;
-pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
 pub use github_app::GithubBundleSelectionError;
 pub use github_app::{
@@ -1216,6 +1216,7 @@ impl Controller {
             title: title.into(),
             harness_kind: profile.kind,
             last_profile: profile_id.to_string(),
+            staged_aws_profile: None,
             bundle_id,
             project_directory,
             managed_worktree: None,

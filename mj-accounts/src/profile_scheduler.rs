@@ -1,5 +1,15 @@
 //! Shared capacity ranking and weighted assignment for profiles.
 
+use std::collections::BTreeSet;
+
+use mj_core::usage::pricing::normalize_model;
+
+use crate::database::{CellCostObservation, canonical_observed_category};
+use crate::power_ranking::PowerRankingLookup;
+use crate::quota_telemetry::{
+    effective_weekly_budget_usd, mean_burn_for_window_pct, normalized_cell_effort,
+};
+
 /// A candidate's last quota reading, scored for the requested model when
 /// candidates are ranked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,6 +516,116 @@ fn binding_window_scope(candidate: &ScheduledCandidate) -> Option<String> {
         .and_then(|w| w.model_scope.clone())
 }
 
+// Relative variance ratio at live within-cell dispersion σ ≈ 0.65–0.95.
+pub(crate) const COST_PRIOR_WEIGHT_K: f64 = 3.0;
+pub(crate) const WEEKS_PER_MONTH: f64 = 4.345;
+
+pub(crate) fn benchmark_task_usd(lookup: &PowerRankingLookup) -> Option<f64> {
+    let positive = |v: &f64| v.is_finite() && *v > 0.0;
+    if let (Some(weekly_budget), Some(tp200)) = (
+        lookup.weekly_budget_usd.filter(positive),
+        lookup.tasks_per_200_sub.filter(positive),
+    ) {
+        let plan_scale = lookup.plan_usd_per_month.filter(positive).unwrap_or(200.0) / 200.0;
+        Some((weekly_budget * WEEKS_PER_MONTH) / (tp200 * plan_scale))
+    } else {
+        lookup
+            .tasks_per_200_api
+            .filter(positive)
+            .map(|tp200| 200.0 / tp200)
+    }
+    .filter(positive)
+}
+
+pub(crate) fn shrink_cell_cost_usd(obs: Option<&CellCostObservation>, prior_usd: f64) -> f64 {
+    if let Some(obs) = obs.filter(|obs| positive_cost_observation(obs)) {
+        (COST_PRIOR_WEIGHT_K * prior_usd + obs.total_api_usd)
+            / (COST_PRIOR_WEIGHT_K + obs.sample_count as f64)
+    } else {
+        prior_usd
+    }
+}
+
+fn positive_cost_observation(obs: &CellCostObservation) -> bool {
+    obs.sample_count > 0 && obs.total_api_usd.is_finite() && obs.total_api_usd > 0.0
+}
+
+pub(crate) fn calibrated_prior_scale<'a>(
+    default_usd: f64,
+    cells: impl Iterator<Item = (f64, Option<&'a CellCostObservation>)>,
+) -> f64 {
+    let mut log_bench_sum = 0.0;
+    let mut bench_count = 0;
+    let mut observed_usd = 0.0;
+    let mut benchmark_usd = 0.0;
+    for (bench, obs) in cells {
+        log_bench_sum += bench.ln();
+        bench_count += 1;
+        if let Some(obs) = obs.filter(|obs| positive_cost_observation(obs)) {
+            observed_usd += obs.total_api_usd;
+            benchmark_usd += obs.sample_count as f64 * bench;
+        }
+    }
+    if benchmark_usd > 0.0 && observed_usd > 0.0 {
+        observed_usd / benchmark_usd
+    } else if bench_count > 0 {
+        default_usd / (log_bench_sum / f64::from(bench_count)).exp()
+    } else {
+        1.0
+    }
+}
+
+pub(crate) fn cell_prior_usd(bench: Option<f64>, scale: f64, default_usd: f64) -> f64 {
+    bench.map_or(default_usd, |bench| (scale * bench).max(f64::MIN_POSITIVE))
+}
+
+struct SubscriptionPricing {
+    plan_price: Option<f64>,
+    weekly_budget: Option<f64>,
+    p_eff: Option<f64>,
+    tp200: Option<f64>,
+}
+
+impl SubscriptionPricing {
+    fn new(monthly_price_usd: Option<u32>, lookup: Option<&PowerRankingLookup>) -> Self {
+        let positive = |v: &f64| v.is_finite() && *v > 0.0;
+        let plan_price = lookup.and_then(|l| l.plan_usd_per_month).filter(positive);
+        Self {
+            plan_price,
+            weekly_budget: lookup.and_then(|l| l.weekly_budget_usd).filter(positive),
+            p_eff: monthly_price_usd
+                .filter(|p| *p > 0)
+                .map(f64::from)
+                .or(plan_price),
+            tp200: lookup
+                .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
+                .filter(positive),
+        }
+    }
+
+    fn budget_price(&self) -> f64 {
+        self.p_eff.unwrap_or(200.0)
+    }
+
+    fn priced_capacity(&self, estimate_usd: f64, prior_usd: f64, prior_scale: f64) -> Option<f64> {
+        if let Some(budget) =
+            effective_weekly_budget_usd(self.weekly_budget, self.budget_price(), self.plan_price)
+            && estimate_usd > 0.0
+        {
+            Some(budget / estimate_usd)
+        } else {
+            self.p_eff.zip(self.tp200).map(|(price, tp200)| {
+                let cold_weekly = (tp200 * (price / 200.0)) / (prior_scale * WEEKS_PER_MONTH);
+                if estimate_usd > 0.0 && prior_usd > 0.0 {
+                    cold_weekly * (prior_usd / estimate_usd)
+                } else {
+                    cold_weekly
+                }
+            })
+        }
+    }
+}
+
 fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
     raw_candidates: Vec<T>,
     ctx: &SchedulingContext<'_>,
@@ -556,60 +676,75 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
         }
     }
 
-    let pool_items: Vec<T> = pools.into_values().map(|(_, item)| item).collect();
-
-    // 2. Compute geometric mean of `tasks_per_200_sub * (P_eff / 200.0)` across
-    //    priced subscription peers in this draw, for unpriced peers.
-    let mut log_sum = 0.0;
-    let mut priced_count = 0usize;
-    for item in &pool_items {
-        let cand = item.as_ref();
-        if let CandidateQuota::Subscription {
-            monthly_price_usd, ..
-        } = &cand.quota
-        {
+    let category = ctx.category.unwrap_or("primary");
+    let cat_stats = ctx.telemetry.category_stats(category);
+    let canonical_category = canonical_observed_category(category).unwrap_or(category);
+    let pool_items: Vec<_> = pools
+        .into_values()
+        .map(|(_, item)| {
+            let cand = item.as_ref();
             let lookup =
                 ctx.power_ranking
                     .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
-            let p_eff = monthly_price_usd
-                .filter(|p| *p > 0)
-                .map(f64::from)
-                .or_else(|| {
-                    lookup
-                        .as_ref()
-                        .and_then(|l| l.plan_usd_per_month)
-                        .filter(|p| p.is_finite() && *p > 0.0)
-                });
-            let tp200 = lookup
-                .as_ref()
-                .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
-                .filter(|v| v.is_finite() && *v > 0.0);
-            if let (Some(p_eff), Some(tp200)) = (p_eff, tp200) {
-                let cap = tp200 * (p_eff / 200.0);
-                if cap > 0.0 {
-                    log_sum += cap.ln();
-                    priced_count += 1;
+            let bench = lookup.as_ref().and_then(benchmark_task_usd);
+            let obs =
+                ctx.telemetry
+                    .cell_cost_observation(category, &cand.model, cand.effort.as_deref());
+            (item, lookup, bench, obs)
+        })
+        .collect();
+    let mut seen_cells = BTreeSet::new();
+    let prior_scale = calibrated_prior_scale(
+        cat_stats.mean_api_usd,
+        pool_items.iter().filter_map(|(item, _, bench, obs)| {
+            let bench = (*bench)?;
+            let cand = item.as_ref();
+            seen_cells
+                .insert((
+                    normalize_model(cand.model.trim()),
+                    normalized_cell_effort(cand.effort.as_deref()),
+                ))
+                .then_some((bench, obs.as_ref()))
+        }),
+    );
+
+    // 2. Price subscriptions in tasks per week and use the same units for peers.
+    let pool_items: Vec<_> = pool_items
+        .into_iter()
+        .map(|(item, lookup, bench, obs)| {
+            let prior_usd = cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd);
+            let estimate_usd = shrink_cell_cost_usd(obs.as_ref(), prior_usd);
+            let subscription = match &item.as_ref().quota {
+                CandidateQuota::Subscription {
+                    monthly_price_usd, ..
+                } => {
+                    let pricing = SubscriptionPricing::new(*monthly_price_usd, lookup.as_ref());
+                    let capacity = pricing.priced_capacity(estimate_usd, prior_usd, prior_scale);
+                    Some((pricing, capacity))
                 }
-            }
+                _ => None,
+            };
+            (item, lookup, estimate_usd, subscription)
+        })
+        .collect();
+    let mut log_sum = 0.0;
+    let mut priced_count = 0;
+    for (_, _, _, subscription) in &pool_items {
+        if let Some((_, Some(capacity))) = subscription {
+            log_sum += capacity.ln();
+            priced_count += 1;
         }
     }
     let peer_geom_mean_capacity = if priced_count > 0 {
-        (log_sum / priced_count as f64).exp()
+        (log_sum / f64::from(priced_count)).exp()
     } else {
         1.0
     };
 
-    let cat_stats = ctx
-        .telemetry
-        .category_stats(ctx.category.unwrap_or("primary"));
-
     // 3. Score each pool, filtering out Exhausted (tier 6) and disallowed Paid.
     let mut scored = Vec::with_capacity(pool_items.len());
-    for item in pool_items {
+    for (item, lookup, cand_est_usd, subscription) in pool_items {
         let cand = item.as_ref();
-        let lookup = ctx
-            .power_ranking
-            .lookup(&cand.model, cand.effort.as_deref(), cand.harness);
         let prefer_pos = ctx
             .prefer
             .iter()
@@ -628,7 +763,6 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                 (5u8, tp200_api)
             }
             CandidateQuota::Subscription {
-                monthly_price_usd,
                 windows,
                 paid_credits,
                 ..
@@ -667,43 +801,36 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                         continue;
                     }
                 } else {
-                    let plan_price = lookup
-                        .as_ref()
-                        .and_then(|l| l.plan_usd_per_month)
-                        .filter(|p| p.is_finite() && *p > 0.0);
-                    let weekly_budget = lookup
-                        .as_ref()
-                        .and_then(|l| l.weekly_budget_usd)
-                        .filter(|v| v.is_finite() && *v > 0.0);
-                    let inferred_price = monthly_price_usd.filter(|p| *p > 0).map(f64::from);
-                    let p_eff_opt = inferred_price.or(plan_price);
-                    let tp200_opt = lookup
-                        .as_ref()
-                        .and_then(|l| l.tasks_per_200_sub.or(l.tasks_per_200_api))
-                        .filter(|v| v.is_finite() && *v > 0.0);
-
-                    let (base_capacity, p_eff_for_budget) = match (p_eff_opt, tp200_opt) {
-                        (Some(p_eff), Some(tp200)) => {
-                            if inferred_price.is_none() {
-                                tracing::trace!(
-                                    profile_id = %cand.profile_id,
-                                    model = %cand.model,
-                                    plan_usd_per_month = p_eff,
-                                    "using power-ranking plan_usd_per_month as P_eff"
-                                );
-                            }
-                            (tp200 * (p_eff / 200.0), p_eff)
-                        }
-                        (Some(p_eff), None) => (peer_geom_mean_capacity * (p_eff / 200.0), p_eff),
-                        (None, _) => {
-                            tracing::debug!(
-                                profile_id = %cand.profile_id,
-                                model = %cand.model,
-                                assumed_capacity = peer_geom_mean_capacity,
-                                "using geometric mean peer capacity for unpriced subscription pool"
-                            );
-                            (peer_geom_mean_capacity, plan_price.unwrap_or(200.0))
-                        }
+                    let (pricing, capacity) = subscription.expect("subscription pricing");
+                    let base_capacity = capacity.unwrap_or_else(|| {
+                        pricing.p_eff.map_or(peer_geom_mean_capacity, |p_eff| {
+                            peer_geom_mean_capacity * (p_eff / 200.0)
+                        })
+                    });
+                    let placement_cost = |placement: &crate::quota_telemetry::RecentPlacement| {
+                        let p_cat = placement.category.as_str();
+                        let same_category = canonical_observed_category(p_cat).unwrap_or(p_cat)
+                            == canonical_category;
+                        let Some(model) = placement.model.as_deref() else {
+                            return if same_category {
+                                cand_est_usd
+                            } else {
+                                ctx.telemetry.category_stats(p_cat).mean_api_usd
+                            };
+                        };
+                        let effort = placement.effort.as_deref();
+                        let obs = ctx.telemetry.cell_cost_observation(p_cat, model, effort);
+                        let prior = if same_category {
+                            let bench = ctx
+                                .power_ranking
+                                .lookup(model, effort, cand.harness)
+                                .as_ref()
+                                .and_then(benchmark_task_usd);
+                            cell_prior_usd(bench, prior_scale, cat_stats.mean_api_usd)
+                        } else {
+                            ctx.telemetry.category_stats(p_cat).mean_api_usd
+                        };
+                        shrink_cell_cost_usd(obs.as_ref(), prior)
                     };
 
                     let mut u_long: Option<f64> = None;
@@ -734,23 +861,22 @@ fn prepare_scored_pools<T: AsRef<ScheduledCandidate>>(
                             let v_60m = wt.map_or(0.0, |t| t.trailing_60m_pct_per_hour);
                             let second_to_last = wt.and_then(|t| t.second_to_last_clean_ts);
                             let ratio = wt.and_then(|t| t.five_hour_to_weekly_ratio);
-                            let reserved = ctx.telemetry.reserved_pct(
-                                &cand.profile_id,
-                                ev.kind,
-                                second_to_last,
-                                weekly_budget,
-                                p_eff_for_budget,
-                                plan_price,
-                                ratio,
-                            );
-                            let new_burn = crate::quota_telemetry::mean_burn_for_window_pct(
-                                cat_stats.mean_api_usd,
-                                ev.kind,
-                                weekly_budget,
-                                p_eff_for_budget,
-                                plan_price,
-                                ratio,
-                            );
+                            let burn = |usd| {
+                                mean_burn_for_window_pct(
+                                    usd,
+                                    ev.kind,
+                                    pricing.weekly_budget,
+                                    pricing.budget_price(),
+                                    pricing.plan_price,
+                                    ratio,
+                                )
+                            };
+                            let reserved: f64 = ctx
+                                .telemetry
+                                .qualifying_placements(&cand.profile_id, second_to_last)
+                                .map(|placement| burn(placement_cost(placement)))
+                                .sum();
+                            let new_burn = burn(cand_est_usd);
                             let rem_eff =
                                 ev.remaining_pct - RESERVE_FLOOR_PCT - reserved - new_burn;
                             let safe = rem_eff
@@ -1103,6 +1229,326 @@ mod tests {
     }
 
     #[test]
+    fn cold_start_preserves_relative_weights_and_centers_reservations_on_category_default() {
+        use crate::quota_telemetry::{
+            QuotaTelemetrySnapshot, RecentPlacement, WindowKey, WindowKind, WindowTelemetry,
+        };
+        use mj_core::config::{ExecutionPolicy, HarnessKind};
+        let now = 1_000_000;
+        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
+        let mut telemetry = QuotaTelemetrySnapshot::default();
+        let candidates: Vec<_> = [
+            ("cheap", "gpt-6.2-sol", "medium", 100),
+            ("pricey", "gpt-6-astra", "medium", 200),
+        ]
+        .into_iter()
+        .map(|(id, model, effort, price)| {
+            scheduled_sub(
+                id,
+                HarnessKind::Codex,
+                model,
+                Some(effort),
+                Some(price),
+                vec![week_window(100, now)],
+                None,
+                false,
+            )
+        })
+        .collect();
+        let template = SchedulingContext {
+            execution_policy: ExecutionPolicy::Unconstrained,
+            placement: Placement::Child,
+            category: Some("subtle"),
+            ranking_anchor: None,
+            prefer: &[],
+            telemetry: &QuotaTelemetrySnapshot::default(),
+            power_ranking: ranking,
+            now_seconds: now,
+        };
+        let ctx = SchedulingContext {
+            telemetry: &telemetry,
+            ..template
+        };
+        let default = telemetry.category_stats("subtle").mean_api_usd;
+        let lookup = |c: &ScheduledCandidate| {
+            ranking
+                .lookup(&c.model, c.effort.as_deref(), c.harness)
+                .unwrap()
+        };
+        let sol = lookup(&candidates[0]);
+        let astra = lookup(&candidates[1]);
+        let sol_budget = sol.weekly_budget_usd.unwrap() / 2.0;
+        let astra_budget = astra.weekly_budget_usd.unwrap();
+        let master_ratio =
+            sol.tasks_per_200_sub.unwrap() / (2.0 * astra.tasks_per_200_sub.unwrap());
+        let scores = prepare_scored_pools(candidates.clone(), &ctx);
+        let weight = |id: &str| {
+            scores
+                .iter()
+                .find(|score| score.item.profile_id == id)
+                .unwrap()
+                .weight
+        };
+        assert!((weight("cheap") / weight("pricey") - master_ratio).abs() < 1e-6);
+        let cheap_usd = sol_budget / weight("cheap");
+        let pricey_usd = astra_budget / weight("pricey");
+        assert!(cheap_usd < default && default < pricey_usd);
+        assert!(((cheap_usd * pricey_usd).sqrt() - default).abs() < 1e-6);
+        let single = prepare_scored_pools(vec![candidates[0].clone()], &ctx);
+        assert!((sol_budget / single[0].weight - default).abs() < 1e-6);
+
+        // With one prior placement and enough 5h headroom for two category
+        // defaults, only the cheaper cell fits when both models are offered.
+        let mut candidates = candidates;
+        for (cand, budget) in candidates.iter_mut().zip([sol_budget, astra_budget]) {
+            let CandidateQuota::Subscription { windows, .. } = &mut cand.quota else {
+                unreachable!()
+            };
+            *windows = claude_window(11, Some(now + 3600), None).windows;
+            telemetry.windows.insert(
+                WindowKey {
+                    profile_id: cand.profile_id.clone(),
+                    cache_identity: cand.cache_identity.clone().unwrap(),
+                    window_kind: WindowKind::Short5h,
+                    model_scope: None,
+                },
+                WindowTelemetry {
+                    five_hour_to_weekly_ratio: Some(10.05 * budget / (200.0 * default)),
+                    ..WindowTelemetry::default()
+                },
+            );
+            telemetry.recent_placements.insert(
+                cand.profile_id.clone(),
+                vec![RecentPlacement {
+                    category: "subtle".into(),
+                    model: Some(cand.model.clone()),
+                    effort: cand.effort.clone(),
+                    created_at_epoch_seconds: now,
+                }],
+            );
+        }
+        let ctx = SchedulingContext {
+            telemetry: &telemetry,
+            ..template
+        };
+        let scores = prepare_scored_pools(candidates.clone(), &ctx);
+        assert_eq!(
+            (scores[0].item.profile_id.as_str(), scores[0].tier),
+            ("cheap", 0)
+        );
+        assert_eq!(
+            (scores[1].item.profile_id.as_str(), scores[1].tier),
+            ("pricey", 1)
+        );
+        assert_eq!(
+            prepare_scored_pools(vec![candidates.remove(0)], &ctx)[0].tier,
+            1
+        );
+    }
+
+    #[test]
+    fn learned_cell_cost_unifies_capacity_and_reservations_and_isolates_cross_category_scale() {
+        use crate::database::CellCostKey;
+        use crate::quota_telemetry::{
+            QuotaTelemetrySnapshot, RecentPlacement, WindowKey, WindowKind, WindowTelemetry,
+        };
+        use mj_core::config::{ExecutionPolicy, HarnessKind};
+        let now = 1_000_000;
+        let ranking = crate::power_ranking::PowerRankingSnapshot::baseline();
+        let mut telemetry = QuotaTelemetrySnapshot::default();
+        let candidates: Vec<_> = [
+            ("sol", HarnessKind::Codex, "gpt-6.2-sol", "medium"),
+            ("kimi", HarnessKind::Kimi, "kimi-code/k3", "high"),
+        ]
+        .into_iter()
+        .map(|(id, harness, model, effort)| {
+            scheduled_sub(
+                id,
+                harness,
+                model,
+                Some(effort),
+                Some(200),
+                vec![week_window(100, now)],
+                None,
+                false,
+            )
+        })
+        .collect();
+        for (category, cand, mean, count) in [
+            ("subtle", &candidates[0], 1.41, 100),
+            ("subtle", &candidates[1], 16.0, 100),
+            ("straightforward", &candidates[0], 0.20, 3),
+        ] {
+            telemetry.cell_costs.insert(
+                CellCostKey {
+                    category: category.into(),
+                    model: cand.model.clone(),
+                    effort: cand.effort.clone(),
+                },
+                CellCostObservation {
+                    total_api_usd: mean * count as f64,
+                    sample_count: count,
+                },
+            );
+        }
+        let lookup = |cand: &ScheduledCandidate| {
+            ranking
+                .lookup(&cand.model, cand.effort.as_deref(), cand.harness)
+                .unwrap()
+        };
+        let benchmarks: Vec<_> = candidates
+            .iter()
+            .map(|cand| benchmark_task_usd(&lookup(cand)).unwrap())
+            .collect();
+        let scale = (1.41 + 16.0) / (benchmarks[0] + benchmarks[1]);
+        let expected = [
+            (3.0 * scale * benchmarks[0] + 141.0) / 103.0,
+            (3.0 * scale * benchmarks[1] + 1600.0) / 103.0,
+        ];
+        let score = |candidates, telemetry: &QuotaTelemetrySnapshot, power_ranking| {
+            prepare_scored_pools(
+                candidates,
+                &SchedulingContext {
+                    execution_policy: ExecutionPolicy::Unconstrained,
+                    placement: Placement::Child,
+                    category: Some("subtle"),
+                    ranking_anchor: None,
+                    prefer: &[],
+                    telemetry,
+                    power_ranking,
+                    now_seconds: now,
+                },
+            )
+        };
+        let scores = score(candidates.clone(), &telemetry, ranking);
+        for (cand, estimate) in candidates.iter().zip(expected) {
+            let weight = scores
+                .iter()
+                .find(|s| s.item.profile_id == cand.profile_id)
+                .unwrap()
+                .weight;
+            assert!((weight - lookup(cand).weekly_budget_usd.unwrap() / estimate).abs() < 1e-6);
+        }
+
+        // Exercise subscriptions with a ranked task count and no weekly USD
+        // budget. Both observed cells move away from their calibrated priors.
+        let mut ranking_without_budgets = ranking.clone();
+        for entry in &mut ranking_without_budgets.entries {
+            entry.weekly_budget_usd = None;
+        }
+        let fallback_scores = score(candidates.clone(), &telemetry, &ranking_without_budgets);
+        let fallback_lookups: Vec<_> = candidates
+            .iter()
+            .map(|cand| {
+                ranking_without_budgets
+                    .lookup(&cand.model, cand.effort.as_deref(), cand.harness)
+                    .unwrap()
+            })
+            .collect();
+        let api_benchmarks: Vec<_> = fallback_lookups
+            .iter()
+            .map(|lookup| 200.0 / lookup.tasks_per_200_api.unwrap())
+            .collect();
+        let fallback_scale = (1.41 + 16.0) / (api_benchmarks[0] + api_benchmarks[1]);
+        for (i, observed_mean) in [1.41, 16.0].into_iter().enumerate() {
+            let prior = fallback_scale * api_benchmarks[i];
+            let estimate = (3.0 * prior + 100.0 * observed_mean) / 103.0;
+            let cold_weekly =
+                fallback_lookups[i].tasks_per_200_sub.unwrap() / (fallback_scale * WEEKS_PER_MONTH);
+            let weight = fallback_scores
+                .iter()
+                .find(|s| s.item.profile_id == candidates[i].profile_id)
+                .unwrap()
+                .weight;
+            assert!((weight / cold_weekly - prior / estimate).abs() < 1e-6);
+            assert_eq!(weight > cold_weekly, i == 0);
+        }
+
+        let mut candidates = candidates;
+        for cand in &mut candidates {
+            let CandidateQuota::Subscription { windows, .. } = &mut cand.quota else {
+                unreachable!()
+            };
+            *windows = claude_window(11, Some(now + 3600), None).windows;
+        }
+        let window_key = |cand: &ScheduledCandidate| WindowKey {
+            profile_id: cand.profile_id.clone(),
+            cache_identity: cand.cache_identity.clone().unwrap(),
+            window_kind: WindowKind::Short5h,
+            model_scope: None,
+        };
+        let kimi_budget = lookup(&candidates[1]).weekly_budget_usd.unwrap();
+        let kimi_window = window_key(&candidates[1]);
+        for (headroom_usd, placement, expected_tier) in [
+            (0.99 * expected[1], false, 1),
+            (1.01 * expected[1], false, 0),
+            (1.99 * expected[1], true, 1),
+            (2.01 * expected[1], true, 0),
+        ] {
+            telemetry.windows.insert(
+                kimi_window.clone(),
+                WindowTelemetry {
+                    five_hour_to_weekly_ratio: Some(0.10 * kimi_budget / headroom_usd),
+                    ..WindowTelemetry::default()
+                },
+            );
+            telemetry.recent_placements.insert(
+                "kimi".into(),
+                if placement {
+                    vec![RecentPlacement {
+                        category: "subtle".into(),
+                        model: Some(candidates[1].model.clone()),
+                        effort: candidates[1].effort.clone(),
+                        created_at_epoch_seconds: now,
+                    }]
+                } else {
+                    vec![]
+                },
+            );
+            assert_eq!(
+                score(candidates.clone(), &telemetry, ranking)
+                    .iter()
+                    .find(|s| s.item.profile_id == "kimi")
+                    .unwrap()
+                    .tier,
+                expected_tier
+            );
+        }
+
+        telemetry.recent_placements.insert(
+            "sol".into(),
+            vec![RecentPlacement {
+                category: "straightforward".into(),
+                model: Some(candidates[0].model.clone()),
+                effort: candidates[0].effort.clone(),
+                created_at_epoch_seconds: now,
+            }],
+        );
+        let cross_category_usd = (0.12 + 0.20) / 2.0;
+        let sol_budget = lookup(&candidates[0]).weekly_budget_usd.unwrap();
+        for (headroom_usd, expected_tier) in [
+            (expected[0] + cross_category_usd - 0.01, 1),
+            (expected[0] + cross_category_usd + 0.01, 0),
+        ] {
+            telemetry.windows.insert(
+                window_key(&candidates[0]),
+                WindowTelemetry {
+                    five_hour_to_weekly_ratio: Some(0.10 * sol_budget / headroom_usd),
+                    ..WindowTelemetry::default()
+                },
+            );
+            assert_eq!(
+                score(candidates.clone(), &telemetry, ranking)
+                    .iter()
+                    .find(|s| s.item.profile_id == "sol")
+                    .unwrap()
+                    .tier,
+                expected_tier
+            );
+        }
+    }
+
+    #[test]
     fn pool_first_draw_invariance_deduplicates_models_sharing_one_pool() {
         let now = 1_000_000;
         let reset = now + 3 * 86_400;
@@ -1192,6 +1638,8 @@ mod tests {
         let burst: Vec<_> = (0..30)
             .map(|i| crate::quota_telemetry::RecentPlacement {
                 category: "subtle".into(),
+                model: None,
+                effort: None,
                 created_at_epoch_seconds: now - 500 + i,
             })
             .collect();

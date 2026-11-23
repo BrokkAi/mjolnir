@@ -1,0 +1,258 @@
+{
+  "version": "1.23.0",
+  "platforms": {
+    "x86_64-unknown-linux-gnu": {
+      "archives": [
+        {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-linux-x64-1.23.0.tgz",
+          "sha256": "b6deea7f2e22c10c043019f294a0ea4d2a6c0ae52a009c34847640db75ec5580",
+          "bytes": 8257032,
+          "files": [
+            {
+              "source": "onnxruntime-linux-x64-1.23.0/LICENSE",
+              "name": "LICENSE",
+              "bytes": 1073,
+              "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+            },
+            {
+              "source": "onnxruntime-linux-x64-1.23.0/lib/libonnxruntime.so.1.23.0",
+              "name": "libonnxruntime.so.1.23.0",
+              "bytes": 22207288,
+              "sha256": "98b0253652d36c706cd9b873f3e8dc74e107c26cf9694672fb4d88da1c00f250"
+            },
+            {
+              "source": "onnxruntime-linux-x64-1.23.0/ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 326866,
+              "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+            }
+          ]
+        }
+      ],
+      "library": "libonnxruntime.so.1.23.0"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "archives": [
+        {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-linux-aarch64-1.23.0.tgz",
+          "sha256": "0b9f47d140411d938e47915824d8daaa424df95a88b5f1fc843172a75168f7a0",
+          "bytes": 7216713,
+          "files": [
+            {
+              "source": "onnxruntime-linux-aarch64-1.23.0/lib/libonnxruntime.so.1.23.0",
+              "name": "libonnxruntime.so.1.23.0",
+              "bytes": 18562312,
+              "sha256": "cb068adc50115db2cca077b385a15b35cc07a14ef3bb71aa5d7c66f1982f5264"
+            },
+            {
+              "source": "onnxruntime-linux-aarch64-1.23.0/LICENSE",
+              "name": "LICENSE",
+              "bytes": 1073,
+              "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+            },
+            {
+              "source": "onnxruntime-linux-aarch64-1.23.0/ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 326866,
+              "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+            }
+          ]
+        }
+      ],
+      "library": "libonnxruntime.so.1.23.0"
+    },
+    "x86_64-apple-darwin": {
+      "archives": [
+        {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-osx-x86_64-1.23.0.tgz",
+          "sha256": "a8e43edcaa349cbfc51578a7fc61ea2b88793ccf077b4bc65aca58999d20cf0f",
+          "bytes": 11621905,
+          "files": [
+            {
+              "source": "./onnxruntime-osx-x86_64-1.23.0/ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 326866,
+              "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+            },
+            {
+              "source": "./onnxruntime-osx-x86_64-1.23.0/LICENSE",
+              "name": "LICENSE",
+              "bytes": 1073,
+              "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+            },
+            {
+              "source": "./onnxruntime-osx-x86_64-1.23.0/lib/libonnxruntime.1.23.0.dylib",
+              "name": "libonnxruntime.1.23.0.dylib",
+              "bytes": 39582416,
+              "sha256": "091d265e49da84ac8eafd6ff76b67688555192a272d784a252d550a858797d6f"
+            }
+          ]
+        }
+      ],
+      "library": "libonnxruntime.1.23.0.dylib"
+    },
+    "aarch64-apple-darwin": {
+      "archives": [
+        {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-osx-arm64-1.23.0.tgz",
+          "sha256": "8182db0ebb5caa21036a3c78178f17fabb98a7916bdab454467c8f4cf34bcfdf",
+          "bytes": 9962096,
+          "files": [
+            {
+              "source": "./onnxruntime-osx-arm64-1.23.0/ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 326866,
+              "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+            },
+            {
+              "source": "./onnxruntime-osx-arm64-1.23.0/LICENSE",
+              "name": "LICENSE",
+              "bytes": 1073,
+              "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+            },
+            {
+              "source": "./onnxruntime-osx-arm64-1.23.0/lib/libonnxruntime.1.23.0.dylib",
+              "name": "libonnxruntime.1.23.0.dylib",
+              "bytes": 35011904,
+              "sha256": "d3859aecdb70ea099f5b5f4185fe16f0527c6680b18731e6e96fc971ec767cca"
+            }
+          ]
+        }
+      ],
+      "library": "libonnxruntime.1.23.0.dylib"
+    },
+    "x86_64-pc-windows-msvc": {
+      "library": "onnxruntime.dll",
+      "archives": [
+        {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-win-x64-1.23.0.zip",
+          "bytes": 78078377,
+          "sha256": "72c23470310ec79a7d42d27fe9d257e6c98540c73fa5a1db1f67f538c6c16f2f",
+          "files": [
+            {
+              "source": "onnxruntime-win-x64-1.23.0/lib/onnxruntime.dll",
+              "name": "onnxruntime.dll",
+              "bytes": 14107168,
+              "sha256": "b4b7f9aed3cf6b04000f595bddcbdf12e87214bc401d1b81beadae3dbf28d2bd"
+            },
+            {
+              "source": "onnxruntime-win-x64-1.23.0/LICENSE",
+              "name": "LICENSE",
+              "bytes": 1094,
+              "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+            },
+            {
+              "source": "onnxruntime-win-x64-1.23.0/ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 333022,
+              "sha256": "e00f828e0a33de591a355ae6606d2625f5758da7d2c844db7821c9dd3e3647b6"
+            }
+          ]
+        }
+      ]
+    },
+    "x86_64-unknown-linux-gnu-cuda": {
+      "library": "libonnxruntime.so.1.23.0",
+      "archives": [
+        {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-linux-x64-gpu-1.23.0.tgz",
+          "bytes": 240863500,
+          "sha256": "fc5d0e2dbdb893de11758da83523169761a70562dc0f6991f2cdb614f6a62c3d",
+          "files": [
+            {
+              "source": "onnxruntime-linux-x64-gpu-1.23.0/LICENSE",
+              "name": "LICENSE",
+              "bytes": 1073,
+              "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+            },
+            {
+              "source": "onnxruntime-linux-x64-gpu-1.23.0/ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 326866,
+              "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+            },
+            {
+              "source": "onnxruntime-linux-x64-gpu-1.23.0/lib/libonnxruntime_providers_cuda.so",
+              "name": "libonnxruntime_providers_cuda.so",
+              "bytes": 368483592,
+              "sha256": "6a6e6c748b08daca02b15dc6fdc62f6f3e78e24abcd46765a222c53264228ea3"
+            },
+            {
+              "source": "onnxruntime-linux-x64-gpu-1.23.0/lib/libonnxruntime.so.1.23.0",
+              "name": "libonnxruntime.so.1.23.0",
+              "bytes": 23810648,
+              "sha256": "9d1ee8a582a8c182f37dec18aeee0a1c89d6334bff78c9ee96c05671d4d81329"
+            },
+            {
+              "source": "onnxruntime-linux-x64-gpu-1.23.0/lib/libonnxruntime_providers_shared.so",
+              "name": "libonnxruntime_providers_shared.so",
+              "bytes": 14632,
+              "sha256": "ebbfc73b7da61d56eba58cb3eb76caa6dcba8b3026f1d75626bb580ffe3cb69b"
+            }
+          ]
+        }
+      ]
+    },
+    "x86_64-pc-windows-msvc-directml": {
+      "archives": [
+        {
+          "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.23.0/microsoft.ml.onnxruntime.directml.1.23.0.nupkg",
+          "sha256": "a33ec2382b3c440bab74042a135733bb6e5085f293b908d3997688a58fe307e7",
+          "bytes": 12746067,
+          "files": [
+            {
+              "source": "LICENSE",
+              "name": "LICENSE",
+              "bytes": 1094,
+              "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+            },
+            {
+              "source": "runtimes/win-x64/native/onnxruntime.dll",
+              "name": "onnxruntime.dll",
+              "bytes": 17201208,
+              "sha256": "f5131591edac6b0a8090d0e329040a49319d7a689cb5b465235fbf7030fa8027"
+            },
+            {
+              "source": "runtimes/win-x64/native/onnxruntime_providers_shared.dll",
+              "name": "onnxruntime_providers_shared.dll",
+              "bytes": 22048,
+              "sha256": "3b27e1417d12b73a6a34d80414c083e359e092d2f0ce572d7e67be8cdbe9e825"
+            },
+            {
+              "source": "ThirdPartyNotices.txt",
+              "name": "ThirdPartyNotices.txt",
+              "bytes": 333022,
+              "sha256": "e00f828e0a33de591a355ae6606d2625f5758da7d2c844db7821c9dd3e3647b6"
+            }
+          ]
+        },
+        {
+          "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+          "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+          "bytes": 202292617,
+          "files": [
+            {
+              "source": "LICENSE-CODE.txt",
+              "name": "DirectML-LICENSE-CODE.txt",
+              "bytes": 1093,
+              "sha256": "903df5512f7d02609fed0c780a9b704f5a3eeb6e4d84ebe42a29845c81899a3c"
+            },
+            {
+              "source": "LICENSE.txt",
+              "name": "DirectML-LICENSE.txt",
+              "bytes": 10439,
+              "sha256": "a05138e3a085ff60a44881eedfa58dccb03ecc1d7b1f6ae888418e8c2fec4b8d"
+            },
+            {
+              "source": "bin/x64-win/DirectML.dll",
+              "name": "DirectML.dll",
+              "bytes": 18527776,
+              "sha256": "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1"
+            }
+          ]
+        }
+      ],
+      "library": "onnxruntime.dll"
+    }
+  }
+}

@@ -986,6 +986,39 @@ test('refresh, workspace navigation, and reconnect preserve card identity, focus
   expect(await original.evaluate(node => node.isConnected)).toBe(true);
 });
 
+test('Changed files opens a tracked patch and can display a legacy worker response', async ({ page }) => {
+  await mount(page, [session('diff-session', 'project', 'Diff')]);
+  const path = '-file & notes.txt';
+  const patch = `diff --git a/${path} b/${path}\n-old\n+new\n`;
+  let legacy = false;
+  await page.route('**/api/v1/sessions/diff-session/diff?*', route => {
+    const selected = new URL(route.request().url()).searchParams.get('path');
+    if (legacy || selected === path) return route.fulfill({ json: { diff: patch } });
+    return route.fulfill({ json: {
+      diff: 'summary',
+      tracked_files: [{ path, insertions: 1, deletions: 1, binary: false }],
+      untracked_files: ['notes.txt'],
+      untracked_total: 2,
+    } });
+  });
+  const sessionCard = card(page, 'diff-session');
+  const openDiff = async () => {
+    await sessionCard.locator('button[aria-label^="Actions for"]').click();
+    await sessionCard.getByRole('menuitem', { name: 'Changed files…' }).click();
+    return page.getByRole('dialog', { name: 'Changed files' });
+  };
+  const dialog = await openDiff();
+  await expect(dialog.getByText('Select a file to view its diff.')).toBeVisible();
+  await expect(dialog.getByText('untracked', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('… and 1 more untracked files')).toBeVisible();
+  await dialog.getByRole('button', { name: path }).click();
+  await expect(dialog.locator('.changed-files-diff')).toHaveText(patch);
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  legacy = true;
+  await expect((await openDiff()).locator('.changed-files-diff')).toHaveText(patch);
+});
+
 test('menus follow capabilities, long press cancellation, right click, keyboard, confirmation, and errors', async ({ page }) => {
   const state = await mount(page, [
     session('openable', 'project-menu', 'Menu', {

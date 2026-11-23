@@ -4984,6 +4984,15 @@ impl SubagentBackend for ApiBackend {
             if options.json {
                 arguments.push("--json".to_owned());
             }
+            arguments.extend(
+                options
+                    .paths
+                    .into_iter()
+                    .map(|path| format!("--path={path}")),
+            );
+            if options.full_patch {
+                arguments.push("--patch".to_owned());
+            }
             let stdout = worker_command(layout, session_id, arguments, "session diff").await?;
             String::from_utf8(stdout).map_err(|error| {
                 ExportError::Failed(anyhow!("the session diff was not UTF-8: {error}"))

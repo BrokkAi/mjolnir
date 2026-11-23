@@ -1,0 +1,37 @@
+=== edited draft (40x14) ===
+edit: Changed
+=== before resolution (40x14) ===
+value: "~/.codex4"; cursor: 9; control: PathField { len: 0, selected: 0, expanded: false }; pending: None; truncated: false
+
+~/.codex4
+
+
+
+
+
+
+
+
+
+
+
+
+resolved with supplied home: "/workspace/user/.codex4"
+missing home rejected: true
+=== draft after resolution attempts (40x14) ===
+value: "~/.codex4"; cursor: 9; control: PathField { len: 0, selected: 0, expanded: false }; pending: None; truncated: false
+
+~/.codex4
+
+
+
+
+
+
+
+
+
+
+
+
+=== end of rendered states ===

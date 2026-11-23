@@ -1099,6 +1099,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         title: "parent".into(),
         harness_kind: HarnessKind::Codex,
         last_profile: profile.to_owned(),
+        staged_aws_profile: None,
         bundle_id: "hel".into(),
         project_directory: None,
         managed_worktree: None,
@@ -1770,6 +1771,22 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
         "no push remote configured"
     );
     assert_eq!(refused("", ""), "branch export was refused by the target");
+}
+
+#[test]
+fn session_diff_reports_an_older_workers_usage_error_as_an_upgrade_refusal() {
+    let output = CommandOutput {
+        status: CLAP_USAGE_EXIT_CODE,
+        stdout: Vec::new(),
+        stderr: b"error: unexpected argument '--path=-literal' found".to_vec(),
+    };
+    match worker_output(output, "session diff") {
+        Err(ExportError::Refused(reason)) => {
+            assert!(reason.contains("session diff"));
+            assert!(reason.contains("resume the session to upgrade"));
+        }
+        other => panic!("expected an upgrade refusal, got {other:?}"),
+    }
 }
 
 fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {

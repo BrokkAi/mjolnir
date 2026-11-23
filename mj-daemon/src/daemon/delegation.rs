@@ -256,8 +256,11 @@ fn spawn_quota_telemetry_refresh(
                 }
                 _ = category_tick.tick() => {
                     let telemetry = state.quota_telemetry.clone();
+                    let power_ranking = state.power_ranking.clone();
                     if let Ok(Err(error)) = mj_core::runtime::spawn_blocking(move || {
-                        telemetry.refresh_category_stats_from_store()
+                        telemetry.refresh_category_stats_from_store()?;
+                        telemetry.log_cell_cost_estimates(&power_ranking.snapshot());
+                        Ok::<_, anyhow::Error>(())
                     })
                     .await
                     {

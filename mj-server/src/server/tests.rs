@@ -165,6 +165,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 title: "Build Hel".into(),
                 harness_kind: HarnessKind::Codex,
                 last_profile: "codex-1".into(),
+                staged_aws_profile: None,
                 bundle_id: "hel".into(),
                 project_directory: None,
                 managed_worktree: None,

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::targets::{self, CommandExecutor, backend_locator, target_profile_home};
+use mj_core::aws_credentials::AwsCredentialSource;
 use mj_core::config::Config;
 use mj_core::state::State;
 use mj_core::targets::SshTrafficClass;
@@ -28,7 +29,7 @@ pub fn aws_credential_source(
     crate::aws_credentials::source(profile, &backend, &environment)
 }
 
-/// [`Self::aws_credential_source`] for the credential sync: the same for a
+/// [`aws_credential_source`] for the credential sync: the same for a
 /// profile without a role, and for one with a role every session that may
 /// hold Mjolnir's credentials stays managed (see
 /// [`crate::aws_credentials::sync_source`]).
@@ -38,7 +39,12 @@ pub fn aws_credential_sync_source(
     session_id: &str,
 ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
     let (profile, backend, environment) = aws_session_inputs(config, state, session_id)?;
-    crate::aws_credentials::sync_source(profile, &backend, &environment)
+    crate::aws_credentials::sync_source(
+        profile,
+        &backend,
+        &environment,
+        state.sessions[session_id].staged_aws_profile.as_deref(),
+    )
 }
 
 /// A notice for the person when the profile's `[profiles.<id>.aws]` role
@@ -106,6 +112,11 @@ pub fn worker_placement(
     Ok((backend, worker_root))
 }
 
+pub struct StagedWorkerProfile {
+    pub login: Option<mj_core::credentials::LoginFingerprint>,
+    pub aws_profile: Option<String>,
+}
+
 pub fn prepare_worker_files(
     config: &Config,
     state: &State,
@@ -114,7 +125,7 @@ pub fn prepare_worker_files(
     worker_root: &str,
     executor: &impl CommandExecutor,
     history: LaunchHistory<'_>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     prepare_worker_files_for(
         config,
         state,
@@ -125,7 +136,7 @@ pub fn prepare_worker_files(
         WorkerFilePreparation::Install,
         history,
     )
-    .map(|_| ())
+    .map(|profile| profile.aws_profile)
 }
 
 // `config` and `state` stand in for the `Controller` this was a method on.
@@ -139,8 +150,8 @@ pub fn prepare_worker_files_for(
     executor: &impl CommandExecutor,
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
-) -> Result<Option<mj_core::credentials::LoginFingerprint>> {
-    let (launch, staged_login) = stage_worker_files_for(
+) -> Result<StagedWorkerProfile> {
+    let (launch, staged_profile) = stage_worker_files_for(
         config,
         state,
         session_id,
@@ -153,11 +164,11 @@ pub fn prepare_worker_files_for(
     if let Some(launch) = launch {
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
     }
-    Ok(staged_login)
+    Ok(staged_profile)
 }
 
 /// Return the pending harness preflight so a new checkout can finish first,
-/// and the login identity when refreshing the profile for an existing worker.
+/// and the AWS profile and login identity staged for the worker.
 // `config` and `state` stand in for the `Controller` this was a method on.
 #[allow(clippy::too_many_arguments)]
 pub fn stage_worker_files_for(
@@ -169,10 +180,7 @@ pub fn stage_worker_files_for(
     executor: &impl CommandExecutor,
     preparation: WorkerFilePreparation,
     history: LaunchHistory<'_>,
-) -> Result<(
-    Option<WorkerLaunchConfig>,
-    Option<mj_core::credentials::LoginFingerprint>,
-)> {
+) -> Result<(Option<WorkerLaunchConfig>, StagedWorkerProfile)> {
     let _timing = crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
     let owner = crate::worker_lifecycle::require(session_id)?;
     let session = state
@@ -219,8 +227,25 @@ pub fn stage_worker_files_for(
         .get(&session.last_profile)
         .context("session profile is missing")?;
     profile.ensure_ready(&session.last_profile)?;
-    let (mut launch, project_memory, target_profile_home) =
-        session_launch_config(config, state, session_id, backend, history)?;
+    let target_environment = &session.target_runtime_settings(config)?.environment;
+    let aws_source = if preparation == WorkerFilePreparation::RestoreProfileOnly {
+        crate::aws_credentials::source_for_staged_profile(
+            profile,
+            backend,
+            target_environment,
+            session.staged_aws_profile.as_deref(),
+        )?
+    } else {
+        crate::aws_credentials::source(profile, backend, target_environment)?
+    };
+    let (mut launch, project_memory, target_profile_home) = session_launch_config_with_source(
+        config,
+        state,
+        session_id,
+        backend,
+        history,
+        aws_source.as_ref(),
+    )?;
 
     if session.native_session_id.is_some() && profile.kind == mj_core::config::HarnessKind::Codex {
         launch.goal_resume_request = Some(mj_core::state::new_session_id()?);
@@ -255,12 +280,21 @@ pub fn stage_worker_files_for(
     );
     drop(staging_timing);
     result?;
-    if let Some(notice) = aws_role_notice(config, state, session_id)? {
-        executor.notify_notice(&notice);
-    }
-    if let Some(source) = aws_credential_source(config, state, session_id)? {
-        let credentials = crate::aws_assume_role::obtain(session_id, &source, executor)?;
+    let mut staged_profile = StagedWorkerProfile {
+        login: None,
+        aws_profile: None,
+    };
+    if let Some(source) = &aws_source {
+        let credentials = crate::aws_assume_role::obtain(session_id, source, executor)?;
         credentials.install(&profile_stage, Path::new(&target_profile_home))?;
+        staged_profile.aws_profile = Some(credentials.profile().to_owned());
+    } else if let Some(notice) = crate::aws_credentials::unused_role_notice(
+        &session.last_profile,
+        profile,
+        crate::aws_credentials::SessionHost::from(backend),
+        target_environment,
+    ) {
+        executor.notify_notice(&notice);
     }
     stage_claude_keychain_login(
         profile,
@@ -361,7 +395,7 @@ pub fn stage_worker_files_for(
     if preparation != WorkerFilePreparation::Install {
         // A shared symlink stays live across boot. Only a copied login
         // identifies the credentials staged for this specific launch.
-        let staged_login = if preparation == WorkerFilePreparation::RefreshProfileOnly
+        staged_profile.login = if preparation == WorkerFilePreparation::RefreshProfileOnly
             && profile.auth_scheme().uses_native_login_file()
             && shared_login.is_none()
         {
@@ -385,7 +419,7 @@ pub fn stage_worker_files_for(
             session_id,
             worker_root,
             &target_profile_home,
-            StagedWorkerProfile {
+            mj_worker_staging::worker_binary::StagedWorkerProfile {
                 launch: &launch_path,
                 ownership: &ownership_path,
                 profile: &profile_stage,
@@ -396,9 +430,9 @@ pub fn stage_worker_files_for(
         if upgrade_retained_worker {
             let worker = WorkerInstall::for_target(backend, executor)?;
             install_worker_binary(executor, backend, session_id, &worker, "hel")?;
-            return Ok((Some(launch), staged_login));
+            return Ok((Some(launch), staged_profile));
         }
-        return Ok((None, staged_login));
+        return Ok((None, staged_profile));
     }
     let worker = WorkerInstall::for_target(backend, executor)?;
     install_worker_files(
@@ -418,7 +452,7 @@ pub fn stage_worker_files_for(
         install_build_cache_shim(config, state, session, backend, &launch, executor)
             .context("install shared machine build cache configuration")?;
     }
-    Ok((Some(launch), None))
+    Ok((Some(launch), staged_profile))
 }
 
 /// Stage and verify the session's mbx, then install marked launchers in
@@ -657,6 +691,43 @@ pub fn session_launch_config(
         .sessions
         .get(session_id)
         .with_context(|| format!("unknown session {session_id}"))?;
+    let profile = config
+        .profiles
+        .get(&session.last_profile)
+        .context("session profile is missing")?;
+    let target = session.target_runtime_settings(config)?;
+    let aws_source = crate::aws_credentials::source_for_staged_profile(
+        profile,
+        backend,
+        &target.environment,
+        session.staged_aws_profile.as_deref(),
+    )?;
+    session_launch_config_with_source(
+        config,
+        state,
+        session_id,
+        backend,
+        history,
+        aws_source.as_ref(),
+    )
+}
+
+fn session_launch_config_with_source(
+    config: &Config,
+    state: &State,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+    history: LaunchHistory<'_>,
+    aws_source: Option<&AwsCredentialSource>,
+) -> Result<(
+    WorkerLaunchConfig,
+    Option<ProjectMemoryLaunchConfig>,
+    String,
+)> {
+    let session = state
+        .sessions
+        .get(session_id)
+        .with_context(|| format!("unknown session {session_id}"))?;
     session.validate_configuration(config)?;
     let profile = config
         .profiles
@@ -708,6 +779,7 @@ pub fn session_launch_config(
         },
         &target,
         config,
+        aws_source,
     )?;
     launch.reviewer_launch = if subagent.is_some() {
         crate::database::load_subagent(session_id)?
@@ -721,6 +793,9 @@ pub fn session_launch_config(
         launch.bridge_args = reviewer.bridge_args.clone();
         launch.execution_policy = reviewer.execution_policy;
         launch.environment.extend(reviewer.environment.clone());
+        if let Some(source) = aws_source {
+            apply_aws_launch_environment(&mut launch.environment, &target_profile_home, source);
+        }
         launch.excluded_environment = reviewer.excluded_environment.clone();
     }
     // Read by the target-side MCP server from launch.json beside its socket,
@@ -1069,6 +1144,51 @@ mod tests {
     use mj_core::state::{SessionState, TargetLocator};
     use mj_core::subagent::{CHILD_REPORT_DIR_ENV, SubagentKind, SubagentRecord};
     use mj_targets::test_isolation::{IsolatedTest, test_name};
+
+    #[test]
+    fn current_worker_launch_config_preserves_staged_aws_profile() {
+        const TEST: &str = "current_worker_launch_config_preserves_staged_aws_profile";
+        const MARKER: &str = "MJ_TEST_STAGED_AWS_PROFILE";
+        if std::env::var_os(MARKER).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), TEST))
+                .env(MARKER, "1")
+                .isolated_store(dir.path())
+                .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default().with_local_targets();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(HarnessKind::Codex, dir.path()),
+        );
+        let id = "33333333333333333333333333333333";
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
+        session.native_session_id = None;
+        session.project_directory = Some(dir.path().to_owned());
+        session.container_workspace = Some(crate::targets::new_container_workspace(id).unwrap());
+        let locator = TargetLocator::LocalPodman {
+            container_id: "c".repeat(64),
+            borrowed_from: None,
+            workspace_storage: Default::default(),
+        };
+        let backend = backend_locator(&locator, &session, &config).unwrap();
+        session.target = Some(Box::new(locator));
+        session.staged_aws_profile = Some("original".into());
+        crate::database::save_session(&session).unwrap();
+        let state = crate::database::load_state().unwrap();
+        for edited_profile in ["original", "changed"] {
+            std::fs::write(
+                dir.path().join("config.toml"),
+                format!("model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"{edited_profile}\""),
+            ).unwrap();
+            let launch = current_worker_launch_config(&config, &state, id, &backend).unwrap();
+            assert_eq!(launch.environment["AWS_PROFILE"], "original");
+            assert!(launch.environment["AWS_CONFIG_FILE"].ends_with("/aws-config"));
+        }
+    }
 
     #[test]
     fn owned_child_launch_uses_its_checkout_and_report_without_parent_placement() {
