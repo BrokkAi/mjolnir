@@ -1,0 +1,46 @@
+{
+  "repository": "brokkai/mj-github-relevance-ettin-150m",
+  "revision": "e4e47921640a6005e5059e5b04e4264b774c6866",
+  "files": [
+    {
+      "name": "model.onnx",
+      "bytes": 1409936,
+      "sha256": "6acd8ec70a96a90c8ae5a42bb9fb497d802ac164674e9e4fc91e56be2d75e7e4"
+    },
+    {
+      "name": "weights.fp16.data",
+      "bytes": 299281922,
+      "sha256": "cd211da1d6a70ca488dfdad5b5c9878c785a5c92e05c8fc01617cd2e02ae02d9"
+    },
+    {
+      "name": "tokenizer.json",
+      "bytes": 3583484,
+      "sha256": "9df2c09521947cbf440af6ba86fa904b37bb14b7747c869e7c6ec19e116cd366"
+    },
+    {
+      "name": "config.json",
+      "bytes": 2039,
+      "sha256": "17d9048d7d6c1e1c915c9ceb8cba5b3b9cc6bc2687b111a88c17aa25d8790fc4"
+    },
+    {
+      "name": "model-coreml-6144.onnx",
+      "sha256": "71e72088c8adeaad0bcc1da302ce0fc47a8aa8abb0208af4f9bdf3fd4cf285cb",
+      "bytes": 10741247
+    },
+    {
+      "name": "model-coreml-8192.onnx",
+      "sha256": "92560983c46c52dd45cf42472a80648fadd48b2ea2c9c64b33fe1eacd79c000c",
+      "bytes": 14144731
+    },
+    {
+      "name": "initializers-6144.json",
+      "sha256": "d961658b2854425a7833ea67acb9ea1c92b5720c74b75fdce376a211490e97f5",
+      "bytes": 38379
+    },
+    {
+      "name": "initializers-8192.json",
+      "sha256": "691a8f307381fdda5f399b7ebd405c3fb0feba85a0798a71e78ee3addb9d6ae6",
+      "bytes": 38379
+    }
+  ]
+}

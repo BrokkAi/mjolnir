@@ -1,0 +1,270 @@
+=== model selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic  gpt-5.6 ▾ · high ▾ ────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: SetConfig { key: "model", value: "gpt-5.6-luna" }
+
+=== effort selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic  gpt-5.6 ▾ · high ▾ ────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: SetConfig { key: "effort", value: "xhigh" }
+
+=== fast toggles on (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: SetConfig { key: "fast-mode", value: "on" }
+
+=== fast toggles off (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic  Fast ──────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: SetConfig { key: "fast-mode", value: "off" }
+
+=== fast argument usage (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+usage: /fast
+╭  mic  Fast ──────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+
+=== fast unavailable for active model (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/fast: Fast mode is unavailable for the active Codex model
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+
+=== busy model command usage (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+The agent does not advertise model values; usage: /model <value>
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+
+=== busy agent accepts queued config update (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic  opus ▾ ────────────────────────────────────────────────────────────────────────────────────╮
+│> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: SetConfig { key: "model", value: "sonnet" }
+draft cleared: true
+
+=== closing worker refuses config update (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/model: The worker is closing; this configuration change was not sent
+╭  mic  opus  Agent shutdown ──────────────────────────────────────────────────────── ●··········· ╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+
+=== missing model value shows usage (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+The agent does not advertise model values; usage: /model <value>
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
