@@ -33,11 +33,7 @@ func DaemonContainer() (string, bool) {
 // machine runs itself: local sessions, the model-discovery probe, mj login
 // and local quota checks.
 //
-// The daemon container's image carries the pinned harnesses, so they are
-// the only source there. A host gets Mjolnir's managed installation.
+// Mjolnir manages these installations on the host and in the daemon container.
 func LocalHarnessRuntime() HarnessRuntimePolicy {
-	if _, ok := DaemonContainer(); ok {
-		return HarnessRuntimePolicyImage
-	}
 	return HarnessRuntimePolicyManaged
 }

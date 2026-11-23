@@ -1657,62 +1657,95 @@ impl DashboardState {
 
     pub(crate) fn selected_quota_row(&self) -> Option<crate::render::quota_pools::QuotaRow> {
         use crate::render::quota_pools::QuotaRow;
-        let pools = self.quota_pools();
-        let rows = crate::render::quota_pools::selectable_rows(&pools, &self.quota_expanded);
-        // A profile's row can change type between refreshes (a status row
-        // becomes a pool or lane after its first reading, and back on a
-        // failure), so follow the profile to its row or the pool it joined
-        // before falling back to its previous pool.
-        let profile_row = |id: &str| {
-            rows.iter()
-                .find(|row| match row {
-                    QuotaRow::Profile(other) | QuotaRow::Lane(_, other) => other == id,
-                    QuotaRow::Pool(_) => false,
-                })
-                .or_else(|| {
-                    rows.iter().find(|row| match row {
-                        QuotaRow::Pool(key) => pools
-                            .iter()
-                            .flat_map(|provider| &provider.pools)
-                            .find(|pool| pool.key == *key)
-                            .is_some_and(|pool| pool.members.iter().any(|member| member.id == id)),
-                        _ => false,
-                    })
-                })
+        let providers = self.quota_pools();
+        let rows = crate::render::quota_pools::selectable_rows(&providers, &self.quota_expanded);
+        let Some(selected) = &self.quota_selection else {
+            return rows.first().cloned();
         };
-        self.quota_selection
-            .as_ref()
-            .and_then(|selected| {
-                rows.iter()
-                    .find(|row| *row == selected)
-                    .or_else(|| match selected {
-                        QuotaRow::Profile(id) | QuotaRow::Lane(_, id) => profile_row(id),
-                        QuotaRow::Pool(_) => None,
-                    })
-                    .or_else(|| {
-                        selected.pool().and_then(|key| {
-                            rows.iter().find(|row| **row == QuotaRow::Pool(key.clone()))
-                        })
-                    })
-            })
-            .or_else(|| rows.first())
-            .cloned()
+        if rows.contains(selected) {
+            return Some(selected.clone());
+        }
+        let provider = match selected {
+            QuotaRow::Profile(id) | QuotaRow::Lane(_, id) => {
+                if let Some(row) = rows.iter().find(|row| {
+                    matches!(row, QuotaRow::Profile(other) | QuotaRow::Lane(_, other) if other == id)
+                }) {
+                    return Some(row.clone());
+                }
+                if let Some(pool) = providers
+                    .iter()
+                    .flat_map(|provider| &provider.pools)
+                    .find(|pool| pool.members.iter().any(|member| member.id == *id))
+                {
+                    return Some(QuotaRow::Pool(pool.key.clone()));
+                }
+                if let Some(key) = selected.pool() {
+                    let row = QuotaRow::Pool(key.clone());
+                    if rows.contains(&row) {
+                        return Some(row);
+                    }
+                }
+                providers.iter().find(|provider| provider.has_profile(id))
+            }
+            QuotaRow::Pool(key) => providers
+                .iter()
+                .find(|provider| provider.provider == key.provider),
+            QuotaRow::ProviderText(kind) => {
+                providers.iter().find(|provider| provider.provider == *kind)
+            }
+        };
+        provider
+            .and_then(|provider| provider.first_row())
+            .or_else(|| rows.first().cloned())
     }
 
     pub(crate) fn toggle_quota_pool(&mut self) {
-        use crate::render::quota_pools::QuotaRow;
-        if let Some(row) = self.selected_quota_row() {
-            let Some(key) = row.pool().cloned() else {
-                return;
-            };
-            if matches!(row, QuotaRow::Lane(..)) || self.quota_expanded.contains(&key) {
-                self.quota_expanded.remove(&key);
-            } else {
-                self.quota_expanded.insert(key.clone());
+        use crate::render::quota_pools::{QuotaGroup, QuotaRow};
+        let Some(row) = self.selected_quota_row() else {
+            return;
+        };
+        let toggle = |expanded: &mut std::collections::BTreeSet<_>, group| {
+            if !expanded.remove(&group) {
+                expanded.insert(group);
             }
-            self.quota_selection = Some(QuotaRow::Pool(key));
-            self.recenter_on_selection.set(Some(Focus::Quota));
-        }
+        };
+        self.quota_selection = match row {
+            QuotaRow::Pool(key) => {
+                toggle(&mut self.quota_expanded, QuotaGroup::Pool(key.clone()));
+                Some(QuotaRow::Pool(key))
+            }
+            QuotaRow::Lane(key, _) => {
+                self.quota_expanded.remove(&QuotaGroup::Pool(key.clone()));
+                Some(QuotaRow::Pool(key))
+            }
+            QuotaRow::ProviderText(provider) => {
+                toggle(
+                    &mut self.quota_expanded,
+                    QuotaGroup::Provider(provider.clone()),
+                );
+                Some(QuotaRow::ProviderText(provider))
+            }
+            QuotaRow::Profile(id) => {
+                let Some(provider) = self
+                    .quota_pools()
+                    .into_iter()
+                    .find(|provider| provider.has_profile(&id))
+                else {
+                    return;
+                };
+                if provider.pools.is_empty() {
+                    self.quota_expanded
+                        .remove(&QuotaGroup::Provider(provider.provider.clone()));
+                } else {
+                    for pool in &provider.pools {
+                        self.quota_expanded
+                            .remove(&QuotaGroup::Pool(pool.key.clone()));
+                    }
+                }
+                provider.first_row()
+            }
+        };
+        self.recenter_on_selection.set(Some(Focus::Quota));
     }
 
     pub(crate) fn focus_len_for(&self, focus: Focus) -> usize {

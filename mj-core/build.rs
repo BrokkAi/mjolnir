@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-/// The registry repository for release images. Keep it
+/// The registry repository for daemon images. Keep it
 /// equal to `mj_core::config::CONTAINER_IMAGE_REPOSITORY`, which
 /// `the_baked_release_image_agrees_with_the_channel_rule` checks.
-const AGENT_DEV_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
+const DAEMON_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/daemon";
 
 /// The digest part of the identity a test binary reports. Keep it equal to
 /// `TEST_REVISION` in `src/worker_build.rs`.
@@ -28,27 +28,27 @@ fn main() {
     // after every commit. The commit and the worker input digest are compiled
     // into `mj-build-id`, which only the programs depend on.
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    // Which container image a session uses when its target names none. A
+    // Which daemon image a build uses when [daemon] omits the image. A
     // release runs the immutable image published for its own version; a
     // development build runs the floating image published from master. The
     // release workflow sets MJ_BUILD_CHANNEL, and a crates.io source package
     // carries .cargo_vcs_info.json, so both count as releases. Keep this rule
     // equal to the one in mj-build-id/build.rs.
     println!("cargo:rerun-if-env-changed=MJ_BUILD_CHANNEL");
-    println!("cargo:rerun-if-env-changed=MJ_AGENT_DEV_IMAGE");
+    println!("cargo:rerun-if-env-changed=MJ_DAEMON_IMAGE");
     let release = std::env::var("MJ_BUILD_CHANNEL").as_deref() == Ok("release")
         || root.join(".cargo_vcs_info.json").exists();
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
-    let image = std::env::var("MJ_AGENT_DEV_IMAGE").unwrap_or_else(|_| {
+    let image = std::env::var("MJ_DAEMON_IMAGE").unwrap_or_else(|_| {
         if release {
-            format!("{AGENT_DEV_IMAGE_REPOSITORY}:{version}")
+            format!("{DAEMON_IMAGE_REPOSITORY}:{version}")
         } else {
-            format!("{AGENT_DEV_IMAGE_REPOSITORY}:latest")
+            format!("{DAEMON_IMAGE_REPOSITORY}:latest")
         }
     });
-    println!("cargo:rustc-env=MJ_AGENT_DEV_IMAGE={image}");
+    println!("cargo:rustc-env=MJ_DAEMON_IMAGE={image}");
     println!(
-        "cargo:rustc-env=MJ_AGENT_DEV_IMAGE_RELEASE={}",
+        "cargo:rustc-env=MJ_DAEMON_IMAGE_RELEASE={}",
         u8::from(release)
     );
     // Generate this fixture at build time: writing an executable during

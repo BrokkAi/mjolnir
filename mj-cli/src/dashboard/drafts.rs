@@ -115,7 +115,7 @@ pub(super) fn chat_daemon_requests(
                             .await
                     }
                     mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
-                        daemon.start_turn_review(session_id).await
+                        daemon.http().await?.start_turn_review(&session_id).await
                     }
                 }
             }

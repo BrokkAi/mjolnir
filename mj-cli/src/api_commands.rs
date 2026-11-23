@@ -2871,9 +2871,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                         workspace_id: args.workspace_id.clone(),
                         profile_id,
                         target_id,
-                        project_directory: None,
-                        model: None,
-                        effort: None,
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -2898,6 +2896,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
                     crate::import::import_named_native_session(
                         harness,
                         native_session_id.clone(),
+                        &indexed_at,
                         &workspace_id,
                     )
                     .with_context(|| {

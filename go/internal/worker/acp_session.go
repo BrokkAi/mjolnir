@@ -614,7 +614,7 @@ func serveSession(ctx context.Context, connection *acp.Connection, spec *LaunchS
 	// analyzer tools, and reviewing without them is the degraded review the
 	// review design refuses.
 	if offeredMCPServers > 0 && !mcpAvailable {
-		remedy := fmt.Sprintf("Managed targets install muse-acp %s; on a container target, suspend and resume the session once its agent-dev image has updated",
+		remedy := fmt.Sprintf("Managed targets install muse-acp %s; on a container target, suspend and resume the session after updating its image to one with a compatible Muse runtime",
 			core.MuseACPVersion)
 		if len(spec.ExtraMCPServers) > 0 {
 			return nil, fmt.Errorf("this Muse runtime does not accept MCP servers, so a Muse reviewer here would run without its analyzer tools. %s.", remedy)

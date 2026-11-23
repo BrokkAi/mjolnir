@@ -15,7 +15,7 @@ export CODEX_HOME="$codex_home"
 export MJ_IMPORT_E2E_ROOT="$test_root"
 export MJ_IMPORT_E2E_CODEX_SESSION="${MJ_IMPORT_E2E_CODEX_SESSION:-019feb6c-5ffc-7c12-ad99-bdeaeb6be79d}"
 export MJ_IMPORT_E2E_CODEX_REPOSITORY="${MJ_IMPORT_E2E_CODEX_REPOSITORY:-BrokkAi/mjolnir}"
-export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-localhost/mjolnir/agent-dev:latest}"
+export MJ_IMPORT_E2E_IMAGE="${MJ_IMPORT_E2E_IMAGE:-docker.io/library/buildpack-deps:noble}"
 # Keep the test's imported state and archive separate from the user's Mjolnir data.
 export MJ_CONFIG_DIR="$test_root/config/mjolnir"
 export MJ_DATA_DIR="$test_root/data/mjolnir"

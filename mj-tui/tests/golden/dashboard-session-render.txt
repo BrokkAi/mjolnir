@@ -2,13 +2,14 @@
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ✓1                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
-│ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                  Select a session to open its conversation.                  │
-│› ✓ ACP pretty name               ◇ ⋯ ││                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│hel ──────────────────────────────────││                                                                              │
+│› ✓ ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle [Q 1]  podman  codex-1         ││                                                                              │
 │  │ answer 1                          ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
@@ -20,10 +21,9 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -38,8 +38,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -61,10 +62,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -79,9 +79,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│  Outside filter                      ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -102,10 +103,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -120,9 +120,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────────────────────────────────────────────││                                                                                                                                                              │
 │› · ACP pretty name                                                       ◇ ⋯ ││                                                                                                                                                              │
 │  Idle  podman  codex-1                                                       ││                                                                                                                                                              │
-│  │ No messages yet                                                           ││                                                                       ✦  M J O L N I R                                                                       │
-│  │                                                                           ││                                                                                                                                                              │
-│  Outside filter                                                              ││                                                          Select a session to open its conversation.                                                          │
+│  │ No messages yet                                                           ││                                                                                                                                                              │
+│  │                                                                           ││                                                                       ✦  M J O L N I R                                                                       │
+│  Outside filter                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                          Select a session to open its conversation.                                                          │
 │                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
@@ -143,10 +144,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                              ││ANTHROPIC                                                                                                                                                     │
-│                                                                              ││  claude-1: refreshing…                                                                                                                                       │
+│                                                                              ││ + refreshing…                                                                                                                                                │
 │                                                                              ││OPENAI                                                                                                                                                        │
-│                                                                              ││  codex-1: refreshing…                                                                                                                                        │
-│                                                                              ││  codex-2: refreshing…                                                                                                                                        │
+│                                                                              ││ + 2 refreshing…                                                                                                                                              │
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                              ││Nothing needs you                                                                                                                                             │
@@ -161,8 +161,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -184,10 +185,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -203,8 +203,9 @@ Unicode title markers: ('×', '·')
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                               *  M J O L N I R                               |
-|  |                                   ||                                                                              |
+|  | No messages yet                   ||                                                                              |
+|  |                                   ||                               *  M J O L N I R                               |
+|                                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -226,10 +227,9 @@ Unicode title markers: ('×', '·')
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||ANTHROPIC                                                                     |
-|                                      ||  claude-1: refreshing..                                                      |
+|                                      || + refreshing..                                                               |
 |                                      ||OPENAI                                                                        |
-|                                      ||  codex-1: refreshing..                                                       |
-|                                      ||  codex-2: refreshing..                                                       |
+|                                      || + 2 refreshing..                                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -244,9 +244,10 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                               *  M J O L N I R                               |
-|  |                                   ||                                                                              |
-|  Outside filter                      ||                  Select a session to open its conversation.                  |
+|  | No messages yet                   ||                                                                              |
+|  |                                   ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                                                                              |
+|                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -267,10 +268,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||ANTHROPIC                                                                     |
-|                                      ||  claude-1: refreshing..                                                      |
+|                                      || + refreshing..                                                               |
 |                                      ||OPENAI                                                                        |
-|                                      ||  codex-1: refreshing..                                                       |
-|                                      ||  codex-2: refreshing..                                                       |
+|                                      || + 2 refreshing..                                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -285,9 +285,10 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |hel --------------------------------------------------------------------------||                                                                                                                                                              |
 |> . ACP pretty name                                                       + . ||                                                                                                                                                              |
 |  Idle  podman  codex-1                                                       ||                                                                                                                                                              |
-|  | No messages yet                                                           ||                                                                       *  M J O L N I R                                                                       |
-|  |                                                                           ||                                                                                                                                                              |
-|  Outside filter                                                              ||                                                          Select a session to open its conversation.                                                          |
+|  | No messages yet                                                           ||                                                                                                                                                              |
+|  |                                                                           ||                                                                       *  M J O L N I R                                                                       |
+|  Outside filter                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                          Select a session to open its conversation.                                                          |
 |                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
@@ -308,10 +309,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Profiles v (not refreshed)---------------------------------------------------------------------------------------------------------------------------- -   = +
 |                                                                              ||ANTHROPIC                                                                                                                                                     |
-|                                                                              ||  claude-1: refreshing..                                                                                                                                      |
+|                                                                              || + refreshing..                                                                                                                                               |
 |                                                                              ||OPENAI                                                                                                                                                        |
-|                                                                              ||  codex-1: refreshing..                                                                                                                                       |
-|                                                                              ||  codex-2: refreshing..                                                                                                                                       |
+|                                                                              || + 2 refreshing..                                                                                                                                             |
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Notifications (0) ------------------------------------------------------------------------------------------------------------------------------------ -   = +
 |                                                                              ||Nothing needs you                                                                                                                                             |
@@ -326,8 +326,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                               *  M J O L N I R                               |
-|  |                                   ||                                                                              |
+|  | No messages yet                   ||                                                                              |
+|  |                                   ||                               *  M J O L N I R                               |
+|                                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -349,10 +350,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||ANTHROPIC                                                                     |
-|                                      ||  claude-1: refreshing..                                                      |
+|                                      || + refreshing..                                                               |
 |                                      ||OPENAI                                                                        |
-|                                      ||  codex-1: refreshing..                                                       |
-|                                      ||  codex-2: refreshing..                                                       |
+|                                      || + 2 refreshing..                                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -368,8 +368,9 @@ ASCII title markers: ('x', '-')
 │hel ──────────────────────────────────││                                      │
 │› · ACP pretty name               ◇ ⋯ ││                                      │
 │  Idle [Q 1]  podman  codex-1         ││                                      │
-│  │ No messages yet                   ││           ✦  M J O L N I R           │
-│  │                                   ││                                      │
+│  │ No messages yet                   ││                                      │
+│  │                                   ││           ✦  M J O L N I R           │
+│                                      ││                                      │
 │                                      ││Select a session to open its conversat│
 │                                      ││                                      │
 │                                      ││                                      │
@@ -391,10 +392,9 @@ ASCII title markers: ('x', '-')
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: refreshing…                                                       │
+│ + refreshing…                                                                │
 │OPENAI                                                                        │
-│  codex-1: refreshing…                                                        │
-│  codex-2: refreshing…                                                        │
+│ + 2 refreshing…                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -409,8 +409,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      ││hel ──────────────────────────────────│
 │                                      ││› · ACP pretty name               ◇ ⋯ │
 │                                      ││  Idle [Q 1]  podman  codex-1         │
-│           ✦  M J O L N I R           ││  │ No messages yet                   │
-│                                      ││  │                                   │
+│                                      ││  │ No messages yet                   │
+│           ✦  M J O L N I R           ││  │                                   │
+│                                      ││                                      │
 │Select a session to open its conversat││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -432,10 +433,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: refreshing…                                                       │
+│ + refreshing…                                                                │
 │OPENAI                                                                        │
-│  codex-1: refreshing…                                                        │
-│  codex-2: refreshing…                                                        │
+│ + 2 refreshing…                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -450,8 +450,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle [Q 1]  podman  codex-1         ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -473,10 +474,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -491,8 +491,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              ││hel ──────────────────────────────────│
 │                                                                              ││› · ACP pretty name               ◇ ⋯ │
 │                                                                              ││  Idle [Q 1]  podman  codex-1         │
-│                               ✦  M J O L N I R                               ││  │ No messages yet                   │
-│                                                                              ││  │                                   │
+│                                                                              ││  │ No messages yet                   │
+│                               ✦  M J O L N I R                               ││  │                                   │
+│                                                                              ││                                      │
 │                  Select a session to open its conversation.                  ││                                      │
 │                                                                              ││                                      │
 │                                                                              ││                                      │
@@ -514,10 +515,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮│                                      │
 │ANTHROPIC                                                                     ││                                      │
-│  claude-1: refreshing…                                                       ││                                      │
+│ + refreshing…                                                                ││                                      │
 │OPENAI                                                                        ││                                      │
-│  codex-1: refreshing…                                                        ││                                      │
-│  codex-2: refreshing…                                                        ││                                      │
+│ + 2 refreshing…                                                              ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮│                                      │
 │Nothing needs you                                                             ││                                      │
@@ -532,8 +532,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────────────────────────││                                                                                                                      │
 │› · ACP pretty name                                   ◇ ⋯ ││                                                                                                                      │
 │  Idle [Q 1]  podman  codex-1                             ││                                                                                                                      │
-│  │ No messages yet                                       ││                                                   ✦  M J O L N I R                                                   │
-│  │                                                       ││                                                                                                                      │
+│  │ No messages yet                                       ││                                                                                                                      │
+│  │                                                       ││                                                   ✦  M J O L N I R                                                   │
+│                                                          ││                                                                                                                      │
 │                                                          ││                                      Select a session to open its conversation.                                      │
 │                                                          ││                                                                                                                      │
 │                                                          ││                                                                                                                      │
@@ -555,10 +556,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                          ││ANTHROPIC                                                                                                             │
-│                                                          ││  claude-1: refreshing…                                                                                               │
+│                                                          ││ + refreshing…                                                                                                        │
 │                                                          ││OPENAI                                                                                                                │
-│                                                          ││  codex-1: refreshing…                                                                                                │
-│                                                          ││  codex-2: refreshing…                                                                                                │
+│                                                          ││ + 2 refreshing…                                                                                                      │
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                          ││Nothing needs you                                                                                                     │
@@ -573,8 +573,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                      ││hel ──────────────────────────────────────────────────────│
 │                                                                                                                      ││› · ACP pretty name                                   ◇ ⋯ │
 │                                                                                                                      ││  Idle [Q 1]  podman  codex-1                             │
-│                                                   ✦  M J O L N I R                                                   ││  │ No messages yet                                       │
-│                                                                                                                      ││  │                                                       │
+│                                                                                                                      ││  │ No messages yet                                       │
+│                                                   ✦  M J O L N I R                                                   ││  │                                                       │
+│                                                                                                                      ││                                                          │
 │                                      Select a session to open its conversation.                                      ││                                                          │
 │                                                                                                                      ││                                                          │
 │                                                                                                                      ││                                                          │
@@ -596,10 +597,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
 │ANTHROPIC                                                                                                             ││                                                          │
-│  claude-1: refreshing…                                                                                               ││                                                          │
+│ + refreshing…                                                                                                        ││                                                          │
 │OPENAI                                                                                                                ││                                                          │
-│  codex-1: refreshing…                                                                                                ││                                                          │
-│  codex-2: refreshing…                                                                                                ││                                                          │
+│ + 2 refreshing…                                                                                                      ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
 │Nothing needs you                                                                                                     ││                                                          │
@@ -614,6 +614,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────││                                                          │
 │› · ACP pretty…◇  ││                                                          │
 │  Idle            ││                                                          │
+│                  ││                                                          │
 │                  ││                     ✦  M J O L N I R                     │
 │                  ││                                                          │
 │                  ││        Select a session to open its conversation.        │
@@ -637,10 +638,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: refreshing…                                                       │
+│ + refreshing…                                                                │
 │OPENAI                                                                        │
-│  codex-1: refreshing…                                                        │
-│  codex-2: refreshing…                                                        │
+│ + 2 refreshing…                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -657,6 +657,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
@@ -682,10 +683,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -702,7 +702,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│  Outside filter                      ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
@@ -727,10 +728,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -747,7 +747,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│  Outside filter                      ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
@@ -772,10 +773,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -792,6 +792,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle            ││                                                                                                  │
 │  Outside filter  ││                                                                                                  │
 │                  ││                                                                                                  │
+│                  ││                                                                                                  │
 │                  ││                                         ✦  M J O L N I R                                         │
 │                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
@@ -817,10 +818,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││ANTHROPIC                                                                                         │
-│                  ││  claude-1: refreshing…                                                                           │
+│                  ││ + refreshing…                                                                                    │
 │                  ││OPENAI                                                                                            │
-│                  ││  codex-1: refreshing…                                                                            │
-│                  ││  codex-2: refreshing…                                                                            │
+│                  ││ + 2 refreshing…                                                                                  │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
@@ -837,6 +837,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle            ││                                                                                                  │
 │  Outside filter  ││                                                                                                  │
 │                  ││                                                                                                  │
+│                  ││                                                                                                  │
 │                  ││                                         ✦  M J O L N I R                                         │
 │                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
@@ -862,10 +863,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││ANTHROPIC                                                                                         │
-│                  ││  claude-1: refreshing…                                                                           │
+│                  ││ + refreshing…                                                                                    │
 │                  ││OPENAI                                                                                            │
-│                  ││  codex-1: refreshing…                                                                            │
-│                  ││  codex-2: refreshing…                                                                            │
+│                  ││ + 2 refreshing…                                                                                  │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
@@ -882,6 +882,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle            ││                                                                                                  │
 │  Outside filter  ││                                                                                                  │
 │                  ││                                                                                                  │
+│                  ││                                                                                                  │
 │                  ││                                         ✦  M J O L N I R                                         │
 │                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
@@ -907,10 +908,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││ANTHROPIC                                                                                         │
-│                  ││  claude-1: refreshing…                                                                           │
+│                  ││ + refreshing…                                                                                    │
 │                  ││OPENAI                                                                                            │
-│                  ││  codex-1: refreshing…                                                                            │
-│                  ││  codex-2: refreshing…                                                                            │
+│                  ││ + 2 refreshing…                                                                                  │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
@@ -927,6 +927,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle            ││                                                                                                  │
 │  Outside filter  ││                                                                                                  │
 │                  ││                                                                                                  │
+│                  ││                                                                                                  │
 │                  ││                                         ✦  M J O L N I R                                         │
 │                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
@@ -952,10 +953,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││ANTHROPIC                                                                                         │
-│                  ││  claude-1: refreshing…                                                                           │
+│                  ││ + refreshing…                                                                                    │
 │                  ││OPENAI                                                                                            │
-│                  ││  codex-1: refreshing…                                                                            │
-│                  ││  codex-2: refreshing…                                                                            │
+│                  ││ + 2 refreshing…                                                                                  │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
@@ -972,6 +972,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle            ││                                                                                                  │
 │  Outside filter  ││                                                                                                  │
 │                  ││                                                                                                  │
+│                  ││                                                                                                  │
 │                  ││                                         ✦  M J O L N I R                                         │
 │                  ││                                                                                                  │
 │                  ││                            Select a session to open its conversation.                            │
@@ -997,10 +998,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││ANTHROPIC                                                                                         │
-│                  ││  claude-1: refreshing…                                                                           │
+│                  ││ + refreshing…                                                                                    │
 │                  ││OPENAI                                                                                            │
-│                  ││  codex-1: refreshing…                                                                            │
-│                  ││  codex-2: refreshing…                                                                            │
+│                  ││ + 2 refreshing…                                                                                  │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │

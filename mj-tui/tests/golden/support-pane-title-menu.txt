@@ -1,6 +1,6 @@
 title click action: None
 focus after title click: Prompt
-menu anchor: (47, 27, 47, 27)
+menu anchor: (47, 28, 47, 28)
 === Targets title menu (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -10,8 +10,9 @@ menu anchor: (47, 27, 47, 27)
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -33,10 +34,9 @@ menu anchor: (47, 27, 47, 27)
 │                                            │╰│Refresh          │─────────────────────────────────────────────────────────────────────────╯
 │                                            │╭│Runtimes…        │freshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            │││Machines…        │                                                                         │
-│                                            │││CPU by session…  │ing…                                                                     │
+│                                            │││CPU by session…  │                                                                         │
 │                                            ││╰─────────────────╯                                                                         │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -44,7 +44,7 @@ menu anchor: (47, 27, 47, 27)
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 title click action: None
 focus after title click: Prompt
-menu anchor: (47, 30, 47, 30)
+menu anchor: (47, 31, 47, 31)
 === Profiles title menu (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -54,8 +54,9 @@ menu anchor: (47, 30, 47, 30)
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -77,11 +78,10 @@ menu anchor: (47, 30, 47, 30)
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││╭Profiles───────────╮                                                                       │
-│                                            │││Refresh            │g…                                                                     │
+│                                            │││Refresh            │                                                                       │
 │                                            │││Settings…          │                                                                       │
-│                                            │││Usage by session…  │…                                                                      │
-│                                            ││╰───────────────────╯…                                                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │││Usage by session…  │                                                                       │
+│                                            │╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -96,8 +96,9 @@ Targets Refresh action: RefreshAll
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -119,10 +120,9 @@ Targets Refresh action: RefreshAll
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││ + refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -151,6 +151,7 @@ Targets Runtimes… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -160,7 +161,6 @@ Targets Runtimes… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -193,6 +193,7 @@ Targets Machines… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -202,7 +203,6 @@ Targets Machines… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -222,8 +222,9 @@ Profiles Refresh action: RefreshAll
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -245,10 +246,9 @@ Profiles Refresh action: RefreshAll
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││ + refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -277,6 +277,7 @@ Profiles Settings… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -286,7 +287,6 @@ Profiles Settings… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -306,8 +306,9 @@ Targets dot action: None
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -329,10 +330,9 @@ Targets dot action: None
 │                                            │╰│Refresh          │─────────────────────────────────────────────────────────────────────────╯
 │                                            │╭│Runtimes…        │freshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            │││Machines…        │                                                                         │
-│                                            │││CPU by session…  │ing…                                                                     │
+│                                            │││CPU by session…  │                                                                         │
 │                                            ││╰─────────────────╯                                                                         │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -361,6 +361,7 @@ Targets number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -370,7 +371,6 @@ Targets number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -403,6 +403,7 @@ Targets number 3 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -412,7 +413,6 @@ Targets number 3 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -431,8 +431,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -454,10 +455,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                            │╰│Refresh          │─────────────────────────────────────────────────────────────────────────╯
 │                                            │╭│Runtimes…        │freshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            │││Machines…        │                                                                         │
-│                                            │││CPU by session…  │ing…                                                                     │
+│                                            │││CPU by session…  │                                                                         │
 │                                            ││╰─────────────────╯                                                                         │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -475,8 +475,9 @@ Targets menu after Escape: false
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -498,10 +499,9 @@ Targets menu after Escape: false
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││ + refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -517,8 +517,9 @@ Targets Enter Refresh action: RefreshAll
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -540,10 +541,9 @@ Targets Enter Refresh action: RefreshAll
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││ + refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -572,6 +572,7 @@ Targets Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -581,7 +582,6 @@ Targets Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -601,8 +601,9 @@ Profiles dot action: None
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -624,11 +625,10 @@ Profiles dot action: None
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││╭Profiles───────────╮                                                                       │
-│                                            │││Refresh            │g…                                                                     │
+│                                            │││Refresh            │                                                                       │
 │                                            │││Settings…          │                                                                       │
-│                                            │││Usage by session…  │…                                                                      │
-│                                            ││╰───────────────────╯…                                                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │││Usage by session…  │                                                                       │
+│                                            │╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -656,6 +656,7 @@ Profiles number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -665,7 +666,6 @@ Profiles number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -684,8 +684,9 @@ Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then 
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -707,11 +708,10 @@ Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then 
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││╭Profiles───────────╮                                                                       │
-│                                            │││Refresh            │g…                                                                     │
+│                                            │││Refresh            │                                                                       │
 │                                            │││Settings…          │                                                                       │
-│                                            │││Usage by session…  │…                                                                      │
-│                                            ││╰───────────────────╯…                                                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │││Usage by session…  │                                                                       │
+│                                            │╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -728,8 +728,9 @@ Profiles menu after Escape: false
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -751,10 +752,9 @@ Profiles menu after Escape: false
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││> claude-1: refreshing…                                                                     │
+│                                            ││>+ refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -770,8 +770,9 @@ Profiles Enter Refresh action: RefreshAll
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -793,10 +794,9 @@ Profiles Enter Refresh action: RefreshAll
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││> claude-1: refreshing…                                                                     │
+│                                            ││>+ refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -825,6 +825,7 @@ Profiles Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -837,7 +838,6 @@ Profiles Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
 │                                                                                                                       ──────────── ▁   ▄ ╮
@@ -847,6 +847,49 @@ Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then 
 Targets Minimized size action: None
 Targets menu after size click: false
 === Targets Minimized pane (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│hel ────────────────────────────────────────││                                                                                            │
+│› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
+│                                            ││                         Select a session to open its conversation.                         │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│                                            ││No conversation open.                                                                       │
+│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▄ ─
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││ANTHROPIC                                                                                   │
+│                                            ││ + refreshing…                                                                              │
+│                                            ││OPENAI                                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
+Targets Standard size action: None
+Targets menu after size click: false
+=== Targets Standard pane (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
@@ -869,48 +912,6 @@ Targets menu after size click: false
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
-│                                            ││No conversation open.                                                                       │
-│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │─ Targets ── none configured ───────────────────────────────────────────────────────── ▁   ▄ ─
-│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
-│                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                            ││Nothing needs you                                                                           │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
-Targets Standard size action: None
-Targets menu after size click: false
-=== Targets Standard pane (140x40) ===
-╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                                                                                            │
-│hel ────────────────────────────────────────││                                                                                            │
-│› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
-│                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
 │                                            ││No conversation open.                                                                       │
@@ -921,10 +922,9 @@ Targets menu after size click: false
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││ + refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │
@@ -984,8 +984,9 @@ Profiles menu after size click: false
 │hel ────────────────────────────────────────││                                                                                            │
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                      ✦  M J O L N I R                                      │
-│  │                                         ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
+│                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1007,10 +1008,9 @@ Profiles menu after size click: false
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││ANTHROPIC                                                                                   │
-│                                            ││  claude-1: refreshing…                                                                     │
+│                                            ││ + refreshing…                                                                              │
 │                                            ││OPENAI                                                                                      │
-│                                            ││  codex-1: refreshing…                                                                      │
-│                                            ││  codex-2: refreshing…                                                                      │
+│                                            ││ + 2 refreshing…                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││Nothing needs you                                                                           │

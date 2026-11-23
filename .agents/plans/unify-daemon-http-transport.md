@@ -17,6 +17,9 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 - [x] (2026-11-23 17:13Z) Milestone 2: Started unconditional loopback HTTP API (`api-endpoint.json`, mode 0600, per-start loopback bearer token scoped strictly to the loopback listener) independent of `[phone].enabled` and Tailscale, initialized report backend and persisted API credential unconditionally, cleaned up `api-endpoint.json` in both epilogue and forced-exit watchdog, and switched local host `ApiClient` to direct `api-endpoint.json` discovery.
 - [x] (2026-11-23 17:56Z) Milestone 2.5: Published host-loopback container HTTP port (`CONTAINER_API_PORT = 8788`), `MJ_DAEMON_API_TOKEN`, host `api-endpoint.json` with owner-checked cleanup, SSH dual `-L` HTTP API forwarding on `SshLease`, unified `DaemonClient::direct_api_endpoint`, and shared `mj_client::http::HttpDaemonClient` (verified with Host, Container fake-engine, and real disposable localhost SSH phone-disabled scenarios).
 - [ ] Milestone 3: Migrate TCP `DaemonAction` families and the two remaining `#1043` dashboard git/working-context probes onto `/api/v1/*` in clean domain slices, deleting migrated TCP variants and handlers after each slice.
+  - [x] (2026-11-23 18:49Z) Slice 3a-1: Migrated & deleted 14 TCP `DaemonAction` variants (`InstallAttachment`, `StartTurnReview`, dead `ResolveTurnReview`, `StopBackgroundTask`, `PreviewContainerUpgrade`, `UpgradeContainer`, `CancelContainerUpgrade`, and all 7 `Wiki*` actions) onto `/api/v1/*` via `mj_client::http::HttpDaemonClient`, unified TUI and Web image attachment upload on `POST /api/v1/sessions/{id}/attachments`, and moved the remaining 2 `#1043` local dashboard probes (`session_working_context`, `session_git_status`) behind `/api/v1/sessions/{id}/working-context` and `/api/v1/sessions/{id}/git-status` (deleting `live_controller_snapshot`).
+  - [ ] Slice 3a-2: Workspaces, drafts, read receipts, preflight, paths, projects, git identity, and move preparation.
+  - [ ] Slice 3b: Consolidate `ServerState` channels + `SubagentBackend` and migrate remaining request/response `DaemonAction` families (including audio & session import so `UploadChunk` can be deleted).
 - [ ] Milestone 4: Move streaming/interactive/SSH daemon paths (`RuntimeChanges`, `LoginTerminal`, SSH `ssh -L` forwarding) onto HTTP `/api/v1/*`, reduce TCP `DaemonAction` to the five frozen upgrade-management variants, and clean up remaining `mj-controller` type imports in `mj-cli`.
 
 ## Surprises & Discoveries
@@ -65,7 +68,9 @@ After this plan is complete, Mjolnir has one HTTP control-plane API under `/api/
 
 - **Milestone 2.5 (complete):** Added `MJ_DAEMON_API_TOKEN`, container second loopback HTTP port (`CONTAINER_API_PORT = 8788`), host `api-endpoint.json` publication/adoption and owner-checked cleanup across every stop/stale-record path, SSH `DaemonEndpoint` additive `api_address`/`api_token` with dual `-L` forwarding on the single `SshLease`, unified `DaemonClient::direct_api_endpoint`, and shared typed `mj_client::http::HttpDaemonClient` (preserving zero `mj-client` dependency in `mj-worker`/`mj-worker-bin`). Real disposable localhost SSH HTTP scenario passes with `[phone].enabled = false` before and after remote restart.
 
-Milestones 3–4 remain.
+- **Milestone 3 Slice 3a-1 (complete):** Deleted 14 TCP `DaemonAction` variants (`InstallAttachment`, `StartTurnReview`, dead `ResolveTurnReview`, `StopBackgroundTask`, 3 container-upgrade actions, 7 Wiki actions) and their TCP handlers across `mj-client`/`mj-daemon`, unified TUI and Web image upload on `POST /api/v1/sessions/{id}/attachments`, and eliminated the last two local dashboard probes (`session_working_context`, `session_git_status`) via `GET /api/v1/sessions/{id}/working-context` and `/git-status` (deleting `live_controller_snapshot`).
+
+Milestones 3 (Slices 3a-2, 3b) and 4 remain.
 
 ## Context and Orientation
 

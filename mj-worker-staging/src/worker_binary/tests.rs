@@ -4,6 +4,30 @@ use super::*;
 
 use crate::targets::unwrapped_remote_line;
 
+#[test]
+fn local_workers_in_the_daemon_image_use_managed_harnesses_and_seed_environment() {
+    const CHILD: &str = "MJ_TEST_DAEMON_IMAGE_RUNTIME";
+    if std::env::var_os(CHILD).is_none() {
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "local_workers_in_the_daemon_image_use_managed_harnesses_and_seed_environment",
+        ))
+        .env(CHILD, "1")
+        .env(mj_core::placement::DAEMON_CONTAINER_ENV, "test-daemon")
+        .run();
+        return;
+    }
+
+    let backend = targets::TargetLocator::LocalBare {
+        worker_root: "/unused".into(),
+    };
+    assert_eq!(
+        harness_runtime_policy(&backend),
+        HarnessRuntimePolicy::Managed,
+    );
+    assert!(worker_runs_in_image(&backend));
+}
+
 /// The worker writes each harness's GitHub CLI approval into a file inside the
 /// session's staged profile, so the profile staging allowlist must carry that
 /// file from the profile home. A harness that names a new file in
@@ -2375,7 +2399,7 @@ fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
 }
 
 #[test]
-#[ignore = "requires Docker and the locally installed agent-dev image"]
+#[ignore = "requires Docker and the locally installed daemon image"]
 fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
     let fixture = podman_install_fixture();
     let session = mj_core::state::new_session_id().unwrap();
@@ -2394,7 +2418,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
                 "-d",
                 "--name",
                 &container_id,
-                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "ghcr.io/brokkai/mjolnir/daemon:latest",
                 "sleep",
                 "infinity",
             ],
@@ -2603,117 +2627,6 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
                 );
             }
         }
-    }
-}
-
-#[test]
-fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
-    use mj_core::harness_runtime::{
-        CLAUDE_CLI_VERSION, DSH_ACP_PACKAGE, DSH_ACP_VERSION, GROK_VERSION, KIMI_VERSION,
-        MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, OPENCODE_VERSION,
-    };
-
-    const CONTAINERFILE: &str = include_str!("../../../containers/Containerfile.agent-dev");
-
-    let codex = format!("codex-acp@{CODEX_ACP_VERSION}");
-    assert!(
-        CONTAINERFILE.contains(&codex),
-        "containers/Containerfile.agent-dev must install {codex}. The image and the \
-             bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
-             session and an npx session run different adapter versions."
-    );
-
-    let claude = format!("claude-agent-acp@{CLAUDE_ACP_VERSION}");
-    assert!(
-        CONTAINERFILE.contains(&claude),
-        "containers/Containerfile.agent-dev must install {claude}. The image and the \
-             bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
-             session and an npx session run different adapter versions."
-    );
-
-    let claude_code = format!("@anthropic-ai/claude-code@{CLAUDE_CLI_VERSION}");
-    assert!(
-        CONTAINERFILE.contains(&claude_code),
-        "containers/Containerfile.agent-dev must install {claude_code}"
-    );
-    assert!(CONTAINERFILE.contains("ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude"));
-
-    let muse = format!("{MUSE_ACP_PACKAGE}@{MUSE_ACP_VERSION}");
-    assert!(
-        CONTAINERFILE.contains(&muse),
-        "containers/Containerfile.agent-dev must install {muse}. The image and the \
-             bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
-             session and an npx session run different adapter versions."
-    );
-    let muse_check = format!(
-        "require('/usr/local/lib/node_modules/{MUSE_ACP_PACKAGE}/package.json').version\")\" = \"{MUSE_ACP_VERSION}\" ]"
-    );
-    assert!(
-        CONTAINERFILE.contains(&muse_check),
-        "containers/Containerfile.agent-dev must check the installed adapter is \
-             {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
-    );
-    assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
-    let antigravity: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../mj-harness-install/assets/antigravity/runtime.json"
-    ))
-    .unwrap();
-    assert_eq!(
-        antigravity["version"],
-        mj_core::harness_runtime::ANTIGRAVITY_VERSION
-    );
-    assert!(CONTAINERFILE.contains(
-        "COPY mj-harness-install/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json"
-    ));
-    assert!(CONTAINERFILE.contains("RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin"));
-    assert!(CONTAINERFILE.contains("ENV AGY_CLI_DISABLE_AUTO_UPDATE=true"));
-
-    for package in [
-        format!("@moonshot-ai/kimi-code@{KIMI_VERSION}"),
-        format!("@xai-official/grok@{GROK_VERSION}"),
-        format!("@opencode/cli@{OPENCODE_VERSION}"),
-    ] {
-        assert!(
-            CONTAINERFILE.contains(&package),
-            "containers/Containerfile.agent-dev must install {package}"
-        );
-    }
-
-    // DSH has no managed installation. The image installs the pinned npm
-    // package, and the launch otherwise fetches that same version through npx.
-    let dsh = format!("{DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}");
-    assert!(
-        CONTAINERFILE.contains(&dsh),
-        "containers/Containerfile.agent-dev must install {dsh}"
-    );
-    let (command, arguments) =
-        bridge_launch(HarnessKind::Dsh, ExecutionPolicy::ConfiguredApprovals);
-    assert_eq!(command, "sh");
-    assert!(
-        arguments.iter().any(|argument| {
-            argument.contains(&format!("npx -y {DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}"))
-        }),
-        "the DSH launch must fetch the pinned {DSH_ACP_PACKAGE}@{DSH_ACP_VERSION}"
-    );
-
-    let package: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../mj-harness-install/assets/harnesses/claude/package.json"
-    ))
-    .unwrap();
-    let lock: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../mj-harness-install/assets/harnesses/claude/package-lock.json"
-    ))
-    .unwrap();
-    for (name, version) in [
-        ("@agentclientprotocol/claude-agent-acp", CLAUDE_ACP_VERSION),
-        ("@anthropic-ai/claude-code", CLAUDE_CLI_VERSION),
-    ] {
-        assert_eq!(package["dependencies"][name], version);
-        assert_eq!(lock["packages"][""]["dependencies"][name], version);
-        assert_eq!(
-            lock["packages"][format!("node_modules/{name}")]["version"],
-            version
-        );
     }
 }
 

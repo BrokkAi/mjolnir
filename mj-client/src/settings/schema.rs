@@ -1066,7 +1066,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Host: a process on this computer. Podman or Docker: a container sharing this computer's network and processes, where local sessions run too. Linux only."
         }
         "image" if path.first().is_some_and(|key| key == "daemon") => {
-            "The daemon container's image. Blank uses this release's agent-dev image."
+            "The daemon container's image. Blank uses this build's daemon image."
         }
         "mounts" if path.first().is_some_and(|key| key == "daemon") => {
             "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."

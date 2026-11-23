@@ -21,6 +21,12 @@ impl RelayClient {
             | RelayRequest::InstallProjectMemorySnapshot { .. }
             | RelayRequest::ReplaceProjectMemoryTree { .. }
             | RelayRequest::BeginLiveBaseline => None,
+            RelayRequest::Status
+            | RelayRequest::HistoryRequests
+            | RelayRequest::PollSubagentQueue { .. }
+            | RelayRequest::SubagentRequests
+            | RelayRequest::CompleteSubagentRequest { .. }
+            | RelayRequest::SetSubagentAdmission { .. } => Some(RELAY_OBSERVATION_TIMEOUT),
             _ => Some(self.request_timeout),
         };
         self.call_with_deadline(request, timeout).await

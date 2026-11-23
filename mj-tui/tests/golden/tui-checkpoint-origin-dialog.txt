@@ -13,11 +13,11 @@
 ╭ Targets   │                                                                          │  ── ▁   ▄ ╮
 │  Host /   │Enter a GitHub origin or absolute local path that contains this history:  │           │
 ╰─────────  │Source:                                                                   │  ─────────╯
-╭ Profiles  │                                                                          │     ▄   □ ╮
-│ANTHROPIC  │Type or paste into Source · Tab moves · Enter checks                      │           ▐
-│  claude-  │                                                                          │           ▐
-│OPENAI     │  Cancel     Check origin                                                 │           ▐
-│  codex-1  ╰──────────────────────────────────────────────────────────────────────────╯           │
+╭ Profiles  │                                                                          │  ── ▁   ▄ ╮
+│ANTHROPIC  │Type or paste into Source · Tab moves · Enter checks                      │           │
+│ + refres  │                                                                          │           │
+│OPENAI     │  Cancel     Check origin                                                 │           │
+│ + 2 refr  ╰──────────────────────────────────────────────────────────────────────────╯           │
 ╰─────────                                                                                ─────────╯
 ╭ Notifica                                                                                ── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
@@ -43,11 +43,11 @@ Cancel action focused: false
 ╭ Targets   │                                                                          │  ── ▁   ▄ ╮
 │  Host /   │Enter a GitHub origin or absolute local path that contains this history:  │           │
 ╰─────────  │Source:                                                                   │  ─────────╯
-╭ Profiles  │                                                                          │     ▄   □ ╮
-│ANTHROPIC  │Type or paste into Source · Tab moves · Enter checks                      │           ▐
-│  claude-  │                                                                          │           ▐
-│OPENAI     │  Cancel     Check origin                                                 │           ▐
-│  codex-1  ╰──────────────────────────────────────────────────────────────────────────╯           │
+╭ Profiles  │                                                                          │  ── ▁   ▄ ╮
+│ANTHROPIC  │Type or paste into Source · Tab moves · Enter checks                      │           │
+│ + refres  │                                                                          │           │
+│OPENAI     │  Cancel     Check origin                                                 │           │
+│ + 2 refr  ╰──────────────────────────────────────────────────────────────────────────╯           │
 ╰─────────                                                                                ─────────╯
 ╭ Notifica                                                                                ── ▁   ▄ ╮
 │Nothing needs you                                                                                 │

@@ -3,12 +3,11 @@ title: Custom container images
 description: What a container image must provide to work with any local or SSH container runtime.
 ---
 
-mj can run a session in any container image that meets a small contract.
-`containers/Containerfile.agent-dev` is the reference image and satisfies all
-of it; start there if you're building your own. CI publishes this image as
-`ghcr.io/brokkai/mjolnir/agent-dev`, multi-arch for `linux/amd64` and
-`linux/arm64`: `:latest` tracks master, and each release is also published
-under its own immutable version tag.
+Mjolnir uses `docker.io/library/buildpack-deps:noble` for container sessions
+by default. Use `mj image build` to build a per-bundle image from the
+repository's mise recipe or set a target's `image` to a custom image that
+meets the contract below. [Daemon-container mode](/daemon-container/) has
+its own image and configuration.
 
 ## The entrypoint
 
@@ -71,8 +70,8 @@ To bake it in, run
 <https://github.com/BrokkAi/dsh-acp/releases> on `PATH`. The Linux binaries
 need glibc 2.34 or newer, so musl images such as Alpine cannot run DSH.
 
-Baking the bridges in, the way the reference image does, avoids that
-installation cost. Codex images should install the bridge version pinned by
+Baking the bridges into a custom image avoids that installation cost.
+Codex images should install the bridge version pinned by
 Mjolnir and set `CODEX_PATH` to the installed Codex executable so the bridge
 runs the selected provider.
 
@@ -85,14 +84,11 @@ the command through `bash -lc`, so a custom image must also provide `bash` on
 `PATH` for that surface to work. Those commands intentionally use the session
 user's shell environment.
 
-Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
-Set `MUSE_CLI` to the native binary's absolute path. Install the pinned
-`@brokkai/muse-acp` adapter from npm, or let npx fetch it at launch, and use
-`scripts/install-muse.py` with `mj-harness-install/assets/muse/runtime.json` to install
-the matching checksum-verified native binary as managed workers do. Copy the
-manifest and script into your image build and run the installer with the
-manifest path and destination bin directory. It needs Python 3.11 or newer and
-curl.
+Mjolnir can install Muse Code and its ACP adapter on demand. To bake them
+into a custom image, place `muse-acp` on `PATH` and set `MUSE_CLI` to the
+absolute path of the native `muse` executable. The managed installer's
+`mj-harness-install/assets/muse/runtime.json` lists the pinned version of
+the native binary and its platform checksums.
 
 ## Project tools
 
@@ -195,7 +191,7 @@ those before starting a container.
 ```toml
 [targets.podman]
 kind = "podman"
-image = "localhost/mjolnir/agent-dev:latest"
+image = "docker.io/library/buildpack-deps:noble"
 # Selects the image platform and the matching mj worker architecture.
 platform = "linux/amd64"
 cpus = "8"

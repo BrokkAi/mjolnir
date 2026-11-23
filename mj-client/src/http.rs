@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
 use std::sync::Arc;
 
+mod sessions;
+
+pub use sessions::{
+    SessionWorkingContext, StopBackgroundTaskRequest, WikiRestoreBody, WikiRestoreResponse,
+};
+
 pub(crate) const MAX_PROOF_RESPONSE_BYTES: usize = 8 * 1024;
 
 #[derive(Deserialize)]
@@ -207,6 +213,34 @@ impl HttpDaemonClient {
 
     pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::json(self.request(Method::DELETE, path)).await
+    }
+
+    pub async fn post_json_no_content(
+        &self,
+        path: &str,
+        body: &(impl Serialize + ?Sized),
+    ) -> Result<()> {
+        Self::send(self.request(Method::POST, path).json(body)).await?;
+        Ok(())
+    }
+
+    pub async fn post_empty_no_content(&self, path: &str) -> Result<()> {
+        Self::send(self.request(Method::POST, path)).await?;
+        Ok(())
+    }
+
+    pub async fn put_json_no_content(
+        &self,
+        path: &str,
+        body: &(impl Serialize + ?Sized),
+    ) -> Result<()> {
+        Self::send(self.request(Method::PUT, path).json(body)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_no_content(&self, path: &str) -> Result<()> {
+        Self::send(self.request(Method::DELETE, path)).await?;
+        Ok(())
     }
 
     pub async fn post_bytes<T: DeserializeOwned>(

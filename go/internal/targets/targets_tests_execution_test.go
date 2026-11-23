@@ -622,7 +622,7 @@ func TestDockerAttachmentInitFailureStopsHelperAndRemovesBackingStorage(t *testi
 
 func TestDockerVMAttachmentSharesSourceIsolatesWritesAndCleansUp(t *testing.T) {
 	skipOnWindows(t, "Unix only")
-	skipUnlessIgnoredTestsRequested(t, "requires a running Docker daemon and cached agent-dev image")
+	skipUnlessIgnoredTestsRequested(t, "requires a running Docker daemon and cached buildpack-deps:noble image")
 	source, err := dockerOverlaySmokeDirectory()
 	if err != nil {
 		t.Fatal(err)
@@ -643,7 +643,7 @@ func TestDockerVMAttachmentSharesSourceIsolatesWritesAndCleansUp(t *testing.T) {
 	if err := os.Symlink("payload", filepath.Join(source, "link")); err != nil {
 		t.Fatal(err)
 	}
-	template := agentDevTemplate(core.TargetsPodmanWorkspaceStorage{})
+	template := sessionTestTemplate(core.TargetsPodmanWorkspaceStorage{})
 	result := func() error {
 		create, err := dockerContainerRun(&template, name, session,
 			[]core.AdditionalMount{{Source: source, Destination: "/mnt/source", Access: core.MountAccessCow}}, "/workspace")
@@ -953,7 +953,7 @@ func TestWorkerLivenessDoesNotReportDeathWhenTheProbeFails(t *testing.T) {
 
 func TestPodmanQuiesceAndRemoveSucceedWhenDeadExecConmonCausesStopTimeout(t *testing.T) {
 	skipOnWindows(t, "Unix only")
-	skipUnlessIgnoredTestsRequested(t, "requires rootless Podman and cached ghcr.io/brokkai/mjolnir/agent-dev:latest image")
+	skipUnlessIgnoredTestsRequested(t, "requires rootless Podman and cached docker.io/library/buildpack-deps:noble image")
 	session, err := core.NewSessionID()
 	if err != nil {
 		t.Fatal(err)
@@ -975,7 +975,7 @@ func TestPodmanQuiesceAndRemoveSucceedWhenDeadExecConmonCausesStopTimeout(t *tes
 	started := run("podman", "run", "-d", "--name", name,
 		"--label", "dev.mj.managed=true",
 		"--label", "dev.mj.session="+session,
-		"ghcr.io/brokkai/mjolnir/agent-dev:latest", "sleep", "300")
+		"docker.io/library/buildpack-deps:noble", "sleep", "300")
 	if started.Status != 0 {
 		t.Fatalf("%s", started.Stderr)
 	}
