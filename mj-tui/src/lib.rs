@@ -1095,7 +1095,7 @@ pub struct DashboardState {
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_selection: Option<render::quota_pools::QuotaRow>,
-    pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
+    pub(crate) quota_expanded: BTreeSet<render::quota_pools::QuotaGroup>,
     pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,
     /// Last rendered Quota row bounds, by profile id, for the row's
     /// right-click menu.

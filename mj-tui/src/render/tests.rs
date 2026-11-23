@@ -1425,6 +1425,8 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
     only_limited.rate_limited_until_epoch_seconds = Some(now_seconds() + 5 * 60);
 
     let mut dashboard = dashboard_with_session(running_session());
+    dashboard.config.profiles.remove("codex-2");
+    dashboard.set_pane_size(SupportPane::Quota, PaneSize::Maximized);
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
         reports: BTreeMap::from([
             ("claude-1".to_owned(), held),
@@ -1432,7 +1434,24 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         ]),
         ..Default::default()
     });
-    let lines = drawn(&mut dashboard, 120, 44);
+    let lines = drawn(&mut dashboard, 200, 44);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" + quota check refused · next in"))
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("quota check refused"))
+            .count(),
+        1
+    );
+    for row in dashboard.quota_rows() {
+        dashboard.quota_selection = Some(row);
+        dashboard.toggle_quota_pool();
+    }
+    let lines = drawn(&mut dashboard, 200, 44);
     for id in ["claude-1", "codex-1"] {
         let row = lines
             .iter()

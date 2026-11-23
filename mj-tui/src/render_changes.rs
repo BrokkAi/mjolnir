@@ -283,36 +283,49 @@ impl DashboardState {
             value: format!("{awaiting}/{five_awaiting}"),
         });
         if self.pane_size(SupportPane::Quota) != crate::PaneSize::Minimized {
+            use crate::render::quota_pools::{
+                profile_status, provider_status_summary, provider_text_expanded,
+            };
+            let mut show_axis = false;
             for provider in providers {
-                for pool in provider.pools {
-                    let expanded = self.quota_expanded.contains(&pool.key);
-                    for member in pool.members {
+                let text_expanded = provider_text_expanded(&provider, &self.quota_expanded);
+                for pool in &provider.pools {
+                    let expanded = pool.is_expanded(&self.quota_expanded);
+                    show_axis |= expanded;
+                    for member in &pool.members {
                         clocks.push(DisplayedClock {
                             key: format!("quota:{:?}:{}:weekly", pool.key, member.id),
                             value: reset_duration(member.reset, now),
                         });
-                        if expanded && let Some(five) = member.five_hour {
+                        if expanded && let Some(five) = &member.five_hour {
                             clocks.push(DisplayedClock {
                                 key: format!("quota:{:?}:{}:five-hour", pool.key, member.id),
                                 value: reset_duration(five.resets_at_epoch_seconds, now),
                             });
                         }
-                        if let Some(note) = member.note {
+                        if expanded && let Some(note) = &member.note {
                             clocks.push(DisplayedClock {
                                 key: format!("quota:{}:hold", member.id),
-                                value: note,
+                                value: note.clone(),
                             });
                         }
                     }
                 }
-                for (id, label) in provider.text {
+                if text_expanded {
+                    for (id, label) in provider.text {
+                        clocks.push(DisplayedClock {
+                            key: format!("quota:{id}:status"),
+                            value: profile_status(&id, &label, &self.quota_refreshing).into_owned(),
+                        });
+                    }
+                } else if provider.text_header().is_some() {
                     clocks.push(DisplayedClock {
-                        key: format!("quota:{id}:status"),
-                        value: label,
+                        key: format!("quota:{:?}:status", provider.provider),
+                        value: provider_status_summary(&provider, &self.quota_refreshing),
                     });
                 }
             }
-            if !self.quota_expanded.is_empty() {
+            if show_axis {
                 clocks.push(DisplayedClock {
                     key: "quota:axis".into(),
                     value: (now / 60).to_string(),

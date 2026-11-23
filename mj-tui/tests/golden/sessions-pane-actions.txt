@@ -86,7 +86,7 @@ action: OpenResumeDialog
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 ─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▄ ─
-─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────── ▁   ▄   □ ─
+─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────────── ▁   ▄ ─
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -112,7 +112,7 @@ Background work finished
 │       │                                                                                  │  .    │
 ╰─────  │                                                                                  │  ─────╯
 ─ Targ  │                                                                                  │     ▄ ─
-─ Prof  │                                                                                  │     □ ─
+─ Prof  │                                                                                  │     ▄ ─
 ╭ Noti  │   Cancel     Next                                                                │     ▄ ╮
 │Nothi  ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 ╰─────                                                                                        ─────╯
@@ -139,7 +139,7 @@ action: None; mode: New=true
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 ─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▄ ─
-─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────── ▁   ▄   □ ─
+─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────────── ▁   ▄ ─
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -569,8 +569,9 @@ action: OpenResumeDialog
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -592,10 +593,9 @@ action: OpenResumeDialog
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -614,8 +614,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -637,10 +638,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -659,8 +659,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -682,10 +683,9 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -704,8 +704,9 @@ button Open: fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -727,10 +728,9 @@ button Open: fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -747,8 +747,9 @@ action: OpenResumeDialog
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -770,10 +771,9 @@ action: OpenResumeDialog
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -791,8 +791,9 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -814,10 +815,9 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -835,8 +835,9 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -858,10 +859,9 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -880,13 +880,14 @@ monochrome Enter action: OpenResumeDialog
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -903,10 +904,9 @@ monochrome Enter action: OpenResumeDialog
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -922,13 +922,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │  · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -945,10 +946,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -965,13 +965,14 @@ action focus: None; Create enabled: true; Open enabled: true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -988,10 +989,9 @@ action focus: None; Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1008,13 +1008,14 @@ action focus: None; Create enabled: true; Open enabled: true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -1031,10 +1032,9 @@ action focus: None; Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1051,13 +1051,14 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -1074,10 +1075,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1094,13 +1094,14 @@ action focus: Some(ResumeDialog); Create enabled: true; Open enabled: true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -1117,10 +1118,9 @@ action focus: Some(ResumeDialog); Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1137,13 +1137,14 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -1160,10 +1161,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1180,13 +1180,14 @@ action focus: None; Create enabled: true; Open enabled: true
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman [1]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│  · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Idle  podman [2]  codex-1           ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -1203,10 +1204,9 @@ action focus: None; Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1223,6 +1223,7 @@ action: Open { session_id: "another-session" }
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                      Create a session to start building.                     │
@@ -1246,10 +1247,9 @@ action: Open { session_id: "another-session" }
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1266,6 +1266,7 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                      Create a session to start building.                     │
@@ -1289,10 +1290,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -1308,6 +1308,7 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
+│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                      Create a session to start building.                     │
@@ -1331,10 +1332,9 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││ + refreshing…                                                                │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: refreshing…                                                        │
-│                                      ││  codex-2: refreshing…                                                        │
+│                                      ││ + 2 refreshing…                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │

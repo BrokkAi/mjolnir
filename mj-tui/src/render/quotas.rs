@@ -384,7 +384,10 @@ pub(crate) fn render_quotas_at(
     render_session_scrollbar(frame, area, lines.len(), offset, viewport);
 }
 
-use super::quota_pools::{PoolMember, PoolPeriod, QuotaPool, QuotaRow, refill_widths};
+use super::quota_pools::{
+    PoolMember, PoolPeriod, QuotaPool, QuotaRow, profile_status, provider_status_summary,
+    provider_text_expanded, refill_widths,
+};
 use mj_core::config::QuotaProvider;
 
 #[allow(
@@ -494,23 +497,13 @@ fn clock_label(epoch: i64, format: &str) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// The line naming a profile whose reset passed without a new reading. Its
-/// banked resets are a separate balance and stay known.
-fn overdue_entry(member: &PoolMember, ascii: bool) -> String {
-    let mut entry = format!("{} reset due, awaiting reading", member.id);
-    if let Some(count) = member.banked.filter(|&count| count > 0) {
-        entry.push_str(&format!(" {}{count} banked", if ascii { "B" } else { "⟲" }));
-    }
-    entry
-}
-
 fn pool_bar(
     pool: &QuotaPool,
     width: usize,
     now: u64,
     accent: Color,
     refreshing: &std::collections::BTreeSet<String>,
-) -> (Vec<Span<'static>>, Vec<String>) {
+) -> Vec<Span<'static>> {
     let percentage = pool.percentage();
     let suffix = format!(
         " {:>padding$}",
@@ -526,19 +519,10 @@ fn pool_bar(
     };
     let weight = pool.reported_weight();
     if weight == 0.0 {
-        let overdue = pool
-            .members
-            .iter()
-            .filter(|member| member.awaiting_reading)
-            .map(|member| overdue_entry(member, theme::ascii()))
-            .collect();
-        return (
-            vec![
-                Span::raw(" ".repeat(width.saturating_sub(suffix_width))),
-                suffix(),
-            ],
-            overdue,
-        );
+        return vec![
+            Span::raw(" ".repeat(width.saturating_sub(suffix_width))),
+            suffix(),
+        ];
     }
     let refills: Vec<_> = pool
         .reported_members()
@@ -632,8 +616,7 @@ fn pool_bar(
             spans.push(divider(accent));
         }
     }
-    let mut fallback = Vec::new();
-    for (index, ((member, capacity), cells)) in refills
+    for (index, ((member, _), cells)) in refills
         .into_iter()
         .zip(widths.into_iter().skip(1))
         .enumerate()
@@ -666,29 +649,12 @@ fn pool_bar(
                 if label_width(&full_label) <= label_budget {
                     full_label
                 } else {
-                    fallback.push(format!("{} {banked} banked", member.id));
                     short_status.to_string()
                 }
             } else {
                 short_status.to_string()
             }
         } else {
-            let mut entry = member.id.clone();
-            if capacity > 0.0 {
-                let share = capacity / weight;
-                let amount = if share < 1.0 {
-                    "<1".to_string()
-                } else {
-                    format!("{share:.0}")
-                };
-                entry.push_str(&format!(" +{amount}%"));
-            }
-            entry.push(' ');
-            entry.push_str(&status);
-            if let Some(banked) = banked {
-                entry.push_str(&format!(" {banked}"));
-            }
-            fallback.push(entry);
             String::new()
         };
         if cells == 0 {
@@ -709,25 +675,7 @@ fn pool_bar(
     if !inline {
         spans.push(suffix());
     }
-    // A profile whose reset passed without a new reading adds nothing to the
-    // bar; name it so the pane says which profile is waiting.
-    for member in pool.members.iter().filter(|member| member.awaiting_reading) {
-        fallback.push(overdue_entry(member, ascii));
-    }
-    // A full profile has no refill chunk, but its banked resets still matter.
-    for member in pool
-        .reported_members()
-        .filter(|member| member.remaining >= 100 && !refreshing.contains(&member.id))
-    {
-        if let Some(count) = member.banked.filter(|&count| count > 0) {
-            fallback.push(format!(
-                "{} {}{count} banked",
-                member.id,
-                if ascii { "B" } else { "⟲" }
-            ));
-        }
-    }
-    (spans, fallback)
+    spans
 }
 
 fn lane(
@@ -904,34 +852,13 @@ fn wrap_note(text: &str, width: usize) -> Vec<String> {
     .collect()
 }
 
-fn refill_lines(labels: Vec<String>, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut row = String::new();
-    let separator = theme::glyphs().footer_separator;
-    let width = width.saturating_sub(2);
-    for label in labels {
-        if !row.is_empty() {
-            let joined = format!("{row}{separator}{label}");
-            if Span::raw(joined.as_str()).width() <= width {
-                row = joined;
-                continue;
-            }
-            lines.push(Line::styled(format!("  {row}"), theme::muted()));
-        }
-        row = label;
-        if Span::raw(row.as_str()).width() > width {
-            lines.extend(
-                wrap_note(&row, width)
-                    .into_iter()
-                    .map(|text| Line::styled(format!("  {text}"), theme::muted())),
-            );
-            row.clear();
-        }
+fn quota_group_prefix(selected: bool, expanded: bool) -> &'static str {
+    match (selected, expanded) {
+        (true, true) => ">- ",
+        (true, false) => ">+ ",
+        (false, true) => " - ",
+        (false, false) => " + ",
     }
-    if !row.is_empty() {
-        lines.push(Line::styled(format!("  {row}"), theme::muted()));
-    }
-    lines
 }
 
 type QuotaLines = (
@@ -962,21 +889,43 @@ fn quota_lines(
             provider.provider.display_name().to_uppercase(),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
-        for pool in provider.pools {
+        let text_expanded = provider_text_expanded(&provider, &dashboard.quota_expanded);
+        if let Some(row) = provider.text_header() {
+            let selected = focused && selection.as_ref() == Some(&row);
+            let summary = provider_status_summary(&provider, &dashboard.quota_refreshing);
+            for (index, text) in wrap_note(&summary, width.saturating_sub(3))
+                .into_iter()
+                .enumerate()
+            {
+                pool_rows.push((row.clone(), lines.len()));
+                if let [(id, _)] = provider.text.as_slice() {
+                    profile_rows.push((id.clone(), lines.len()));
+                }
+                let prefix = if index == 0 {
+                    quota_group_prefix(selected, text_expanded)
+                } else {
+                    "   "
+                };
+                lines.push(Line::styled(
+                    format!("{prefix}{text}"),
+                    if selected {
+                        theme::selection(true)
+                    } else {
+                        theme::muted()
+                    },
+                ));
+            }
+        }
+        for pool in &provider.pools {
             let row = QuotaRow::Pool(pool.key.clone());
             let selected = focused && selection.as_ref() == Some(&row);
             pool_rows.push((row, lines.len()));
-            let expanded = dashboard.quota_expanded.contains(&pool.key);
-            let prefix = format!(
-                "{}{}{}",
-                if selected { ">" } else { " " },
-                if expanded { "- " } else { "+ " },
-                if pool.label.is_empty() {
-                    String::new()
-                } else {
-                    format!("{} ", pool.label)
-                }
-            );
+            let expanded = pool.is_expanded(&dashboard.quota_expanded);
+            let mut prefix = quota_group_prefix(selected, expanded).to_owned();
+            if !pool.label.is_empty() {
+                prefix.push_str(&pool.label);
+                prefix.push(' ');
+            }
             let bar_width = width.saturating_sub(prefix.chars().count());
             let mut spans = vec![Span::styled(
                 prefix,
@@ -986,9 +935,13 @@ fn quota_lines(
                     Style::default()
                 },
             )];
-            let (bar, refill_labels) =
-                pool_bar(&pool, bar_width, now, accent, &dashboard.quota_refreshing);
-            spans.extend(bar);
+            spans.extend(pool_bar(
+                pool,
+                bar_width,
+                now,
+                accent,
+                &dashboard.quota_refreshing,
+            ));
             if pool.members.len() == 1 {
                 profile_rows.push((pool.members[0].id.clone(), lines.len()));
             }
@@ -1002,32 +955,6 @@ fn quota_lines(
                     ),
                     theme::muted(),
                 ));
-            }
-            // Expanded lanes already give each profile's reset and banked
-            // resets; the list only supplies what a collapsed bar cannot fit.
-            if !expanded {
-                lines.extend(refill_lines(refill_labels, width));
-            }
-            // Warnings (a refused check, unknown windows) stay visible while
-            // collapsed; each line names one member and opens its menu.
-            for member in &pool.members {
-                if let Some(note) = &member.note {
-                    for text in wrap_note(
-                        &format!(
-                            "{} {} · {note}",
-                            member.id,
-                            if member.awaiting_reading {
-                                "?".to_string()
-                            } else {
-                                format!("{}%", member.remaining)
-                            }
-                        ),
-                        width.saturating_sub(2),
-                    ) {
-                        profile_rows.push((member.id.clone(), lines.len()));
-                        lines.push(Line::styled(format!("  {text}"), theme::muted()));
-                    }
-                }
             }
             if expanded {
                 let name_width = pool
@@ -1113,13 +1040,8 @@ fn quota_lines(
                 }
             }
         }
-        for (id, label) in provider.text {
-            let label = if dashboard.quota_refreshing.contains(&id) {
-                format!("refreshing{}", theme::glyphs().ellipsis)
-            } else {
-                label
-            };
-            profile_rows.push((id.clone(), lines.len()));
+        for (id, label) in provider.text.into_iter().filter(|_| text_expanded) {
+            let label = profile_status(&id, &label, &dashboard.quota_refreshing);
             let row = QuotaRow::Profile(id.clone());
             let selected = focused && selection.as_ref() == Some(&row);
             for (index, text) in wrap_note(&format!("{id}: {label}"), width.saturating_sub(2))
@@ -1150,6 +1072,7 @@ fn quota_lines(
 
 #[cfg(test)]
 mod tests {
+    use super::super::quota_pools::QuotaGroup;
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use mj_core::config::{HarnessProfile, SymbolSet};
@@ -1166,7 +1089,7 @@ mod tests {
             20,
         );
         assert_eq!(widths.iter().sum::<usize>(), 20);
-        // 97% of 20 cells; refills that cannot fit go under the bar.
+        // 97% of 20 cells; refill segments cannot shrink the available fill.
         assert!(widths[0] >= 19, "{widths:?}");
     }
 
@@ -1266,7 +1189,7 @@ mod tests {
                 pool.remaining = 50;
                 let accent = theme::palette().muted;
                 assert!(!matches!(accent, Color::Rgb(..)));
-                let (spans, _) = pool_bar(&pool, 20, now, accent, &Default::default());
+                let spans = pool_bar(&pool, 20, now, accent, &Default::default());
                 let available = spans
                     .iter()
                     .find(|span| span.content.contains('█'))
@@ -1281,6 +1204,134 @@ mod tests {
                 assert_ne!(look(available), look(refill));
             })
         });
+    }
+
+    #[test]
+    fn collapsed_quota_pool_hides_narrow_refills_banked_profiles_and_notes() {
+        let (mut dashboard, now) = fixture();
+        let ids = [
+            "claude2",
+            "claude5",
+            "claude6",
+            "claude7",
+            "claude-aws",
+            "claude-login",
+        ];
+        dashboard
+            .config
+            .profiles
+            .retain(|id, _| ids.contains(&id.as_str()));
+        dashboard.quotas.get_mut("claude2").unwrap().windows[0].resets_at_epoch_seconds =
+            Some(now as i64 - 1);
+        let banked = dashboard.quotas.get_mut("claude5").unwrap();
+        banked.windows[1].remaining_percent = Some(100);
+        banked.extra = Some("Booster balance".into());
+        dashboard.quotas.get_mut("claude7").unwrap().windows[0].remaining_percent = Some(99);
+
+        let render = |dashboard: &DashboardState| {
+            let (lines, _, _) = quota_lines(dashboard, 22, now, true, fixture_clock);
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let collapsed = render(&dashboard);
+        for id in ids {
+            assert!(!collapsed.contains(id), "{collapsed}");
+        }
+        assert!(
+            collapsed.contains("2 profiles not reporting"),
+            "{collapsed}"
+        );
+        assert_eq!(dashboard.quota_rows().len(), 1);
+        dashboard.toggle_quota_pool();
+        let expanded = render(&dashboard);
+        for label in [
+            "claude2",
+            "claude5",
+            "claude-aws",
+            "claude-login",
+            "Booster balance",
+            "pay-per-use",
+        ] {
+            assert!(expanded.contains(label), "{expanded}");
+        }
+        assert_eq!(expanded.matches("Booster balance").count(), 1);
+        dashboard.quota_selection = Some(QuotaRow::Profile("claude-login".into()));
+        dashboard.toggle_quota_pool();
+        assert!(matches!(
+            dashboard.selected_quota_row(),
+            Some(QuotaRow::Pool(_))
+        ));
+        assert_eq!(render(&dashboard), collapsed);
+    }
+
+    #[test]
+    fn provider_text_quota_header_toggles_with_keyboard_and_wrapped_mouse_hit() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut dashboard, now) = fixture();
+        dashboard
+            .config
+            .profiles
+            .retain(|id, _| id == "claude5" || id == "dsh");
+        let mut unreadable = dashboard.quotas["claude-login"].clone();
+        unreadable.profile_id = "claude5".into();
+        unreadable.extra = Some("Log in again to check usage".into());
+        let reading = dashboard
+            .quotas
+            .insert("claude5".into(), unreadable.clone())
+            .unwrap();
+        let header = QuotaRow::ProviderText(mj_core::config::QuotaProvider::Anthropic);
+        dashboard.quota_selection = Some(header.clone());
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        dashboard.handle_dashboard_key(enter);
+        assert!(
+            dashboard
+                .quota_rows()
+                .contains(&QuotaRow::Profile("claude5".into()))
+        );
+        assert_eq!(dashboard.selected_quota_row(), Some(header.clone()));
+        let mut output = String::new();
+        capture(&mut output, "wrapped status", &mut dashboard, now, 30, 22);
+        let continuation = dashboard
+            .quota_pool_areas
+            .borrow()
+            .iter()
+            .filter(|(row, _)| row == &header)
+            .nth(1)
+            .unwrap()
+            .1;
+        assert!(
+            dashboard
+                .quota_row_areas
+                .borrow()
+                .iter()
+                .any(|(id, area)| id == "claude5" && *area == continuation)
+        );
+        dashboard.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: continuation.x,
+            row: continuation.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            !dashboard
+                .quota_rows()
+                .contains(&QuotaRow::Profile("claude5".into()))
+        );
+        assert_eq!(dashboard.selected_quota_row(), Some(header.clone()));
+        assert_eq!(dashboard.quota_rows().len(), 2);
+
+        dashboard.apply_quota(reading);
+        assert!(
+            matches!(dashboard.selected_quota_row(), Some(QuotaRow::Pool(key))
+            if key.provider == mj_core::config::QuotaProvider::Anthropic)
+        );
+        dashboard.apply_quota(unreadable);
+        assert_eq!(dashboard.selected_quota_row(), Some(header));
     }
 
     // Hard-won: db4dc77c9: refresh reordered pool lanes and stranded selection on another profile.
@@ -1365,7 +1416,7 @@ mod tests {
             dashboard.selected_quota_row(),
             Some(QuotaRow::Pool(key.clone()))
         );
-        assert!(!dashboard.quota_expanded.contains(&key));
+        assert!(!dashboard.quota_expanded.contains(&QuotaGroup::Pool(key)));
     }
 
     // Hard-won: quota review: clicks used stale positions after a quota refresh reordered rows.
@@ -1494,7 +1545,12 @@ mod tests {
                     dashboard.quota_expanded = dashboard
                         .quota_pools()
                         .into_iter()
-                        .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                        .flat_map(|provider| {
+                            provider
+                                .pools
+                                .into_iter()
+                                .map(|pool| QuotaGroup::Pool(pool.key))
+                        })
                         .collect();
                     dashboard.set_selection_for(Focus::Quota, 0);
                     capture(
@@ -1687,7 +1743,12 @@ mod tests {
             dashboard.quota_expanded = dashboard
                 .quota_pools()
                 .into_iter()
-                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .flat_map(|provider| {
+                    provider
+                        .pools
+                        .into_iter()
+                        .map(|pool| QuotaGroup::Pool(pool.key))
+                })
                 .collect();
             let moonshot = dashboard
                 .quota_rows()
@@ -1745,7 +1806,12 @@ mod tests {
             dashboard.quota_expanded = dashboard
                 .quota_pools()
                 .into_iter()
-                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .flat_map(|provider| {
+                    provider
+                        .pools
+                        .into_iter()
+                        .map(|pool| QuotaGroup::Pool(pool.key))
+                })
                 .collect();
             dashboard.set_selection_for(Focus::Quota, 0);
             capture(
@@ -1877,7 +1943,12 @@ mod tests {
                 dashboard.quota_expanded = dashboard
                     .quota_pools()
                     .into_iter()
-                    .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                    .flat_map(|provider| {
+                        provider
+                            .pools
+                            .into_iter()
+                            .map(|pool| QuotaGroup::Pool(pool.key))
+                    })
                     .collect();
                 dashboard.set_selection_for(Focus::Quota, 0);
                 capture(
@@ -1961,7 +2032,12 @@ mod tests {
                 dashboard.quota_expanded = dashboard
                     .quota_pools()
                     .into_iter()
-                    .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                    .flat_map(|provider| {
+                        provider
+                            .pools
+                            .into_iter()
+                            .map(|pool| QuotaGroup::Pool(pool.key))
+                    })
                     .collect();
                 dashboard.set_selection_for(Focus::Quota, 0);
                 capture(
@@ -2000,7 +2076,7 @@ mod tests {
                 dashboard.toggle_quota_pool();
                 capture(
                     &mut output,
-                    &format!("{symbols:?} reset at cell start and banked fallback"),
+                    &format!("{symbols:?} reset at cell start and banked balance"),
                     &mut dashboard,
                     now,
                     60,
@@ -2096,7 +2172,12 @@ mod tests {
             dashboard.quota_expanded = dashboard
                 .quota_pools()
                 .into_iter()
-                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .flat_map(|provider| {
+                    provider
+                        .pools
+                        .into_iter()
+                        .map(|pool| QuotaGroup::Pool(pool.key))
+                })
                 .collect();
             dashboard.set_selection_for(Focus::Quota, 0);
             capture(
@@ -2140,7 +2221,12 @@ mod tests {
             dashboard.quota_expanded = dashboard
                 .quota_pools()
                 .into_iter()
-                .flat_map(|provider| provider.pools.into_iter().map(|pool| pool.key))
+                .flat_map(|provider| {
+                    provider
+                        .pools
+                        .into_iter()
+                        .map(|pool| QuotaGroup::Pool(pool.key))
+                })
                 .collect();
             dashboard.set_selection_for(Focus::Quota, 0);
             capture(

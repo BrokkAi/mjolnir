@@ -1,5 +1,6 @@
 //! Provider identity is resolved off the UI thread; pooling uses only snapshots.
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::thread::JoinHandle;
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
@@ -276,9 +277,16 @@ impl PoolPeriod {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum QuotaGroup {
+    Pool(PoolKey),
+    Provider(QuotaProvider),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QuotaRow {
     Pool(PoolKey),
+    ProviderText(QuotaProvider),
     Profile(String),
     Lane(PoolKey, String),
 }
@@ -287,43 +295,112 @@ impl QuotaRow {
     pub(crate) fn pool(&self) -> Option<&PoolKey> {
         match self {
             Self::Pool(key) | Self::Lane(key, _) => Some(key),
-            Self::Profile(_) => None,
+            Self::ProviderText(_) | Self::Profile(_) => None,
         }
+    }
+}
+
+pub(crate) fn provider_text_expanded(
+    provider: &ProviderQuota,
+    expanded: &BTreeSet<QuotaGroup>,
+) -> bool {
+    if provider.pools.is_empty() {
+        expanded.contains(&QuotaGroup::Provider(provider.provider.clone()))
+    } else {
+        provider.pools.iter().any(|pool| pool.is_expanded(expanded))
     }
 }
 
 pub(crate) fn selectable_rows(
     providers: &[ProviderQuota],
-    expanded: &std::collections::BTreeSet<PoolKey>,
+    expanded: &BTreeSet<QuotaGroup>,
 ) -> Vec<QuotaRow> {
-    providers
-        .iter()
-        .flat_map(|provider| {
-            provider
-                .pools
-                .iter()
-                .flat_map(|pool| {
-                    std::iter::once(QuotaRow::Pool(pool.key.clone())).chain(
-                        pool.members
-                            .iter()
-                            .filter(|_| expanded.contains(&pool.key))
-                            .map(|member| QuotaRow::Lane(pool.key.clone(), member.id.clone())),
-                    )
-                })
-                .chain(
-                    provider
-                        .text
+    let mut rows = Vec::new();
+    for provider in providers {
+        rows.extend(provider.text_header());
+        for pool in &provider.pools {
+            rows.push(QuotaRow::Pool(pool.key.clone()));
+            if pool.is_expanded(expanded) {
+                rows.extend(
+                    pool.members
                         .iter()
-                        .map(|(id, _)| QuotaRow::Profile(id.clone())),
-                )
-        })
-        .collect()
+                        .map(|member| QuotaRow::Lane(pool.key.clone(), member.id.clone())),
+                );
+            }
+        }
+        if provider_text_expanded(provider, expanded) {
+            rows.extend(
+                provider
+                    .text
+                    .iter()
+                    .map(|(id, _)| QuotaRow::Profile(id.clone())),
+            );
+        }
+    }
+    rows
+}
+
+pub(crate) fn profile_status<'a>(
+    id: &str,
+    label: &'a str,
+    refreshing: &BTreeSet<String>,
+) -> Cow<'a, str> {
+    if refreshing.contains(id) {
+        format!("refreshing{}", mj_chat::theme::glyphs().ellipsis).into()
+    } else {
+        label.into()
+    }
+}
+
+pub(crate) fn provider_status_summary(
+    provider: &ProviderQuota,
+    refreshing: &BTreeSet<String>,
+) -> String {
+    let mut counts = Vec::new();
+    for (id, label) in &provider.text {
+        let label = profile_status(id, label, refreshing);
+        if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| *seen == label) {
+            *count += 1;
+        } else {
+            counts.push((label, 1));
+        }
+    }
+    if provider.text.len() == 1 {
+        return counts.remove(0).0.into_owned();
+    }
+    counts
+        .into_iter()
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub(crate) struct ProviderQuota {
     pub provider: QuotaProvider,
     pub pools: Vec<QuotaPool>,
     pub text: Vec<(String, String)>,
+}
+
+impl ProviderQuota {
+    pub(crate) fn text_header(&self) -> Option<QuotaRow> {
+        (self.pools.is_empty() && !self.text.is_empty())
+            .then(|| QuotaRow::ProviderText(self.provider.clone()))
+    }
+
+    pub(crate) fn first_row(&self) -> Option<QuotaRow> {
+        self.pools
+            .first()
+            .map(|pool| QuotaRow::Pool(pool.key.clone()))
+            .or_else(|| self.text_header())
+    }
+
+    pub(crate) fn has_profile(&self, id: &str) -> bool {
+        self.text.iter().any(|(profile, _)| profile == id)
+            || self
+                .pools
+                .iter()
+                .any(|pool| pool.members.iter().any(|member| member.id == id))
+    }
 }
 
 pub(crate) struct QuotaPool {
@@ -336,6 +413,10 @@ pub(crate) struct QuotaPool {
 }
 
 impl QuotaPool {
+    pub(crate) fn is_expanded(&self, expanded: &BTreeSet<QuotaGroup>) -> bool {
+        expanded.contains(&QuotaGroup::Pool(self.key.clone()))
+    }
+
     pub(super) fn reported_members(&self) -> impl Iterator<Item = &PoolMember> {
         self.members
             .iter()
