@@ -4,8 +4,6 @@
 Provide the built mj and its matching portable worker. The Podman engine
 must have the agent-dev:latest image cached. The fixture runs a private Git
 origin and a deterministic ACP peer. Use a named instance for each case.
-For a debug build, run with RUST_MIN_STACK=33554432 so Move has enough
-stack space on Tokio threads.
 """
 
 import argparse
