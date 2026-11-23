@@ -33,8 +33,8 @@ tokio.workspace = true
 tracing.workspace = true
 semver.workspace = true
 chrono.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime" }
-tempfile.workspace = true

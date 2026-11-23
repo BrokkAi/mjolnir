@@ -605,6 +605,13 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
+    if cli.command.is_none()
+        && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || !std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    {
+        print_noninteractive_welcome();
+        return Ok(());
+    }
     if matches!(cli.command, Some(Command::DaemonRun)) {
         // Set this before starting threads: the launcher's session checkout
         // can be removed while the daemon is still running.
@@ -2177,8 +2184,7 @@ async fn run_workspace_dashboard(
             }
         }
         None => {
-            println!("Welcome to Mjolnir");
-            println!("Run `mj doctor` for non-interactive validation.");
+            print_noninteractive_welcome();
             Ok(DashboardExit::Normal)
         }
     };
@@ -2213,6 +2219,11 @@ async fn run_workspace_dashboard(
         detach_request,
     );
     result
+}
+
+fn print_noninteractive_welcome() {
+    println!("Welcome to Mjolnir");
+    println!("Run `mj doctor` for non-interactive validation.");
 }
 
 /// What the dashboard needs before it can draw.

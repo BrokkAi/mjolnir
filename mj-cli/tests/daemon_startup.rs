@@ -66,6 +66,44 @@ fn upgrade_command(storage: &common::DaemonStorage) -> Command {
     command
 }
 
+// Hard-won: a06334f2e2: redirected bare mj started the daemon and consumed first-launch placement.
+#[test]
+fn redirected_bare_mj_leaves_first_launch_placement_unset() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let data = root.path().join("data");
+    fs::create_dir(&config).unwrap();
+    fs::create_dir(&data).unwrap();
+    let _storage = common::DaemonStorage::new(root, config.clone(), data.clone());
+    let output = mj_core::subprocess::run_with_input(
+        common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+            .args(["--instance", "redirected-bare-mj"])
+            .env("MJ_CONFIG_DIR", &config)
+            .env("MJ_DATA_DIR", &data)
+            .env("MJOLNIR_NO_UPDATE_CHECK", "1"),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "Welcome to Mjolnir",
+            "Run `mj doctor` for non-interactive validation."
+        ]
+    );
+    assert!(!data.join("daemon.json").exists());
+    assert!(!data.join("mj.sqlite3").exists());
+}
+
 /// A configured Apple runtime is started by the real daemon startup path.
 /// The fake CLI holds its start operation until this test observes a
 /// successful management request, proving that the daemon does not wait for
