@@ -1,25 +1,22 @@
-//! Cumulative review of a completed coding turn by independent harness sessions.
+//! Before-push review of committed changes by independent harness sessions.
 //!
-//! A *turn review* runs after the primary agent finishes a prompt: Hel captures
-//! what the workspace's repositories changed since the last completed review,
-//! then asks independently running reviewer sessions to inspect that same captured
-//! change. The configured reviewer profile is resolved once for the group. The
-//! user can inspect each session and either forward the combined findings to the
-//! primary, dismiss them, or cancel the review.
+//! A review captures the committed changes proposed for publication and asks
+//! independent reviewer sessions to inspect the same captured trees. An optional
+//! brief writer summarizes the affected code before the reviewers start.
 //!
 //! Each reviewer follows Codex's `/review` rubric and returns plain-text findings
 //! or exactly `No findings.` when there are none. The driver keeps reports in
 //! launch order, labels their source sessions, and declares the group clean only
-//! when every reviewer completed cleanly. It owns forwarding, cancellation and
-//! the durable state restored after a daemon restart.
+//! when every reviewer completed cleanly. The host uses the result to decide
+//! whether to release a pending push or report findings to the primary session.
+//! The driver can resume from its persisted state after a daemon restart.
 //!
 //! Terms used throughout:
 //!
 //! * A *reviewer* reads the user messages, changed-file counts and captured
 //!   tree ids, then gets the diff through its own harness tools.
-//! * A *baseline* is the Git tree id of a repository's working tree as of the
-//!   last completed review. It advances only after complete review coverage;
-//!   cancellation or an incomplete group leaves the changes for the next review.
+//! * A *baseline* is the Git tree id that serves as the base of a repository's
+//!   review diff.
 
 #[cfg(test)]
 mj_core::enable_test_fixtures_on_startup!();

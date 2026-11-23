@@ -1,0 +1,205 @@
+# Docker for Mjolnir
+
+This is the operational contract for hosts that run Mjolnir Docker targets.
+Mjolnir drives the Docker CLI and requires it to reach a Linux Docker daemon.
+For Docker on this machine, attached source directories must be visible inside the
+Docker daemon's filesystem. On Linux with a native daemon, copy-on-write
+attachments use OverlayFS, and the writable storage lives in Docker-managed
+volumes. On macOS, every Docker daemon (Docker Desktop, Colima, OrbStack) runs
+in a Linux VM that reaches host directories through a file share, as Docker
+Desktop also does on Linux. A file share cannot back an overlay, so on these
+daemons copy-on-write attachments mount read-only, and Mjolnir reports each one
+when the session starts. The directory must still be shared with the VM. For Docker on an SSH machine, attached sources
+are on the configured SSH host. The controller uses the Docker CLI and does not
+install Docker locally for an SSH target.
+
+## Configure a target
+
+```toml
+[targets.docker]
+kind = "docker"
+```
+
+An SSH Docker target uses the existing OpenSSH configuration and runs Docker
+filesystem operations on the remote host:
+
+```toml
+[machines.builder]
+kind = "ssh"
+host = "builder"
+
+[targets.builder-docker]
+kind = "docker"
+machine = "builder"
+```
+
+The `host` value is an SSH destination (usually an alias from
+`~/.ssh/config`). It must support noninteractive `ssh builder true`; configure
+keys and host verification before running `mj doctor`. The remote user must be
+able to run Docker, and Docker Engine must be installed and running there.
+Mjolnir does not forward a Docker socket, create a Docker context, or install
+Docker on the controller machine.
+
+Before launch, Mjolnir runs:
+
+```console
+docker version --format '{{.Server.Version}} {{.Server.Os}}'
+```
+
+The command must succeed and report `linux` as the server operating system.
+For each session Mjolnir starts one detached, labeled container, uses `docker exec`
+and `docker cp` for the worker and its files, and removes that exact container
+only after checkpointing succeeds.
+
+Every session also mounts a private disk-backed Docker volume at `/tmp`, with
+mode 1777 so nonroot image users can create temporary files. Temporary writes
+go directly to the daemon host's filesystem rather than the container's
+writable overlay. This volume is excluded from checkpoints and removed after
+the container, so its contents are lost when the session environment is destroyed. An explicit
+attachment at `/tmp` keeps its configured behavior.
+
+Daemon upgrades reconnect to compatible workers and leave existing containers,
+workspace storage, temporary files and build caches in place. **Restart agent**
+restarts the worker and harness inside the same container, preserving its
+filesystem even when the configured image or container settings have changed.
+New sessions use the configured image.
+
+Choose **Upgrade container and restart…** from the session menu, or the upgrade
+alternative in the Restart dialog, to explicitly replace a container. The
+confirmation shows the current and target images. Existing independent
+workspace and cache mounts are reattached; they are never reconstructed from a
+checkpoint. State in the container's writable layer, including manually
+installed packages, may be lost. A checkpoint does not preserve the whole
+environment. The private worker journal and harness state are transferred so
+accepted work and conversation state survive.
+
+Upgrades requested during work wait for the worker's atomic idle reservation.
+The pending request survives daemon replacement and can be cancelled before
+replacement starts. The stopped source is retained until the replacement worker
+is ready. A failed replacement retains its storage and durable recovery intent.
+
+The operation supports owned local and SSH Podman/Docker containers whose
+workspace is on a writable volume or bind mount. A workspace stored only in the
+container layer, transient copy-on-write mounts, borrowed child containers and
+unsupported engine settings produce a preservation refusal before the worker
+is stopped. In particular, a default Docker session with its workspace in the
+container layer cannot use this upgrade path. Apple containers are unsupported.
+There is no destructive fallback.
+
+Preview and queue through the CLI:
+
+```console
+mj upgrade-container --session <id>
+mj upgrade-container --session <id> --acknowledge-writable-layer-loss
+mj upgrade-container --session <id> --cancel
+```
+
+The default `pull_policy = "auto"` launches with `docker run --pull=missing`, so
+a session starts from the cached image. The daemon keeps remote `:latest` images
+current instead: once an hour it runs `docker pull` and then
+`docker image prune -f` for every such image. Versioned tags, local names, and
+digest-pinned references stay cached. Docker has no `--pull=newer` spelling, so
+Mjolnir maps an explicit `newer` and `always` to `docker run --pull=always`:
+Docker checks the registry manifest digest and reuses unchanged layers.
+`missing` and `never` map directly to Docker's matching run policies.
+
+## Writable attached directories
+
+Mjolnir preserves the same attached-directory behavior on Docker and Podman. A
+writable attachment reads the selected host directory but writes into
+session-owned OverlayFS upper and work directories, leaving the original host
+directory unchanged. Read-only attachments remain ordinary read-only bind
+mounts.
+
+For each writable attachment, Mjolnir creates a labeled Docker local volume in
+this form:
+
+```console
+docker volume create --driver local \
+  --label dev.mj.managed=true \
+  --label dev.mj.session=<session-id> \
+  --opt type=overlay \
+  --opt device=overlay \
+  --opt o=lowerdir=<source>,upperdir=<upper>,workdir=<work> \
+  <volume-name>
+```
+
+Docker's built-in local volume driver passes these options to the Linux mount
+operation. The upper and work directories live in a separate labeled Docker
+backing volume on the daemon's Linux filesystem. A short-lived helper using the
+configured image creates these directories; it requires no privileged mode. The source
+remains the shared host directory: Mjolnir does not copy it into the volume.
+Mjolnir verifies ownership labels before reusing or removing resources and
+refuses colliding foreign volumes or helper containers. The writable layer
+preserves the source directory's ownership and permissions. As with ordinary
+Docker mounts, attached files must permit access by the image's configured user;
+Mjolnir does not rewrite file ownership or run the session as root.
+
+On a failed launch, Mjolnir removes only resources carrying the expected session
+identity. On suspension or destruction it removes the container first, then its labeled
+volumes, then the backing volume. It retains the backing volume if
+the container or a volume could not be removed, preventing deletion beneath a
+live mount.
+
+OverlayFS requires a Linux daemon with working overlay mounts. Its upper and
+work directories must be on the same compatible filesystem. Mjolnir automatically
+switches known-incompatible attachment sources, such as NFS, SMB, FUSE, FAT,
+or another OverlayFS, to read-only and reports that change during launch.
+
+## Verify Docker and the image
+
+For a local target, first make sure the CLI can reach the daemon:
+
+```console
+docker info
+docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+```
+
+For an SSH target, run the equivalent checks on the configured host:
+
+```console
+ssh builder docker info
+ssh builder docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+```
+
+Then run Mjolnir's checks:
+
+```console
+mj doctor --json
+mj doctor --json --smoke
+```
+
+The regular check verifies the daemon and each configured image. The smoke
+check creates its temporary source directory under the user's shared home on
+macOS, or in the host temporary directory on Linux. With a native Linux daemon
+it attaches the directory through the managed OverlayFS path, writes through
+the container view, confirms that the source directory did not change, and
+removes the container, overlay volume, and backing volume. With a VM-hosted
+daemon it attaches the directory read-only, as sessions there do, and confirms
+the container can read it but not write to it. A failed smoke test is
+`fixable`, so `mj doctor --smoke` exits non-zero. Source directories outside
+the VM's shared locations must be shared in Docker Desktop's or Colima's
+configuration before they can be attached. Resolve every `fixable` result before launching a session.
+
+## Git clone cache and recovery
+
+Docker targets use the same host Git clone cache as local Podman targets. For
+Docker on an SSH machine, this cache is on the SSH host. Mjolnir mounts a session snapshot
+read-only, lets the in-container clone borrow its objects, and falls back to a
+normal network clone if cache preparation fails. Session snapshots are removed
+after their owning container.
+
+If Mjolnir exits while a container survives, `mj recover scan` finds Docker
+containers carrying Mjolnir ownership labels, including on an SSH Docker
+host. By default, the scan includes only containers stamped with the current
+Mjolnir instance's `dev.mj.instance` identity. Use `--all-instances` to include
+other instances and older, unstamped containers. Adoption verifies ownership
+and instance access, starts a stopped container when safe, and
+reconnects its worker. A normal checkpoint/resume instead provisions a fresh
+Docker container from the verified recovery archive on the same host.
+If the worker's original workspace is missing from the controller database,
+adoption groups the session in a `Recovered` workspace. A fresh controller can
+reconstruct the transcript only while the worker retains its full event history.
+After a verified checkpoint allows older events to be pruned, recovery also
+requires that checkpoint archive; retain the original controller data or import
+its checkpoint instead of adopting into an empty database.

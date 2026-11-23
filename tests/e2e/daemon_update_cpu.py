@@ -100,7 +100,7 @@ def main():
                 raise ScenarioFailure(f"fixture did not finish: {answer}")
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                status, conversation = lab.request("GET", f"/api/conversations/{session}")
+                status, conversation = lab.request("GET", f"/api/v1/conversations/{session}")
                 if status == 200 and len(json.dumps(conversation)) > 65536:
                     break
                 time.sleep(0.1)
@@ -119,7 +119,7 @@ def main():
         time.sleep(3)
         if any(wait.done() for wait in waits):
             raise ScenarioFailure("a fixture wait ended before measurement")
-        status, streaming_before = lab.request("GET", f"/api/conversations/{sessions[-1]}")
+        status, streaming_before = lab.request("GET", f"/api/v1/conversations/{sessions[-1]}")
         if status != 200:
             raise ScenarioFailure("streaming conversation unavailable")
         before = counters(pid)
@@ -127,7 +127,7 @@ def main():
         time.sleep(args.seconds)
         elapsed = time.monotonic() - started
         after = counters(pid)
-        status, streaming_after = lab.request("GET", f"/api/conversations/{sessions[-1]}")
+        status, streaming_after = lab.request("GET", f"/api/v1/conversations/{sessions[-1]}")
         if status != 200:
             raise ScenarioFailure("streaming conversation unavailable")
         if any(wait.done() for wait in waits):

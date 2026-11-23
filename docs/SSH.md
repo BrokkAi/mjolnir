@@ -6,7 +6,7 @@ Four runtimes can run on it:
 - `bare` — uses an existing Git project directory on the remote machine.
   **Create isolated checkout** chooses a session-specific clone under
   `.mj/clones/<session-id>` instead of using the selected directory directly.
-- `podman` — starts a rootless container on the remote machine
+- `podman` — starts a rootless container on a remote Linux machine
   (the same model as on this machine, just reached over SSH) and runs the
   session inside it.
 - `docker` — uses the remote host's Linux Docker daemon; see
@@ -206,14 +206,14 @@ sharing open their own connection and use the same refusal retry.
   SSH user must be able to create `.mj/clones/` below the
   repository when **Create isolated checkout** is selected. Uncommitted changes
   in the source are not copied into that clone.
-- For a Podman runtime: **rootless Podman on the remote host**, meeting the same
+- For a Podman runtime: **rootless Podman on the remote Linux host**, meeting the same
   postconditions Mjolnir expects locally. See [Podman for Mjolnir](PODMAN.md) — the
-  remote host needs Podman 4.3 or newer and the same rootless
+  remote host needs Podman 4.0 or newer and the same rootless
   user-namespace setup as a local Podman host.
 - For an Apple container runtime: **Apple's signed `container` package, macOS 26
-  or newer, Apple silicon, and a running service**. Follow the [official
-  installation instructions](https://github.com/apple/container#initial-install)
-  on the Mac, run `container system start`, and check `container system status`.
+  or newer, and Apple silicon**. Follow the [official installation
+  instructions](https://github.com/apple/container#initial-install) on the Mac.
+  Mjolnir starts the service and installs the default kernel if needed at launch.
   Mjolnir runs `container` with the Mac's system `PATH` from `/etc/paths`,
   which includes `/usr/local/bin` where the package installs it, so the SSH
   account needs no shell configuration. Mjolnir checks these same commands
@@ -232,7 +232,7 @@ disconnects, and adds each runtime it newly runs: a `bare` runtime named after
 the machine when the host is Linux or macOS on x86_64 or arm64,
 `<machine>-podman` and `<machine>-docker` for each engine that passes the same
 check a launch runs, and `<machine>-apple-container` when the machine is
-Apple-silicon macOS 26 or newer with a running Apple container service. This
+Apple-silicon macOS 26 or newer with a working Apple container installation. This
 covers machines that already have runtimes, so Docker installed later on a
 host you already use appears without any configuration. Settings › Runtimes › Detect runtimes checks on demand. A runtime
 whose machine did not answer, or whose engine stopped working, is left out of
@@ -276,6 +276,9 @@ permissions = "guardian"
 ```
 
 ### macOS hosts, including EC2 Macs
+
+Use Docker or Apple container for container sessions on these hosts. Podman
+runtimes require a Linux host.
 
 A bare SSH runtime can run directly on an Intel or Apple silicon Mac. The
 controller detects the remote operating system and architecture and uploads

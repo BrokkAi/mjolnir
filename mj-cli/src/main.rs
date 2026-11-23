@@ -191,7 +191,7 @@ enum Command {
     Elicitations(api_commands::ElicitationsArgs),
     /// Respond to a structured input request.
     Respond(api_commands::RespondArgs),
-    /// Print a unified diff of a session's work.
+    /// Summarize a session's changes or print the diff for selected paths.
     Diff(api_commands::DiffArgs),
     /// Get a session's work out as a patch, a pushed branch, or a git bundle.
     Export(api_commands::ExportArgs),
@@ -605,6 +605,13 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
+    if cli.command.is_none()
+        && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || !std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    {
+        print_noninteractive_welcome();
+        return Ok(());
+    }
     if matches!(cli.command, Some(Command::DaemonRun)) {
         // Set this before starting threads: the launcher's session checkout
         // can be removed while the daemon is still running.
@@ -2177,8 +2184,7 @@ async fn run_workspace_dashboard(
             }
         }
         None => {
-            println!("Welcome to Mjolnir");
-            println!("Run `mj doctor` for non-interactive validation.");
+            print_noninteractive_welcome();
             Ok(DashboardExit::Normal)
         }
     };
@@ -2213,6 +2219,11 @@ async fn run_workspace_dashboard(
         detach_request,
     );
     result
+}
+
+fn print_noninteractive_welcome() {
+    println!("Welcome to Mjolnir");
+    println!("Run `mj doctor` for non-interactive validation.");
 }
 
 /// What the dashboard needs before it can draw.
@@ -3339,6 +3350,7 @@ mod tests {
                 title: "stopped".into(),
                 harness_kind: mj_core::config::HarnessKind::Codex,
                 last_profile: "codex".into(),
+                staged_aws_profile: None,
                 bundle_id: "project".into(),
                 project_directory: None,
                 managed_worktree: None,

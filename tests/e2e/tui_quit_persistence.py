@@ -201,7 +201,7 @@ def rename_session(lab: Lab, session_id: str, title: str) -> None:
     )
     status, response = lab.request(
         "POST",
-        "/api/actions",
+        "/api/v1/actions",
         {"action": "rename", "session_id": session_id, "title": title},
     )
     if status != 202:

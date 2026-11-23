@@ -619,6 +619,7 @@ mod tests {
             action: OPERATOR_AWAY_ACTION.into(),
             // Even a historical worker carrying a reply must not manufacture a user answer.
             reply: Some("not a user answer".into()),
+            answers: None,
         };
         // A question already open when AFK starts must be captured into that AFK period
         // when the worker's away resolution arrives.
@@ -883,6 +884,7 @@ mod tests {
                     elicitation_id: request.id.clone(),
                     action: "cancel".into(),
                     reply: None,
+                    answers: None,
                 });
             }
             observations
@@ -1132,6 +1134,7 @@ mod tests {
                             )]),
                         },
                     )),
+                    answers: None,
                 },
             ],
         );

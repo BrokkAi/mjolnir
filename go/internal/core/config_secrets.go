@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -381,6 +382,16 @@ func (e Environment) normalized() Environment {
 // unresolved entry needs.
 func (e Environment) Equal(other Environment) bool {
 	return reflect.DeepEqual(e.normalized(), other.normalized())
+}
+
+// Clone is the derived Clone: a copy that shares no table with e, so
+// either can be edited, or read on another goroutine, without the other.
+func (e Environment) Clone() Environment {
+	return Environment{
+		sources:    maps.Clone(e.sources),
+		resolved:   maps.Clone(e.resolved),
+		unresolved: maps.Clone(e.unresolved),
+	}
 }
 
 func (e *Environment) Clear() {

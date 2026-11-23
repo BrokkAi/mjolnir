@@ -141,6 +141,16 @@ pub struct ClientSessionState {
 pub struct DetachedSessionDraft {
     pub text: String,
     pub inherited_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_drafts: Vec<RetiredDetachedDraft>,
+}
+
+/// The source snapshot read before a terminal saves its recovered copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetiredDetachedDraft {
+    pub draft_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
 }
 
 /// What one turn produced, without loading the transcript around it.
@@ -491,6 +501,13 @@ pub struct UsageCoverage {
     pub estimated_cost_turns: u64,
     #[serde(default)]
     pub missing_cost_turns: u64,
+}
+
+impl UsageCoverage {
+    /// Whole-turn totals omit turns with incomplete or missing reports.
+    pub fn is_partial(&self) -> bool {
+        self.full_turn_reports < self.recorded_turns || self.unfinished_turns > 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

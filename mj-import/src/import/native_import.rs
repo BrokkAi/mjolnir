@@ -219,6 +219,7 @@ pub fn import_native_session(
             title,
             harness_kind: harness,
             last_profile: profile_id,
+            staged_aws_profile: None,
             bundle_id: bundle_id.to_owned(),
             project_directory: raw_project
                 .as_ref()

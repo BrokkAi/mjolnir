@@ -1,7 +1,87 @@
 use super::*;
+use crate::server::{
+    MAX_ATTACHMENT_UPLOAD_BYTES, MAX_PROMPT_BODY_BYTES, handlers as viewer, require_session,
+    settings::{
+        MAX_SETTINGS_BODY_BYTES, edit_settings, push_device_status, push_key, read_settings,
+        render_settings_page, save_settings,
+    },
+};
+use axum::routing::put;
 
 pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
+    // Settings can edit the daemon configuration and require a signed viewer cookie.
+    let settings = Router::new()
+        .route("/settings", get(read_settings))
+        .route(
+            "/settings/page",
+            post(render_settings_page).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route(
+            "/settings/edit",
+            post(edit_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route(
+            "/settings/save",
+            post(save_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+
     Router::new()
+        .route("/push/key", get(push_key))
+        .route("/push/status", get(push_device_status))
+        .route("/snapshot", get(viewer::snapshot))
+        .route("/sessions/{session_id}/row", get(viewer::session_row))
+        .route(
+            "/sessions/{session_id}/notification-message",
+            get(viewer::notification_message),
+        )
+        .route("/conversations/{session_id}", get(viewer::conversation))
+        .route(
+            "/conversations/{session_id}/read",
+            post(viewer::mark_conversation_read),
+        )
+        .route("/viewer/events", get(viewer::events))
+        .route("/bundles", post(viewer::create_bundle))
+        .route("/preflight/new", post(viewer::preflight_new))
+        .route("/preflight/resume", post(viewer::preflight_resume))
+        .route("/paths/complete", post(viewer::complete_path))
+        .route("/projects/discover", post(viewer::discover_projects))
+        .route(
+            "/projects",
+            get(viewer::read_projects).post(viewer::refresh_projects),
+        )
+        .route(
+            "/git-identity",
+            get(viewer::read_git_identity).post(viewer::save_git_identity),
+        )
+        .route("/moves/prepare", post(viewer::prepare_move))
+        .route(
+            "/sessions/{session_id}/client-state",
+            get(viewer::client_state),
+        )
+        .route(
+            "/sessions/{session_id}/attachments",
+            post(viewer::upload_attachment).layer(named_body_limit(MAX_ATTACHMENT_UPLOAD_BYTES)),
+        )
+        .route(
+            "/sessions/{session_id}/draft",
+            put(viewer::save_draft).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
+        )
+        .route(
+            "/sessions/{session_id}/prompt-history",
+            get(viewer::prompt_history),
+        )
+        .route(
+            "/workspaces/{workspace_id}/read",
+            post(viewer::mark_workspace_read),
+        )
+        .route(
+            "/actions",
+            post(viewer::action).layer(named_body_limit(MAX_PROMPT_BODY_BYTES)),
+        )
         .route("/images/build", post(images::start))
         .route("/images/status", post(images::status))
         .route(
@@ -122,7 +202,8 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             state,
             require_api_auth,
         ))
-        // Outside the auth layer so a 401 carries the version header too: a
+        .merge(settings)
+        // Outside the auth layers so a 401 carries the version header too: a
         // client must be able to tell "wrong token" from "wrong server".
         .layer(axum::middleware::from_fn(api_response_headers))
 }
@@ -153,7 +234,10 @@ pub(super) async fn require_api_auth(
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim);
     if bearer.is_some_and(|token| {
-        constant_time_eq(state.api_token.as_bytes(), token.as_bytes()) && !token.is_empty()
+        !token.is_empty()
+            && (constant_time_eq(state.api_token.as_bytes(), token.as_bytes())
+                || (!state.loopback_token.is_empty()
+                    && constant_time_eq(state.loopback_token.as_bytes(), token.as_bytes())))
     }) {
         return Ok(next.run(request).await);
     }

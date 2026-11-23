@@ -1252,15 +1252,20 @@ pub(crate) fn record_runtime_event_with_facts(
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
         }
+        RuntimeEvent::GuardianReviewed { review } => {
+            relay.record_observation(RelayObservation::GuardianReviewed { review })?;
+        }
         RuntimeEvent::ElicitationResolved {
             elicitation_id,
             action,
             reply,
+            answers,
         } => {
             relay.record_observation(RelayObservation::ElicitationResolved {
                 elicitation_id,
                 action,
                 reply,
+                answers,
             })?;
         }
         RuntimeEvent::PromptFinished {
@@ -1755,6 +1760,24 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
             request_id,
             active_prompt_id: active_prompt_id.clone(),
         }),
+        RelayCommand::CancelTurnTarget { target } => {
+            use mj_core::relay::TurnInterruptTarget::*;
+            match target {
+                ActivePrompt { command_id }
+                | QueuedRestart { command_id }
+                | CapacityRetry { command_id } => Some(CommandRequest::CancelTurnFor {
+                    request_id,
+                    active_prompt_id: command_id.clone(),
+                }),
+                Autonomous { .. } | GoalResume { .. } => {
+                    Some(CommandRequest::CancelUnpromptedTurn {
+                        request_id,
+                        target: target.clone(),
+                    })
+                }
+                QuotaRecovery { .. } => None,
+            }
+        }
         RelayCommand::CancelTurn => Some(CommandRequest::Cancel {
             request_id,
             steering_prompt: None,

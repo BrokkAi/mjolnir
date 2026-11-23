@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::storage::RetiredDetachedDraft;
 
 /// Transfer the latest local draft into both sides of an asynchronous attach:
 /// the chat being prepared and the composer the person can edit meanwhile.
@@ -32,6 +33,48 @@ pub(super) fn capture_editor_draft(
     {
         cache.capture(session_id, text, inherited);
     }
+}
+
+pub(super) fn local_composer_draft(
+    cache: &ComposerDraftCache,
+    dashboard: &DashboardState,
+    chats: &BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    inherited: &str,
+) -> String {
+    dashboard
+        .standby_prompt_draft(session_id)
+        .or_else(|| chats.get(session_id).map(|chat| chat.draft()))
+        .unwrap_or_else(|| {
+            cache
+                .get(session_id)
+                .map_or(inherited, |draft| &draft.text)
+                .to_owned()
+        })
+}
+
+pub(super) fn install_workspace_draft(
+    cache: &mut ComposerDraftCache,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    inherited: &str,
+    text: &str,
+) -> Result<()> {
+    let current = local_composer_draft(cache, dashboard, chats, session_id, inherited);
+    let final_text = if current.is_empty() || current == text {
+        text.to_owned()
+    } else {
+        mj_core::draft::merge_drafts(&current, text)?
+    };
+    if let Some(chat) = chats.get_mut(session_id) {
+        chat.set_draft(final_text.clone());
+    }
+    if dashboard.has_standby_composer(session_id) {
+        dashboard.seed_standby_prompt(session_id, final_text.clone());
+    }
+    cache.capture(session_id, final_text, inherited);
+    Ok(())
 }
 
 /// Keep ordering within a session while independent sessions dispatch
@@ -97,7 +140,141 @@ pub(super) fn chat_daemon_requests(
     persistence_tx
 }
 
+pub(super) struct PendingDraftRecovery {
+    pub(super) revision: u64,
+    pub(super) generation: u64,
+    pub(super) name: String,
+}
+
+impl PendingDraftRecovery {
+    // A refresh keeps the current manager busy until its final snapshot arrives.
+    pub(super) fn finish(
+        self,
+        dashboard: &mut DashboardState,
+        result: Result<(), &str>,
+    ) -> Option<u64> {
+        match result {
+            Ok(()) => {
+                dashboard.workspace_draft_notice(
+                    self.generation,
+                    format!("Recovered draft into {}.", self.name),
+                );
+                dashboard
+                    .workspace_management_is_current(self.generation)
+                    .then_some(self.generation)
+            }
+            Err(error) => {
+                report_recovery_error(
+                    dashboard,
+                    self.generation,
+                    format!("Could not save recovered draft for {}: {error}", self.name),
+                );
+                None
+            }
+        }
+    }
+}
+
+fn report_recovery_error(dashboard: &mut DashboardState, generation: u64, error: String) {
+    if !dashboard
+        .finish_workspace_management(generation, Err(error.clone()), false)
+        .foreground
+    {
+        dashboard.set_notice(error);
+    }
+}
+
 impl DashboardContext {
+    pub(super) fn workspace_draft_recovery_error(&self, session_id: &str) -> Option<String> {
+        let inherited = self
+            .chat_session_record(session_id)
+            .map_or("", |session| &session.draft_input);
+        let current = local_composer_draft(
+            &self.composer_drafts,
+            &self.dashboard,
+            &self.chats,
+            session_id,
+            inherited,
+        );
+        (!current.is_empty()).then(|| {
+            format!(
+                "Session {} already has unsent text in its composer. Send or clear it first.",
+                self.session_notice_name(session_id)
+            )
+        })
+    }
+
+    pub(super) fn apply_workspace_draft_recovery(
+        &mut self,
+        generation: u64,
+        source: RetiredDetachedDraft,
+        session_id: String,
+        text: String,
+    ) {
+        let inherited = self
+            .chat_session_record(&session_id)
+            .map_or_else(String::new, |session| session.draft_input.clone());
+        let name = self.session_notice_name(&session_id);
+        match install_workspace_draft(
+            &mut self.composer_drafts,
+            &mut self.dashboard,
+            &mut self.chats,
+            &session_id,
+            &inherited,
+            &text,
+        ) {
+            Ok(()) => {
+                let revision = self.composer_drafts.retire_draft(&session_id, source);
+                self.pending_draft_recoveries
+                    .entry(session_id.clone())
+                    .or_default()
+                    .push(PendingDraftRecovery {
+                        revision,
+                        generation,
+                        name,
+                    });
+                self.flush_composer_draft(&session_id, true);
+            }
+            Err(error) => {
+                report_recovery_error(
+                    &mut self.dashboard,
+                    generation,
+                    format!(
+                        "Could not merge recovered draft into {name}: {error:#}. Your composer and the detached draft were both kept."
+                    ),
+                );
+            }
+        }
+    }
+
+    pub(super) fn finish_workspace_draft_saves(
+        &mut self,
+        session_id: &str,
+        revision: u64,
+        result: Result<(), &str>,
+    ) {
+        let std::collections::btree_map::Entry::Occupied(mut entry) =
+            self.pending_draft_recoveries.entry(session_id.to_owned())
+        else {
+            return;
+        };
+        let mut reload_generation = None;
+        for recovery in entry
+            .get_mut()
+            .extract_if(.., |pending| pending.revision <= revision)
+        {
+            reload_generation = recovery
+                .finish(&mut self.dashboard, result)
+                .or(reload_generation);
+        }
+        if entry.get().is_empty() {
+            entry.remove();
+        }
+        if let Some(generation) = reload_generation {
+            io::spawn_workspace_drafts_reload(generation, self.dashboard_io_tx.clone());
+        }
+    }
+
     pub(crate) fn chat_daemon_requests(
         &mut self,
         session_id: &str,

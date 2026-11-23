@@ -42,7 +42,7 @@ async function mount(page, {
         ...extraTargets,
       ], bundles, capacity: [], launch_failures: [],
     },
-    snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
+    snapshots: 0, preflights: [], preflightFailures: 0, actions: [], upgrades: [], creates: [], rejectCreate: false,
     completions: [], discoveries: [], discoveryFailures: 0,
     discover: body => body.kind === 'github' ? {
       entries: [{ name: 'example/app', source: 'https://github.com/example/app', description: 'A useful project', kind: 'repository' }],
@@ -76,23 +76,29 @@ async function mount(page, {
     };
   });
   page.on('requestfailed', request => {
-    if (request.url().endsWith('/api/preflight/new')) state.preflightFailures++;
-    if (request.url().endsWith('/api/projects/discover')) state.discoveryFailures++;
+    if (request.url().endsWith('/api/v1/preflight/new')) state.preflightFailures++;
+    if (request.url().endsWith('/api/v1/projects/discover')) state.discoveryFailures++;
   });
   await page.route('**/*', async route => {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
-    if (pathname === '/api/snapshot') {
+    if (pathname === '/api/v1/snapshot') {
       state.snapshots++;
       const wire = viewerWireSnapshot(state.snapshot);
       state.lastWireSnapshot = wire;
       state.streamInternedKeys = new Set(Object.keys(wire.interned));
       return json(wire);
     }
-    if (/^\/api\/sessions\/[^/]+\/container-upgrade$/.test(pathname)) return json(state.upgradePreview);
-    if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
+    if (/^\/api\/v1\/sessions\/[^/]+\/container-upgrade$/.test(pathname)) {
+      if (route.request().method() === 'GET') return json(state.upgradePreview);
+      if (route.request().method() === 'POST') {
+        state.upgrades.push({ path: pathname, body: route.request().postDataJSON() });
+        return route.fulfill({ status: 202, body: '' });
+      }
+    }
+    if (pathname === '/api/v1/viewer/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
 
-    if (pathname === '/api/preflight/new') {
+    if (pathname === '/api/v1/preflight/new') {
       const request = route.request().postDataJSON();
       state.preflights.push(request);
       const bare = state.snapshot.targets.find(target => target.id === request.target_id)?.requires_project_directory === true;
@@ -106,12 +112,12 @@ async function mount(page, {
         managed_worktree: bare ? state.worktreeOptions : { available: false, default_create: false },
       });
     }
-    if (pathname === '/api/paths/complete') {
+    if (pathname === '/api/v1/paths/complete') {
       const body = route.request().postDataJSON();
       state.completions.push(body);
       return json(await state.complete(body));
     }
-    if (pathname === '/api/git-identity') {
+    if (pathname === '/api/v1/git-identity') {
       if (gitIdentityError)
         return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: gitIdentityError }) });
       if (route.request().method() === 'POST') {
@@ -123,25 +129,25 @@ async function mount(page, {
       }
       return json(state.gitIdentity);
     }
-    if (pathname === '/api/projects') {
+    if (pathname === '/api/v1/projects') {
       if (state.holdCatalog) await state.holdCatalog;
       return json({ projects: [], locations: [], status: state.catalogStatus || { state: 'ready' } });
     }
-    if (pathname === '/api/projects/discover') {
+    if (pathname === '/api/v1/projects/discover') {
       const body = route.request().postDataJSON();
       state.discoveries.push(body);
       const result = await state.discover(body);
       if (result.error) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify(result) });
       return json(result);
     }
-    if (pathname === '/api/bundles') {
+    if (pathname === '/api/v1/bundles') {
       state.creates.push(route.request().postDataJSON());
       if (state.holdCreate) await state.holdCreate;
       if (state.rejectCreate) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'Repository source is invalid' }) });
       state.snapshot.bundles.push({ id: 'created', repositories: [] });
       return json({ bundle_id: 'created' });
     }
-    if (pathname === '/api/actions') {
+    if (pathname === '/api/v1/actions') {
       const body = route.request().postDataJSON();
       if (body.action === 'check-availability') return route.fulfill({ status: 202, body: '' });
       state.actions.push(body);
@@ -194,11 +200,12 @@ async function captureNewSessionState(output, page, label, state, extra = null) 
   })));
   output.push(`controls: ${JSON.stringify(controls)}`);
   output.push(`subagent selector count: ${await page.locator('#new-subagents').count()}`);
-  if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions)}`);
-  if (state.preflights.length) output.push(`request: POST /api/preflight/new ${JSON.stringify(state.preflights)}`);
-  if (state.completions.length) output.push(`request: POST /api/paths/complete ${JSON.stringify(state.completions)}`);
-  if (state.discoveries.length) output.push(`request: POST /api/projects/discover ${JSON.stringify(state.discoveries)}`);
-  if (state.creates.length) output.push(`request: POST /api/bundles ${JSON.stringify(state.creates)}`);
+  if (state.actions.length) output.push(`action: POST /api/v1/actions ${JSON.stringify(state.actions)}`);
+  for (const { path, body } of state.upgrades) output.push(`request: POST ${path} ${JSON.stringify(body)}`);
+  if (state.preflights.length) output.push(`request: POST /api/v1/preflight/new ${JSON.stringify(state.preflights)}`);
+  if (state.completions.length) output.push(`request: POST /api/v1/paths/complete ${JSON.stringify(state.completions)}`);
+  if (state.discoveries.length) output.push(`request: POST /api/v1/projects/discover ${JSON.stringify(state.discoveries)}`);
+  if (state.creates.length) output.push(`request: POST /api/v1/bundles ${JSON.stringify(state.creates)}`);
   output.push(`project creation requests: ${state.creates.length}`);
   if (extra !== null) output.push(`layout: ${JSON.stringify(extra)}`);
 }
@@ -403,8 +410,11 @@ test('golden_viewer_new_session', async ({ context }) => {
     await page.getByRole('menuitem', { name: 'Upgrade container and restart…', exact: true }).click();
     await expect(warning).toBeVisible();
     await warning.getByRole('button', { name: 'Upgrade container and restart…', exact: true }).click();
-    await expect.poll(() => state.actions.length).toBe(3);
-    expect(state.actions[2]).toEqual({ action: 'upgrade-container', request: { selection: state.upgradePreview, acknowledge_writable_layer_loss: true } });
+    await expect.poll(() => state.upgrades.length).toBe(1);
+    expect(state.upgrades[0]).toEqual({
+      path: '/api/v1/sessions/mounted/container-upgrade',
+      body: { selection: state.upgradePreview, acknowledge_writable_layer_loss: true },
+    });
 
   });
 

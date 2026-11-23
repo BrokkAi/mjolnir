@@ -440,11 +440,6 @@ impl DurableRelay {
                 });
             }
         }
-        ensure_serialized_budget(
-            &next,
-            RELAY_SNAPSHOT_BYTE_BUDGET,
-            "relay snapshot with pending prompt context",
-        )?;
         self.commit_snapshot(next)
     }
 

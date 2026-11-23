@@ -18,7 +18,7 @@ use mj_core::workspace::WorkspaceRecord;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -44,6 +44,38 @@ pub enum StartupPromptOutcome {
 
 pub fn metadata_path() -> PathBuf {
     data_dir().join("daemon.json")
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ApiEndpointMetadata {
+    pub address: SocketAddr,
+    pub token: String,
+    pub pid: u32,
+    pub instance_id: String,
+    pub protocol_version: u32,
+}
+
+pub fn api_endpoint_path() -> PathBuf {
+    api_endpoint_path_in(&data_dir())
+}
+
+pub fn api_endpoint_path_in(dir: &Path) -> PathBuf {
+    dir.join("api-endpoint.json")
+}
+
+pub fn read_api_endpoint() -> Result<Option<ApiEndpointMetadata>> {
+    read_api_endpoint_from(&api_endpoint_path())
+}
+
+pub fn read_api_endpoint_from(path: &Path) -> Result<Option<ApiEndpointMetadata>> {
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    serde_json::from_slice(&body)
+        .map(Some)
+        .with_context(|| format!("parse {}", path.display()))
 }
 
 /// The environment variable naming the container a daemon was launched in.
@@ -831,12 +863,14 @@ impl GitIdentity {
 pub struct DraftPreview {
     pub id: String,
     pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub preview: String,
     pub source: String,
     pub owner_pid: Option<u32>,
     pub saved_at: String,
 }
 
-/// One workspace's detached drafts, without their text.
+/// One workspace's detached drafts, with bounded previews.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceDrafts {
     pub workspace_id: String,
@@ -1421,6 +1455,10 @@ pub enum DaemonAction {
     RecoverDraft {
         draft_id: String,
     },
+    DiscardDrafts {
+        workspace_id: String,
+        draft_id: Option<String>,
+    },
     Stop,
 }
 
@@ -1563,8 +1601,13 @@ pub enum DaemonReply {
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
-    /// Every workspace's detached drafts, without their text.
     WorkspaceDrafts(Vec<WorkspaceDrafts>),
+    RecoveredDraft {
+        session_id: String,
+        text: String,
+        revision: Option<i64>,
+    },
+    Count(usize),
     HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
@@ -2128,6 +2171,10 @@ impl DaemonClient {
         );
         client.stream = Some(stream);
         Ok(client)
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.metadata.pid
     }
 
     /// Connector-owned SSH origin; never inferred from daemon-host placement.
@@ -3825,13 +3872,38 @@ impl DaemonClient {
         }
     }
 
-    pub async fn recover_draft(&mut self, draft_id: String) -> Result<()> {
+    /// Fetch a detached draft. The destination terminal save retires the source.
+    pub async fn recover_draft(
+        &mut self,
+        draft_id: String,
+    ) -> Result<(String, String, Option<i64>)> {
         match self
             .request(DaemonAction::RecoverDraft { draft_id })
             .await?
         {
-            DaemonReply::Done => Ok(()),
+            DaemonReply::RecoveredDraft {
+                session_id,
+                text,
+                revision,
+            } => Ok((session_id, text, revision)),
             reply => bail!("unexpected recover-draft reply {reply:?}"),
+        }
+    }
+
+    pub async fn discard_drafts(
+        &mut self,
+        workspace_id: String,
+        draft_id: Option<String>,
+    ) -> Result<usize> {
+        match self
+            .request(DaemonAction::DiscardDrafts {
+                workspace_id,
+                draft_id,
+            })
+            .await?
+        {
+            DaemonReply::Count(count) => Ok(count),
+            reply => bail!("unexpected discard-drafts reply {reply:?}"),
         }
     }
 
@@ -4013,7 +4085,7 @@ pub const MOVE_ORIGIN_DELTA_PROTOCOL: u32 = SUSPEND_CONSENT_PROTOCOL + 1;
 pub const SUPERVISORS_PROTOCOL: u32 = MOVE_ORIGIN_DELTA_PROTOCOL + 1;
 /// Orchestrator opt-in is part of the delegation policy.
 pub const ORCHESTRATORS_PROTOCOL: u32 = SUPERVISORS_PROTOCOL + 1;
-pub const PROTOCOL_VERSION: u32 = ORCHESTRATORS_PROTOCOL;
+pub const PROTOCOL_VERSION: u32 = ORCHESTRATORS_PROTOCOL + 1;
 /// Guidance for clients sending the removed checkpoint action.
 pub const REMOVED_CHECKPOINT_MESSAGE: &str =
     "The checkpoint action was removed; suspend saves the session.";
@@ -4252,6 +4324,27 @@ mod tests {
         fs::write(&metadata, fixture.to_string()).unwrap();
         let error = read_metadata_at(&metadata).unwrap_err();
         assert!(format!("{error:#}").contains("unknown field `container_id`"));
+    }
+
+    #[test]
+    fn api_endpoint_discovery_tolerates_future_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = api_endpoint_path_in(directory.path());
+        fs::write(
+            &path,
+            serde_json::json!({
+                "address": "127.0.0.1:8787",
+                "token": "fixture-token",
+                "pid": 42,
+                "instance_id": "current-start",
+                "protocol_version": PROTOCOL_VERSION,
+                "future_field": {"extra": true}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let endpoint = read_api_endpoint_from(&path).unwrap().unwrap();
+        assert_eq!(endpoint.instance_id, "current-start");
     }
 
     // Hard-won: c672eb41a1bf: macOS startup hang waited forever for an exited but unreaped daemon

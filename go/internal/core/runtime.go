@@ -500,6 +500,13 @@ func (u *Unbounded[T]) Send(value T) error {
 	return nil
 }
 
+// IsEmpty is the receiver's is_empty: whether no value is queued.
+func (u *Unbounded[T]) IsEmpty() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.queue) == 0
+}
+
 // Recv waits for the next value; false when the channel is closed and empty,
 // or ctx ended.
 func (u *Unbounded[T]) Recv(ctx context.Context) (T, bool) {
@@ -527,6 +534,22 @@ func (u *Unbounded[T]) Recv(ctx context.Context) (T, bool) {
 			return zero, false
 		}
 	}
+}
+
+// TryRecv is try_recv: the next queued value without waiting. ok is false
+// when nothing is queued; closed then tells a channel that is closed and
+// drained (Disconnected) from one that is merely empty.
+func (u *Unbounded[T]) TryRecv() (value T, ok bool, closed bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.queue) > 0 {
+		value = u.queue[0]
+		var zero T
+		u.queue[0] = zero
+		u.queue = u.queue[1:]
+		return value, true, false
+	}
+	return value, false, u.closed
 }
 
 // Close stops further sends, as dropping the receiver does.

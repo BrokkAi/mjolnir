@@ -1356,6 +1356,7 @@ struct FakeBackend {
     /// repeats once exhausted, so a wait loop settles rather than spinning.
     turn_states: Mutex<Vec<Option<TurnState>>>,
     prompt_ordinal: u64,
+    prompt_refusal: Option<mj_core::refusal::Refusal>,
     prompts: Mutex<Vec<(String, String)>>,
     message_requests: Mutex<Vec<CapturedSessionMessageRequest>>,
     submissions: Arc<Mutex<Vec<(String, mj_core::relay::RelayCommand)>>>,
@@ -1624,7 +1625,10 @@ impl SubagentBackend for FakeBackend {
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>> {
         Box::pin(async move {
             self.prompts.lock().unwrap().push((session_id, text));
-            Ok(self.prompt_ordinal)
+            match &self.prompt_refusal {
+                Some(refusal) => Err(refusal.clone().into()),
+                None => Ok(self.prompt_ordinal),
+            }
         })
     }
     fn record_user_prompt(
@@ -2248,6 +2252,23 @@ fn api_app_with_client_state(
     mpsc::Receiver<super::super::BundleRequest>,
     mpsc::Receiver<super::super::ClientStateRequest>,
 ) {
+    let (options, actions, snapshots, bundles, client_state) =
+        api_options_with_client_state(backend, adjust, preferences_path, worker_check);
+    (router(options), actions, snapshots, bundles, client_state)
+}
+
+fn api_options_with_client_state(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    worker_check: Option<crate::server::WorkerSourceCheck>,
+) -> (
+    ServerOptions,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+    mpsc::Receiver<super::super::ClientStateRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -2289,13 +2310,7 @@ fn api_app_with_client_state(
     if let Some(check) = worker_check {
         options.set_worker_source_check(check);
     }
-    (
-        router(options),
-        action_rx,
-        snapshot_tx,
-        bundle_rx,
-        client_state_rx,
-    )
+    (options, action_rx, snapshot_tx, bundle_rx, client_state_rx)
 }
 
 fn bearer(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -2555,6 +2570,31 @@ async fn prompts_and_user_messages_wait_for_lifecycle_work_to_finish() {
     }
 }
 
+#[tokio::test]
+async fn public_prompt_returns_the_worker_queue_refusal_as_conflict() {
+    let message = "The session queue is full. Wait for queued prompts to run or remove queued input, then try again.";
+    let backend = Arc::new(FakeBackend {
+        prompt_refusal: Some(mj_core::refusal::Refusal::precondition(message)),
+        ..Default::default()
+    });
+    let (app, _, _, _) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"do the work"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["error"], message);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_prompt_waiting_for_lifecycle_work_reports_its_terminal_result() {
     use mj_core::state::SessionState;
@@ -2675,6 +2715,46 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
     assert_eq!(json_body(response).await["turn_id"], 3);
 }
 
+#[tokio::test]
+async fn public_interrupt_submits_only_when_the_session_offers_it() {
+    let (app, mut actions, snapshot_tx, _) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            // The daemon can publish an interrupt for queued recovery with no active prompt.
+            snapshot.sessions[0].capabilities.interrupt_turn = true;
+        });
+    let request = || {
+        bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = mj_core::runtime::spawn(app.clone().oneshot(request()));
+    let action = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        action.action,
+        ControllerAction::InterruptTurn {
+            session_id: "session-1".into()
+        }
+    );
+    action
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.interrupt_turn = false);
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert!(actions.try_recv().is_err());
+}
+
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
 // Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
 #[tokio::test]
@@ -2726,6 +2806,53 @@ async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt
         backend.prompts.lock().unwrap().is_empty(),
         "a withdrawn prompt is never submitted"
     );
+}
+
+#[tokio::test]
+async fn an_interrupt_on_either_listener_withdraws_the_other_listeners_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(FakeBackend {
+        record_gate: Some((started.clone(), release.clone())),
+        ..FakeBackend::default()
+    });
+    let (options, _actions, _snapshot_tx, _bundles, _client_state) = api_options_with_client_state(
+        backend.clone(),
+        |snapshot| {
+            snapshot.sessions[0].capabilities.prompt = true;
+            snapshot.sessions[0].capabilities.interrupt_turn = false;
+        },
+        absent_preferences_path(),
+        None,
+    );
+    let loopback = router(options.clone());
+    let phone = router(options);
+    for (sender, interrupter) in [(&loopback, &phone), (&phone, &loopback)] {
+        let prompt = sender.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"stop me"}"#))
+                .unwrap(),
+        );
+        tokio::pin!(prompt);
+        tokio::select! {
+            () = started.notified() => {}
+            result = &mut prompt => panic!("prompt finished before it was held: {result:?}"),
+        }
+        let interrupt = interrupter
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(interrupt.status(), StatusCode::ACCEPTED);
+        release.notify_one();
+        assert_eq!(prompt.await.unwrap().status(), StatusCode::CONFLICT);
+    }
+    assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -5892,6 +6019,57 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
 }
 
 #[tokio::test]
+async fn diff_route_preserves_repeated_paths_and_export_selects_the_full_patch() {
+    let backend = Arc::new(FakeBackend {
+        diff: Some(r#"{"diff":"+new\n","base":"aaaa","head":"bbbb","tracked_files":[{"path":"tracked","insertions":1,"deletions":0,"binary":false}],"untracked_files":["new.txt"],"untracked_total":1}"#.into()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app.clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true&path=-literal&path=src%2Ffile+%26+notes&path="))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["tracked_files"][0]["path"], "tracked");
+    assert_eq!(body["untracked_files"][0], "new.txt");
+    assert_eq!(body["untracked_total"], 1);
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"patch"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/x-diff; charset=utf-8"
+    );
+    assert_eq!(
+        backend.diff_options.lock().unwrap().as_slice(),
+        [
+            DiffOptions {
+                base: Some("HEAD^".into()),
+                json: true,
+                paths: vec!["-literal".into(), "src/file & notes".into(), String::new()],
+                full_patch: false,
+            },
+            DiffOptions {
+                full_patch: true,
+                ..DiffOptions::default()
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
@@ -7136,6 +7314,27 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
             reason: "Docker is not installed on this host".into(),
         };
         snapshot.targets.push(docker);
+        for (id, kind, availability) in [
+            ("apple", "apple-container", AvailabilityVerdict::Available),
+            (
+                "remote-apple",
+                "ssh-apple-container",
+                AvailabilityVerdict::Available,
+            ),
+            (
+                "broken-apple",
+                "ssh-apple-container",
+                AvailabilityVerdict::Missing {
+                    reason: "Apple container check exited with status 64.".into(),
+                },
+            ),
+        ] {
+            let mut apple = snapshot.targets[0].clone();
+            apple.id = id.into();
+            apple.kind = kind.into();
+            apple.availability = availability;
+            snapshot.targets.push(apple);
+        }
         snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
             id: "local".into(),
             label: "local".into(),
@@ -7179,6 +7378,15 @@ async fn options_publish_the_daemon_verdicts_without_classifying_host_capacity()
         "Start Podman and try again."
     );
     assert!(target("podman").get("runtime_missing").is_none());
+    for id in ["apple", "remote-apple"] {
+        assert_eq!(target(id)["availability"], "ready");
+        assert!(target(id)["unavailable_reason"].is_null());
+    }
+    assert_eq!(target("broken-apple")["availability"], "unavailable");
+    assert_eq!(
+        target("broken-apple")["unavailable_reason"],
+        "Apple container check exited with status 64."
+    );
     assert_eq!(target("raw")["availability"], "unknown");
     // The previous CLI strictly decodes each profile in the stable options
     // response, even when a daemon has probed its availability.
@@ -8878,13 +9086,13 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
     );
     let cookie = login_cookie(&app).await;
 
-    for (route, cookie_only) in [
+    for (route, use_cookie) in [
         ("/api/v1/sessions/session-1/items", false),
         (
             "/api/v1/sessions/session-1/native-agents/child/items",
             false,
         ),
-        ("/api/sessions/session-1/items", true),
+        ("/api/v1/sessions/session-1/items", true),
     ] {
         let edit = format!("{route}/tool%3Aedit/detail");
         let request = |builder: axum::http::request::Builder| {
@@ -8892,14 +9100,8 @@ async fn tool_call_detail_routes_enforce_auth_and_scope_and_report_full_or_unava
         };
         let response = request(Request::get(&edit)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
-        if cookie_only {
-            assert_eq!(
-                request(bearer(Request::get(&edit))).await.unwrap().status(),
-                StatusCode::UNAUTHORIZED
-            );
-        }
         let authenticated = |path: &str| {
-            if cookie_only {
+            if use_cookie {
                 Request::get(path).header(COOKIE, &cookie)
             } else {
                 bearer(Request::get(path))

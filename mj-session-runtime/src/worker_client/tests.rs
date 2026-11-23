@@ -1366,7 +1366,6 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &target,
             &skills,
             &credential_sync::GithubSync::Known(None),
-            &credential_sync::AwsSync::Unmanaged,
             credential_sync::HostLogins {
                 slopcop: &credential_sync::HostSlopcopLogin::Unknown,
                 harness: &credential_sync::PassLogin::PerSession,
@@ -1635,7 +1634,7 @@ fn codex_sync_target(
 // Hard-won: #1385: AWS reconciliation skipped credentials, and local sessions can share the same profile.
 #[cfg(unix)]
 #[tokio::test]
-async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile() {
+async fn unscoped_aws_auth_wake_reexports_only_for_the_isolated_session() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = tempfile::tempdir().unwrap();
@@ -1679,10 +1678,9 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
         ]),
         role: None,
         mints: true,
-        selection: None,
     });
     let targets = [local, remote];
-    for generation in ["initial", "renewed"] {
+    let write_export = |generation: &str| {
         std::fs::write(
             &source_file,
             serde_json::to_vec(&serde_json::json!({
@@ -1693,30 +1691,51 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             .unwrap(),
         )
         .unwrap();
-        let outcomes = reconcile_profile(&targets, None).await;
-        assert_eq!(
-            outcomes,
-            [CredentialSyncOutcome {
-                unchanged_login: None,
-                current_access_token: None,
-                session_id: "remote".into(),
-                outcome: Ok(vec![CredentialSyncAction::AwsCredentialsPushed]),
-                step_failures: Vec::new(),
-            }]
-        );
+    };
+    let received_key = || {
         let received: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&remote_received).unwrap()).unwrap();
-        assert_eq!(received["AccessKeyId"], format!("key-{generation}"));
-        assert!(!local_received.exists());
-        assert!(reconcile_profile(&targets, None).await.is_empty());
-    }
-    // A failed AWS source reports only the isolated session; the local
-    // session still completes its ordinary reconciliation.
-    std::fs::remove_file(&source_file).unwrap();
-    let outcomes = reconcile_profile(&targets, None).await;
-    assert_eq!(outcomes.len(), 1);
-    assert_eq!(outcomes[0].session_id, "remote");
-    assert!(!outcomes[0].step_failures.is_empty());
+        received["AccessKeyId"].as_str().unwrap().to_owned()
+    };
+    write_export("initial");
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    let profile_id = targets[1].profile_id.clone();
+    handle.set_targets(targets.into_iter().collect());
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.unwrap();
+            if result.partial && aws_pushed(&result, "remote") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("initial export was installed");
+    assert_eq!(received_key(), "key-initial");
+
+    write_export("renewed");
+    let cause = mj_core::credentials::CredentialSyncCause {
+        session_id: "remote".into(),
+        ordinal: 1,
+        reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+        login_fingerprint: None,
+    };
+    handle.sync_profile_now(&profile_id, Some(cause.clone()));
+    let triggered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.unwrap();
+            if result.trigger.is_some() {
+                break result;
+            }
+        }
+    })
+    .await
+    .expect("the authentication wake reported its new export");
+    assert_eq!(triggered.trigger, Some(cause));
+    assert!(aws_pushed(&triggered, "remote"), "{triggered:?}");
+    assert_eq!(received_key(), "key-renewed");
+    assert!(!local_received.exists());
 }
 
 // A profile with a role gives each session credentials assumed for it alone;
@@ -1774,7 +1793,6 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
             source_identity: false,
         }),
         mints: true,
-        selection: None,
     };
     let granted_received = scratch.path().join("granted");
     let denied_received = scratch.path().join("denied");
@@ -1895,7 +1913,6 @@ async fn role_scoped_mints_for_one_profile_run_together() {
                     source_identity: false,
                 }),
                 mints: true,
-                selection: None,
             });
             target
         })
@@ -1969,7 +1986,6 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
                 source_identity: false,
             }),
             mints: true,
-            selection: None,
         });
         target
     };
@@ -2259,25 +2275,13 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
             source_identity: None,
         }),
     };
-    let skills = Arc::new(CanonicalSkills::collect(&target));
-    let reconcile_for = |aws: credential_sync::AwsSync| {
-        let (target, skills) = (&target, &skills);
-        async move {
-            reconcile_session(
-                &SessionRelays::Direct,
-                target,
-                skills,
-                &credential_sync::GithubSync::Known(None),
-                &aws,
-                credential_sync::HostLogins {
-                    slopcop: &credential_sync::HostSlopcopLogin::Unknown,
-                    harness: &credential_sync::PassLogin::PerSession,
-                    pinned: None,
-                },
-                credential_sync::JobHold::new(None, None),
-            )
-            .await
-        }
+    let reconcile_for = |aws| {
+        credential_sync::run_on_session(
+            &SessionRelays::Direct,
+            &target,
+            credential_sync::SyncWork::Aws(Box::new(aws)),
+            credential_sync::JobHold::new(None, None),
+        )
     };
     let reconcile = || reconcile_for(unavailable.clone());
     // Install as a worker does, then move the files to where the relay
@@ -2803,7 +2807,6 @@ async fn mac_sync_pass(
         &target,
         &skills,
         &credential_sync::GithubSync::Known(None),
-        &credential_sync::AwsSync::Unmanaged,
         credential_sync::HostLogins {
             slopcop: &credential_sync::HostSlopcopLogin::Unknown,
             harness: &pass,
@@ -3055,11 +3058,15 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
         environment: BTreeMap::from([("AWS_PROFILE".into(), "bedrock".into())]),
         role: Some(role_config()),
         mints: true,
-        selection: None,
     };
-    let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
+    let cache = crate::aws_assume_role::AwsCredentialCache::shared();
     cache
-        .credentials_for("swept-last-session", &source, &ShortLived)
+        .credentials_for(
+            "swept-last-session",
+            &source,
+            &ShortLived,
+            Duration::from_secs(5),
+        )
         .unwrap();
     assert!(cache.holds("swept-last-session"));
     // Its credentials expire; no session is left to sync.
@@ -3601,7 +3608,7 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
 // Hard-won: 42c9f2103: the renewal teardown test assumed /proc on macOS.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mints() {
+async fn unscoped_aws_helper_cancels_without_holding_up_profile_sync() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = tempfile::tempdir().unwrap();
@@ -3609,6 +3616,12 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
     let token = scratch.path().join("token-source");
     std::fs::write(&token, "pat").unwrap();
     let cli = granting_aws_cli(scratch.path());
+    let exported = scratch.path().join("exported.json");
+    std::fs::write(
+        &exported,
+        br#"{"Version":1,"AccessKeyId":"key","SecretAccessKey":"secret"}"#,
+    )
+    .unwrap();
     let (pids, release) = (
         scratch.path().join("helper-pids"),
         scratch.path().join("helper-release"),
@@ -3620,7 +3633,7 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
             pids = pids.display(),
             release = release.display(),
             dir = scratch.path().display(),
-            output = scratch.path().join("granted.json").display(),
+            output = exported.display(),
         ),
     )
     .unwrap();
@@ -3628,7 +3641,13 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
     let _release_on_exit = ReleaseOnDrop(release.clone());
     let root = scratch.path().join("session");
     std::fs::create_dir(&root).unwrap();
-    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "superseded", None);
+    let mut target = aws_sync_session_named(home.path(), &root, &token, &cli, "superseded", None);
+    target.aws_credentials.as_mut().unwrap().role = None;
+    target.harness = mj_core::config::HarnessKind::Codex;
+    target.skips_login_file_sync = false;
+    let login = codex_login("2026-09-25T20:00:00Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+    std::fs::write(root.join("slopcop"), b"old login").unwrap();
     let coordinator = CredentialSyncCoordinator::spawn();
     let handle = coordinator.handle();
     handle.set_targets(vec![target.clone()]);
@@ -3649,6 +3668,25 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
         .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
     };
     wait_for("the first helper", &|| helper_pids().len() == 1).await;
+    let pass = tokio::time::timeout(
+        Duration::from_secs(5),
+        credential_sync::reconcile_profile_guarded(
+            &access!(),
+            std::slice::from_ref(&target),
+            None,
+            || Ok(None),
+        ),
+    )
+    .await
+    .expect("profile pass completed while AWS was blocked");
+    assert!(
+        pass.iter().all(|outcome| outcome.step_failures.is_empty()),
+        "{pass:?}"
+    );
+    assert_eq!(std::fs::read(root.join("login")).unwrap(), login);
+    assert!(root.join("skills").exists());
+    assert_eq!(std::fs::read(root.join("github")).unwrap(), b"pat");
+    assert!(!root.join("slopcop").exists());
     let stuck = helper_pids()[0];
     let birth = mj_core::subprocess::process_birth_identity(stuck)
         .expect("the first helper is still running");
@@ -3674,25 +3712,13 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
     drop(coordinator);
 }
 
-// A role-scoped session is bounded by the role and its session policy
-// whatever name the credentials are installed under, so the worker's staged
-// configuration, which the session can edit, may supply that name. It never
-// decides which host profile the controller assumes the role as: that is the
-// host's own selection, read at mint time. A session that renames its profile
-// section still gets only role-scoped credentials, minted from the host, and a
-// name that is not a profile name is refused.
+// A worker-side edit cannot change the installed profile or the mint identity.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_session_that_edits_its_aws_configuration_still_gets_only_role_scoped_credentials() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = tempfile::tempdir().unwrap();
-    let codex_home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"team\"\n",
-    )
-    .unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let token = scratch.path().join("token-source");
     std::fs::write(&token, "pat").unwrap();
@@ -3711,11 +3737,12 @@ async fn a_session_that_edits_its_aws_configuration_still_gets_only_role_scoped_
     let root = scratch.path().join("session");
     std::fs::create_dir(&root).unwrap();
     let mut target = aws_sync_session_named(home.path(), &root, &token, &cli, "edited", None);
-    target.aws_credentials.as_mut().unwrap().selection =
-        Some(mj_core::aws_credentials::AwsProfileSelection {
-            home: codex_home.path().to_path_buf(),
-            overlay: None,
-        });
+    target
+        .aws_credentials
+        .as_mut()
+        .unwrap()
+        .environment
+        .insert("AWS_PROFILE".into(), "team".into());
     // The session renamed the profile section in its own AWS configuration,
     // hoping the sync would act for a host profile it picked.
     std::fs::write(
@@ -3736,53 +3763,20 @@ async fn a_session_that_edits_its_aws_configuration_still_gets_only_role_scoped_
     let minted_as = std::fs::read_to_string(&args).unwrap();
     assert!(minted_as.contains("--profile team"), "{minted_as}");
     assert!(!minted_as.contains("victim"), "{minted_as}");
-    // What is installed is the role-scoped credentials, under the worker's name.
+    // Renewal installs under the originally staged name.
     let installed: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("aws")).unwrap()).unwrap();
-    assert_eq!(installed["Profile"], "victim");
+    assert_eq!(installed["Profile"], "team");
     assert!(
         std::fs::read_to_string(root.join("aws-scope.json"))
             .unwrap()
             .contains("arn:aws:iam::123456789012:role/mj-bedrock")
     );
-
-    // Any name launch accepts is accepted here, spaces and `@` included.
-    std::fs::remove_file(&args).unwrap();
-    std::fs::write(
-        root.join("aws-config"),
-        "[profile dev@example team]\ncredential_process = cat x\n",
-    )
-    .unwrap();
-    reconcile_profile(std::slice::from_ref(&target), None).await;
-    let installed: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("aws")).unwrap()).unwrap();
-    assert_eq!(installed["Profile"], "dev@example team");
-
-    // A name that cannot be a section name is refused, and nothing is minted.
-    // (The credentials are cached, so the CLI is not called again either way;
-    // the log is cleared to show no call is made.)
-    std::fs::remove_file(&args).ok();
-    std::fs::remove_file(root.join("aws")).unwrap();
-    std::fs::write(
-        root.join("aws-config"),
-        "[profile a]b]\ncredential_process = cat x\n",
-    )
-    .unwrap();
-    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
-    let failure = outcomes[0].failure_text().unwrap();
-    assert!(
-        failure.contains("profile name that is not valid"),
-        "{failure}"
-    );
-    assert!(failure.contains("Restart the session"), "{failure}");
-    assert!(!args.exists(), "something was minted");
-    assert!(!root.join("aws").exists());
 }
 
 // A session can delete or damage its own AWS configuration, so withdrawing the
 // credentials that do not match the role must not wait on reading the profile
-// name from it: the withdrawal comes first, and the error that follows says what
-// the person can do.
+// name from it. The withdrawal comes first and a mint failure is reported.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_session_that_breaks_its_aws_configuration_still_has_host_credentials_withdrawn() {
@@ -3819,7 +3813,7 @@ async fn a_session_that_breaks_its_aws_configuration_still_has_host_credentials_
             "{case}: host credentials stayed"
         );
         let failure = outcomes[0].failure_text().unwrap();
-        assert!(failure.contains("Restart the session"), "{case}: {failure}");
+        assert!(failure.contains("AWS credentials"), "{case}: {failure}");
         assert!(
             outcomes[0]
                 .outcome
@@ -3827,7 +3821,7 @@ async fn a_session_that_breaks_its_aws_configuration_still_has_host_credentials_
                 .is_ok_and(|actions| actions.contains(&CredentialSyncAction::AwsCredentialsRemoved)),
             "{case}: {outcomes:?}"
         );
-        assert!(!started.exists(), "{case}: something was minted");
+        assert!(started.exists(), "{case}: AWS CLI was not invoked");
     }
 }
 
@@ -3863,89 +3857,6 @@ async fn a_role_on_a_profile_that_is_not_bedrock_still_withdraws_host_credential
         "{outcomes:?}"
     );
     assert!(outcomes[0].step_failures.is_empty(), "{outcomes:?}");
-}
-
-// When the controller cannot read the profile's Codex configuration it cannot
-// tell which AWS login to use, so nothing is minted that cycle. The session
-// stays managed as role-scoped: credentials the controller did not issue (the
-// host's own, from before the role) are withdrawn, and the read error is
-// reported. The file is read each cycle, not captured in the target: once it
-// is repaired, with the mj configuration unchanged, the next cycle mints.
-#[cfg(unix)]
-#[tokio::test]
-async fn an_unreadable_provider_configuration_is_that_cycles_outcome_and_a_repair_is_seen() {
-    let codex_home = tempfile::tempdir().unwrap();
-    let config = codex_home.path().join("config.toml");
-    std::fs::write(&config, "model_provider = [unterminated").unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    let token = scratch.path().join("token-source");
-    std::fs::write(&token, "pat").unwrap();
-    let cli = granting_aws_cli(scratch.path());
-    let root = scratch.path().join("session");
-    std::fs::create_dir(&root).unwrap();
-    // A running session still holding the host's own, unscoped credentials.
-    std::fs::write(root.join("aws"), br#"{"Version":1,"AccessKeyId":"AKIA"}"#).unwrap();
-    let mut target = aws_sync_session_named(home.path(), &root, &token, &cli, "unreadable", None);
-    target.aws_credentials.as_mut().unwrap().selection =
-        Some(mj_core::aws_credentials::AwsProfileSelection {
-            home: codex_home.path().to_path_buf(),
-            overlay: None,
-        });
-    let mut coordinator =
-        CredentialSyncCoordinator::spawn_with_renewal_retry(Duration::from_millis(100));
-    coordinator.handle().set_targets(vec![target]);
-    let next_partial = async |coordinator: &mut CredentialSyncCoordinator| {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let result = coordinator.result().await.expect("coordinator stopped");
-                if result.partial {
-                    return result;
-                }
-            }
-        })
-        .await
-        .expect("a renewal result arrived")
-    };
-
-    // Unreadable: the unscoped credentials are withdrawn (said at once), and
-    // the error said.
-    let withdrawn = next_partial(&mut coordinator).await;
-    assert!(aws_pushed(&withdrawn, "unreadable") || withdrawn.failures().next().is_some());
-    let failed = loop {
-        let result = next_partial(&mut coordinator).await;
-        if result
-            .failures()
-            .any(|(_, _, detail)| detail.contains("could not be determined"))
-        {
-            break result;
-        }
-    };
-    let (_, step, detail) = failed
-        .failures()
-        .find(|(_, _, detail)| detail.contains("could not be determined"))
-        .expect("the error is reported");
-    assert_eq!(step, Some(SyncStep::Aws));
-    assert!(
-        detail.contains("could not be determined") && detail.contains("TOML parse error"),
-        "{detail}"
-    );
-    assert!(!root.join("aws").exists(), "unscoped credentials were kept");
-
-    // Repaired, and nothing else changed: a later cycle mints and installs.
-    std::fs::write(
-        &config,
-        "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"team\"\n",
-    )
-    .unwrap();
-    let repaired = loop {
-        let result = next_partial(&mut coordinator).await;
-        if result.failures().next().is_none() {
-            break result;
-        }
-    };
-    assert!(aws_pushed(&repaired, "unreadable"), "{repaired:?}");
-    assert!(root.join("aws").exists());
 }
 
 // A renewal task that ends on its own (it panics) is noticed at the next sync,
@@ -5387,7 +5298,6 @@ async fn judged_token(
         target,
         &skills,
         &credential_sync::GithubSync::Known(None),
-        &credential_sync::AwsSync::Unmanaged,
         credential_sync::HostLogins {
             slopcop: &credential_sync::HostSlopcopLogin::Unknown,
             harness: &pass,
@@ -5717,4 +5627,105 @@ async fn cancelling_connect_before_handshake_stops_proxy_immediately() {
     .unwrap()
     .unwrap();
     assert_eq!(eof, 0, "killed proxy must close the sentinel FIFO");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn aws_renewal_uses_the_pinned_profile_for_scoped_and_unscoped_sessions() {
+    use mj_core::config::{Config, HarnessKind, HarnessProfile};
+    use mj_core::state::{State, TargetLocator};
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let home = scratch.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let token = scratch.path().join("token");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let export = scratch.path().join("export.json");
+    std::fs::write(
+        &export,
+        br#"{"Version":1,"AccessKeyId":"exported","SecretAccessKey":"secret"}"#,
+    )
+    .unwrap();
+    let calls = scratch.path().join("calls");
+    std::fs::write(
+        cli.join("aws"),
+        format!(
+            "#!/bin/sh\n/bin/echo \"$1 $AWS_PROFILE\" >> {calls}\ncase \"$1\" in\nconfigure) exec /bin/cat {export};;\nsts) exec /bin/cat {assumed};;\nesac\n",
+            calls = calls.display(),
+            export = export.display(),
+            assumed = scratch.path().join("granted.json").display(),
+        ),
+    ).unwrap();
+    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut config = Config::default().with_local_targets();
+    let mut profile = HarnessProfile::new(HarnessKind::Codex, &home);
+    profile
+        .environment
+        .insert("PATH".into(), cli.to_string_lossy().into_owned());
+    let mut state = State::default();
+    let source_config = home.join("config.toml");
+    let bedrock = "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\n";
+    for (scoped, changed) in [(false, "from-file"), (true, "from-environment")] {
+        profile.aws = scoped.then(role_config);
+        profile
+            .environment
+            .insert("AWS_PROFILE".into(), "from-environment".into());
+        std::fs::write(
+            &source_config,
+            if scoped {
+                bedrock.to_owned()
+            } else {
+                format!("{bedrock}profile = \"from-file\"\n")
+            },
+        )
+        .unwrap();
+        config.profiles.insert("codex".into(), profile.clone());
+
+        for (generation, expected) in [("existing", "original"), ("fresh", changed)] {
+            let id = format!("{generation}-{changed}");
+            let mut session = crate::database::test_fixtures::checkpoint_test_session(&id);
+            session.target = Some(Box::new(TargetLocator::LocalPodman {
+                container_id: "c".repeat(64),
+                borrowed_from: None,
+                workspace_storage: Default::default(),
+            }));
+            let root = scratch.path().join(&id);
+            std::fs::create_dir(&root).unwrap();
+            state.sessions.insert(id.clone(), session);
+            let staged = if generation == "existing" {
+                "original".to_owned()
+            } else {
+                mj_worker_launch::worker_launch::aws_credential_source(&config, &state, &id)
+                    .unwrap()
+                    .unwrap()
+                    .environment["AWS_PROFILE"]
+                    .clone()
+            };
+            state.sessions.get_mut(&id).unwrap().staged_aws_profile = Some(staged);
+            let mut target = aws_sync_session_named(&home, &root, &token, &cli, &id, None);
+            target.aws_credentials =
+                mj_worker_launch::worker_launch::aws_credential_sync_source(&config, &state, &id)
+                    .unwrap();
+            let outcomes = reconcile_profile(&[target], None).await;
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|outcome| outcome.step_failures.is_empty()),
+                "{outcomes:?}"
+            );
+            let installed: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(root.join("aws")).unwrap()).unwrap();
+            assert_eq!(installed["Profile"], expected);
+            assert_eq!(root.join("aws-scope.json").exists(), scoped);
+        }
+    }
+
+    let calls = std::fs::read_to_string(calls).unwrap();
+    assert_eq!(
+        calls,
+        "configure original\nconfigure from-file\nsts original\nsts from-environment\n"
+    );
 }

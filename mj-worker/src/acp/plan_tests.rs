@@ -1845,6 +1845,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
             elicitation_id: old.id.clone(),
             action: "cancel".into(),
             reply: None,
+            answers: None,
         })
         .unwrap();
     assert_eq!(relay.operational_state().cancelling_prompt_id, None);
@@ -1860,6 +1861,7 @@ async fn permission_ids_survive_bridge_restart_without_consuming_the_new_questio
             elicitation_id: new.id.clone(),
             action: "cancel".into(),
             reply: None,
+            answers: None,
         })
         .unwrap();
     assert_eq!(
@@ -2016,6 +2018,7 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
             elicitation_id,
             action,
             reply,
+            ..
         } = probe.event().await
             && elicitation_id == form.id
         {
@@ -2354,6 +2357,7 @@ async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
                         elicitation_id,
                         action,
                         reply,
+                        ..
                     } = probe.event().await
                     {
                         assert_eq!(elicitation_id, request.id);
@@ -2420,6 +2424,7 @@ impl PlanProbe {
                 elicitation_id,
                 action,
                 reply,
+                ..
             } => {
                 assert_eq!(elicitation_id, question.id);
                 assert_eq!(action, mj_core::elicitation::OPERATOR_AWAY_ACTION);
@@ -2493,6 +2498,7 @@ impl PlanProbe {
                 elicitation_id,
                 action,
                 reply,
+                ..
             } = self.event().await
             {
                 assert_eq!(elicitation_id, pending.id);

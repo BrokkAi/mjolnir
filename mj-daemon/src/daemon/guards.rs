@@ -74,17 +74,31 @@ pub(super) fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot
         .collect();
     let drafts = mj_controller::database::list_detached_drafts(workspace_id)?
         .into_iter()
-        .map(|draft| DraftPreview {
-            id: draft.id,
-            session_id: draft.session_id,
-            source: draft.source,
-            owner_pid: draft.owner_pid,
-            saved_at: draft.saved_at,
-        })
+        .map(|draft| draft_preview(draft, &controller.state.sessions))
         .collect();
     Ok(WorkspaceSnapshot {
         workspace,
         sessions,
         drafts,
     })
+}
+
+pub(super) fn draft_preview(
+    draft: mj_core::workspace::DetachedDraft,
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+) -> DraftPreview {
+    let session_title = draft
+        .session_id
+        .as_ref()
+        .and_then(|id| sessions.get(id))
+        .map(|session| session.listed_title().to_owned());
+    DraftPreview {
+        id: draft.id,
+        session_id: draft.session_id,
+        session_title,
+        preview: mj_core::draft::preview(&draft.text),
+        source: draft.source,
+        owner_pid: draft.owner_pid,
+        saved_at: draft.saved_at,
+    }
 }

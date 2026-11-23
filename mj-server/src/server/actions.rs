@@ -6,6 +6,7 @@ pub fn is_turn_control_command(command: &mj_core::relay::RelayCommand) -> bool {
         mj_core::relay::RelayCommand::Steer { .. }
             | mj_core::relay::RelayCommand::ApplyQueuedFor { .. }
             | mj_core::relay::RelayCommand::CancelTurnFor { .. }
+            | mj_core::relay::RelayCommand::CancelTurnTarget { .. }
             | mj_core::relay::RelayCommand::ResolveSteering { .. }
     )
 }

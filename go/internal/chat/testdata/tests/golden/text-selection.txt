@@ -1,0 +1,96 @@
+=== content coordinates through a scrolled transcript (10x4) ===
+screen (2,3) -> ContentPos { row: 40, col: 0 }; screen (5,5) -> ContentPos { row: 42, col: 3 }; content row 42 -> Some(5); rows 39 and 44 -> None, None
+=== press and release in the same cell (14x10) ===
+action: Click { column: 5, row: 4 }; range: None; active surface: None
+
+
+
+  row00 abcd
+  row01 abcd
+  row02 abcd
+  row03 abcd
+
+
+
+=== drag, highlight, and copy request (14x10) ===
+action: CopyRequested { surface: Transcript, range: SelectionRange { start: ContentPos { row: 11, col: 2 }, end: ContentPos { row: 12, col: 5 } } }; range: SelectionRange { start: ContentPos { row: 11, col: 2 }, end: ContentPos { row: 12, col: 5 } }; active surface: Some(Transcript); copied: "w11 abcd\nrow12"
+
+
+
+  row10 abcd
+  row11 abcd
+  row12 abcd
+  row13 abcd
+
+
+
+=== backward drag normalized to content order (14x10) ===
+action: CopyRequested { surface: Transcript, range: SelectionRange { start: ContentPos { row: 0, col: 1 }, end: ContentPos { row: 2, col: 6 } } }; normalized range: SelectionRange { start: ContentPos { row: 0, col: 1 }, end: ContentPos { row: 2, col: 6 } }
+
+
+
+  row00 abcd
+  row01 abcd
+  row02 abcd
+  row03 abcd
+
+
+
+=== autoscroll direction at viewport edges (14x10) ===
+inside: None; one row below top: None; top edge: Some((Transcript, -1)); above top edge: Some((Transcript, -1)); bottom edge: Some((Transcript, 1)); after release: None
+
+
+
+  row10 abcd
+  row11 abcd
+  row12 abcd
+  row13 abcd
+
+
+
+=== no autoscroll when the whole surface fits (14x10) ===
+request: None
+
+
+
+  row00 abcd
+  row01 abcd
+  row02 abcd
+  row03 abcd
+
+
+
+=== outside press clears the selection (14x10) ===
+before: Some(SelectionRange { start: ContentPos { row: 0, col: 1 }, end: ContentPos { row: 2, col: 7 } }); after: None; active: None; action: None
+
+
+
+  row00 abcd
+  row01 abcd
+  row02 abcd
+  row03 abcd
+
+
+
+=== highlight only selected cells (8x3) ===
+reverse-video cells: [(4, 0), (5, 0), (6, 0), (1, 1), (2, 1)]
+abcdefgh
+ijklmnop
+qrstuvwx
+=== selection keeps existing bold style (4x1) ===
+cell modifiers: BOLD | REVERSED | BOLD | REVERSED | BOLD | REVERSED | BOLD | REVERSED
+bold
+=== copy trims pad and joins rows (10x3) ===
+copied: "hello\nhi\nthere"
+hello
+hi
+there
+=== copy reads partial first and last rows (8x3) ===
+copied: "fgh\nijklmnop\nqrs"
+abcdefgh
+ijklmnop
+qrstuvwx
+=== copy is relative to the surface origin (7x2) ===
+copied: "hello\nworld"
+xxhello
+xxworld

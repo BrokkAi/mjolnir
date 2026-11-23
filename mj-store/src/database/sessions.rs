@@ -2072,16 +2072,18 @@ pub fn mark_session_worker_connected(
     session_id: &str,
     native_session_id: Option<&str>,
     updated_at: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let session_id = session_id.to_owned();
     let native_session_id = native_session_id.map(str::to_owned);
     let updated_at = updated_at.to_owned();
+    let owns_worker = crate::worker_lifecycle::current(&session_id).is_some();
     submit_database_write("mark_session_worker_connected", move |_| {
         mark_session_worker_connected_to(
             &database_path(),
             &session_id,
             native_session_id.as_deref(),
             &updated_at,
+            owns_worker,
         )
     })
 }
@@ -2118,15 +2120,35 @@ pub(super) fn mark_session_worker_connected_to(
     session_id: &str,
     native_session_id: Option<&str>,
     updated_at: &str,
-) -> Result<()> {
+    owns_worker: bool,
+) -> Result<Option<String>> {
     if updated_at.trim().is_empty() {
         bail!("worker connection timestamp is empty");
     }
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     mark_session_worker_connected_with(&tx, session_id, native_session_id, updated_at)?;
+    if owns_worker {
+        let boot: Option<String> = tx.query_row(
+            "SELECT operation_id FROM worker_restart_intents WHERE session_id=?1 AND phase != 'prepared'",
+            [session_id],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(operation_id) = boot {
+            super::worker_restart::publish_worker_restart_aws_profile(
+                &tx,
+                session_id,
+                &operation_id,
+            )?;
+        }
+    }
+    let staged = tx.query_row(
+        "SELECT staged_aws_profile FROM sessions WHERE session_id=?1",
+        [session_id],
+        |row| row.get(0),
+    )?;
     tx.commit()?;
-    Ok(())
+    Ok(staged)
 }
 
 pub(super) fn mark_session_worker_connected_with(
@@ -2300,6 +2322,13 @@ pub(super) fn save_checkpointed_session_to(path: &Path, session: &SessionRecord)
 }
 
 pub(super) fn validate_session_record(session: &SessionRecord) -> Result<()> {
+    ensure!(
+        session
+            .staged_aws_profile
+            .as_deref()
+            .is_none_or(mj_core::aws_credentials::valid_profile_name),
+        "invalid staged AWS profile name"
+    );
     let mut validation = State::default();
     validation
         .sessions
@@ -2384,52 +2413,6 @@ pub(super) fn purge_borrowed_descendants_in_tx(
         delete_session_in_tx(tx, id)?;
     }
     Ok(ids)
-}
-
-/// Overwrite the unsent chat input carried across a detach. Unlike the read
-/// receipt this is not monotonic: a draft can shrink, and an empty string
-/// clears it.
-pub fn set_session_draft_input(session_id: &str, draft: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let draft = draft.to_owned();
-    submit_database_write("set_session_draft_input", move |_| {
-        set_session_draft_input_at(&database_path(), &session_id, &draft)
-    })
-}
-
-pub(super) fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &str) -> Result<()> {
-    let mut connection = open(path)?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let updated = tx.execute(
-        "UPDATE sessions SET draft_input = ?2 WHERE session_id = ?1",
-        params![session_id, draft],
-    )?;
-    ensure!(updated == 1, "unknown session {session_id}");
-    tx.commit()?;
-    Ok(())
-}
-
-/// Append recovered input on the writer lane, preserving every preceding
-/// durable edit instead of combining with a stale daemon snapshot.
-pub fn append_session_draft_input(session_id: &str, text: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    let text = text.to_owned();
-    submit_database_write("append_session_draft_input", move |connection| {
-        let tx = connection.transaction()?;
-        let existing: String = tx.query_row(
-            "SELECT draft_input FROM sessions WHERE session_id=?1",
-            [&session_id],
-            |row| row.get(0),
-        )?;
-        let merged = mj_core::draft::merge_drafts(&existing, &text)?;
-        let updated = tx.execute(
-            "UPDATE sessions SET draft_input=?2 WHERE session_id=?1",
-            params![session_id, merged],
-        )?;
-        ensure!(updated == 1, "unknown session {session_id}");
-        tx.commit()?;
-        Ok(())
-    })
 }
 
 /// Retire a submitted shared draft without erasing a newer client's edit.
@@ -2624,6 +2607,7 @@ mod ownership_tests {
             &stale.id,
             Some("surviving-native"),
             "2030-01-01T00:00:00Z",
+            false,
         )
         .unwrap();
         let current = record_adoption_failure_if_current_to(

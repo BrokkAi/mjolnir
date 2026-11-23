@@ -105,6 +105,25 @@ pub(crate) fn placement() -> DaemonPlacement {
     }
 }
 
+/// Parse `MJ_DAEMON_API_LISTEN` and refuse non-loopback plain HTTP outside a
+/// container daemon whose host port publication binds exclusively to loopback.
+fn parse_api_listen_address(
+    override_value: Option<&str>,
+    placement: &DaemonPlacement,
+) -> Result<SocketAddr> {
+    let address = match override_value {
+        Some(address) => address
+            .parse::<SocketAddr>()
+            .with_context(|| format!("MJ_DAEMON_API_LISTEN is not an address: {address:?}"))?,
+        None => return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+    };
+    anyhow::ensure!(
+        address.ip().is_loopback() || matches!(placement, DaemonPlacement::Container { .. }),
+        "MJ_DAEMON_API_LISTEN must use a loopback address outside a container daemon: {address}"
+    );
+    Ok(address)
+}
+
 pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
@@ -554,6 +573,30 @@ pub(super) async fn run_daemon_runtime(
         delegation_updates,
         cancellation.clone(),
     );
+    let listen = parse_api_listen_address(
+        mj_core::config::env_override("DAEMON_API_LISTEN").as_deref(),
+        &metadata.placement,
+    )?;
+    let api_listener = TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("bind the Mjolnir HTTP API endpoint {listen}"))?;
+    let api_endpoint = ApiEndpointMetadata {
+        address: api_listener.local_addr()?,
+        token: random_hex::<32>()?,
+        pid: metadata.pid,
+        instance_id: metadata.instance_id.clone(),
+        protocol_version: metadata.protocol_version,
+    };
+    let (api_options, mut api_task) = crate::server_runtime::start_api(
+        api_listener,
+        api_endpoint.token.clone(),
+        cancellation.clone(),
+        manager_control.clone(),
+        state.clone(),
+        delegation_services,
+    )
+    .await?;
+    let mut api_outcome = None;
     // Reviewer prewarm holds no admission: it is cancelled with the daemon
     // and planned again from the session records by the next one.
     let reviewer_prewarm = super::prewarm::spawn(state.clone(), cancellation.clone());
@@ -817,15 +860,16 @@ pub(super) async fn run_daemon_runtime(
             config.phone,
             cancellation.clone(),
             state.clone(),
-            manager_control.clone(),
-            delegation_services,
+            api_options,
         ))
     } else {
+        drop(api_options);
         state.set_phone_status(WebViewerStatus::Disabled);
         state.web_viewer.publish(crate::server::WebViewerAccess::Unavailable("Web access is disabled. Enable [phone].enabled in your configuration, then restart the daemon.".into()));
         None
     };
     let daemon_metadata_path = metadata_path();
+    let api_metadata_path = api_endpoint_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
     let mut cache_task = mj_core::runtime::spawn(crate::daemon::mbx_service::run(
@@ -858,6 +902,7 @@ pub(super) async fn run_daemon_runtime(
     let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
     let mut auto_afk_outcome = None;
     let mut outcome = async {
+        write_metadata(&api_metadata_path, &api_endpoint)?;
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
         tracing::info!(
@@ -872,6 +917,10 @@ pub(super) async fn run_daemon_runtime(
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 _ = progress_tick.tick() => {},
+                result = supervise_service(&mut api_task, &mut api_outcome, &cancellation, "loopback HTTP API") => {
+                    result?;
+                    break;
+                }
                 result = supervise_service(&mut auto_afk, &mut auto_afk_outcome, &cancellation, "auto AFK service") => {
                     result?;
                     break;
@@ -1136,6 +1185,11 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.record(
         &mut outcome,
+        "remove HTTP API metadata",
+        remove_daemon_metadata(&api_metadata_path),
+    );
+    epilogue.record(
+        &mut outcome,
         "shut down code review host",
         state
             .review_host()
@@ -1214,6 +1268,17 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join Jev notice publisher",
         jev_notices.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join loopback HTTP API",
+        match api_outcome {
+            Some(result) => result,
+            None => api_task
+                .await
+                .context("loopback HTTP API task failed")
+                .and_then(std::convert::identity),
+        },
     );
     if let Some(phone_task) = phone_task {
         epilogue.record(
@@ -1498,10 +1563,10 @@ pub(super) fn spawn_shutdown_watchdog() {
         );
         // The metadata file points clients at a process that is about to stop
         // answering. Removing it is what the epilogue would have done.
-        if let Err(error) = fs::remove_file(metadata_path())
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%error, "could not remove daemon metadata before the forced exit");
+        for path in [metadata_path(), api_endpoint_path()] {
+            if let Err(error) = remove_daemon_metadata(&path) {
+                tracing::warn!(%error, "could not remove endpoint metadata before the forced exit");
+            }
         }
         // 128 + signal is reserved for exits that really were signalled.
         std::process::exit(1);
@@ -1806,7 +1871,7 @@ fn spawn_apple_container_startup(
             ) {
                 return Ok(None);
             }
-            mj_controller::targets::ensure_apple_container_runtime(&executor).map(Some)
+            mj_controller::targets::ensure_apple_container_runtime(None, &executor).map(Some)
         });
         let result = tokio::select! {
             result = &mut startup => result
@@ -1935,5 +2000,33 @@ mod tests {
             outcome.unwrap(),
         );
         assert!(format!("{:#}", daemon_outcome.unwrap_err()).contains("service cleanup failed"));
+    }
+
+    #[test]
+    fn api_listen_address_rejects_non_loopback_outside_container() {
+        let host = DaemonPlacement::Host;
+        assert_eq!(
+            parse_api_listen_address(None, &host).unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+        );
+        assert_eq!(
+            parse_api_listen_address(Some("127.0.0.1:4123"), &host).unwrap(),
+            "127.0.0.1:4123".parse().unwrap()
+        );
+        assert_eq!(
+            parse_api_listen_address(Some("[::1]:4123"), &host).unwrap(),
+            "[::1]:4123".parse().unwrap()
+        );
+        let error = parse_api_listen_address(Some("0.0.0.0:4123"), &host).unwrap_err();
+        assert!(error.to_string().contains("loopback address"));
+
+        let container = DaemonPlacement::Container {
+            name: "mjolnir-daemon".into(),
+            runtime: None,
+        };
+        assert_eq!(
+            parse_api_listen_address(Some("0.0.0.0:4123"), &container).unwrap(),
+            "0.0.0.0:4123".parse().unwrap()
+        );
     }
 }

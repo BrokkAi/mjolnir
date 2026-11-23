@@ -46,19 +46,18 @@ pub(super) fn install_captured_records(
     controller.state.mount_history = runtime.metadata.mount_history.clone();
 }
 
-pub(crate) async fn run_server(
-    args: ServerArgs,
+pub(crate) async fn start_api(
+    listener: tokio::net::TcpListener,
+    loopback_token: String,
     termination: tokio_util::sync::CancellationToken,
     worker_commands_tx: SessionManagerControl,
     daemon_runtime: Arc<RuntimeState>,
     services: crate::daemon::delegation::Services,
-) -> Result<()> {
-    // Each step is logged with its duration: the viewer and API stay
-    // "starting" until all of them finish, and startup has taken minutes.
-    let mut startup = StartupSteps::new();
-    let resolved = resolve_server_args(args, termination.clone()).await?;
-    startup.finished("resolve server arguments and TLS");
-    let bind = resolved.bind;
+) -> Result<(ServerOptions, tokio::task::JoinHandle<Result<()>>)> {
+    let bind = listener
+        .local_addr()
+        .context("read the loopback API address")?;
+    let termination = termination.child_token();
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
     let api_backend = services.backend.clone();
@@ -76,7 +75,6 @@ pub(crate) async fn run_server(
     let mut browser_revisions = daemon_runtime.revisions();
     browser_revisions.borrow_and_update();
     let snapshot_rx = daemon_runtime.subscribe_browser_views()?;
-    startup.finished("capture first browser view");
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
     let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
     let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(32);
@@ -111,11 +109,11 @@ pub(crate) async fn run_server(
     )?;
     options.set_background_task_stop_tx(background_task_stop_tx);
     options.shutdown = termination.clone();
+    options.delegate_image_build_shutdown();
     // Keep signed-in phones and logged-out identities consistent across
     // restarts. Loading the signing key and revocations runs off this loop.
     let cookie_key_path = crate::server::cookie_key_path();
     options.load_cookie_credentials(cookie_key_path).await?;
-    startup.finished("load cookie credentials");
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
     let token = crate::server::load_or_create_api_token(&crate::server::api_token_path())?;
@@ -141,69 +139,20 @@ pub(crate) async fn run_server(
             &mj_controller::targets::ProcessExecutor,
         )
     }));
-    startup.finished("configure API and source checks");
-    let renewal_cancellation = termination.child_token();
-    let mut renewal_task = None;
-    // Publish a pin only for a certificate the operator configured. A
-    // Tailscale certificate chains to a public CA and renews in place, so a
-    // pin taken now would go stale while ordinary verification keeps working.
-    let mut certificate_sha256 = None;
-    if let Some((cert, key)) = resolved.tls_files {
-        if resolved.tailscale.is_none() {
-            let pem = tokio::fs::read(&cert)
-                .await
-                .with_context(|| format!("read web viewer TLS certificate {}", cert.display()))?;
-            certificate_sha256 = Some(crate::server::api::served_certificate_sha256(&pem)?);
-        }
-        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
-            .await
-            .context("load web viewer TLS certificate")?;
-        options.set_tls_config(rustls.clone());
-        if let Some(tailscale) = resolved.tailscale {
-            renewal_task = Some(spawn_tailscale_cert_renewer(
-                tailscale,
-                rustls,
-                renewal_cancellation.clone(),
-            ));
-        }
-    } else if bind.ip().is_loopback() {
-        options.secure_cookie = false;
-    } else {
-        anyhow::bail!("non-loopback web viewer requires TLS");
-    }
-    let fallback_reason = resolved.fallback_reason;
-    let qr_login_url = if fallback_reason.is_none() && resolved.viewer_url.starts_with("https://") {
-        let encoded = url::form_urlencoded::byte_serialize(options.login_token().as_bytes())
-            .collect::<String>();
-        Some(format!(
-            "{}/auth/login?token={encoded}",
-            resolved.viewer_url.trim_end_matches('/')
-        ))
-    } else {
-        None
-    };
-    startup.finished("load TLS certificate");
-    let ready = crate::server::WebViewerAccess::Ready {
-        viewer_url: resolved.viewer_url,
-        viewer_code: options.viewer_code().to_owned(),
-        qr_login_url,
-        fallback_reason,
-        certificate_sha256,
-        local_address: None,
-    };
-
     let image_builds = options.image_builds.clone();
-    let mut serve = ViewerServer::spawn({
-        let daemon_runtime = daemon_runtime.clone();
-        async move {
-            crate::web_viewer::serve(options, ready, &daemon_runtime.web_viewer, |access| {
-                daemon_runtime.publish_web_access(access);
-            })
-            .await
-        }
-    });
+    let mut loopback_options = options.clone();
+    loopback_options.secure_cookie = false;
+    loopback_options.set_loopback_token(loopback_token);
+    let mut serve = ViewerServer::spawn(crate::server::run_server_on_listener(
+        loopback_options,
+        listener,
+    ));
     let conversation_projection_shutdown = termination.child_token();
-    let control = async {
+    let control_termination = termination.clone();
+    let projection_shutdown = conversation_projection_shutdown.clone();
+    let browser_runtime = daemon_runtime.clone();
+    let control = async move {
+        let termination = control_termination;
         // Stored viewer state expires with the authentication that created it.
         // The sweep is hourly rather than on every request, because it is
         // housekeeping and nothing waits for it.
@@ -243,10 +192,8 @@ pub(crate) async fn run_server(
         let mut launch_workspaces = std::collections::BTreeMap::new();
         let (conversation_projection_tx, mut conversation_projection_rx) =
             tokio::sync::mpsc::channel(CONVERSATION_PROJECTION_CHANNEL_CAPACITY);
-        let mut conversation_projections = ConversationProjectionDispatcher::new(
-            conversation_projection_tx,
-            conversation_projection_shutdown.clone(),
-        );
+        let mut conversation_projections =
+            ConversationProjectionDispatcher::new(conversation_projection_tx, projection_shutdown);
         // A feed that ends is not a reason to exit quietly: the phone server
         // exists to follow sessions, so losing that feed is a named failure
         // rather than a silent success.
@@ -1352,40 +1299,120 @@ pub(crate) async fn run_server(
             None => Ok::<(), anyhow::Error>(()),
         }
     };
-    // The recorder runs beside the server, never as an arm of this select:
-    // a recording failure must not end `run_server` and take the API down
-    // with it (issue 1117).
-    let recorder = mj_core::runtime::spawn(api_activity::record_activity_stream(
-        activity_snapshots,
-        mj_controller::database::record_api_activities,
-    ));
-    let browser_views = daemon_runtime.follow_browser_views(browser_revisions);
-    let result = tokio::select! {
-        result = serve.stopped() => result,
-        result = control => result,
-        result = browser_views => result,
-    };
-    recorder.abort();
-    if let Err(error) = recorder.await
-        && error.is_panic()
-    {
-        tracing::warn!(%error, "native API activity recorder panicked");
+    let task = mj_core::runtime::spawn(async move {
+        // The recorder runs beside the server, never as an arm of this select:
+        // a recording failure must not end the control loop and take the API down
+        // with it (issue 1117).
+        let recorder = mj_core::runtime::spawn(api_activity::record_activity_stream(
+            activity_snapshots,
+            mj_controller::database::record_api_activities,
+        ));
+        let browser_views = browser_runtime.follow_browser_views(browser_revisions);
+        tokio::pin!(control);
+        let (result, listener_stopped) = tokio::select! {
+            result = &mut control => (result, false),
+            result = serve.stopped() => {
+                termination.cancel();
+                let control_result = control.await;
+                (result.and(control_result), true)
+            },
+            result = browser_views => {
+                termination.cancel();
+                let control_result = control.await;
+                (result.and(control_result), false)
+            },
+        };
+        termination.cancel();
+        recorder.abort();
+        if let Err(error) = recorder.await
+            && error.is_panic()
+        {
+            tracing::warn!(%error, "native API activity recorder panicked");
+        }
+        conversation_projection_shutdown.cancel();
+        let listener_result = if listener_stopped {
+            Ok(())
+        } else {
+            serve.stopped().await
+        };
+        image_builds.finish().await;
+        result.and(listener_result)
+    });
+    Ok((options, task))
+}
+
+pub(crate) async fn serve_phone(
+    args: ServerArgs,
+    mut options: ServerOptions,
+    daemon_runtime: Arc<RuntimeState>,
+) -> Result<()> {
+    let mut startup = StartupSteps::new();
+    let termination = options.shutdown.clone();
+    let resolved = resolve_server_args(args, termination.clone()).await?;
+    startup.finished("resolve server arguments and TLS");
+    let bind = resolved.bind;
+    options.bind = bind;
+    let renewal_cancellation = termination.child_token();
+    let mut renewal_task = None;
+    // Publish a pin only for a certificate the operator configured. A
+    // Tailscale certificate chains to a public CA and renews in place, so a
+    // pin taken now would go stale while ordinary verification keeps working.
+    let mut certificate_sha256 = None;
+    if let Some((cert, key)) = resolved.tls_files {
+        if resolved.tailscale.is_none() {
+            let pem = tokio::fs::read(&cert)
+                .await
+                .with_context(|| format!("read web viewer TLS certificate {}", cert.display()))?;
+            certificate_sha256 = Some(crate::server::api::served_certificate_sha256(&pem)?);
+        }
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .context("load web viewer TLS certificate")?;
+        options.set_tls_config(rustls.clone());
+        if let Some(tailscale) = resolved.tailscale {
+            renewal_task = Some(spawn_tailscale_cert_renewer(
+                tailscale,
+                rustls,
+                renewal_cancellation.clone(),
+            ));
+        }
+    } else if bind.ip().is_loopback() {
+        options.secure_cookie = false;
+    } else {
+        anyhow::bail!("non-loopback web viewer requires TLS");
     }
-    // Image builds are reproducible work, so shutdown cancels and reaps them
-    // before aborting the HTTP task that accepted them.
-    image_builds.finish().await;
-    // Dropping the handle aborts the server task, which is what dropping the
-    // server future used to do when this `select!` owned it directly.
-    drop(serve);
-    conversation_projection_shutdown.cancel();
+    let fallback_reason = resolved.fallback_reason;
+    let qr_login_url = if fallback_reason.is_none() && resolved.viewer_url.starts_with("https://") {
+        let encoded = url::form_urlencoded::byte_serialize(options.login_token().as_bytes())
+            .collect::<String>();
+        Some(format!(
+            "{}/auth/login?token={encoded}",
+            resolved.viewer_url.trim_end_matches('/')
+        ))
+    } else {
+        None
+    };
+    startup.finished("load TLS certificate");
+    let ready = crate::server::WebViewerAccess::Ready {
+        viewer_url: resolved.viewer_url,
+        viewer_code: options.viewer_code().to_owned(),
+        qr_login_url,
+        fallback_reason,
+        certificate_sha256,
+        local_address: None,
+    };
+
+    let result = crate::web_viewer::serve(options, ready, &daemon_runtime.web_viewer, |access| {
+        daemon_runtime.publish_web_access(access);
+    })
+    .await;
     renewal_cancellation.cancel();
     if let Some(task) = renewal_task
         && let Err(error) = task.await
     {
         tracing::warn!(%error, "Tailscale certificate renewal task failed");
     }
-    result?;
-    Ok(())
+    result
 }
 
 /// The viewer's HTTP server, running on a task of its own.

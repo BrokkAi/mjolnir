@@ -20,7 +20,7 @@ globalThis.MjPush = (() => {
   }
   const locked = work => navigator.locks.request('mj-notifications', work);
   async function action(body) {
-    const response = await fetch('/api/actions', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await fetch('/api/v1/actions', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error(`Notification sync failed (HTTP ${response.status}). Check sign-in and try again.`);
   }
   async function reconcileLocked(registration, oldEndpoint) {
@@ -30,7 +30,7 @@ globalThis.MjPush = (() => {
     await store(state);
     if (state.enabled && Notification.permission === 'granted') {
       if (!subscription) {
-        const response = await fetch('/api/push/key', { credentials: 'include' });
+        const response = await fetch('/api/v1/push/key', { credentials: 'include' });
         if (!response.ok) throw new Error(`Notification key unavailable (HTTP ${response.status}). Check sign-in and try again.`);
         const { public_key: key } = await response.json();
         subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)) });

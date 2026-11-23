@@ -121,30 +121,12 @@ pub fn target_recovery_plan(
     if is_borrowed(locator) {
         return Ok(None);
     }
-    // Apple container keeps a stopped container, unlike a Podman or Docker one
-    // whose daemon restarts it, so it has no recovery plan; a remote Docker
-    // host recovers exactly as a local one does.
-    if let TargetLocator::SshDocker {
-        ssh, container_id, ..
-    } = locator
-    {
-        let local = target_recovery_plan(
-            &TargetLocator::LocalDocker {
-                borrowed_from: None,
-                container_id: container_id.clone(),
-            },
-            session_id,
-        )?;
-        return Ok(local.map(|plan| TargetRecoveryPlan {
-            exists: command_over_ssh(SshTrafficClass::Control, plan.exists, ssh),
-            inspect: command_over_ssh(SshTrafficClass::Control, plan.inspect, ssh),
-            start: command_over_ssh(SshTrafficClass::Control, plan.start, ssh),
-            session_id: plan.session_id,
-        }));
-    }
-
-    let (exists, inspect, start) = match locator {
-        TargetLocator::LocalPodman { container_id, .. } => (
+    let Some(endpoint) = locator.container_endpoint() else {
+        return Ok(None);
+    };
+    let container_id = endpoint.container_id;
+    let (exists, inspect, start) = match endpoint.engine {
+        "podman" => (
             CommandSpec::new("podman", ["container", "exists", container_id])
                 .purpose("check for Mjolnir session container"),
             CommandSpec::new("podman", ["container", "inspect", container_id])
@@ -152,9 +134,7 @@ pub fn target_recovery_plan(
             CommandSpec::new("podman", ["start", container_id])
                 .purpose("start stopped Mjolnir session container"),
         ),
-        TargetLocator::SshDocker { .. } => unreachable!("handled above"),
-        TargetLocator::SshAppleContainer { .. } => return Ok(None),
-        TargetLocator::LocalDocker { container_id, .. } => (
+        "docker" => (
             CommandSpec::new(
                 "sh",
                 [
@@ -170,32 +150,19 @@ pub fn target_recovery_plan(
             CommandSpec::new("docker", ["start", container_id])
                 .purpose("start stopped Mjolnir Docker session container"),
         ),
-        TargetLocator::SshPodman { ssh, container_id, .. } => (
-            ssh_command(SshTrafficClass::Control, ssh, ["podman", "container", "exists", container_id])
-                .purpose("check for remote Mjolnir session container"),
-            ssh_command(SshTrafficClass::Control, ssh, ["podman", "container", "inspect", container_id])
-                .purpose("inspect remote Mjolnir session container"),
-            ssh_command(SshTrafficClass::Control, ssh, ["podman", "start", container_id])
-                .purpose("start stopped remote Mjolnir session container"),
-        ),
-        // A retained sandbox stops when the host reboots or the unit dies, and
-        // the engine relaunches it from its retained disks, so it recovers
-        // exactly like Podman, through the engine on the host.
-        TargetLocator::SshNitro {
-            ssh, container_id, ..
-        } => (
-            ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, ["container", "exists", container_id])
+        "container" => return Ok(None),
+        MICROVM_ENGINE => (
+            engine_command(MICROVM_ENGINE, ["container", "exists", container_id])
                 .purpose("check for remote Mjolnir session sandbox"),
-            ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, ["container", "inspect", container_id])
+            engine_command(MICROVM_ENGINE, ["container", "inspect", container_id])
                 .purpose("inspect remote Mjolnir session sandbox"),
-            ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, ["start", container_id])
+            engine_command(MICROVM_ENGINE, ["start", container_id])
                 .purpose("start stopped remote Mjolnir session sandbox"),
         ),
-        TargetLocator::LocalBare { .. }
-        | TargetLocator::AppleContainer { .. }
-        | TargetLocator::AwsEc2 { .. }
-        | TargetLocator::SshBare { .. } => return Ok(None),
+        _ => unreachable!("unknown container engine"),
     };
+    let [exists, inspect, start] = [exists, inspect, start]
+        .map(|command| endpoint.host_command(SshTrafficClass::Control, command));
     Ok(Some(TargetRecoveryPlan {
         exists,
         inspect,
