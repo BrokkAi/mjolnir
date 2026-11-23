@@ -1074,6 +1074,82 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     assert!(unknown.sessions[0].activity_details.is_none());
 }
 
+// Hard-won: #1209: losing contact with an idle worker left the cached session looking ready.
+#[test]
+fn disconnected_worker_never_projects_cached_idle_as_ready() {
+    let id = "session-1";
+    let mut controller = controller_with_profiles(&["codex"]);
+    let mut record = phone_session(id, 0);
+    record.state = SessionState::Running;
+    controller.state.sessions.insert(id.into(), record);
+    let mut operational = mj_core::relay::RelaySnapshot::new(id.into()).operational_state();
+    operational.config_options = vec![
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "sol",
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
+                "sol", "Sol",
+            )]),
+        )
+        .category(SessionConfigOptionCategory::Model),
+    ]
+    .into();
+    let mut sessions = fixture_runtime_sessions(
+        &BTreeMap::from([(id.into(), operational.into())]),
+        &BTreeMap::from([(
+            id.into(),
+            mj_client::daemon::RuntimeMaterializedSession {
+                execution: mj_core::state::MaterializedExecutionState::Idle,
+                last_activity_at_ms: Some(7_777),
+                ..Default::default()
+            },
+        )]),
+    );
+    let project = |sessions: &mj_core::snapshot_map::SnapshotMap<_, _>| {
+        viewer_snapshot(
+            &controller,
+            &[],
+            &Default::default(),
+            &PhoneSessionViews {
+                sessions,
+                native_agents: &Default::default(),
+                conversations: &Default::default(),
+                project_sources: &Default::default(),
+                operations: &Default::default(),
+                move_recoveries: &Default::default(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &Default::default(),
+            },
+            1,
+        )
+    };
+    assert!(project(&sessions).sessions[0].is_idle);
+
+    let view = sessions.get_mut(id).unwrap();
+    view.connected = false;
+    view.error = Some(mj_client::session::ViewError::Unreachable("offline".into()));
+    let snapshot = project(&sessions);
+    let session = &snapshot.sessions[0];
+    assert!(!session.verdict.idle);
+    assert!(!session.is_idle);
+    assert_eq!(session.chat_phase, crate::server::ViewerChatPhase::Idle);
+    assert_eq!(
+        session.activity_state,
+        Some(mj_core::activity::while_disconnected(
+            mj_core::state::MaterializedExecutionState::Idle,
+            Some(7_777),
+        )),
+    );
+    assert!(session.activity_details.is_none());
+    assert_eq!(session.config_options[0].current.as_deref(), Some("sol"));
+    assert_eq!(
+        session.relay_state,
+        Some(crate::server::api::RelayState::Unreachable)
+    );
+}
+
 // Hard-won: b72adcc6f: the viewer must distinguish pending checks from failed assessments on idle sessions.
 #[test]
 fn golden_phone_session_snapshot() {
@@ -2926,6 +3002,7 @@ fn fixture_runtime_sessions(
         let mut view =
             mj_client::daemon::RuntimeSessionView::from_managed(id.clone(), Default::default());
         view.operational = operational.get(id).cloned();
+        view.connected = view.operational.is_some();
         view.materialized = materialized.get(id).cloned().map(Into::into);
         views.insert(id.clone(), view);
     }

@@ -50,7 +50,22 @@ pub(super) async fn get_session(
     let (mut session, enforcement) = {
         let snapshot = state.snapshot_rx.borrow();
         let record = require_session_record(&snapshot, &session_id)?;
-        (ApiSession::from(record), record.execution_enforcement)
+        let mut session = ApiSession::from(record);
+        // Like the public session error, this omits raw runtime errors that
+        // can contain hostnames and paths. Publish the stages and relay state.
+        session.operation =
+            record
+                .operation
+                .as_deref()
+                .map(|operation| crate::server::ViewerOperation {
+                    notice: None,
+                    ..operation.clone()
+                });
+        session.relay = record.relay_state.map(|state| RelayHealth {
+            state,
+            detail: None,
+        });
+        (session, record.execution_enforcement)
     };
     if let Ok(backend) = backend(&state) {
         session.profile_login_error = backend.profile_login_errors()?.remove(&session.profile_id);

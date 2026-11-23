@@ -1272,7 +1272,7 @@ impl SessionHandleBackend for FakeSession {
         &self,
         _command_id: String,
     ) -> BoxFuture<'_, AnyResult<Option<Option<String>>>> {
-        Box::pin(async { Ok(Some(None)) })
+        Box::pin(async { Ok(self.view.connected.then_some(None)) })
     }
     fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
         Box::new(self.clone())
@@ -1964,6 +1964,102 @@ async fn session_detail_keeps_the_setter_configuration_while_the_snapshot_lags()
         assert_eq!(option["current"], current);
     }
     assert_eq!(detail["config_options"], applied["config_options"]);
+}
+
+// Hard-won: #1209: session detail hid provisioning progress and stale readiness when the worker went offline.
+#[tokio::test]
+async fn session_detail_reports_lifecycle_and_disconnected_worker() {
+    let mut view = live_view("flash", &["high", "max"]);
+    view.connected = false;
+    view.error = Some(mj_client::session::ViewError::Unreachable(
+        "connection refused at /private/worker.sock".into(),
+    ));
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(view),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        use crate::server::{ViewerOperation, ViewerOperationKind, ViewerOperationStage};
+        let session = &mut snapshot.sessions[0];
+        session.relay_state = Some(RelayState::Disconnected);
+        session.operation = Some(Box::new(ViewerOperation {
+            id: "create-1".into(),
+            session_id: session.id.clone(),
+            kind: ViewerOperationKind::Create,
+            started_at_epoch_seconds: 100,
+            stages: vec![ViewerOperationStage {
+                label: "Sync".into(),
+                started_at_epoch_seconds: 110,
+            }],
+            notice: Some("sync failed at /private/worker.sock".into()),
+            cancellable: true,
+        }));
+    });
+    let get = |path| bearer(Request::get(path)).body(Body::empty()).unwrap();
+    let path = "/api/v1/sessions/session-1";
+    let response = app.clone().oneshot(get(path)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = json_body(response).await;
+    assert_eq!(
+        detail["relay"],
+        serde_json::json!({"state": "disconnected"})
+    );
+    assert_eq!(detail["operation"]["kind"], "create");
+    assert_eq!(detail["operation"]["started_at_epoch_seconds"], 100);
+    assert_eq!(
+        detail["operation"]["stages"],
+        serde_json::json!([
+            {"label": "Sync", "started_at_epoch_seconds": 110}
+        ])
+    );
+    assert!(detail["operation"].get("notice").is_none());
+
+    snapshot_tx.send_modify(|snapshot| {
+        let session = &mut snapshot.sessions[0];
+        session.operation = None;
+        session.relay_state = Some(RelayState::Unreachable);
+        session.is_idle = false;
+        session.activity_state = Some(mj_core::activity::while_disconnected(
+            mj_core::state::MaterializedExecutionState::Idle,
+            Some(120_000),
+        ));
+        session.capabilities.set_config = true;
+    });
+    let response = app.clone().oneshot(get(path)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = json_body(response).await;
+    assert_eq!(detail["relay"], serde_json::json!({"state": "unreachable"}));
+    assert!(detail.get("operation").is_none());
+    assert_eq!(detail["is_idle"], false);
+    assert_eq!(detail["chat_phase"], "idle");
+    assert_eq!(detail["activity_state"]["state"], "unknown");
+    assert!(
+        detail["config_options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| { option["key"] == "effort" && option["current"] == "high" })
+    );
+    let list = json_body(app.clone().oneshot(get("/api/v1/sessions")).await.unwrap()).await;
+    assert!(list["sessions"][0].get("relay").is_none());
+
+    let response = app
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"effort","value":"max"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("configuration connection failed")
+    );
 }
 
 /// A model change replaces the effort catalogue at once, while the controller
