@@ -136,11 +136,23 @@ pub(super) async fn close_workspace(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
     let backend = backend(&state)?.clone();
-    run_admitted_mutation(&state, "workspace close", async move {
-        backend.close_workspace(id).await?;
-        Ok(StatusCode::NO_CONTENT)
+    let admission = state
+        .upgrade_gate
+        .enter_unless_draining("workspace close")
+        .map_err(|_| ApiFailure::handoff())?;
+    // Transfer the single admission guard into `close_workspace` so it is
+    // dropped right after member suspensions are dispatched instead of holding
+    // daemon handoff across slow suspensions.
+    mj_core::runtime::spawn(async move {
+        let result = backend.close_workspace(id, admission).await;
+        if let Err(error) = &result {
+            tracing::debug!(label = "workspace close", %error, "daemon HTTP mutation failed");
+        }
+        result
     })
     .await
+    .context("workspace close")??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) async fn cancel_workspace_close(

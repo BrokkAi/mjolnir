@@ -8433,6 +8433,13 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             }
         }) => joined.expect("the workspace close never joined both stops"),
     }
+    assert!(
+        !mj_controller::upgrade::gate()
+            .blockers()
+            .iter()
+            .any(|blocker| blocker.label == "workspace close"),
+        "workspace close must release its handoff admission once member suspensions are dispatched"
+    );
     http.cancel_workspace_close(workspace.id.clone())
         .await
         .unwrap();

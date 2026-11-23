@@ -85,9 +85,18 @@ impl RuntimeState {
     }
 
     pub async fn close_workspace(self: &Arc<Self>, workspace_id: String) -> Result<()> {
+        let upgrade_work = mj_controller::upgrade::activity("workspace close")?;
+        self.close_workspace_with_admission(workspace_id, upgrade_work)
+            .await
+    }
+
+    pub async fn close_workspace_with_admission(
+        self: &Arc<Self>,
+        workspace_id: String,
+        upgrade_work: mj_core::upgrade::Work,
+    ) -> Result<()> {
         // Hold handoff admission only while recording intent and dispatching
         // suspends, not while waiting for them to finish.
-        let upgrade_work = mj_controller::upgrade::activity("workspace close")?;
         let cancelled = Arc::new(AtomicBool::new(false));
         {
             let mut closes = self

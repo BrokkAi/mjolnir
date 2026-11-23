@@ -342,7 +342,11 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    fn close_workspace(&self, _id: String) -> BoxFuture<'_, Result<(), ApiFailure>> {
+    fn close_workspace(
+        &self,
+        _id: String,
+        _admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'_, Result<(), ApiFailure>> {
         Box::pin(async { Err(ApiFailure::unavailable("workspace close is unavailable")) })
     }
 

@@ -268,7 +268,11 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    fn close_workspace(self: Arc<Self>, _id: String) -> BoxFuture<'static, Result<()>> {
+    fn close_workspace(
+        self: Arc<Self>,
+        _id: String,
+        _admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async { bail!("workspace close is unavailable") })
     }
 
@@ -612,8 +616,14 @@ impl ExportRuntime for RuntimeState {
         Box::pin(RuntimeState::refresh_workspaces(self))
     }
 
-    fn close_workspace(self: Arc<Self>, id: String) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move { RuntimeState::close_workspace(&self, id).await })
+    fn close_workspace(
+        self: Arc<Self>,
+        id: String,
+        admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(
+            async move { RuntimeState::close_workspace_with_admission(&self, id, admission).await },
+        )
     }
 
     fn cancel_workspace_close(&self, id: &str) -> Result<()> {
@@ -4551,11 +4561,15 @@ impl SubagentBackend for ApiBackend {
         self.exports.refresh_workspaces()
     }
 
-    fn close_workspace(&self, id: String) -> BoxFuture<'_, std::result::Result<(), ApiFailure>> {
+    fn close_workspace(
+        &self,
+        id: String,
+        admission: mj_core::upgrade::Work,
+    ) -> BoxFuture<'_, std::result::Result<(), ApiFailure>> {
         Box::pin(async move {
             self.exports
                 .clone()
-                .close_workspace(id)
+                .close_workspace(id, admission)
                 .await
                 .map_err(|error| ApiFailure::conflict(format!("{error:#}")))
         })
