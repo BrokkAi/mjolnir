@@ -307,6 +307,21 @@ pub(super) fn attribute(
     Ok(())
 }
 
+fn attributed_turn_cost_ticks(usage: &TokenUsage, selected: UsageSelection) -> Result<Option<u64>> {
+    let mut attributed = BTreeMap::new();
+    attribute(usage, selected, &mut attributed)?;
+    let mut sum = 0u64;
+    let mut known = !attributed.is_empty();
+    for (selection, totals) in attributed {
+        if let Some(part) = estimate_model_cost(usage, selection.model.as_deref(), &totals)? {
+            sum = sum.checked_add(part).context("turn cost overflow")?;
+        } else {
+            known = false;
+        }
+    }
+    Ok(known.then_some(sum))
+}
+
 fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummary> {
     let mut summary = UsageSummary::default();
     let mut groups = BTreeMap::new();
@@ -334,20 +349,7 @@ fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummar
                     .as_ref()
                     .and_then(|details| details.cost.as_ref().filter(|cost| !cost.is_partial));
                 let estimated = if provider_cost.is_none() {
-                    let mut attributed = BTreeMap::new();
-                    attribute(&usage, selection.clone(), &mut attributed)?;
-                    let mut sum = 0u64;
-                    let mut known = !attributed.is_empty();
-                    for (selection, totals) in attributed {
-                        let part =
-                            estimate_model_cost(&usage, selection.model.as_deref(), &totals)?;
-                        if let Some(part) = part {
-                            sum = sum.checked_add(part).context("turn cost overflow")?;
-                        } else {
-                            known = false;
-                        }
-                    }
-                    known.then_some(sum)
+                    attributed_turn_cost_ticks(&usage, selection.clone())?
                 } else {
                     None
                 };
@@ -562,9 +564,13 @@ fn turn_cost_ticks(usage: &TokenUsage, model: Option<&str>) -> Result<Option<u64
     {
         return Ok(Some(cost.usd_ticks));
     }
-    let mut totals = BTreeMap::new();
-    add_counters(&mut totals, &counters(usage))?;
-    estimate_model_cost(usage, model, &totals)
+    attributed_turn_cost_ticks(
+        usage,
+        UsageSelection {
+            model: model.map(str::to_owned),
+            effort: None,
+        },
+    )
 }
 
 pub fn load_cell_cost_observations(
@@ -711,13 +717,16 @@ fn recent_placements_since(
             COALESCE(s.last_profile, sc.profile_id),
             COALESCE(sa.category, 'primary'),
             sc.created_at,
-            (SELECT model FROM session_turn_selections
-             WHERE session_id = sc.session_id AND model IS NOT NULL ORDER BY rowid DESC LIMIT 1),
-            (SELECT effort FROM session_turn_selections
-             WHERE session_id = sc.session_id AND effort IS NOT NULL ORDER BY rowid DESC LIMIT 1)
+            sts.model,
+            sts.effort
          FROM session_contexts sc
          LEFT JOIN sessions s ON s.session_id = sc.session_id
          LEFT JOIN subagent_accounting sa ON sa.child_session_id = sc.session_id
+         LEFT JOIN session_turn_selections sts ON sts.rowid = (
+             SELECT rowid FROM session_turn_selections
+             WHERE session_id = sc.session_id AND model IS NOT NULL
+             ORDER BY rowid DESC LIMIT 1
+         )
          WHERE sc.created_at >= ?1
            AND COALESCE(s.last_profile, sc.profile_id) IS NOT NULL
          ORDER BY sc.created_at ASC",
@@ -1424,6 +1433,12 @@ mod tests {
              VALUES ('new-child', 'new-primary', 'worker', 'subtle')",
             [],
         )?;
+        conn.execute(
+            "INSERT INTO session_turn_selections(session_id, command_id, model, effort)
+             VALUES ('new-child', 'first', 'gpt-6.2-sol', 'high'),
+                    ('new-child', 'second', 'gpt-6.2-astra', NULL)",
+            [],
+        )?;
         drop(conn);
 
         let rebuilt = load_recent_placements_since_from(&path, base_ts)?;
@@ -1442,7 +1457,7 @@ mod tests {
                     session_id: "new-child".into(),
                     profile_id: "codex1".into(),
                     category: "subtle".into(),
-                    model: None,
+                    model: Some("gpt-6.2-astra".into()),
                     effort: None,
                     created_at_epoch_seconds: base_ts + 20,
                 },
@@ -1466,7 +1481,7 @@ mod tests {
                     session_id: "new-child".into(),
                     profile_id: "codex1".into(),
                     category: "subtle".into(),
-                    model: None,
+                    model: Some("gpt-6.2-astra".into()),
                     effort: None,
                     created_at_epoch_seconds: base_ts + 20,
                 }
@@ -1486,7 +1501,18 @@ mod tests {
                 r.get(0)
             })?;
         let sol = "gpt-6.2-sol";
+        let opus = "claude-opus-5-5";
+        let haiku = "claude-haiku-5-5";
         let cases = [
+            (
+                "claude-breakdown",
+                "stopped",
+                "subtle",
+                None,
+                None,
+                0,
+                false,
+            ),
             ("minority", "lost", "reviewer", None, None, 0, false),
             ("destroyed", "stopped", "reviewer", None, None, 4, false),
             ("older", "stopped", "subtle", Some("high"), None, 9, false),
@@ -1559,9 +1585,10 @@ mod tests {
                 "INSERT INTO sessions(session_id, title, harness_kind, last_profile, target_template_id, state, updated_at)
                  VALUES (?1, 't', 'codex', 'codex', 'local', ?2, ?3)", params![id, state, ts],
             )?;
+            let model = if id == "claude-breakdown" { opus } else { sol };
             conn.execute(
                 "INSERT INTO session_turn_selections(session_id, command_id, model, effort, category)
-                 VALUES (?1, 'turn', ?2, ?3, ?4)", params![id, sol, effort, category],
+                 VALUES (?1, 'turn', ?2, ?3, ?4)", params![id, model, effort, category],
             )?;
             if let Some((model, effort)) = followup {
                 conn.execute(
@@ -1570,14 +1597,25 @@ mod tests {
                     params![id, model, effort],
                 )?;
             }
-            let cost = mj_core::usage::ProviderTurnCost::from_usd_ticks(
-                dollars * mj_core::usage::USD_TICKS_PER_DOLLAR,
-                partial,
-            );
-            let usage = serde_json::json!({
+            let mut usage = serde_json::json!({
                 "scope": "turn", "total_tokens": 500_000, "input_tokens": 500_000,
-                "output_tokens": 0, "provider_details": {"cost": cost}
+                "output_tokens": 0
             });
+            if id == "claude-breakdown" {
+                let model_usage = serde_json::json!({
+                    "scope": "turn", "total_tokens": 250_000, "input_tokens": 250_000,
+                    "output_tokens": 0
+                });
+                usage["provider_details"] = serde_json::json!({
+                    "model_usage": { (opus): model_usage, (haiku): model_usage }
+                });
+            } else {
+                let cost = mj_core::usage::ProviderTurnCost::from_usd_ticks(
+                    dollars * mj_core::usage::USD_TICKS_PER_DOLLAR,
+                    partial,
+                );
+                usage["provider_details"] = serde_json::json!({"cost": cost});
+            }
             let body = serde_json::json!({
                 "command_id": "turn",
                 "completed_ordinal": 1,
@@ -1623,6 +1661,18 @@ mod tests {
         assert_eq!(
             load_cell_cost_observations_from(&path, 2)?,
             BTreeMap::from([
+                (
+                    CellCostKey {
+                        category: "subtle".into(),
+                        model: opus.into(),
+                        effort: None,
+                    },
+                    CellCostObservation {
+                        // 250k input tokens each at $4.00/M and $0.10/M.
+                        total_api_usd: 1.025,
+                        sample_count: 1,
+                    },
+                ),
                 (
                     CellCostKey {
                         category: "subtle".into(),
