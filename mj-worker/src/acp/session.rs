@@ -330,13 +330,19 @@ pub(super) async fn serve_session(
     let reopening_codex = spec.harness == HarnessKind::Codex
         && spec.resume_session.is_some()
         && !session_open.replace_unused_codex_thread;
-    let needs_goal_pause = (reopening_codex && capability.is_some())
-        || (goal_resume_supported
-            && spec
-                .goal_recovery
-                .lock()
-                .expect("goal lock poisoned")
-                .asking());
+    let (asking_goal_recovery, has_active_goal) = {
+        let recovery = spec.goal_recovery.lock().expect("goal lock poisoned");
+        (
+            recovery.asking(),
+            recovery
+                .state
+                .snapshot
+                .as_ref()
+                .is_some_and(mj_core::goal::GoalSnapshot::active),
+        )
+    };
+    let needs_goal_pause = (reopening_codex && capability.is_some() && has_active_goal)
+        || (goal_resume_supported && asking_goal_recovery);
     ensure!(
         !needs_goal_pause || goal_pause_supported,
         "the installed adapter cannot pause a stored goal before reopening; update the adapter"

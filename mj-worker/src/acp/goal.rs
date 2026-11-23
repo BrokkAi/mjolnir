@@ -552,6 +552,7 @@ mod tests {
             ResumeTimedOut,
             ResumeRejected(i32),
             PauseUnsupported,
+            GoalFreePauseUnsupported,
         }
         use Reopen::*;
         for case in [
@@ -575,6 +576,7 @@ mod tests {
             ResumeRejected(-32601),
             ResumeRejected(-32603),
             PauseUnsupported,
+            GoalFreePauseUnsupported,
         ] {
             let (method, status) = match case {
                 QueuedWork(method, status) => (method, status),
@@ -595,8 +597,10 @@ mod tests {
             let asking = matches!(case, Form(..) | ResumeTimedOut | ResumeRejected(_));
             let running = matches!(case, Running);
             let decision = matches!(case, SavedAnswer);
-            let queued_prompt = matches!(case, QueuedWork(..));
-            let pause_supported = !matches!(case, PauseUnsupported);
+            let goal_free = matches!(case, GoalFreePauseUnsupported);
+            let refuse_open = matches!(case, PauseUnsupported);
+            let queued_prompt = matches!(case, QueuedWork(..)) || goal_free;
+            let pause_supported = !refuse_open && !goal_free;
             let root = tempfile::tempdir().unwrap();
             let script = root.path().join("goal.py");
             std::fs::write(&script, r#"
@@ -605,6 +609,7 @@ asking = os.environ['ASKING'] == 'true'
 running = os.environ['RUNNING'] == 'true'
 open_method = 'session/' + os.environ['OPEN_METHOD']
 pause_supported = os.environ['PAUSE_SUPPORTED'] == 'true'
+goal_free = os.environ['GOAL_FREE'] == 'true'
 def emit(x): print(json.dumps(x), flush=True)
 def update(meta): emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'session_info_update','_meta':meta}}})
 goal = {'objective':'finish campaign','status':'active','createdAt':123,'tokenBudget':900,'tokensUsed':100,'controlMethod':'_session/goal'}
@@ -614,12 +619,12 @@ for line in sys.stdin:
     if method == 'initialize':
         result={'protocolVersion':1,'agentCapabilities':{'loadSession':True,'sessionCapabilities':{'resume':{}} if open_method == 'session/resume' else {}},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve'] if pause_supported else ['preserve']}}},'execution':{'version':1}}}
     elif method in ('session/load', 'session/resume'):
-        assert method == open_method and pause_supported
+        assert method == open_method and (pause_supported or goal_free)
         assert p['_meta']['jetbrains']['air']['goal']['resumePolicy'] == 'pause'
         # For ordinary reopen, deliberately report the pre-pause status. Even
         # with an active snapshot Mjolnir must not issue a second resume.
         goal['status']='paused' if asking and os.environ['GOAL_STATUS']=='active' else os.environ['GOAL_STATUS']
-        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
+        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{} if goal_free else {'goal':goal}},'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
         # Live output is legal before the resume response and exceeds a pipe buffer.
         if running:
             emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*80000}}}})
@@ -647,6 +652,15 @@ for line in sys.stdin:
             let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext {
                 request: asking.then(|| "explicit-1".into()),
                 state: mj_core::goal::GoalState {
+                    snapshot: refuse_open.then(|| {
+                        serde_json::from_value(serde_json::json!({
+                            "objective": "finish campaign",
+                            "status": "active",
+                            "createdAt": 123,
+                            "controlMethod": "_session/goal",
+                        }))
+                        .unwrap()
+                    }),
                     decision: decision.then(|| mj_core::goal::GoalDecision {
                         goal: serde_json::from_value(serde_json::json!({"objective":"finish campaign","status":"paused","createdAt":123,"controlMethod":"_session/goal"})).unwrap(), resume: true,
                     }),
@@ -681,6 +695,7 @@ for line in sys.stdin:
                     ("ASKING".into(), asking.to_string()),
                     ("OPEN_METHOD".into(), method.into()),
                     ("PAUSE_SUPPORTED".into(), pause_supported.to_string()),
+                    ("GOAL_FREE".into(), goal_free.to_string()),
                     ("WAIT_FOR_CUT".into(), track_cut.to_string()),
                     (
                         "REJECT_CODE".into(),
@@ -721,7 +736,7 @@ for line in sys.stdin:
                 .unwrap();
             }
             let task = mj_core::runtime::spawn(run(spec, rx, events));
-            if !pause_supported {
+            if refuse_open {
                 tokio::time::timeout(Duration::from_secs(10), async {
                     let mut refused = false;
                     while let Some(event) = receive.recv().await {
