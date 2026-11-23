@@ -62,20 +62,18 @@ pub fn remove_revoked_move_granted_keys(
     let updated_at = updated_at.to_owned();
     submit_database_write("remove_revoked_move_granted_keys", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some(mut current) = load_move_operation_with(&tx, &session_id)? else {
+        let Some((operation_id, mut current)) = load_move_granted_keys_with(&tx, &session_id)?
+        else {
             return Ok(());
         };
-        let before = current.granted_keys.len();
-        current.granted_keys.retain(|key| !revoked.contains(key));
-        if current.granted_keys.len() != before {
-            current.updated_at = updated_at;
+        let before = current.len();
+        current.retain(|key| !revoked.contains(key));
+        if current.len() != before {
             tx.execute(
-                "UPDATE session_moves SET operation_json=?2 WHERE session_id=?1 AND operation_id=?3",
-                params![
-                    session_id,
-                    serde_json::to_string(&current)?,
-                    current.operation_id
-                ],
+                "UPDATE session_moves
+                 SET operation_json=json_set(operation_json, '$.granted_keys', json(?2), '$.updated_at', ?3)
+                 WHERE session_id=?1 AND operation_id=?4",
+                params![session_id, serde_json::to_string(&current)?, updated_at, operation_id],
             )?;
         }
         tx.commit()?;
@@ -227,24 +225,34 @@ pub fn load_move_operation(session_id: &str) -> Result<Option<MoveOperation>> {
     load_move_operation_with(&connection, session_id)
 }
 
-/// Explicit destroy can still remove local credentials when an old Move's
-/// recovery snapshot names an unsupported harness. Legacy rows without grants
-/// have no local credential files.
-pub fn load_move_granted_keys(session_id: &str) -> Result<Vec<GrantedMoveKey>> {
+/// Read credential ownership even when a Move's recovery snapshot names an
+/// unsupported harness. Legacy rows without grants have no credentials here.
+pub fn load_move_granted_keys(session_id: &str) -> Result<Option<(String, Vec<GrantedMoveKey>)>> {
     let connection = open_reader(&database_path())?;
-    let grants: Option<Option<String>> = connection
+    load_move_granted_keys_with(&connection, session_id)
+}
+
+fn load_move_granted_keys_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<(String, Vec<GrantedMoveKey>)>> {
+    let row: Option<(String, Option<String>)> = connection
         .query_row(
-            "SELECT json_extract(operation_json, '$.granted_keys') FROM session_moves WHERE session_id=?1",
+            "SELECT operation_id, json_extract(operation_json, '$.granted_keys')
+             FROM session_moves WHERE session_id=?1",
             [session_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    Ok(grants
-        .flatten()
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?
-        .unwrap_or_default())
+    row.map(|(id, keys)| {
+        let keys = keys
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        Ok((id, keys))
+    })
+    .transpose()
 }
 
 /// Whether a durable in-place Move currently owns sub-agent admission closed.

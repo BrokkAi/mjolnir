@@ -498,33 +498,43 @@ impl RuntimeState {
                         &announced,
                     )?;
                 }
-                let active: BTreeSet<_> = stopped
+                let mut parents: BTreeMap<_, _> = stopped
                     .iter()
-                    .map(|child| &child.child_session_id)
-                    .collect();
-                let children = active
-                    .iter()
-                    .filter(|id| {
-                        controller
-                            .state
-                            .subagents
-                            .get(**id)
-                            .is_some_and(|child| !active.contains(&child.parent_session_id))
+                    .map(|child| {
+                        let id = &child.child_session_id;
+                        (
+                            id.clone(),
+                            controller.state.subagents[id].parent_session_id.clone(),
+                        )
                     })
-                    .map(|id| (*id).clone())
+                    .collect();
+                // Retired workers still have durable bindings and relations,
+                // even though they have no typed record for the parent notice.
+                for peer in peers
+                    .iter()
+                    .filter(|id| !controller.state.sessions.contains_key(*id))
+                {
+                    if let Some(relation) = mj_controller::database::load_subagent(peer)? {
+                        parents.insert(peer.clone(), relation.parent_session_id);
+                    }
+                }
+                let children: Vec<_> = parents
+                    .iter()
+                    .filter(|(_, parent)| !parents.contains_key(*parent))
+                    .map(|(id, _)| id.clone())
                     .collect();
                 Ok((stopped, children))
             }
         })
         .await
         .context("list the sub-agents this suspend stops")?;
-        if stopped.is_empty() {
+        if children.is_empty() {
             return Ok(());
         }
         let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
         tracing::info!(
             session_id = %parent_session_id,
-            stopped = stopped.len(),
+            child_roots = children.len(),
             not_handed_back,
             "stopping sub-agents before suspending their parent"
         );

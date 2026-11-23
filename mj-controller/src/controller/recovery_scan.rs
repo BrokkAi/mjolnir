@@ -2025,6 +2025,8 @@ mod tests {
     #[derive(Default)]
     struct ContainerTeardown {
         allow_remove: bool,
+        allow_revoke: bool,
+        revocation_commands: std::sync::atomic::AtomicUsize,
         removed: std::sync::atomic::AtomicBool,
     }
 
@@ -2062,6 +2064,25 @@ mod tests {
                 });
             }
             if let Some(teardown) = &self.teardown {
+                if matches!(
+                    command.purpose.as_str(),
+                    "remove temporary Move authorized_keys entry"
+                        | "remove temporary Move SSH key and known_hosts"
+                ) {
+                    assert_eq!(command.program, "ssh");
+                    let args = command.args.join(" ");
+                    assert!(args.contains("builder@test-remote"));
+                    assert!(args.contains("retired-move"));
+                    teardown
+                        .revocation_commands
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(CommandOutput {
+                        status: i32::from(!teardown.allow_revoke),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+
                 if command.args.iter().any(|arg| arg == "mj-remove-container") {
                     if !teardown.allow_remove {
                         bail!("host unavailable during container removal");
@@ -2184,28 +2205,41 @@ mod tests {
         session.checkpoint = Some(Box::new(checkpoint.clone()));
         let key_path = directory.path().join("move-key");
         let known_hosts_path = directory.path().join("move-known-hosts");
-        let operation: mj_core::state::MoveOperation = serde_json::from_value(serde_json::json!({
-            "operation_id": "retired-move",
-            "selection": { "session_id": session_id },
-            "source_profile_id": session.last_profile,
-            "source_target_template_id": session.target_template_id,
-            "source_additional_mounts": [],
-            "configuration_fingerprint": "",
-            "queue": "discard",
-            "phase": "failed",
-            "queue_admission_started": false,
-            "queue_admission_finished": false,
-            "cancellation_requested": false,
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-            "granted_keys": [{
-                "host": "test-host",
-                "comment": "mj-move",
-                "private_key_path": key_path,
-                "known_hosts_path": known_hosts_path,
-            }],
-        }))
-        .unwrap();
+        let mut operation: mj_core::state::MoveOperation =
+            serde_json::from_value(serde_json::json!({
+                "operation_id": "retired-move",
+                "selection": { "session_id": session_id },
+                "source_profile_id": session.last_profile,
+                "source_target_template_id": session.target_template_id,
+                "source_additional_mounts": [],
+                "configuration_fingerprint": "",
+                "queue": "discard",
+                "phase": "failed",
+                "queue_admission_started": false,
+                "queue_admission_finished": false,
+                "cancellation_requested": false,
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+                "granted_keys": [{
+                    "host": "test-host",
+                    "comment": "mj-move",
+                    "private_key_path": key_path,
+                    "known_hosts_path": known_hosts_path,
+                }],
+            }))
+            .unwrap();
+        operation.granted_keys.push(mj_core::state::GrantedMoveKey {
+            host: "test-remote".into(),
+            comment: "mj-move-retired-move".into(),
+            private_key_path: Some("/remote/mj-move-retired-move.key".into()),
+            known_hosts_path: None,
+            authorized_keys_path: Some("/remote/authorized_keys".into()),
+            worker_bin: Some("/remote/hel".into()),
+            ssh_target: Some(mj_core::targets::SshTarget {
+                destination: "builder@test-remote".into(),
+                ssh_args: Vec::new(),
+            }),
+        });
         let (mut controller, mut executor) = podman_scan_controller(session.clone());
         controller.state.sessions.remove(session_id);
 
@@ -2233,6 +2267,26 @@ mod tests {
                     }
                 })
             };
+            if !orphan {
+                let error = destroy(&mut controller, &executor).unwrap_err();
+                assert!(
+                    format!("{error:#}")
+                        .contains("could not revoke all temporary Move SSH credentials")
+                );
+                let row = database::load_retired_harness_session(session_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    row.owned_environment.unwrap().phase,
+                    EnvironmentPhase::Active
+                );
+                let (move_id, keys) = database::load_move_granted_keys(session_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(move_id, operation.operation_id);
+                assert_eq!(keys, operation.granted_keys[1..]);
+                executor.teardown.as_mut().unwrap().allow_revoke = true;
+            }
             let error = destroy(&mut controller, &executor).unwrap_err();
             assert!(
                 format!("{error:#}").contains("host unavailable"),
@@ -2251,7 +2305,7 @@ mod tests {
                     .as_ref(),
                 Some(&checkpoint)
             );
-            assert!(key_path.is_file());
+            assert_eq!(key_path.is_file(), orphan);
             executor.teardown.as_mut().unwrap().allow_remove = true;
             destroy(&mut controller, &executor).unwrap();
             assert!(
@@ -2261,6 +2315,17 @@ mod tests {
                     .unwrap()
                     .removed
                     .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            // The successful revocation is durable before the failed teardown.
+            // Only the first two attempts can reach SSH.
+            assert_eq!(
+                executor
+                    .teardown
+                    .as_ref()
+                    .unwrap()
+                    .revocation_commands
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                if orphan { 0 } else { 4 }
             );
             let row = database::load_retired_harness_session(session_id).unwrap();
             let stored_checkpoint = database::load_session_checkpoint(session_id).unwrap();

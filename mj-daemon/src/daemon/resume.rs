@@ -978,10 +978,7 @@ impl RuntimeState {
                         }
                     })
                     .await?;
-                    if retired
-                        && (matches!(request, DestroyRequest::Recovery)
-                            || kind != LifecycleKind::ForceDestroy)
-                    {
+                    if retired && matches!(request, DestroyRequest::Recovery) {
                         accepted.send_replace(Some(Ok(())));
                         return Ok(DaemonLifecycleResult::Done);
                     }

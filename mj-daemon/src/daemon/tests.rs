@@ -17857,3 +17857,55 @@ async fn retired_harness_child_is_destroyed_during_parent_destruction_recovery()
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn retired_harness_child_is_stopped_before_its_parent_suspends() {
+    use mj_controller::database::{self, test_fixtures};
+    use mj_controller::test_isolation::{IsolatedTest, test_name};
+
+    const TEST: &str = "retired_harness_child_is_stopped_before_its_parent_suspends";
+    const CHILD: &str = "MJ_TEST_RETIRED_HARNESS_CHILD_SUSPEND";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "retired-harness-child-suspend")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = database::install_isolated_test_writer();
+    let parent = test_fixtures::checkpoint_test_session("supported-parent");
+    let child = test_fixtures::checkpoint_test_session("retired-child");
+    database::save_session(&parent).unwrap();
+    database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id)).unwrap();
+    database::test_fixtures::retire_test_harness(&child.id).unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    assert!(
+        state
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .get(&child.id)
+            .is_none()
+    );
+    state
+        .stop_subagents_before_close(&parent.id, None)
+        .await
+        .unwrap();
+
+    assert!(
+        database::load_retired_harness_session(&child.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        database::session_environment(&parent.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        database::EnvironmentPhase::Active
+    );
+}
