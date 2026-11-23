@@ -31,10 +31,13 @@ func dialogsRender(frame *chat.Frame, dashboard *DashboardState) {
 }
 
 // dialogsTerminal is a TestBackend terminal: one buffer the dashboard is
-// drawn into, and the cursor the last draw left.
+// drawn into, and the cursor position the backend holds. Like ratatui's
+// TestBackend, the position starts at the origin, moves only when a draw
+// shows the cursor, and keeps its last value while the cursor is hidden, so
+// reading it always succeeds.
 type dialogsTerminal struct {
 	buffer *uv.Buffer
-	cursor *uv.Position
+	cursor uv.Position
 }
 
 func newDialogsTerminal(width, height int) *dialogsTerminal {
@@ -48,9 +51,8 @@ func (t *dialogsTerminal) draw(dashboard *DashboardState) {
 	t.buffer = uv.NewBuffer(area.Dx(), area.Dy())
 	frame := chat.NewFrame(t.buffer)
 	dialogsRender(frame, dashboard)
-	t.cursor = nil
 	if position, ok := frame.CursorPosition(); ok {
-		t.cursor = &position
+		t.cursor = position
 	}
 }
 
@@ -1660,10 +1662,7 @@ func TestGoldenTuiImportConfirmation(t *testing.T) {
 
 func TestGoldenTuiCheckpointOriginDialog(t *testing.T) {
 	appendState := func(output *strings.Builder, label string, terminal *dialogsTerminal, width, height int) {
-		if terminal.cursor == nil {
-			t.Fatal("source cursor")
-		}
-		cursor := *terminal.cursor
+		cursor := terminal.cursor
 		buffer := terminal.buffer
 		lines := bufferLines(buffer)
 		appendDialogRender(output, label, width, height, lines)

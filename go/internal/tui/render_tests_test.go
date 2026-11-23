@@ -3663,7 +3663,6 @@ func TestGoldenDashboardFooterRender(t *testing.T) {
 // Hard-won: 3747d578c: Windows omits the default localhost permission metadata.
 func TestGoldenDashboardResourcePanels(t *testing.T) {
 	var output strings.Builder
-	noQuotas := map[string]client.ProfileQuota{}
 
 	targetConfig := core.DefaultConfig()
 	// Pin the permission metadata even on hosts that cannot run local
@@ -3675,7 +3674,7 @@ func TestGoldenDashboardResourcePanels(t *testing.T) {
 		sandbox = local
 	}
 	targetConfig.Targets["sandbox"] = sandbox
-	dashboard := NewDashboardState(targetConfig.WithLocalTargets(), core.NewStateState(), noQuotas)
+	dashboard := NewDashboardState(targetConfig.WithLocalTargets(), core.NewStateState(), map[string]client.ProfileQuota{})
 	target := testCapacityTarget()
 	target.TargetIDs = []string{"docker", "localhost", "podman", "sandbox"}
 	dashboard.setDeploymentCapacityTargets([]core.DeploymentCapacityTarget{target})
@@ -3684,7 +3683,7 @@ func TestGoldenDashboardResourcePanels(t *testing.T) {
 	})
 	renderAppendDashboardGolden(&output, "Targets hides unavailable defaults", 160, 40, dashboard)
 
-	dashboard = NewDashboardState(config(), core.NewStateState(), noQuotas)
+	dashboard = NewDashboardState(config(), core.NewStateState(), map[string]client.ProfileQuota{})
 	target = testCapacityTarget()
 	target.TargetIDs = []string{"podman", "mac-container"}
 	dashboard.setDeploymentCapacityTargets([]core.DeploymentCapacityTarget{target})
@@ -3746,7 +3745,7 @@ func TestGoldenDashboardResourcePanels(t *testing.T) {
 	bedrock.Home = "/profiles/bedrock-claude"
 	bedrock.Environment.Insert("CLAUDE_CODE_USE_BEDROCK", "1")
 	apiConfig.Profiles["bedrock-claude"] = bedrock
-	dashboard = NewDashboardState(apiConfig, core.NewStateState(), noQuotas)
+	dashboard = NewDashboardState(apiConfig, core.NewStateState(), map[string]client.ProfileQuota{})
 	bedrockQuota := renderAPIQuota("bedrock-claude")
 	bedrockQuota.Harness = core.HarnessKindClaude
 	bedrockQuota.RefreshedAtEpochSeconds = 0
@@ -3761,7 +3760,7 @@ func TestGoldenDashboardResourcePanels(t *testing.T) {
 	opencode.Kind = core.HarnessKindOpenCode
 	opencode.Home = "/profiles/opencode"
 	opencodeConfig.Profiles["opencode-1"] = opencode
-	dashboard = NewDashboardState(opencodeConfig, core.NewStateState(), noQuotas)
+	dashboard = NewDashboardState(opencodeConfig, core.NewStateState(), map[string]client.ProfileQuota{})
 	opencodeQuota := renderAPIQuota("opencode-1")
 	opencodeQuota.Harness = core.HarnessKindOpenCode
 	notReported := client.NotReportedLabel
