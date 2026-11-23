@@ -895,6 +895,19 @@ def _bifrost_callback(models):
     return None
 
 
+def _load_measurement(path, query, models):
+    record = json.loads(path.read_bytes())
+    runner = getattr(models, "bifrost", None)
+    if query.step == DOCUMENTED and runner is not None:
+        bifrost_answer = record.get("bifrost_answer")
+        if not isinstance(bifrost_answer, dict):
+            raise ValueError(f"saved measurement at {path} has no real Bifrost gold record")
+        if (bifrost_answer.get("bifrost_binary_sha256") != runner.binary_sha256
+                or bifrost_answer.get("bifrost_build_identity") != runner.build_identity):
+            raise ValueError(f"saved measurement at {path} used a different Bifrost binary")
+    return record
+
+
 def _run_sample_concurrent(run, queries, fresh, engine, models, *, stop_request, concurrency):
     """Run fidelity tasks concurrently with single-owner scheduling.
 
@@ -915,7 +928,7 @@ def _run_sample_concurrent(run, queries, fresh, engine, models, *, stop_request,
         path = run / query.key / "measurement.json"
         if path.exists():
             if models is not None:
-                records[query.key] = json.loads(path.read_bytes())
+                records[query.key] = _load_measurement(path, query, models)
         else:
             pending.append(query)
     if not pending:
@@ -1142,7 +1155,7 @@ def run_sample(run, queries, fresh, engine, models, *, stop_request, concurrency
         path = directory / "measurement.json"
         if path.exists():
             if models is not None:
-                records[query.key] = json.loads(path.read_bytes())
+                records[query.key] = _load_measurement(path, query, models)
             continue
         answer = partial(checkpointed_answer, engine, directory)
         reask = query.key in fresh

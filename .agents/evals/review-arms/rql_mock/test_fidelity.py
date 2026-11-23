@@ -304,7 +304,7 @@ class EnginePhase(unittest.TestCase):
             return {"rows": self.rows, "complete": True, "truncated": False, "diagnostics": [],
                     "bifrost_binary_sha256": "0" * 64, "bifrost_build_identity": "fixture-bifrost"}
 
-        return SimpleNamespace(query=query)
+        return SimpleNamespace(query=query, binary_sha256="0" * 64, build_identity="fixture-bifrost")
 
     def answer(self, commit, text, *, fresh=False):
         call = (text, fresh)
@@ -1521,3 +1521,19 @@ for line in sys.stdin:
                 stop_request=stop_file, concurrency=3,
             )
             self.assertEqual(resumed, serial)
+
+            # Changing the Bifrost binary invalidates completed measurements on resume (serial and concurrent).
+            changed_bifrost = SimpleNamespace(binary_sha256="2" * 64, build_identity="other")
+            mismatch_models = SimpleNamespace(
+                enumerate_rows=resume_models.enumerate_rows,
+                adjudicate=resume_models.adjudicate,
+                bifrost=changed_bifrost,
+                bifrost_rows=resume_models.bifrost_rows,
+            )
+            for workers in (1, 3):
+                with self.subTest(concurrency=workers):
+                    with self.assertRaisesRegex(ValueError, "used a different Bifrost binary"):
+                        fidelity_live.run_sample(
+                            root / "resumed", queries, fresh, resume_engine, mismatch_models,
+                            stop_request=stop_file, concurrency=workers,
+                        )

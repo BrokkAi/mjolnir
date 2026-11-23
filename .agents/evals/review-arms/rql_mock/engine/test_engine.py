@@ -602,6 +602,22 @@ class EngineTests(unittest.TestCase):
                     self.assertFalse(record.exists())
                     self.assertFalse(runner.launches)
         self.assertEqual(len(runner.launches), 1)
+        # Real Claude reports omit the 5-hour window while idle before first use.
+        driver.mj = lambda op, flag, prof: {"profiles": [{"report": {
+            "harness": "claude",
+            "windows": [{"remaining_percent": 97, "duration_seconds": 604800}],
+            "error": None,
+        }}]}
+        self.assertEqual(driver.pilot_claude_quota("claude4"), ((97, 100), None))
+        driver.mj = lambda op, flag, prof: {"profiles": [{"report": {
+            "harness": "claude",
+            "windows": [
+                {"remaining_percent": 97, "duration_seconds": 604800},
+                {"remaining_percent": None, "duration_seconds": 18_000},
+            ],
+            "error": None,
+        }}]}
+        self.assertIn("no usable 5-hour quota report", driver.pilot_claude_hold("claude4"))
 
     # Hard-won: 3dbf317: a held launch left an empty active directory for teardown.
     def test_teardown_after_a_held_launch_has_nothing_to_retire(self):
