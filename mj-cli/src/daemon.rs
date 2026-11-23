@@ -1021,7 +1021,11 @@ async fn probe_daemon_release(metadata: &DaemonMetadata) -> Result<DaemonRelease
         }
         let status = match ControllerStoreGuard::try_acquire() {
             Ok(None) => Ok(true),
-            Ok(Some(_guard)) => host_pid_is_daemon(previous.pid),
+            // The daemon released the store and is exiting. Nothing is
+            // signalled here, so a PID that still exists is waited for even
+            // when its command line is already gone; the caller's timeout
+            // bounds the wait.
+            Ok(Some(_guard)) => Ok(host_pid(previous.pid) != HostPid::NotDaemon),
             Err(error) => Err(error),
         };
         Err(match status {
@@ -2373,11 +2377,22 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
     wait_for_daemon_release(metadata, STOP_TIMEOUT).await
 }
 
-/// Check the command line so a reused PID cannot stand in for the daemon.
-/// An existing process whose command line is inaccessible is inconclusive.
-fn host_pid_is_daemon(pid: u32) -> Result<bool> {
+/// What runs at a daemon's recorded PID, judged by its command line so a
+/// reused PID cannot stand in for the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostPid {
+    Daemon,
+    /// Gone, or running something other than `mj daemon-run`.
+    NotDaemon,
+    /// The process exists but its command line cannot be read. A daemon in
+    /// the middle of exiting looks like this on macOS and Windows: its
+    /// arguments are gone before its PID is.
+    Unreadable,
+}
+
+fn host_pid(pid: u32) -> HostPid {
     if !process_is_alive(pid) {
-        return Ok(false);
+        return HostPid::NotDaemon;
     }
     let process_id = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -2389,15 +2404,32 @@ fn host_pid_is_daemon(pid: u32) -> Result<bool> {
     );
     let command = system.process(process_id).map(sysinfo::Process::cmd);
     if let Some(command) = command.filter(|command| !command.is_empty()) {
-        return Ok(command
+        return if command
             .get(1)
-            .is_some_and(|argument| argument == "daemon-run"));
+            .is_some_and(|argument| argument == "daemon-run")
+        {
+            HostPid::Daemon
+        } else {
+            HostPid::NotDaemon
+        };
     }
-    ensure!(
-        !process_is_alive(pid),
-        "could not read the command line for Mjolnir daemon PID {pid}"
-    );
-    Ok(false)
+    if process_is_alive(pid) {
+        HostPid::Unreadable
+    } else {
+        HostPid::NotDaemon
+    }
+}
+
+/// Whether the daemon still runs at `pid`, for a caller about to signal it.
+/// An unreadable command line is inconclusive, so it is an error here.
+fn host_pid_is_daemon(pid: u32) -> Result<bool> {
+    match host_pid(pid) {
+        HostPid::Daemon => Ok(true),
+        HostPid::NotDaemon => Ok(false),
+        HostPid::Unreadable => {
+            bail!("could not read the command line for Mjolnir daemon PID {pid}")
+        }
+    }
 }
 
 /// What the keep-alive last saw when it refreshed this client's presence.

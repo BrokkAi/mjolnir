@@ -17570,6 +17570,12 @@ async fn spawn_orchestrator_checks_destination_and_persists_only_explicit_reposi
         );
     }
     config.disabled_targets.insert("disabled".into());
+    // Loading adds the default local targets, and on macOS `apple-container`
+    // sorts before "container". Save them turned off so the refusal below
+    // names the container target this test configures on every platform.
+    let mut config = config.with_local_targets();
+    let defaults = config.default_targets.clone();
+    config.disabled_targets.extend(defaults);
     config.save().unwrap();
     let workspace = mj_controller::database::create_workspace("Orchestrator placement").unwrap();
     let parent_id = "11111111111111111111111111111111";

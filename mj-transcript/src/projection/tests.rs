@@ -840,7 +840,7 @@ fn golden_mailbox_delivery_transcript() {
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
-            command_id: "mixed-event-wake".into(),
+            command_id: "mailbox-wake-mixed-events".into(),
             command: RelayCommand::MailboxWake { events },
             created_at_ms: 600,
             insert_at_front: false,
@@ -851,7 +851,7 @@ fn golden_mailbox_delivery_transcript() {
     apply_observation(
         &mut session,
         RelayObservation::CommandStarted {
-            command_id: "mixed-event-wake".into(),
+            command_id: "mailbox-wake-mixed-events".into(),
             started_at_ms: 700,
         },
     );
@@ -2292,7 +2292,7 @@ fn interrupted_mailbox_wake_with_continuation_returns_to_idle() {
     use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
 
     let mut session = MaterializedSession::empty("session");
-    let command_id = "mailbox-wake";
+    let command_id = "mailbox-wake-parent";
     let continuation_id = mj_core::continuation::restart_continuation_id(command_id);
     apply_observation(
         &mut session,
@@ -4133,7 +4133,7 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
             apply_observation(
                 &mut session,
                 RelayObservation::CommandQueued {
-                    command_id: "mailbox-wake".into(),
+                    command_id: "mailbox-wake-parent".into(),
                     command: RelayCommand::MailboxWake {
                         events: vec![mj_core::mailbox::MailboxEvent {
                             key: "parent-message".into(),
@@ -4152,7 +4152,7 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
             apply_observation(
                 &mut session,
                 RelayObservation::CommandStarted {
-                    command_id: "mailbox-wake".into(),
+                    command_id: "mailbox-wake-parent".into(),
                     started_at_ms: 20,
                 },
             );
@@ -4161,13 +4161,13 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
                     .active_turn
                     .as_ref()
                     .unwrap()
-                    .belongs_to("mailbox-wake")
+                    .belongs_to("mailbox-wake-parent")
             );
             assert!(
                 !session
                     .transcript
                     .iter()
-                    .any(|item| item.stable_id == "user:mailbox-wake")
+                    .any(|item| item.stable_id == "user:mailbox-wake-parent")
             );
             if native_running {
                 apply_observation(&mut session, RelayObservation::SessionUpdate {
@@ -4183,10 +4183,10 @@ fn interrupted_mailbox_wake_before_restart_produces_one_unread_interruption() {
                 &mut session,
                 RelayObservation::CommandInterrupted {
                     continuation_id: Some(mj_core::continuation::restart_continuation_id(
-                        "mailbox-wake",
+                        "mailbox-wake-parent",
                     )),
                     reason: Some(mj_core::event_outcome::OutcomeReason::WorkerRestarted),
-                    command_id: "mailbox-wake".into(),
+                    command_id: "mailbox-wake-parent".into(),
                     command: RelayCommandKind::Prompt,
                     message: "bridge restarted".into(),
                 },

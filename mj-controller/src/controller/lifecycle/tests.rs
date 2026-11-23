@@ -3890,11 +3890,17 @@ fn move_keep_preflight_and_capture_share_source_selection() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let directory = tempfile::tempdir().unwrap();
-    let (origin, repo) = init_managed_clone_with_origin(directory.path(), name);
+    let temp = tempfile::tempdir().unwrap();
+    // Reach the checkout through a symlink, as macOS reaches its temporary
+    // directory (`/var` is `/private/var`): Git reports the resolved top
+    // level, and the keep stream must still match the recorded checkout.
+    std::fs::create_dir(temp.path().join("resolved")).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("resolved"), temp.path().join("linked")).unwrap();
+    let directory = temp.path().join("linked");
+    let (origin, repo) = init_managed_clone_with_origin(&directory, name);
     let source_root = mj_checkpoint::checkpoint::session_keep_dir(&repo, name).unwrap();
     let keep_root = mj_checkpoint::checkpoint::checkout_keep_dir(&repo);
-    let outside = directory.path().join("outside");
+    let outside = directory.join("outside");
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .current_dir(&repo)
@@ -3916,7 +3922,7 @@ fn move_keep_preflight_and_capture_share_source_selection() {
     let mut session = checkpoint_test_session(name);
     session.state = SessionState::Running;
     session.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: directory.path().join(name),
+        worker_root: directory.join(name),
     }));
     attach_local_managed_clone(&mut session, repo.clone(), origin);
     let mut controller = Controller {
@@ -3942,7 +3948,7 @@ fn move_keep_preflight_and_capture_share_source_selection() {
         super::super::checkpoint::HOST_CHECKOUT_REPOSITORY,
         &repo,
         Some(name),
-        directory.path().join("workspace.pack"),
+        directory.join("workspace.pack"),
         None,
     )
     .unwrap();

@@ -164,6 +164,31 @@ pub fn interpret_checkout_top_level(
     bail!("resolve checkout {}: {}", cwd.display(), stderr.trim())
 }
 
+/// Interpret `git -C <cwd> rev-parse --show-prefix --show-toplevel` as
+/// [`interpret_checkout_top_level`] does, except that a `cwd` which is itself
+/// the top level is returned as given. Git spells the top level with symlinks
+/// resolved (`/var` is `/private/var` on macOS) and absolute where a session
+/// records it relative to the target user's home, while a Move's preview and
+/// capture find the keep directory under the session's recorded checkout.
+pub fn interpret_checkout_top_level_as_given(
+    cwd: &Path,
+    status: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(PathBuf, bool)> {
+    if status != Some(0) {
+        return interpret_checkout_top_level(cwd, status, stdout, stderr);
+    }
+    let text = std::str::from_utf8(stdout).context("decode Git checkout top level")?;
+    let (prefix, top) = text
+        .split_once('\n')
+        .context("Git did not report the checkout prefix and top level")?;
+    if prefix.is_empty() {
+        return Ok((cwd.to_path_buf(), true));
+    }
+    interpret_checkout_top_level(cwd, status, top.as_bytes(), stderr)
+}
+
 fn checkout_top_level(cwd: &Path) -> Result<(PathBuf, bool)> {
     let cwd = std::path::absolute(cwd).with_context(|| format!("resolve {}", cwd.display()))?;
     let output = git(

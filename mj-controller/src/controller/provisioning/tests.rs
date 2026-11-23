@@ -673,18 +673,18 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     }
 
     let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, child_id) = startup_cleanup_fixture(false);
     // The shape `register_subagent` produced before borrowing was
     // recorded: the parent's container with no owner, which no child can
     // verify.
+    let (mut controller, child_id) =
+        startup_cleanup_fixture_on(false, |_| mj_core::state::TargetLocator::SshDocker {
+            host: "builder".into(),
+            container_id: targets::resource_name(PROVISIONED_SESSION).unwrap(),
+            borrowed_from: None,
+        });
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
     record.state = SessionState::Provisioning;
     record.target_template_id = "docker".into();
-    record.target = Some(Box::new(mj_core::state::TargetLocator::SshDocker {
-        host: "builder".into(),
-        container_id: targets::resource_name(PROVISIONED_SESSION).unwrap(),
-        borrowed_from: None,
-    }));
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
@@ -962,6 +962,18 @@ fn failed_owned_child_startup_retires_its_environment_and_keeps_the_relation() {
 }
 
 fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
+    startup_cleanup_fixture_on(owns_environment, |id| TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join(id),
+    })
+}
+
+/// A parent and its failed child, each placed by `target`. A local bare
+/// worker root is a POSIX path a Windows controller cannot record, so a test
+/// that must run there places the sessions in a container.
+fn startup_cleanup_fixture_on(
+    owns_environment: bool,
+    target: impl Fn(&str) -> TargetLocator,
+) -> (Controller, String) {
     let mut config = ssh_docker_registration_config();
     config
         .targets
@@ -970,18 +982,14 @@ fn startup_cleanup_fixture(owns_environment: bool) -> (Controller, String) {
     config.save().unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
     parent.project_directory = Some(mj_core::config::data_dir());
-    parent.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join(PROVISIONED_SESSION),
-    }));
+    parent.target = Some(Box::new(target(PROVISIONED_SESSION)));
     crate::database::save_session(&parent).unwrap();
     let child_id = "fedcba9876543210fedcba9876543210";
     let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture launch failed".into());
     child.project_directory = Some(mj_core::config::data_dir());
-    child.target = Some(Box::new(TargetLocator::LocalBare {
-        worker_root: mj_core::config::data_dir().join(child_id),
-    }));
+    child.target = Some(Box::new(target(child_id)));
     crate::database::register_subagent_with_startup(
         &child,
         &mj_core::subagent::SubagentRecord {

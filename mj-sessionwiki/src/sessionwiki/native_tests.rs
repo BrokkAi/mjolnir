@@ -76,8 +76,16 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
             path
         }
         HarnessKind::Antigravity => {
-            let path = home.join("antigravity-cli/brain/90c30a64-54f7-4261-90f1-e75b1c14311c");
-            let transcript = path.join(".system_generated/logs/transcript_full.jsonl");
+            // One component per join: the adapter's key uses the platform
+            // separator, so a joined "a/b" would differ from it on Windows.
+            let path = home
+                .join("antigravity-cli")
+                .join("brain")
+                .join("90c30a64-54f7-4261-90f1-e75b1c14311c");
+            let transcript = path
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript_full.jsonl");
             fs::create_dir_all(transcript.parent().unwrap()).unwrap();
             fs::write(
                 transcript,
