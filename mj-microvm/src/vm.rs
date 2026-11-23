@@ -32,8 +32,9 @@ const POOL_OVERHEAD_BYTES: u64 = 2 << 20;
 const SLOT_STEP: u32 = 8;
 /// Firecracker's documented maximum for `vcpu_count`.
 const MAX_VCPUS: u32 = 32;
-/// Allow the guest's Docker shutdown budget in addition to its flush budget.
-pub const DEFAULT_STOP_SECONDS: u64 = super::guest_agent::DOCKER_STOP_GRACE.as_secs() + 10;
+/// The 15-second daemon shutdown default in `dockerd --help` plus the
+/// existing 10-second filesystem flush grace from Podman's default `stop` timeout.
+pub const DEFAULT_STOP_SECONDS: u64 = 25;
 const NITRO_SYSFS: &str = "/sys/class/misc/nitro_enclaves";
 const RUNTIME_ROOT: &str = "/run/mj-microvm";
 

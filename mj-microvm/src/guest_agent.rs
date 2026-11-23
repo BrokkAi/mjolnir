@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
@@ -335,10 +335,6 @@ fn resolve_user_in_guest(spec: &str) -> Result<ResolvedUser> {
 // ---------------------------------------------------------------------------
 // The agent
 
-// Docker defaults to a ten-second SIGTERM grace for its containers. Give it
-// that long to stop them and clean up overlay mounts before the kill sweep.
-pub(super) const DOCKER_STOP_GRACE: Duration = Duration::from_secs(10);
-
 pub(super) struct DockerdConfig {
     pub binary: PathBuf,
     pub socket: PathBuf,
@@ -548,9 +544,6 @@ impl Agent {
             self.spawner.spawn(&mut command).context("spawn dockerd")?
         };
 
-        // Docker is optional. Limit its head start so a daemon wedged restoring
-        // containers cannot prevent the VM's main command from starting.
-        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if *self
                 .shutting_down
@@ -561,15 +554,7 @@ impl Agent {
                 *dockerd = Some(child);
                 return Ok(());
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                *dockerd = Some(child);
-                bail!("timed out waiting for {}", config.socket.display());
-            }
-            match child
-                .exit
-                .recv_timeout(remaining.min(Duration::from_millis(25)))
-            {
+            match child.exit.recv_timeout(Duration::from_millis(25)) {
                 Ok(Ok(status)) => bail!("dockerd exited before listening: {status}"),
                 Ok(Err(error)) => bail!("waiting for dockerd failed: {error}"),
                 Err(mpsc::RecvTimeoutError::Disconnected) => bail!("lost dockerd's exit status"),
@@ -593,7 +578,7 @@ impl Agent {
             Ok(true) => {}
             Err(error) => klog(&format!("could not send SIGTERM to dockerd: {error}")),
         }
-        match child.exit.recv_timeout(DOCKER_STOP_GRACE) {
+        match child.exit.recv() {
             Ok(Ok(status)) if status.success() => {}
             Ok(Ok(status)) => klog(&format!("dockerd shut down with {status}")),
             Ok(Err(error)) => klog(&format!("waiting for dockerd shutdown failed: {error}")),
