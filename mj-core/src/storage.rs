@@ -141,6 +141,8 @@ pub struct ClientSessionState {
 pub struct DetachedSessionDraft {
     pub text: String,
     pub inherited_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_draft_ids: Vec<String>,
 }
 
 /// What one turn produced, without loading the transcript around it.

@@ -3047,17 +3047,20 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         transaction.commit()?;
     }
-    // Compatible: deletes only obsolete or duplicate legacy drafts. The schema
-    // and revisioned terminal draft contract remain unchanged.
+    // Compatible: deduplicates identical legacy drafts while preserving user
+    // text, the schema and the revisioned terminal draft contract.
     if version < 154 {
         let transaction =
             Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "DELETE FROM detached_drafts AS legacy
-              WHERE revision IS NULL AND recovered_at IS NULL AND session_id IS NOT NULL
-                AND (NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = legacy.session_id)
-                     OR EXISTS (SELECT 1 FROM detached_drafts
-                                 WHERE session_id = legacy.session_id AND revision IS NOT NULL));
+              WHERE legacy.revision IS NULL AND legacy.recovered_at IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM detached_drafts AS current
+                    WHERE current.revision IS NOT NULL AND current.recovered_at IS NULL
+                      AND current.text <> '' AND current.workspace_id = legacy.workspace_id
+                      AND current.session_id IS legacy.session_id AND current.text = legacy.text
+                );
              DELETE FROM detached_drafts WHERE draft_id IN (
                  SELECT draft_id FROM (
                      SELECT draft_id, row_number() OVER (
@@ -5580,7 +5583,7 @@ mod reader_tests {
     }
 
     #[test]
-    fn revision_154_retires_only_obsolete_and_duplicate_legacy_drafts() {
+    fn revision_154_only_retires_exact_duplicate_legacy_drafts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         for id in ["untouched", "cleared", "saved", "deleted"] {
@@ -5599,6 +5602,9 @@ mod reader_tests {
                 ('cleared-marker', 'default', 'cleared', 'terminal', '02', '', 3, NULL),
                 ('saved-legacy', 'default', 'saved', 'terminal', '01', 'old', NULL, NULL),
                 ('saved-draft', 'default', 'saved', 'terminal', '02', 'current', 2, NULL),
+                ('saved-copy', 'default', 'saved', 'other terminal', '03', 'current', NULL, NULL),
+                ('hidden-draft', 'default', 'saved', 'hidden terminal', '02', 'hidden', 1, '03'),
+                ('hidden-legacy', 'default', 'saved', 'legacy terminal', '01', 'hidden', NULL, NULL),
                 ('untouched', 'default', 'untouched', 'terminal', '02', 'unique', NULL, NULL),
                 ('dup-by-time', 'default', NULL, 'terminal', '01', 'dup', NULL, NULL),
                 ('dup-a', 'default', NULL, 'terminal', '02', 'dup', NULL, NULL),
@@ -5623,10 +5629,15 @@ mod reader_tests {
         assert_eq!(
             remaining,
             [
+                "cleared-legacy",
                 "cleared-marker",
                 "dup-z",
+                "hidden-draft",
+                "hidden-legacy",
+                "orphan",
                 "recovered",
                 "saved-draft",
+                "saved-legacy",
                 "untouched"
             ]
         );

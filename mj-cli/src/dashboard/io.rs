@@ -1506,7 +1506,7 @@ impl DashboardContext {
             }
             DashboardIoUpdate::TerminalDraft { session_id, revision, result } => {
                 self.composer_drafts.complete(&session_id, revision, result.is_ok());
-                match result {
+                match &result {
                     Ok(()) => { self.draft_save_failures.remove(&session_id); }
                     Err(error) => {
                         let message = format!("Could not confirm saved draft for {}: {error}", self.session_notice_name(&session_id));
@@ -1514,6 +1514,7 @@ impl DashboardContext {
                         self.dashboard.set_notice(message);
                     }
                 }
+                self.finish_workspace_draft_saves(&session_id, revision, result.as_ref().map(|_| ()).map_err(String::as_str));
                 self.flush_composer_draft(&session_id, false);
             }
             DashboardIoUpdate::ReadReceipt { session_id, result } => {

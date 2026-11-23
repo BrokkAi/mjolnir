@@ -3835,6 +3835,7 @@ impl DaemonClient {
         }
     }
 
+    /// Fetch a detached draft. The destination terminal save retires the source.
     pub async fn recover_draft(&mut self, draft_id: String) -> Result<(String, String)> {
         match self
             .request(DaemonAction::RecoverDraft { draft_id })

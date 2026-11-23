@@ -369,25 +369,35 @@ pub(crate) fn spawn_workspace_draft_recovery(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
-    let recovery_updates = updates.clone();
     spawn_workspace_management_operation(
         generation,
-        "recovering workspace draft",
+        "reading workspace draft",
         updates,
         Some(tracker),
         async move {
             let mut daemon = daemon::connect_or_start().await?;
             let (session_id, text) = daemon.recover_draft(draft_id.clone()).await?;
-            let _ = recovery_updates.send(DashboardIoUpdate::WorkspaceManagement {
-                generation,
-                result: Ok(WorkspaceManagementResult {
-                    recovered_draft: Some((draft_id, session_id, text)),
-                    ..Default::default()
-                }),
-            });
+            Ok(WorkspaceManagementResult {
+                recovered_draft: Some((draft_id, session_id, text)),
+                ..Default::default()
+            })
+        },
+    )
+}
+
+pub(crate) fn spawn_workspace_drafts_reload(
+    generation: u64,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    spawn_workspace_management_operation(
+        generation,
+        "refreshing workspace drafts",
+        updates,
+        None,
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
             Ok(WorkspaceManagementResult {
                 entries: Some(load_workspace_management_entries(&mut daemon).await?),
-                select_workspace: None,
                 ..Default::default()
             })
         },

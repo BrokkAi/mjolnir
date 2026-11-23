@@ -1280,8 +1280,7 @@ pub(super) async fn handle_action(
         }
         DaemonAction::RecoverDraft { draft_id } => {
             let draft =
-                blocking(move || mj_controller::database::recover_detached_draft(&draft_id))
-                    .await?;
+                blocking(move || mj_controller::database::read_detached_draft(&draft_id)).await?;
             Ok(DaemonReply::RecoveredDraft {
                 session_id: draft.session_id,
                 text: draft.text,

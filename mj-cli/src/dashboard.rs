@@ -33,7 +33,6 @@ use anyhow::{Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use mj_controller::database::DetachedSessionDraft;
 #[cfg(test)]
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord};
@@ -398,6 +397,7 @@ pub(crate) struct DashboardContext {
     composer_daemon_requests: BTreeMap<String, mj_chat::chat::ChatDaemonSender>,
     /// Retain save failures so quitting cannot erase their notice before it is read.
     draft_save_failures: BTreeMap<String, String>,
+    pending_draft_recoveries: BTreeMap<String, Vec<drafts::PendingDraftRecovery>>,
     /// Session-manager attachment is asynchronous: an actor may need to
     /// answer from a worker or relay before a chat can be built. Each pane
     /// runs its own attach, so opening one conversation never cancels
@@ -1612,12 +1612,7 @@ impl DashboardContext {
         let stopped = self.dashboard.take_stopped_by_suspend();
         for session_id in &stopped.sessions {
             self.cancel_chat_open_for(session_id);
-            discard_session_composer(
-                &mut self.dashboard,
-                &mut self.chats,
-                &mut self.composer_drafts,
-                session_id,
-            );
+            self.discard_composer(session_id);
             self.transcript_positions.remove(session_id);
             self.question_drafts.remove(session_id);
         }
@@ -1638,13 +1633,22 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for session_id in sessions {
             self.cancel_chat_open_for(&session_id);
-            discard_session_composer(
-                &mut self.dashboard,
-                &mut self.chats,
-                &mut self.composer_drafts,
-                &session_id,
-            );
+            self.discard_composer(&session_id);
             self.question_drafts.remove(&session_id);
+        }
+    }
+
+    fn discard_composer(&mut self, session_id: &str) {
+        discard_session_composer(
+            &mut self.dashboard,
+            &mut self.chats,
+            &mut self.composer_drafts,
+            session_id,
+        );
+        if let Some(recoveries) = self.pending_draft_recoveries.remove(session_id) {
+            for recovery in recoveries {
+                recovery.finish(&mut self.dashboard, Err("the session was removed"));
+            }
         }
     }
 
@@ -2033,6 +2037,7 @@ impl DashboardContext {
             composer_drafts: ComposerDraftCache::default(),
             composer_daemon_requests: BTreeMap::new(),
             draft_save_failures: BTreeMap::new(),
+            pending_draft_recoveries: BTreeMap::new(),
             opening_chat_sessions: BTreeMap::new(),
             attachments: BTreeMap::new(),
             drawn_chat_sessions: Vec::new(),

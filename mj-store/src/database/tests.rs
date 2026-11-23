@@ -4596,6 +4596,7 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
         &DetachedSessionDraft {
             text: "kept across resume placement".into(),
             inherited_input: None,
+            retired_draft_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -4647,6 +4648,7 @@ fn assigning_new_session_workspace_moves_managed_terminal_draft() {
         &DetachedSessionDraft {
             text: "keep across initial placement".into(),
             inherited_input: None,
+            retired_draft_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -4768,6 +4770,7 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
             &DetachedSessionDraft {
                 text: current.into(),
                 inherited_input: Some(record.draft_input.clone()),
+                retired_draft_ids: Vec::new(),
             },
         )
         .unwrap();
@@ -4783,7 +4786,7 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
             assert_eq!(drafts[0].source, "tui-client-a");
             assert_eq!(drafts[0].owner_pid, Some(1234));
             // Explicit recovery is still supported after retiring the seed.
-            let recovered = recover_detached_draft_at(&database, &drafts[0].id).unwrap();
+            let recovered = read_detached_draft_at(&database, &drafts[0].id).unwrap();
             assert_eq!(recovered.session_id, record.id);
             assert_eq!(recovered.text, current);
             assert!(
@@ -4816,6 +4819,7 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
         &DetachedSessionDraft {
             text: String::new(),
             inherited_input: Some("older inherited input".into()),
+            retired_draft_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -4833,6 +4837,7 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
         &DetachedSessionDraft {
             text: "must survive the failed save".into(),
             inherited_input: Some(record.draft_input.clone()),
+            retired_draft_ids: Vec::new(),
         },
     );
     assert!(result.is_err());
@@ -4870,6 +4875,7 @@ fn a_moved_session_retires_its_inherited_seed_on_first_terminal_save() {
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: Some("inherited input".into()),
+                retired_draft_ids: Vec::new(),
             },
         )
         .unwrap();
@@ -4909,6 +4915,7 @@ fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: None,
+                retired_draft_ids: Vec::new(),
             },
         )
     };
@@ -4972,6 +4979,7 @@ fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: (revision == 1).then(|| "adopt me".into()),
+                retired_draft_ids: Vec::new(),
             },
         )
     };
@@ -5016,6 +5024,7 @@ fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
         &DetachedSessionDraft {
             text: "independent client".into(),
             inherited_input: None,
+            retired_draft_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -5024,7 +5033,7 @@ fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
 }
 
 #[test]
-fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
+fn terminal_draft_recovery_makes_an_identical_self_transfer_visible() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Drafts").unwrap();
@@ -5032,7 +5041,7 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
     record.workspace_id = workspace.id.clone();
     record.draft_input = "seed".into();
     save_session_to(&database, &record).unwrap();
-    let save = |revision, text: &str| {
+    let save = |revision, text: &str, retired_draft_ids: Vec<String>| {
         save_terminal_draft_in(
             &mut open(&database).unwrap(),
             &record.id,
@@ -5042,20 +5051,27 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: Some("seed".into()),
+                retired_draft_ids,
             },
         )
     };
-    save(1, "seed").unwrap();
+    save(1, "seed", Vec::new()).unwrap();
     let draft_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
         .id
         .clone();
-    let recovered = recover_detached_draft_at(&database, &draft_id).unwrap();
+    let recovered = read_detached_draft_at(&database, &draft_id).unwrap();
     assert_eq!(recovered.session_id, record.id);
     assert_eq!(recovered.text, "seed");
 
+    assert_eq!(
+        read_detached_draft_at(&database, &draft_id).unwrap(),
+        recovered
+    );
+    discard_detached_drafts_at(&database, &workspace.id, Some(&draft_id)).unwrap();
+
     // A retry or identical newer save must leave the recovered source hidden.
-    save(1, "seed").unwrap();
-    save(2, "seed").unwrap();
+    save(1, "seed", Vec::new()).unwrap();
+    save(2, "seed", Vec::new()).unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id].draft_input,
         ""
@@ -5065,7 +5081,8 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
             .unwrap()
             .is_empty()
     );
-    save(3, "new unsent edit").unwrap();
+    // An explicit transfer back into this same terminal makes the row visible.
+    save(3, "seed", vec![draft_id.clone()]).unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id].draft_input,
         ""
@@ -5073,7 +5090,7 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
     let visible = list_detached_drafts_at(&database, &workspace.id).unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].id, draft_id);
-    assert_eq!(visible[0].text, "new unsent edit");
+    assert_eq!(visible[0].text, "seed");
 }
 
 #[test]
@@ -9717,6 +9734,7 @@ fn detached_draft_discard_retires_revisioned_rows_and_deletes_legacy_rows() {
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: None,
+                retired_draft_ids: Vec::new(),
             },
         )
         .unwrap();
@@ -9763,6 +9781,90 @@ fn detached_draft_discard_retires_revisioned_rows_and_deletes_legacy_rows() {
     assert_eq!(list_detached_drafts_at(&path, &other.id).unwrap().len(), 1);
     assert!(
         !conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM detached_drafts WHERE draft_id = ?1)",
+                [&legacy],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+fn terminal_draft_transfer_retires_sources_only_with_a_committed_new_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let workspace = create_workspace_at(&path, "Draft transfer").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id.clone_from(&workspace.id);
+    save_session_to(&path, &record).unwrap();
+    let mut connection = open(&path).unwrap();
+    let save = |connection: &mut Connection, source, revision, text: &str, retired_draft_ids| {
+        save_terminal_draft_in(
+            connection,
+            &record.id,
+            source,
+            42,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                retired_draft_ids,
+                inherited_input: None,
+            },
+        )
+    };
+    save(&mut connection, "original", 2, "revisioned", vec![]).unwrap();
+    save(&mut connection, "destination", 3, "old composer", vec![]).unwrap();
+    let revisioned = list_detached_drafts_at(&path, &workspace.id)
+        .unwrap()
+        .into_iter()
+        .find(|draft| draft.source == "original")
+        .unwrap()
+        .id;
+    let legacy = seed_legacy_detached_draft(
+        &path,
+        &workspace.id,
+        Some(&record.id),
+        "legacy",
+        None,
+        "legacy copy",
+    )
+    .unwrap()
+    .unwrap();
+    let sources = vec![revisioned.clone(), legacy.clone()];
+
+    save(&mut connection, "destination", 3, "merged", sources.clone()).unwrap();
+    for id in &sources {
+        assert!(read_detached_draft_at(&path, id).is_ok());
+    }
+
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_legacy_retirement BEFORE DELETE ON detached_drafts
+         WHEN OLD.revision IS NULL BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;",
+        )
+        .unwrap();
+    assert!(save(&mut connection, "destination", 4, "merged", sources.clone()).is_err());
+    for id in &sources {
+        assert!(read_detached_draft_at(&path, id).is_ok());
+    }
+    assert!(
+        list_detached_drafts_at(&path, &workspace.id)
+            .unwrap()
+            .iter()
+            .any(|draft| draft.source == "destination" && draft.text == "old composer")
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER refuse_legacy_retirement")
+        .unwrap();
+    save(&mut connection, "destination", 4, "merged", sources).unwrap();
+    let visible = list_detached_drafts_at(&path, &workspace.id).unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].text, "merged");
+    assert_eq!(connection.query_row("SELECT revision FROM detached_drafts WHERE draft_id = ?1 AND recovered_at IS NOT NULL", [&revisioned], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert!(
+        !connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM detached_drafts WHERE draft_id = ?1)",
                 [&legacy],

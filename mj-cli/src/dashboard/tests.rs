@@ -1966,3 +1966,70 @@ async fn workspace_draft_recovery_merges_typing_that_arrived_in_flight() {
     assert_eq!(chats["session"].draft(), expected);
     assert_eq!(cache.start("session", true).unwrap().1.text, expected);
 }
+
+#[test]
+fn workspace_draft_recovery_refreshes_only_after_save_acknowledgement() {
+    let mut dashboard = populated_dashboard();
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("expected workspace manager load");
+    };
+    let mut cache = ComposerDraftCache::default();
+    cache.capture("session", "recovered".into(), "");
+    let revision = cache.retire_draft("session", "source".into());
+    let recovery = || drafts::PendingDraftRecovery {
+        generation,
+        revision,
+        name: "Example".into(),
+    };
+    let (saving, draft) = cache.start("session", false).unwrap();
+    assert_eq!(saving, revision);
+    assert_eq!(draft.retired_draft_ids, ["source"]);
+    assert_eq!(dashboard.notice(), None);
+
+    cache.complete("session", revision, false);
+    assert_eq!(recovery().finish(&mut dashboard, Err("disk full")), None);
+    let (retry, draft) = cache.start("session", true).unwrap();
+    assert_eq!(retry, revision);
+    assert_eq!(draft.retired_draft_ids, ["source"]);
+    cache.complete("session", revision, true);
+    assert_eq!(recovery().finish(&mut dashboard, Ok(())), Some(generation));
+
+    dashboard.cancel_modal();
+    assert_eq!(recovery().finish(&mut dashboard, Ok(())), None);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Recovered draft into Example.")
+    );
+    assert_eq!(recovery().finish(&mut dashboard, Err("disk full")), None);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Could not save recovered draft for Example: disk full")
+    );
+}
+
+#[tokio::test]
+async fn workspace_draft_recovery_rejects_unmergeable_input_before_staging_retirement() {
+    let mut dashboard = populated_dashboard();
+    let mut chats = BTreeMap::new();
+    let mut cache = ComposerDraftCache::default();
+    dashboard.seed_standby_prompt("session", "typing during recovery".into());
+    let source = "mjolnir-chat-draft-v1:malformed";
+    assert!(
+        drafts::install_workspace_draft(
+            &mut cache,
+            &mut dashboard,
+            &mut chats,
+            "session",
+            "",
+            source
+        )
+        .is_err()
+    );
+    assert_eq!(
+        dashboard.standby_prompt_draft("session").as_deref(),
+        Some("typing during recovery")
+    );
+    assert!(cache.start("session", true).is_none());
+}

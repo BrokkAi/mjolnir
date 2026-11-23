@@ -346,14 +346,13 @@ pub(super) fn save_terminal_draft_in(
             params![session_id, inherited],
         )?;
     }
-    if let Some((draft_id, _)) = existing {
+    let target_draft_id = if let Some((draft_id, _)) = existing {
         transaction.execute(
             "UPDATE detached_drafts
                 SET workspace_id = ?2, owner_pid = ?3, saved_at = ?4,
                     text = ?5, revision = ?6,
                     recovered_at = CASE
-                        WHEN text = ?5 THEN recovered_at
-                        WHEN ?5 <> '' THEN NULL
+                        WHEN ?5 <> '' AND (?7 OR text <> ?5) THEN NULL
                         ELSE recovered_at
                     END
               WHERE draft_id = ?1",
@@ -363,9 +362,11 @@ pub(super) fn save_terminal_draft_in(
                 owner_pid,
                 saved_at,
                 draft.text,
-                revision
+                revision,
+                !draft.retired_draft_ids.is_empty(),
             ],
         )?;
+        draft_id
     } else {
         let id = new_workspace_id()?;
         transaction.execute(
@@ -382,6 +383,26 @@ pub(super) fn save_terminal_draft_in(
                 draft.text,
                 revision
             ],
+        )?;
+        id
+    };
+    // The destination and all source retirements commit together. A revisioned
+    // source keeps its watermark so late saves cannot resurrect it.
+    for retired_id in &draft.retired_draft_ids {
+        if retired_id == &target_draft_id {
+            continue;
+        }
+        transaction.execute(
+            "UPDATE detached_drafts SET recovered_at = ?2
+              WHERE draft_id = ?1 AND session_id = ?3
+                AND recovered_at IS NULL AND revision IS NOT NULL",
+            params![retired_id, saved_at, session_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM detached_drafts
+              WHERE draft_id = ?1 AND session_id = ?2
+                AND recovered_at IS NULL AND revision IS NULL",
+            params![retired_id, session_id],
         )?;
     }
     transaction.commit()?;
@@ -450,38 +471,26 @@ pub struct RecoveredDraft {
     pub text: String,
 }
 
-/// Claim a detached draft for the requesting composer's local owner.
-pub fn recover_detached_draft(draft_id: &str) -> Result<RecoveredDraft> {
-    let draft_id = draft_id.to_owned();
-    submit_database_write("recover_detached_draft", move |_| {
-        recover_detached_draft_at(&database_path(), &draft_id)
-    })
+/// Read the recoverable draft. Its source stays visible until a terminal
+/// commits its destination draft and retires the source in the same save.
+pub fn read_detached_draft(draft_id: &str) -> Result<RecoveredDraft> {
+    read_detached_draft_at(&database_path(), draft_id)
 }
 
-pub(super) fn recover_detached_draft_at(path: &Path, draft_id: &str) -> Result<RecoveredDraft> {
-    let mut connection = open(path)?;
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let (session_id, text): (Option<String>, String) = tx
+pub(super) fn read_detached_draft_at(path: &Path, draft_id: &str) -> Result<RecoveredDraft> {
+    let connection = open_reader(path)?;
+    let (session_id, text, session_exists): (Option<String>, String, bool) = connection
         .query_row(
-            "SELECT session_id, text FROM detached_drafts
-              WHERE draft_id = ?1 AND recovered_at IS NULL AND text <> ''",
+            "SELECT draft.session_id, draft.text,
+                    EXISTS(SELECT 1 FROM sessions WHERE session_id = draft.session_id)
+               FROM detached_drafts AS draft
+              WHERE draft.draft_id = ?1 AND recovered_at IS NULL AND text <> ''",
             [draft_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .with_context(|| format!("find recoverable draft {draft_id:?}"))?;
     let session_id = session_id.context("draft is not associated with a session")?;
-    let session_exists = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
-        [&session_id],
-        |row| row.get::<_, bool>(0),
-    )?;
     ensure!(session_exists, "draft session no longer exists");
-    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    tx.execute(
-        "UPDATE detached_drafts SET recovered_at = ?2 WHERE draft_id = ?1",
-        params![draft_id, now],
-    )?;
-    tx.commit()?;
     Ok(RecoveredDraft { session_id, text })
 }
 

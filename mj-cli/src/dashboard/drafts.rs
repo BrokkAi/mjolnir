@@ -139,6 +139,50 @@ pub(super) fn chat_daemon_requests(
     persistence_tx
 }
 
+pub(super) struct PendingDraftRecovery {
+    pub(super) revision: u64,
+    pub(super) generation: u64,
+    pub(super) name: String,
+}
+
+impl PendingDraftRecovery {
+    // A refresh keeps the current manager busy until its final snapshot arrives.
+    pub(super) fn finish(
+        self,
+        dashboard: &mut DashboardState,
+        result: Result<(), &str>,
+    ) -> Option<u64> {
+        match result {
+            Ok(()) => {
+                dashboard.workspace_draft_notice(
+                    self.generation,
+                    format!("Recovered draft into {}.", self.name),
+                );
+                dashboard
+                    .workspace_management_is_current(self.generation)
+                    .then_some(self.generation)
+            }
+            Err(error) => {
+                report_recovery_error(
+                    dashboard,
+                    self.generation,
+                    format!("Could not save recovered draft for {}: {error}", self.name),
+                );
+                None
+            }
+        }
+    }
+}
+
+fn report_recovery_error(dashboard: &mut DashboardState, generation: u64, error: String) {
+    if !dashboard
+        .finish_workspace_management(generation, Err(error.clone()), false)
+        .foreground
+    {
+        dashboard.set_notice(error);
+    }
+}
+
 impl DashboardContext {
     pub(super) fn workspace_draft_recovery_error(&self, session_id: &str) -> Option<String> {
         let inherited = self
@@ -179,48 +223,54 @@ impl DashboardContext {
             &text,
         ) {
             Ok(()) => {
+                let revision = self.composer_drafts.retire_draft(&session_id, draft_id);
+                self.pending_draft_recoveries
+                    .entry(session_id.clone())
+                    .or_default()
+                    .push(PendingDraftRecovery {
+                        revision,
+                        generation,
+                        name,
+                    });
                 self.flush_composer_draft(&session_id, true);
-                self.dashboard
-                    .workspace_draft_notice(generation, format!("Recovered draft into {name}."));
             }
             Err(error) => {
-                let source = format!("Unmerged recovery ({draft_id})");
-                let reason = format!("{error:#}");
-                io::spawn_critical_async(
-                    self.critical_operations.clone(),
-                    format!("keeping unmerged draft for {name}"),
-                    self.dashboard_io_tx.clone(),
-                    io::SAVE_ACK_TIMEOUT,
-                    async move {
-                        let mut daemon = crate::daemon::connect_or_start().await?;
-                        daemon
-                            .persist_terminal_draft(
-                                source,
-                                session_id,
-                                std::process::id(),
-                                1,
-                                DetachedSessionDraft {
-                                    text,
-                                    inherited_input: None,
-                                },
-                            )
-                            .await
-                    },
-                    move |result| {
-                        DashboardIoUpdate::WorkspaceManagement {
-                        generation,
-                        result: result.map(|()| io::WorkspaceManagementResult {
-                            draft_notice: Some(format!(
-                                "Kept the newer composer for {name}. The recovered draft is in Workspaces → Drafts ({reason})."
-                            )),
-                            ..Default::default()
-                        }).map_err(|error| format!(
-                            "Could not keep the unmerged draft for {name}: {error} ({reason})"
-                        )),
-                    }
-                    },
+                report_recovery_error(
+                    &mut self.dashboard,
+                    generation,
+                    format!(
+                        "Could not merge recovered draft into {name}: {error:#}. Your composer and the detached draft were both kept."
+                    ),
                 );
             }
+        }
+    }
+
+    pub(super) fn finish_workspace_draft_saves(
+        &mut self,
+        session_id: &str,
+        revision: u64,
+        result: Result<(), &str>,
+    ) {
+        let std::collections::btree_map::Entry::Occupied(mut entry) =
+            self.pending_draft_recoveries.entry(session_id.to_owned())
+        else {
+            return;
+        };
+        let mut reload_generation = None;
+        for recovery in entry
+            .get_mut()
+            .extract_if(.., |pending| pending.revision <= revision)
+        {
+            reload_generation = recovery
+                .finish(&mut self.dashboard, result)
+                .or(reload_generation);
+        }
+        if entry.get().is_empty() {
+            entry.remove();
+        }
+        if let Some(generation) = reload_generation {
+            io::spawn_workspace_drafts_reload(generation, self.dashboard_io_tx.clone());
         }
     }
 

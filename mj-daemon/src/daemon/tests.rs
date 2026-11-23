@@ -17780,11 +17780,44 @@ async fn workspace_draft_rpc_lists_previews_recovers_and_discards() {
     assert_eq!(snapshot.drafts[0].preview, draft.preview);
 
     let recovered = client.recover_draft(draft.id.clone()).await.unwrap();
-    assert_eq!(recovered, (session.id.clone(), text));
-    assert!(client.recover_draft(draft.id.clone()).await.is_err());
+    assert_eq!(recovered, (session.id.clone(), text.clone()));
+    assert_eq!(
+        client.recover_draft(draft.id.clone()).await.unwrap(),
+        recovered
+    );
     assert_eq!(
         mj_controller::database::load_state().unwrap().sessions[&session.id].draft_input,
         "inherited seed",
+    );
+
+    client
+        .persist_terminal_draft(
+            "receiving terminal".into(),
+            session.id.clone(),
+            std::process::id(),
+            1,
+            mj_core::storage::DetachedSessionDraft {
+                text,
+                retired_draft_ids: vec![draft.id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(client.recover_draft(draft.id.clone()).await.is_err());
+    let transferred = client.list_workspace_drafts().await.unwrap();
+    assert_eq!(transferred[0].drafts.len(), 1);
+    assert_eq!(transferred[0].drafts[0].source, "receiving terminal");
+    assert_eq!(transferred[0].drafts[0].preview, draft.preview);
+    assert_eq!(
+        client
+            .discard_drafts(
+                workspace.id.clone(),
+                Some(transferred[0].drafts[0].id.clone())
+            )
+            .await
+            .unwrap(),
+        1
     );
 
     for text in ["single discard", "bulk 1", "bulk 2"] {
