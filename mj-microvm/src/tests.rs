@@ -568,10 +568,11 @@ fn stop_flushes_before_it_answers_and_then_powers_off() {
 
 fn dockerd_config(work: &Path) -> DockerdConfig {
     DockerdConfig {
-        binary: work.join("dockerd"),
         socket: work.join("docker.sock"),
         pidfile: work.join("docker.pid"),
         log_file: work.join("dockerd.log"),
+        search_path: work.to_str().unwrap().to_owned(),
+        ..DockerdConfig::default()
     }
 }
 
@@ -621,9 +622,14 @@ fn start_and_stop_without_dockerd() {
 fn dockerd_listens_before_main_and_exits_before_quiesce() {
     for stop_requested in [false, true] {
         let work = tempfile::tempdir_in("/tmp").unwrap();
-        let config = dockerd_config(work.path());
+        let sbin = work.path().join("sbin");
+        fs::create_dir(&sbin).unwrap();
+        let config = DockerdConfig {
+            search_path: sbin.to_str().unwrap().to_owned(),
+            ..dockerd_config(work.path())
+        };
         executable_file(
-            &config.binary,
+            &sbin.join("dockerd"),
             r#"#!/usr/bin/env python3
 import os
 import signal
@@ -717,11 +723,12 @@ while ready.exists() and not release.exists():
 #[test]
 fn dockerd_early_exit_does_not_block_main() {
     let work = tempfile::tempdir().unwrap();
-    let config = dockerd_config(work.path());
-    executable_file(
-        &config.binary,
-        "#!/bin/sh\necho 'dockerd failed' >&2\nexit 1\n",
-    );
+    let binary = work.path().join("dockerd");
+    let config = DockerdConfig {
+        binary: binary.to_str().unwrap().to_owned(),
+        ..dockerd_config(work.path())
+    };
+    executable_file(&binary, "#!/bin/sh\necho 'dockerd failed' >&2\nexit 1\n");
     let log_file = config.log_file.clone();
     let harness = Harness::with_dockerd(config, false);
     let ran = work.path().join("main-ran");

@@ -336,7 +336,8 @@ fn resolve_user_in_guest(spec: &str) -> Result<ResolvedUser> {
 // The agent
 
 pub(super) struct DockerdConfig {
-    pub binary: PathBuf,
+    pub binary: String,
+    pub search_path: String,
     pub socket: PathBuf,
     pub pidfile: PathBuf,
     pub log_file: PathBuf,
@@ -345,7 +346,8 @@ pub(super) struct DockerdConfig {
 impl Default for DockerdConfig {
     fn default() -> Self {
         Self {
-            binary: "/usr/bin/dockerd".into(),
+            binary: "dockerd".into(),
+            search_path: DEFAULT_PATH.to_owned(),
             socket: "/var/run/docker.sock".into(),
             pidfile: "/run/docker.pid".into(),
             log_file: "/run/dockerd.log".into(),
@@ -513,13 +515,17 @@ impl Agent {
 
     fn start_dockerd(&self, gid: u32) -> Result<()> {
         let config = &self.dockerd_config;
-        if !is_executable(&config.binary) {
+        // Explicit paths bypass PATH lookup. Check them too so absent or
+        // non-executable daemons are skipped before opening the log.
+        let Some(binary) = resolve_program(&config.binary, &config.search_path, "/")
+            .filter(|binary| is_executable(Path::new(binary)))
+        else {
             return Ok(());
-        }
+        };
         let log = fs::File::create(&config.log_file).context("open dockerd log")?;
         let mut socket_url = OsString::from("unix://");
         socket_url.push(&config.socket);
-        let mut command = Command::new(&config.binary);
+        let mut command = Command::new(binary);
         command
             .args(["--exec-opt", "native.cgroupdriver=cgroupfs", "--host"])
             .arg(socket_url)
