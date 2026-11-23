@@ -37,8 +37,8 @@ pub fn create_intent_is_stale(session: &SessionRecord) -> bool {
 
 /// How a session's creation stands, read from durable state alone: the
 /// intent row says whether it is unfinished, the record says how it ended.
-/// The row is read first. It is removed in the transaction that writes the
-/// final state, so a missing row means the record already shows the end.
+/// Both reads share one SQLite snapshot so a lagging `CommittedState` cache
+/// cannot pair a settled intent with a stale `Provisioning` record.
 pub enum CreateEnd {
     Unfinished,
     Finished,
@@ -46,17 +46,17 @@ pub enum CreateEnd {
 }
 
 pub fn session_create_end(session_id: &str) -> Result<CreateEnd> {
-    let connection = open_reader(&database_path())?;
-    let unfinished: bool = connection.query_row(
+    let mut connection = open_reader(&database_path())?;
+    let snapshot = connection.transaction()?;
+    let unfinished: bool = snapshot.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
         [session_id],
         |row| row.get(0),
     )?;
-    drop(connection);
     if unfinished {
         return Ok(CreateEnd::Unfinished);
     }
-    let Some(record) = load_session_record(session_id)? else {
+    let Some(record) = state_io::load_session_with(&snapshot, session_id)? else {
         return Ok(CreateEnd::Failed(format!(
             "session {session_id} no longer exists"
         )));
@@ -241,4 +241,64 @@ pub fn reset_session_for_create_retry(session: &SessionRecord) -> Result<()> {
         tx.commit()?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_isolation::{IsolatedTest, test_name};
+    use std::sync::mpsc::channel;
+
+    // Hard-won: 4e82c9302e: session_create_end mixed an SQL intent check with a stale cached session record
+    #[test]
+    fn session_create_end_reads_failure_before_cache_publication() {
+        const CHILD: &str = "MJ_TEST_CREATE_END_SNAPSHOT";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "session_create_end_reads_failure_before_cache_publication",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "create-end-snapshot")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+
+        let owner = install_isolated_test_writer();
+        let mut session = super::super::tests::session("cancelled-create", "project");
+        session.state = SessionState::Provisioning;
+        save_new_session(&session, None, false, false).unwrap();
+
+        let id = session.id.clone();
+        session.state = SessionState::StartupCleanup;
+        session.last_error = Some("creation cancelled".into());
+        let (committed, commit) = channel();
+        let (publish, publication) = channel();
+        let (cached, outcome) = std::thread::scope(|scope| {
+            let write = scope.spawn(move || {
+                submit_database_write("settle cancelled create", move |connection| {
+                    let tx = connection.transaction()?;
+                    update_lifecycle_fields(&tx, &session)?;
+                    tx.commit()?;
+                    committed.send(())?;
+                    publication.recv()?;
+                    Ok(())
+                })
+            });
+            commit.recv().unwrap();
+            let cached = load_session_record(&id);
+            let outcome = session_create_end(&id);
+            publish.send(()).unwrap();
+            write.join().unwrap().unwrap();
+            (cached, outcome)
+        });
+
+        assert_eq!(cached.unwrap().unwrap().state, SessionState::Provisioning);
+        assert!(
+            matches!(outcome.unwrap(), CreateEnd::Failed(reason) if reason == "creation cancelled")
+        );
+        owner.shutdown().unwrap();
+    }
 }
