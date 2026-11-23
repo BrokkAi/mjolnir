@@ -1,8 +1,8 @@
-// Port of the tests in mj-worker/src/review/hook.rs.
+// Port of the tests in mj-worker-review/src/hook.rs.
 
 //go:build unix
 
-package worker
+package workerreview
 
 import (
 	"fmt"
@@ -34,8 +34,8 @@ func hookTestPush(t *testing.T, root string, gate bool, refs ...string) checkpoi
 
 func hookTestReviewed(t *testing.T, root string) {
 	t.Helper()
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
-	head := testSupportGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
+	head := testsGit(root, "rev-parse", "HEAD")
 	pushTestRecordReviewed(t, root, tree, head)
 }
 
@@ -125,7 +125,7 @@ func TestHookAcceptsAnOverriddenTreeAndAReinstallReplacesTheOldScript(t *testing
 	}
 	pushTestWrite(t, hook, old)
 	head := pushTestCommit(t, root, "overridden")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	if err := checkpoint.RecordOverriddenTree(checkpoint.SystemGit{}, root, tree, head); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestConfiguredHooksPathAndLinkedWorktreeUseGitHookLocations(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := hookTestCheckout(t, temp)
 	external := filepath.Join(temp, "custom hooks")
-	testSupportGit(root, "config", "core.hooksPath", external)
+	testsGit(root, "config", "core.hooksPath", external)
 	hookTestInstall(t, root)
 	if !hookTestExists(filepath.Join(external, "pre-push")) {
 		t.Fatal("the hook is not in the configured directory")
@@ -224,9 +224,9 @@ func TestConfiguredHooksPathAndLinkedWorktreeUseGitHookLocations(t *testing.T) {
 	if hookTestPush(t, root, true, "HEAD:refs/heads/custom").Status == 0 {
 		t.Fatal("an unreviewed push was accepted")
 	}
-	testSupportGit(root, "config", "--unset", "core.hooksPath")
+	testsGit(root, "config", "--unset", "core.hooksPath")
 	linked := filepath.Join(temp, "linked")
-	testSupportGit(root, "worktree", "add", "-qb", "linked", linked)
+	testsGit(root, "worktree", "add", "-qb", "linked", linked)
 	if info, err := os.Stat(filepath.Join(linked, ".git")); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("%v %v", info, err)
 	}
@@ -252,9 +252,9 @@ func TestTrackedWorktreeHooksAreRefusedWithoutFileChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	pushTestWrite(t, filepath.Join(hooks, "pre-push"), "#!/bin/sh\nexit 0\n")
-	testSupportGit(root, "add", ".husky/pre-push")
-	testSupportGit(root, "commit", "-qm", "tracked Husky hook")
-	testSupportGit(root, "config", "core.hooksPath", ".husky")
+	testsGit(root, "add", ".husky/pre-push")
+	testsGit(root, "commit", "-qm", "tracked Husky hook")
+	testsGit(root, "config", "core.hooksPath", ".husky")
 	before := hookTestRead(t, filepath.Join(hooks, "pre-push"))
 	if got := hookTestInstall(t, root); got != HookInstall(HookInstallRefusedWorkTreeHooksDirectory{Path: hooks}) {
 		t.Fatalf("%#v", got)
@@ -265,10 +265,10 @@ func TestTrackedWorktreeHooksAreRefusedWithoutFileChanges(t *testing.T) {
 	if entries, err := os.ReadDir(hooks); err != nil || len(entries) != 1 {
 		t.Fatalf("%v %v", entries, err)
 	}
-	if status := testSupportGit(root, "status", "--porcelain", "--untracked-files=all"); status != "" {
+	if status := testsGit(root, "status", "--porcelain", "--untracked-files=all"); status != "" {
 		t.Fatal(status)
 	}
-	head := testSupportGit(root, "rev-parse", "HEAD")
+	head := testsGit(root, "rev-parse", "HEAD")
 	if _, err := CapturePushableCommits(checkpoint.SystemGit{}, root, head); err != nil {
 		t.Fatal(err)
 	}
@@ -276,12 +276,12 @@ func TestTrackedWorktreeHooksAreRefusedWithoutFileChanges(t *testing.T) {
 	if err := os.Symlink(hooks, alias); err != nil {
 		t.Fatal(err)
 	}
-	testSupportGit(root, "config", "core.hooksPath", alias)
+	testsGit(root, "config", "core.hooksPath", alias)
 	if got := hookTestInstall(t, root); got != HookInstall(HookInstallRefusedWorkTreeHooksDirectory{Path: hooks}) {
 		t.Fatalf("%#v", got)
 	}
 	// Refuse untracked pollution before even creating the directory.
-	testSupportGit(root, "config", "core.hooksPath", ".untracked-hooks")
+	testsGit(root, "config", "core.hooksPath", ".untracked-hooks")
 	untracked := filepath.Join(root, ".untracked-hooks")
 	if got := hookTestInstall(t, root); got != HookInstall(HookInstallRefusedWorkTreeHooksDirectory{Path: untracked}) {
 		t.Fatalf("%#v", got)
@@ -299,14 +299,14 @@ func TestIgnoredWorktreeHooksInstallWithoutDirtyingTheCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 	pushTestWrite(t, filepath.Join(hooks, ".gitignore"), "*\n")
-	testSupportGit(root, "config", "core.hooksPath", ".husky/_")
+	testsGit(root, "config", "core.hooksPath", ".husky/_")
 	if got := hookTestInstall(t, root); got != HookInstall(HookInstallInstalled{}) {
 		t.Fatalf("%#v", got)
 	}
 	if !hookTestExists(filepath.Join(hooks, "pre-push")) {
 		t.Fatal("the hook was not installed")
 	}
-	if status := testSupportGit(root, "status", "--porcelain", "--untracked-files=all"); status != "" {
+	if status := testsGit(root, "status", "--porcelain", "--untracked-files=all"); status != "" {
 		t.Fatal(status)
 	}
 	pushTestCommit(t, root, "unreviewed")

@@ -1,12 +1,11 @@
-// Port of mj-worker/src/review/capture.rs.
+// Port of mj-worker-review/src/capture.rs.
 //
 // Worker-owned Git capture for push review.
 //
-// Names that collide with other mj-worker modules carry this module's
-// prefix: captureRun (Rust run) and captureRepositoryRoot (Rust
-// repository_root).
+// Names that collided with other mj-worker modules when this was part of
+// the worker package keep this module's prefix: captureRun (Rust run).
 
-package worker
+package workerreview
 
 import (
 	"bytes"
@@ -133,7 +132,7 @@ func CapturePushableCommits(runner checkpoint.GitCommandRunner, root string, ses
 }
 
 func capturePushableCommits(runner checkpoint.GitCommandRunner, root string, sessionStartHead string) (PushCapture, error) {
-	status, err := checkedGit(runner, root, []string{"status", "--porcelain", "--untracked-files=no", "-z"})
+	status, err := CheckedGit(runner, root, []string{"status", "--porcelain", "--untracked-files=no", "-z"})
 	if err != nil {
 		return PushCapture{}, err
 	}
@@ -440,7 +439,9 @@ func mergeBase(runner checkpoint.GitCommandRunner, root, one, other string) (*st
 	return nil, fmt.Errorf("find a merge base: %s", captureLossy(output.Stderr))
 }
 
-func checkedGit(runner checkpoint.GitCommandRunner, root string, args []string) ([]byte, error) {
+// CheckedGit runs git in root and returns its standard output, failing
+// when git exits unsuccessfully.
+func CheckedGit(runner checkpoint.GitCommandRunner, root string, args []string) ([]byte, error) {
 	output, err := captureRun(runner, root, args)
 	if err != nil {
 		return nil, err
@@ -599,7 +600,7 @@ func LaterReviewBase(runner checkpoint.GitCommandRunner, root string, revision s
 }
 
 func checkedGitText(runner checkpoint.GitCommandRunner, root string, args []string) (string, error) {
-	output, err := checkedGit(runner, root, args)
+	output, err := CheckedGit(runner, root, args)
 	if err != nil {
 		return "", err
 	}
@@ -826,7 +827,7 @@ func EnsureSessionStartHead(runner checkpoint.GitCommandRunner, root, session st
 		return nil, err
 	}
 	// An empty old value creates the ref only if it does not exist.
-	if _, err := checkedGit(runner, root, []string{"update-ref", reference, *head, ""}); err != nil {
+	if _, err := CheckedGit(runner, root, []string{"update-ref", reference, *head, ""}); err != nil {
 		// A concurrent initializer may have published the start first.
 		start, startErr := SessionStartHead(runner, root, session)
 		if startErr != nil || start != nil {
@@ -845,7 +846,7 @@ func EnsureSessionStartHead(runner checkpoint.GitCommandRunner, root, session st
 func DiscoverRepositories(git checkpoint.GitCommandRunner, roots []string) []string {
 	var discovered []string
 	for _, root := range roots {
-		toplevel, ok := captureRepositoryRoot(git, root)
+		toplevel, ok := RepositoryRoot(git, root)
 		if ok && !captureContainsPath(discovered, toplevel) {
 			discovered = append(discovered, toplevel)
 		}
@@ -853,10 +854,9 @@ func DiscoverRepositories(git checkpoint.GitCommandRunner, roots []string) []str
 	return discovered
 }
 
-// captureRepositoryRoot is Rust's review::capture::repository_root
-// (prefixed: move_workspace's repository_root keeps the name): the top level
-// of the repository containing directory.
-func captureRepositoryRoot(git checkpoint.GitCommandRunner, directory string) (string, bool) {
+// RepositoryRoot is Rust's capture::repository_root: the top level of the
+// repository containing directory.
+func RepositoryRoot(git checkpoint.GitCommandRunner, directory string) (string, bool) {
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
 		return "", false
 	}

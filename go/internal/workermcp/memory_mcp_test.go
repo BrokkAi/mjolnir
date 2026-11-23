@@ -1,8 +1,8 @@
-// Port of the tests of mj-worker/src/memory_mcp.rs (`cfg(all(test, unix))`).
+// Port of the tests of mj-worker-mcp/src/memory_mcp.rs (`cfg(all(test, unix))`).
 
 //go:build unix
 
-package worker
+package workermcp
 
 import (
 	"bufio"

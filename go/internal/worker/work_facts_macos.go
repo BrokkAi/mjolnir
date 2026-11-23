@@ -92,7 +92,7 @@ func ps(args []string) (string, error) {
 	if !output.Status.Success() {
 		return "", fmt.Errorf("ps failed with %s", workFactsExitStatus(output.Status))
 	}
-	return captureLossy(output.Stdout), nil
+	return fromUTF8Lossy(output.Stdout), nil
 }
 
 // listing is the ps arguments of the scan's process listing.

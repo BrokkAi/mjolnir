@@ -77,7 +77,7 @@ func readBoundedLine(reader *bufio.Reader, maximumBytes int) (string, bool, erro
 	default:
 		return "", false, nil
 	}
-	text, err := captureFromUTF8(line)
+	text, err := fromUTF8(line)
 	if err != nil {
 		return "", false, fmt.Errorf("relay request is not UTF-8: %w", err)
 	}

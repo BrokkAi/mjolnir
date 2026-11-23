@@ -1,8 +1,8 @@
-// Port of mj-worker/src/review/hook.rs.
+// Port of mj-worker-review/src/hook.rs.
 //
 // Repository-local pre-push review gate.
 
-package worker
+package workerreview
 
 import (
 	"bytes"
@@ -92,7 +92,7 @@ func InstallPrePushHook(runner checkpoint.GitCommandRunner, root string) (HookIn
 	case 0:
 		directoryOutput = configured.Stdout
 	case 1:
-		directoryOutput, err = checkedGit(runner, root, []string{"rev-parse", "--path-format=absolute", "--git-path", "hooks"})
+		directoryOutput, err = CheckedGit(runner, root, []string{"rev-parse", "--path-format=absolute", "--git-path", "hooks"})
 		if err != nil {
 			return nil, err
 		}
@@ -186,7 +186,7 @@ func InstallPrePushHook(runner checkpoint.GitCommandRunner, root string) (HookIn
 
 // hookGitOutputPath is the one path a Git command prints, in canonical form.
 func hookGitOutputPath(runner checkpoint.GitCommandRunner, root string, args []string) (string, error) {
-	output, err := checkedGit(runner, root, args)
+	output, err := CheckedGit(runner, root, args)
 	if err != nil {
 		return "", err
 	}

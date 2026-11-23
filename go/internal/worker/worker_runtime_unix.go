@@ -2083,11 +2083,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 		sessionID := config.SessionID
 		environment := maps.Clone(config.Environment)
 		policy := config.ExecutionPolicy
-		tools := ParentTools{
-			Oracle:                false,
-			AgentMailboxesEnabled: config.AgentMailboxesEnabled,
-			SubtleSubagents:       config.SubtleSubagents,
-		}
+		subtleSubagents := config.SubtleSubagents
 		type codexProfile struct {
 			registered  bool
 			environment map[string]string
@@ -2097,7 +2093,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 			if stepCtx.Err() != nil {
 				return codexProfile{}, errors.New("preparation cancelled before configuring the Codex profile")
 			}
-			registered, err := configureCodexProfile(root, sessionID, home, environment, subagentRole, policy, tools, reviewTools, managedSubagent)
+			registered, err := configureCodexProfile(root, sessionID, home, environment, subagentRole, policy, subtleSubagents, reviewTools, managedSubagent)
 			if err != nil {
 				return codexProfile{}, err
 			}
@@ -2126,7 +2122,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 			return nil, err
 		}
 		sessionID := config.SessionID
-		mailboxesEnabled := config.AgentMailboxesEnabled
+		oracle, orchestratorsEnabled := config.Oracle, config.OrchestratorsEnabled
 		subtleSubagents := config.SubtleSubagents
 		if managedSubagent {
 			// Marketplace refreshes on every child start fetch from Git or
@@ -2161,7 +2157,7 @@ func prepareAndStartHarness(ctx context.Context, cancel context.CancelFunc, setu
 			if stepCtx.Err() != nil {
 				return claudeProfile{}, errors.New("preparation cancelled before configuring the Claude profile")
 			}
-			registered, err := configureClaudeSubagentMCP(root, sessionID, home, subagentRole, mailboxesEnabled, subtleSubagents, reviewTools)
+			registered, err := configureClaudeSubagentMCP(root, sessionID, home, subagentRole, oracle, orchestratorsEnabled, subtleSubagents, reviewTools)
 			if err != nil {
 				return claudeProfile{}, err
 			}

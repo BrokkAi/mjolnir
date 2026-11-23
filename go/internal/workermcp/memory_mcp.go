@@ -1,8 +1,8 @@
-// Port of mj-worker/src/memory_mcp.rs.
+// Port of mj-worker-mcp/src/memory_mcp.rs.
 
 // MCP server for project history search and code provenance.
 
-package worker
+package workermcp
 
 import (
 	"errors"

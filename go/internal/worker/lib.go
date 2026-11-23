@@ -5,9 +5,11 @@
 // mj-worker crate (`brokk-mj-worker-runtime`, library `mj_worker`).
 //
 // The crate's modules (acp, relay, worker_runtime, terminal, user_shell,
-// checkpoint, review and the rest) are files of this one package, named as
-// in mj-core's port: module `foo/bar.rs` is `foo_bar.go`. The MicroVM engine
-// is the mj-microvm crate, Go package microvm.
+// checkpoint and the rest) are files of this one package, named as in
+// mj-core's port: module `foo/bar.rs` is `foo_bar.go`. The MicroVM engine is
+// the mj-microvm crate, Go package microvm; the worker's MCP servers are
+// mj-worker-mcp, Go package workermcp; and the push-review capture and
+// pre-push gate are mj-worker-review, Go package workerreview.
 //
 // Rust's `crate::acp::RuntimeEvent` is a re-export of mj-core's; this package
 // uses core.RuntimeEvent directly. A bounded tokio mpsc sender of runtime
@@ -16,6 +18,7 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"net"
@@ -142,6 +145,65 @@ func (c timeoutConn) Write(buffer []byte) (int, error) {
 		}
 	}
 	return c.conn.Write(buffer)
+}
+
+// fromUTF8 is Rust's String::from_utf8, failing with the text of Rust's
+// Utf8Error.
+func fromUTF8(data []byte) (string, error) {
+	for index := 0; index < len(data); {
+		valid, complete := utf8Sequence(data[index:])
+		switch {
+		case complete:
+			index += valid
+		case valid > 0 && index+valid == len(data):
+			return "", fmt.Errorf("incomplete utf-8 byte sequence from index %d", index)
+		default:
+			return "", fmt.Errorf("invalid utf-8 sequence of %d bytes from index %d", max(valid, 1), index)
+		}
+	}
+	return string(data), nil
+}
+
+// utf8Sequence measures the UTF-8 sequence text starts with: valid is how
+// many of its leading bytes form a valid sequence or a valid prefix of one,
+// and complete whether that is a whole character. An invalid first byte
+// gives zero.
+func utf8Sequence(text []byte) (valid int, complete bool) {
+	first := text[0]
+	width := 0
+	switch {
+	case first < 0x80:
+		return 1, true
+	case first >= 0xC2 && first <= 0xDF:
+		width = 2
+	case first >= 0xE0 && first <= 0xEF:
+		width = 3
+	case first >= 0xF0 && first <= 0xF4:
+		width = 4
+	default:
+		return 0, false
+	}
+	low, high := byte(0x80), byte(0xBF)
+	switch first {
+	case 0xE0:
+		low = 0xA0
+	case 0xED:
+		high = 0x9F
+	case 0xF0:
+		low = 0x90
+	case 0xF4:
+		high = 0x8F
+	}
+	for offset := 1; offset < width; offset++ {
+		if offset >= len(text) {
+			return offset, false
+		}
+		next := text[offset]
+		if offset == 1 && (next < low || next > high) || offset > 1 && (next < 0x80 || next > 0xBF) {
+			return offset, false
+		}
+	}
+	return width, true
 }
 
 // fromUTF8Lossy is Rust's String::from_utf8_lossy: every maximal invalid

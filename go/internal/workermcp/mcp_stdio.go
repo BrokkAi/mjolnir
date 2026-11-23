@@ -1,4 +1,4 @@
-// Port of mj-worker/src/mcp_stdio.rs.
+// Port of mj-worker-mcp/src/mcp_stdio.rs.
 
 // The JSON-lines stdio transport shared by the worker's MCP servers.
 //
@@ -9,7 +9,7 @@
 // JSON values are the untyped values of github.com/BrokkAi/acp-go/jsonvalue
 // (serde_json::Value's Go form).
 
-package worker
+package workermcp
 
 import (
 	"bufio"

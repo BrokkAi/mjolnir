@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
@@ -104,7 +105,7 @@ func mailboxHookRun(socket string, hookEvent string, format HookOutputFormat, st
 			if _, observed := payload.(core.RelayResponsePayloadAntigravityStopObserved); observed {
 				return mailboxHookWriteOutput(stdout, jsonvalue.Object{})
 			}
-			return mailboxHookWriteEmptyWithDiagnostic(stdout, fmt.Sprintf("worker refused Stop: %s", relayResponsePayloadDebug(payload)))
+			return mailboxHookWriteEmptyWithDiagnostic(stdout, fmt.Sprintf("worker refused Stop: %s", mailboxHookPayloadDebug(payload)))
 		}
 	}
 
@@ -182,7 +183,7 @@ func mailboxHookDrain(socket string, hookEvent string, conversationID *string, i
 	}
 	drained, ok := payload.(core.RelayResponsePayloadMailboxDrained)
 	if !ok {
-		return nil, 0, nil, fmt.Errorf("worker refused mailbox hook request: %s", relayResponsePayloadDebug(payload))
+		return nil, 0, nil, fmt.Errorf("worker refused mailbox hook request: %s", mailboxHookPayloadDebug(payload))
 	}
 	return drained.Text, drained.Count, drained.LeaseID, nil
 }
@@ -199,7 +200,7 @@ func mailboxHookAcknowledge(socket string, leaseID string) error {
 	case ok:
 		return errors.New("worker no longer holds the mailbox lease; it may be delivered again")
 	}
-	return fmt.Errorf("worker refused mailbox acknowledgement: %s", relayResponsePayloadDebug(payload))
+	return fmt.Errorf("worker refused mailbox acknowledgement: %s", mailboxHookPayloadDebug(payload))
 }
 
 // mailboxHookSendRequest sends one relay request over the worker's control
@@ -252,7 +253,7 @@ func mailboxHookSendRequest(socket string, request core.RelayRequest) (core.Rela
 	if ok, isOk := response.Body.(core.RelayResponseBodyOk); isOk {
 		return ok.Payload, nil
 	}
-	return nil, fmt.Errorf("worker refused mailbox hook request: %s", relayResponseBodyDebug(response.Body))
+	return nil, fmt.Errorf("worker refused mailbox hook request: %s", mailboxHookBodyDebug(response.Body))
 }
 
 func mailboxHookWriteOutput(stdout io.Writer, value any) error {
@@ -267,4 +268,60 @@ func mailboxHookWriteOutput(stdout io.Writer, value any) error {
 func mailboxHookWriteEmptyWithDiagnostic(stdout io.Writer, message string) error {
 	core.DiagnosticStderr("Mjolnir mailbox hook: %s", message)
 	return mailboxHookWriteOutput(stdout, jsonvalue.Object{})
+}
+
+// mailboxHookBodyDebug renders a relay response body as Rust's `{:?}` shows
+// it, for the refusals the mailbox hook client reports.
+func mailboxHookBodyDebug(body core.RelayResponseBody) string {
+	switch body := body.(type) {
+	case core.RelayResponseBodyError:
+		detail := "None"
+		if body.Error.Detail != nil {
+			detail = fmt.Sprintf("Some(%+v)", body.Error.Detail)
+		}
+		return fmt.Sprintf("Error { error: RelayProtocolError { code: %s, message: %s, retryable: %t, detail: %s } }",
+			relayCommandKindDebug(core.RelayCommandKind(body.Error.Code)), mailboxHookDebugString(body.Error.Message), body.Error.Retryable, detail)
+	case core.RelayResponseBodyOk:
+		return fmt.Sprintf("Ok { payload: %s }", mailboxHookPayloadDebug(body.Payload))
+	}
+	return fmt.Sprintf("%+v", body)
+}
+
+// mailboxHookPayloadDebug names a payload as Rust's `{:?}` does, with its
+// fields in Go's form.
+func mailboxHookPayloadDebug(payload core.RelayResponsePayload) string {
+	name := fmt.Sprintf("%T", payload)
+	name = name[strings.LastIndexByte(name, '.')+1:]
+	name = strings.TrimPrefix(name, "RelayResponsePayload")
+	return name + " " + fmt.Sprintf("%+v", payload)
+}
+
+// mailboxHookDebugString is a string as Rust's `{:?}` shows it.
+func mailboxHookDebugString(text string) string {
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	for _, r := range text {
+		switch r {
+		case '"':
+			quoted.WriteString(`\"`)
+		case '\\':
+			quoted.WriteString(`\\`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case 0:
+			quoted.WriteString(`\0`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&quoted, `\u{%x}`, r)
+			} else {
+				quoted.WriteRune(r)
+			}
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }

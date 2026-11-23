@@ -23,12 +23,13 @@ import (
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/workermcp"
 )
 
 // configureCodexMCP registers the owned server in Codex's session-private
 // profile (Rust's test-only configure_codex_mcp).
 func configureCodexMCP(root string, home string, role *core.SubagentMcpRole, policy core.ExecutionPolicy) (bool, error) {
-	return configureCodexMCPWithMailboxes(root, "", home, role, policy, true, true, false, false)
+	return configureCodexMCPProfile(root, "", home, role, policy, true, false, false)
 }
 
 // snapshot is the queued requests and the completed results (Rust's
@@ -393,7 +394,7 @@ func TestClaudeProfileRepairAcceptsSymlinkedAncestorsWithDifferentPathSpellings(
 		root, home := pair[0], pair[1]
 		subagentsWrite(t, filepath.Join(home, ".claude.json"), "{}")
 		subagentsWrite(t, filepath.Join(home, "settings.json"), "{}")
-		_, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, false)
+		_, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, true, false)
 		subagentsMust(t, err)
 		hooked, err := configureClaudeMailboxHook(root, "session", home)
 		subagentsMust(t, err)
@@ -636,7 +637,7 @@ func TestClaudeMailboxRepairRejectsNestedSymlinks(t *testing.T) {
 		if hooked {
 			t.Fatalf("%s %s must not be edited", root, home)
 		}
-		_, err = configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, false)
+		_, err = configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, true, false)
 		subagentsMust(t, err)
 		for _, name := range []string{"settings.json", ".claude.json"} {
 			if got := subagentsRead(t, filepath.Join(home, name)); got != "{}" {
@@ -790,7 +791,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
 		subagentsMust(t, err)
 		subagentsWrite(t, path, string(body))
 		configure := func() {
-			_, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(check.role), true, true, false)
+			_, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(check.role), true, true, true, false)
 			subagentsMust(t, err)
 		}
 		configure()
@@ -857,7 +858,7 @@ func TestAMessageOnlySessionGetsSendMessageOnAProfileStagedWithoutIt(t *testing.
 	// servers, no `mj-agents`, and no rule for it.
 	path := filepath.Join(home, ".claude.json")
 	subagentsWrite(t, path, `{"mcpServers":{"other":{"command":"x"}}}`)
-	_, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, false)
+	_, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, true, false)
 	subagentsMust(t, err)
 	config := subagentsJSONFile(t, path)
 	if subagentsGet(config, "mcpServers", "other", "command") != "x" {
@@ -875,7 +876,7 @@ func TestAMessageOnlySessionGetsSendMessageOnAProfileStagedWithoutIt(t *testing.
 	}
 
 	// Losing the role removes the server; the person's servers stay.
-	_, err = configureClaudeSubagentMCP(root, "session", home, nil, true, true, false)
+	_, err = configureClaudeSubagentMCP(root, "session", home, nil, true, true, true, false)
 	subagentsMust(t, err)
 	config = subagentsJSONFile(t, path)
 	if subagentsGet(config, "mcpServers", "mj-agents") != nil || subagentsGet(config, "mcpServers", "other", "command") != "x" {
@@ -886,7 +887,7 @@ func TestAMessageOnlySessionGetsSendMessageOnAProfileStagedWithoutIt(t *testing.
 	bare := t.TempDir()
 	bareHome := filepath.Join(bare, "profile")
 	subagentsMust(t, os.Mkdir(bareHome, 0o777))
-	_, err = configureClaudeSubagentMCP(bare, "session", bareHome, nil, true, true, false)
+	_, err = configureClaudeSubagentMCP(bare, "session", bareHome, nil, true, true, true, false)
 	subagentsMust(t, err)
 	for _, name := range []string{".claude.json", "settings.json"} {
 		if _, err := os.Stat(filepath.Join(bareHome, name)); err == nil {
@@ -911,7 +912,7 @@ func TestTheClaudeProfileAllowsItsOwnSubAgentTools(t *testing.T) {
 	}
 	configure := func(root string, role core.SubagentMcpRole, subtle bool) (map[string]any, map[string]any, []string) {
 		home := filepath.Join(root, "profile")
-		_, err := configureClaudeSubagentMCP(root, "session", home, &role, true, subtle, false)
+		_, err := configureClaudeSubagentMCP(root, "session", home, &role, true, true, subtle, false)
 		subagentsMust(t, err)
 		settings := subagentsJSONFile(t, filepath.Join(home, "settings.json"))
 		config := subagentsJSONFile(t, filepath.Join(home, ".claude.json"))
@@ -949,7 +950,7 @@ func TestTheClaudeProfileAllowsItsOwnSubAgentTools(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("allow = %q", allow)
 	}
-	for _, tool := range []string{"spawn", "list_agents", "send_message", "close", "fetch"} {
+	for _, tool := range []string{"spawn_worker", "spawn_orchestrator", "list_agents", "list_targets", "send_message", "close", "fetch"} {
 		if !slices.Contains(allow, "mcp__mj-agents__"+tool) {
 			t.Fatalf("%s: %q", tool, allow)
 		}
@@ -977,11 +978,11 @@ func TestTheClaudeRegistrationNeverEditsAProfileThatMayBeThePersonsOwn(t *testin
 	subagentsMust(t, os.Symlink(own, filepath.Join(root, "profile")))
 	home := filepath.Join(root, "profile")
 	for _, role := range []core.SubagentMcpRole{core.SubagentMcpRoleParent, core.SubagentMcpRoleChild} {
-		if _, err := configureClaudeSubagentMCP(root, "session", home, &role, true, true, false); err == nil {
+		if _, err := configureClaudeSubagentMCP(root, "session", home, &role, true, true, true, false); err == nil {
 			t.Fatalf("%s cannot start without its tools", role)
 		}
 	}
-	registered, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, false)
+	registered, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, true, false)
 	subagentsMust(t, err)
 	if registered {
 		t.Fatal("a message-only session starts without its server there")
@@ -999,7 +1000,7 @@ func TestTheClaudeRegistrationNeverEditsAProfileThatMayBeThePersonsOwn(t *testin
 	subagentsMust(t, os.Mkdir(home, 0o777))
 	for _, broken := range []string{"{", "[]", `{"mcpServers":[]}`} {
 		subagentsWrite(t, filepath.Join(home, ".claude.json"), broken)
-		if _, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, false); err == nil {
+		if _, err := configureClaudeSubagentMCP(root, "session", home, subagentsRole(core.SubagentMcpRoleMessageOnly), true, true, true, false); err == nil {
 			t.Fatalf("%s must be refused", broken)
 		}
 		if got := subagentsRead(t, filepath.Join(home, ".claude.json")); got != broken {
@@ -1100,7 +1101,7 @@ enabled = false
 			if subagentsGet(server, "url") != nil || subagentsGet(server, "enabled") != nil {
 				t.Fatalf("server = %v", server)
 			}
-			expectedArgs := []string{"worker", "subagent-mcp", "--socket", socket, "--harness", "codex", "--role", role.ID(), "--agent-mailboxes-enabled", "true"}
+			expectedArgs := []string{"worker", "subagent-mcp", "--socket", socket, "--harness", "codex", "--role", role.ID()}
 			if got := subagentsStrings(subagentsGet(server, "args")); !slices.Equal(got, expectedArgs) {
 				t.Fatalf("args = %q", got)
 			}
@@ -1110,7 +1111,7 @@ enabled = false
 			}
 			if role == core.SubagentMcpRoleChild {
 				child := func() {
-					staged, err := configureCodexMCPWithMailboxes(root, "", home, &role, policy, true, true, false, true)
+					staged, err := configureCodexMCPProfile(root, "", home, &role, policy, true, false, true)
 					subagentsMust(t, err)
 					if !staged {
 						t.Fatal("the private profile must be configured")
@@ -1212,14 +1213,14 @@ func TestCodexDelegationProfileHandlesMissingAndInvalidConfiguration(t *testing.
 			subagentsRole(core.SubagentMcpRoleMessageOnly),
 			subagentsRole(core.SubagentMcpRoleChild),
 		} {
-			staged, err := configureCodexMCPWithMailboxes(root, "session", remote, role, policy, true, true, false, false)
+			staged, err := configureCodexMCPProfile(root, "session", remote, role, policy, true, false, false)
 			subagentsMust(t, err)
 			if !staged {
 				t.Fatal("the session's remote profile is private")
 			}
 		}
 	}
-	staged, err := configureCodexMCPWithMailboxes(root, "different-session", remote, nil, core.ExecutionPolicyConfiguredApprovals, true, true, false, false)
+	staged, err := configureCodexMCPProfile(root, "different-session", remote, nil, core.ExecutionPolicyConfiguredApprovals, true, false, false)
 	subagentsMust(t, err)
 	if staged {
 		t.Fatal("another session's profile is not this session's")
@@ -1287,7 +1288,7 @@ func TestLegacyCodexHomesStayOnAcpWithoutWritingTheUsersProfile(t *testing.T) {
 		if privateStagedHome(root, "session", remoteHome) {
 			t.Fatal("a linked profiles directory is not private")
 		}
-		staged, err := configureCodexMCPWithMailboxes(root, "session", remoteHome, role, core.ExecutionPolicyConfiguredApprovals, true, true, false, false)
+		staged, err := configureCodexMCPProfile(root, "session", remoteHome, role, core.ExecutionPolicyConfiguredApprovals, true, false, false)
 		subagentsMust(t, err)
 		if staged {
 			t.Fatal("a linked profiles directory must not be configured")
@@ -1334,7 +1335,11 @@ func TestClosedMutationAdmissionRejectsChangesButKeepsObservationsOpen(t *testin
 		},
 		core.SubagentToolActionSendInput{ChildSessionID: "child", Message: "continue"},
 		core.SubagentToolActionSendMessage{ChildSessionID: "child", Message: "note"},
-		core.SubagentToolActionLegacyInterruptAgent{ChildSessionID: "child"},
+		core.SubagentToolActionSpawnOrchestrator{
+			NoGithubCredentials: false,
+			TaskName:            "coordinate",
+			Instructions:        "delegate the work",
+		},
 		core.SubagentToolActionCloseAgent{ChildSessionID: "child"},
 	}
 	for index, action := range mutations {
@@ -1680,9 +1685,9 @@ func TestASocketWaiterIsRegisteredBeforeTheRequestBecomesVisible(t *testing.T) {
 }
 
 // TestAnUnansweredRequestIsAnsweredHereWithWhetherTheDaemonPickedItUp: #1197:
-// the MCP server gives up after replyTimeout. This worker answers first, and
-// says whether the daemon has read the queue since the request joined it; a
-// read before the request does not count. Rust runs this on tokio's paused
+// the MCP server gives up after workermcp.ReplyTimeout. This worker answers
+// first, and says whether the daemon has read the queue since the request
+// joined it; a read before the request does not count. Rust runs this on tokio's paused
 // clock; here the reply budget is shortened instead.
 //
 // Hard-won: dfd2e32: a stalled daemon launched a queued child after the parent had moved on.
@@ -1727,7 +1732,7 @@ func TestAnUnansweredRequestIsAnsweredHereWithWhetherTheDaemonPickedItUp(t *test
 		subagentsMust(t, <-served)
 		client.Close()
 		listener.Close()
-		if elapsed := time.Since(started); elapsed >= replyTimeout {
+		if elapsed := time.Since(started); elapsed >= workermcp.ReplyTimeout {
 			t.Fatalf("the worker must answer before the MCP server gives up, took %v", elapsed)
 		}
 		var reply map[string]any
@@ -1740,7 +1745,7 @@ func TestAnUnansweredRequestIsAnsweredHereWithWhetherTheDaemonPickedItUp(t *test
 		}
 		daemon, err := json.Marshal(reply["daemon"])
 		subagentsMust(t, err)
-		var contact DaemonContact
+		var contact workermcp.DaemonContact
 		subagentsMust(t, json.Unmarshal(daemon, &contact))
 		if contact.PickedUp != daemonReadsIt || contact.LastCollectedSecondsAgo == nil {
 			t.Fatalf("reply = %v", reply)
@@ -1785,7 +1790,7 @@ func TestTheReviewServerIsRegisteredForEveryRoleWhenTheLaunchOffersReviewTools(t
 		for _, tools := range []bool{false, true} {
 			expected := tools
 			root, home := reviewGateStagedProfile(t)
-			_, err := configureClaudeSubagentMCP(root, "session", home, &role, true, true, tools)
+			_, err := configureClaudeSubagentMCP(root, "session", home, &role, true, true, true, tools)
 			subagentsMust(t, err)
 			config, allow := reviewGateClaudeFiles(t, home)
 			servers := config["mcpServers"].(map[string]any)
@@ -1837,7 +1842,7 @@ func TestTheReviewServerIsRegisteredForEveryRoleWhenTheLaunchOffersReviewTools(t
 			}
 
 			for _, policy := range []core.ExecutionPolicy{core.ExecutionPolicyConfiguredApprovals, core.ExecutionPolicyUnconstrained} {
-				_, err := configureCodexMCPWithMailboxes(root, "", home, &role, policy, true, true, tools, false)
+				_, err := configureCodexMCPProfile(root, "", home, &role, policy, true, tools, false)
 				subagentsMust(t, err)
 				servers := reviewGateCodexServers(t, home)
 				agents := subagentsStrings(subagentsGet(servers, "mj-agents", "args"))
@@ -1887,7 +1892,7 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 		socket))
 	parent := subagentsRole(core.SubagentMcpRoleParent)
 
-	_, err = configureClaudeSubagentMCP(root, "session", home, parent, true, true, true)
+	_, err = configureClaudeSubagentMCP(root, "session", home, parent, true, true, true, true)
 	subagentsMust(t, err)
 	config, allow := reviewGateClaudeFiles(t, home)
 	if subagentsGet(config, "mcpServers", "other", "command") != "x" {
@@ -1905,7 +1910,7 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 		}
 	}
 
-	_, err = configureCodexMCPWithMailboxes(root, "", home, parent, core.ExecutionPolicyConfiguredApprovals, true, true, true, false)
+	_, err = configureCodexMCPProfile(root, "", home, parent, core.ExecutionPolicyConfiguredApprovals, true, true, false)
 	subagentsMust(t, err)
 	servers := reviewGateCodexServers(t, home)
 	if slices.Contains(subagentsStrings(subagentsGet(servers, "mj-agents", "args")), "--review-gate") {
@@ -1916,7 +1921,7 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 	}
 
 	// Turning the gate off, or losing the role, removes the review server.
-	_, err = configureClaudeSubagentMCP(root, "session", home, parent, true, true, false)
+	_, err = configureClaudeSubagentMCP(root, "session", home, parent, true, true, true, false)
 	subagentsMust(t, err)
 	config, _ = reviewGateClaudeFiles(t, home)
 	if subagentsGet(config, "mcpServers", "mj-review") != nil {
@@ -1925,7 +1930,7 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 	if _, ok := subagentsGet(config, "mcpServers", "mj-agents").(map[string]any); !ok {
 		t.Fatalf("config = %v", config)
 	}
-	_, err = configureCodexMCPWithMailboxes(root, "", home, parent, core.ExecutionPolicyConfiguredApprovals, true, true, false, false)
+	_, err = configureCodexMCPProfile(root, "", home, parent, core.ExecutionPolicyConfiguredApprovals, true, false, false)
 	subagentsMust(t, err)
 	servers = reviewGateCodexServers(t, home)
 	if _, ok := servers["mj-review"]; ok {
@@ -1935,9 +1940,9 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 		t.Fatalf("servers = %v", servers)
 	}
 
-	_, err = configureClaudeSubagentMCP(root, "session", home, parent, true, true, true)
+	_, err = configureClaudeSubagentMCP(root, "session", home, parent, true, true, true, true)
 	subagentsMust(t, err)
-	_, err = configureClaudeSubagentMCP(root, "session", home, nil, true, true, true)
+	_, err = configureClaudeSubagentMCP(root, "session", home, nil, true, true, true, true)
 	subagentsMust(t, err)
 	config, _ = reviewGateClaudeFiles(t, home)
 	if subagentsGet(config, "mcpServers", "mj-review") != nil || subagentsGet(config, "mcpServers", "mj-agents") != nil {
@@ -1946,9 +1951,9 @@ func TestAProfileStagedWithReviewToolsUnderMjAgentsIsUpgradedOnStart(t *testing.
 	if subagentsGet(config, "mcpServers", "other", "command") != "x" {
 		t.Fatalf("config = %v", config)
 	}
-	_, err = configureCodexMCPWithMailboxes(root, "", home, parent, core.ExecutionPolicyConfiguredApprovals, true, true, true, false)
+	_, err = configureCodexMCPProfile(root, "", home, parent, core.ExecutionPolicyConfiguredApprovals, true, true, false)
 	subagentsMust(t, err)
-	_, err = configureCodexMCPWithMailboxes(root, "", home, nil, core.ExecutionPolicyConfiguredApprovals, true, true, true, false)
+	_, err = configureCodexMCPProfile(root, "", home, nil, core.ExecutionPolicyConfiguredApprovals, true, true, false)
 	subagentsMust(t, err)
 	servers = reviewGateCodexServers(t, home)
 	if len(servers) != 0 {

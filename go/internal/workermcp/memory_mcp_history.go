@@ -1,8 +1,8 @@
-// Port of mj-worker/src/memory_mcp/history.rs.
+// Port of mj-worker-mcp/src/memory_mcp/history.rs.
 
 // History tools and their connection-only worker transport.
 
-package worker
+package workermcp
 
 import (
 	"bufio"

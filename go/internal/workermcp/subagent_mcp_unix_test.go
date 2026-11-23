@@ -1,9 +1,9 @@
-// Port of the tests in mj-worker/src/subagent_mcp.rs that serve a fake
+// Port of the tests in mj-worker-mcp/src/subagent_mcp.rs that serve a fake
 // worker on a Unix socket (Rust's #[cfg(unix)] tests).
 
 //go:build unix
 
-package worker
+package workermcp
 
 import (
 	"bufio"
@@ -98,10 +98,9 @@ func TestSpawnWithOnlyStraightforwardSendsStraightforward(t *testing.T) {
 		_, err := conn.Write([]byte(`{"result":{"child_session_id":"child"}}` + "\n"))
 		return err
 	})
-	value, isError, err := callWithBudgetAndOptions(socket, nil, core.SubagentMcpRoleParent,
-		json.RawMessage(`{"name":"spawn","arguments":{"task_name":"t","instructions":"i","no_github_credentials":true}}`),
-		ProgressSilent(time.Second), func(core.SubagentToolAction) time.Duration { return 5 * time.Second },
-		subagentStraightforwardOnly)
+	value, isError, err := testCallWithOptions(socket, nil, core.SubagentMcpRoleParent,
+		`{"name":"spawn_worker","arguments":{"task_name":"t","instructions":"i","no_github_credentials":true}}`,
+		ProgressSilent(time.Second), 5*time.Second, subagentStraightforwardOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +170,45 @@ func TestReviewToolsSendDurableActionsThroughTheSameRequestPath(t *testing.T) {
 		if isError || subagentValue(value, "accepted") != true {
 			t.Fatal(value)
 		}
+	}
+}
+
+func TestSpawnOrchestratorDispatchesTheNewWireAction(t *testing.T) {
+	socket := subagentSocket(t)
+	listener := subagentListen(t, socket)
+	target := "remote"
+	repos := []string{"https://example.com/code.git"}
+	want := core.SubagentToolActionSpawnOrchestrator{
+		TaskName:            "plan",
+		Instructions:        "coordinate",
+		Target:              &target,
+		Repos:               &repos,
+		NoGithubCredentials: true,
+	}
+	worker := subagentServeOne(listener, func(conn net.Conn, _ *bufio.Reader, line []byte) error {
+		var request core.SubagentToolRequest
+		if err := json.Unmarshal(line, &request); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(request.Action, want) {
+			return fmt.Errorf("sent %#v, want %#v", request.Action, want)
+		}
+		_, err := conn.Write([]byte(`{"result":{"child_session_id":"child"}}` + "\n"))
+		return err
+	})
+	options := DefaultParentTools()
+	options.OrchestratorsEnabled = true
+	value, isError, err := testCallWithOptions(socket, nil, core.SubagentMcpRoleParent,
+		`{"name":"spawn_orchestrator","arguments":{"task_name":"plan","instructions":"coordinate","target":"remote","repos":["https://example.com/code.git"],"no_github_credentials":true}}`,
+		ProgressSilent(time.Second), 5*time.Second, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-worker; err != nil {
+		t.Fatal(err)
+	}
+	if isError || subagentText(value, "child_session_id") != "child" {
+		t.Fatal(value)
 	}
 }
 
@@ -286,7 +324,7 @@ func spawnAnsweredByWorker(t *testing.T, daemon string) (any, bool) {
 		return err
 	})
 	value, isError, err := subagentCallWithBudget(socket, nil, core.SubagentMcpRoleParent,
-		`{"name":"spawn","arguments":{"task_name":"t","instructions":"i","task_type":"straightforward"}}`,
+		`{"name":"spawn_worker","arguments":{"task_name":"t","instructions":"i","task_type":"straightforward"}}`,
 		ProgressSilent(50*time.Millisecond), 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -436,46 +474,6 @@ func childSendsItsReport(t *testing.T, configured bool) {
 	}
 }
 
-func TestSendMessageAcceptsTheUnlistedSendInputAlias(t *testing.T) {
-	socket := subagentSocket(t)
-	listener := subagentListen(t, socket)
-	received := make(chan any, 1)
-	worker := subagentServeOne(listener, func(conn net.Conn, reader *bufio.Reader, line []byte) error {
-		request, err := subagentParseLine(line)
-		if err != nil {
-			return err
-		}
-		received <- request
-		if err := subagentWriteLine(conn, subagentObject("accepted", true, "result", subagentObject(
-			"request_id", subagentValue(request, "request_id"),
-			"completed_at_ms", 1,
-			"is_error", false,
-			"message", `{"child_session_id":"child","status":"queued"}`,
-		))); err != nil {
-			return err
-		}
-		_, _ = reader.Read(make([]byte, 1))
-		return nil
-	})
-	value, isError, err := callWithBudgetAndOptions(socket, nil, core.SubagentMcpRoleParent,
-		json.RawMessage(`{"name":"send_input","arguments":{"child_session_id":"child","message":"keep going"}}`),
-		ProgressSilent(50*time.Millisecond), func(core.SubagentToolAction) time.Duration { return 5 * time.Second },
-		subagentMailboxesDisabled)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isError || subagentText(value, "status") != "queued" {
-		t.Fatal(value)
-	}
-	request := <-received
-	if !subagentEqualJSON(subagentValue(request, "action"), `{"action":"send_input","params":{"child_session_id":"child","message":"keep going"}}`) {
-		t.Fatal(subagentValue(request, "action"))
-	}
-	if err := <-worker; err != nil {
-		t.Fatal(err)
-	}
-}
-
 // answerAnnouncingWriter observes output after the server owns the
 // writer, and announces the response the fake worker is waiting for. The
 // writer is the one place that knows a response has been written, so
@@ -549,19 +547,24 @@ func TestASlowToolCallDoesNotBlockALaterOne(t *testing.T) {
 	// that ran the calls in order would answer the spawn first - nothing
 	// releases it, so it would fall back to its own budget - and the two
 	// responses would come back the other way round.
-	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn","arguments":{"task_name":"slow","instructions":"work","task_type":"straightforward"}}}` + "\n" +
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn_worker","arguments":{"task_name":"slow","instructions":"work","task_type":"straightforward"}}}` + "\n" +
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents"}}` + "\n"
 	writer := &answerAnnouncingWriter{cheapCallAnswered: cheapCallAnswered}
 	if err := subagentRun(strings.NewReader(input), writer, socket, nil, core.SubagentMcpRoleParent); err != nil {
 		t.Fatal(err)
 	}
+	// The server has answered both calls, so every connection it made has
+	// been accepted. Rust never joins its fake worker; closing the listener
+	// ends an Accept no call will satisfy, so a call refused before it
+	// connects fails the order check below instead of hanging here.
+	_ = listener.Close()
 	served.Wait()
 	writer.mu.Lock()
 	text := string(writer.written)
 	writer.mu.Unlock()
 	// Progress notifications carry no id; only the two responses do.
 	var answered []int64
-	for _, line := range captureLines(text) {
+	for _, line := range subagentLines(text) {
 		response, err := jsonvalue.Parse([]byte(line))
 		if err != nil {
 			continue

@@ -1,8 +1,8 @@
-// Port of the tests in mj-worker/src/subagent_mcp.rs that run on every
+// Port of the tests in mj-worker-mcp/src/subagent_mcp.rs that run on every
 // platform. The ones that serve a fake worker socket are in
 // subagent_mcp_unix_test.go.
 
-package worker
+package workermcp
 
 import (
 	"bytes"
@@ -23,9 +23,9 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 )
 
-var subagentMailboxesDisabled = ParentTools{Oracle: false, AgentMailboxesEnabled: false, SubtleSubagents: true}
+var subagentParentWithoutOracle = ParentTools{Oracle: false, SubtleSubagents: true, OrchestratorsEnabled: false}
 
-var subagentStraightforwardOnly = ParentTools{Oracle: false, AgentMailboxesEnabled: true, SubtleSubagents: false}
+var subagentStraightforwardOnly = ParentTools{Oracle: false, SubtleSubagents: false, OrchestratorsEnabled: false}
 
 // subagentValue is serde_json's Value indexing: each step takes an object member by
 // string key or an array element by int index; a missing step is nil.
@@ -66,8 +66,21 @@ func subagentEqualJSON(value any, text string) bool {
 	return jsonvalue.Equal(value, want)
 }
 
+// subagentToolDefinitions is Rust's test-only tool_definitions: a parent's
+// tools with the default options.
 func subagentToolDefinitions() []jsonvalue.Object {
 	return toolDefinitionsWithOptions(nil, DefaultParentTools())
+}
+
+// toolDefinitionsWithOptions is Rust's test-only tool_definitions_with_options:
+// a parent's tools.
+func toolDefinitionsWithOptions(_ *core.HarnessKind, options ParentTools) []jsonvalue.Object {
+	return roleToolDefinitions(core.SubagentMcpRoleParent, options)
+}
+
+// childToolDefinitions is Rust's test-only child_tool_definitions.
+func childToolDefinitions() []jsonvalue.Object {
+	return roleToolDefinitions(core.SubagentMcpRoleChild, DefaultParentTools())
 }
 
 func subagentToolNamed(tools []jsonvalue.Object, name string) jsonvalue.Object {
@@ -88,7 +101,7 @@ func subagentToolNames(tools []jsonvalue.Object) []string {
 }
 
 func subagentSpawnDefinition(options ParentTools) jsonvalue.Object {
-	return subagentToolNamed(toolDefinitionsWithOptions(nil, options), "spawn")
+	return subagentToolNamed(toolDefinitionsWithOptions(nil, options), "spawn_worker")
 }
 
 // subagentCall is Rust's test-only call: one call with the default parent
@@ -97,10 +110,35 @@ func subagentCall(socket string, harness *core.HarnessKind, role core.SubagentMc
 	return callWithOptions(socket, harness, role, json.RawMessage(params), progress, DefaultParentTools())
 }
 
+// callWithOptions is Rust's test-only call_with_options: one call that reads
+// the report budget a child or orchestrator has from the launch file, as
+// the server does.
+func callWithOptions(socket string, harness *core.HarnessKind, role core.SubagentMcpRole, params json.RawMessage, progress *Progress, options ParentTools) (any, bool, error) {
+	launch, hasLaunch, err := readLaunchSettings(socket)
+	if err != nil {
+		return nil, false, err
+	}
+	var reportBudget *childReportBudget
+	if hasLaunch && (role == core.SubagentMcpRoleChild || role == core.SubagentMcpRoleOrchestrator) {
+		if reportBudget, err = childReportBudgetFromLaunch(launch); err != nil {
+			return nil, false, err
+		}
+	}
+	budget := func(action core.SubagentToolAction) time.Duration { return replyTimeoutFor(action, harness) }
+	return callWithBudgetAndOptions(socket, role, params, progress, budget, options, reportBudget)
+}
+
 // subagentCallWithBudget is Rust's test-only call_with_budget.
-func subagentCallWithBudget(socket string, harness *core.HarnessKind, role core.SubagentMcpRole, params string, progress *Progress, budget time.Duration) (any, bool, error) {
-	return callWithBudgetAndOptions(socket, harness, role, json.RawMessage(params), progress,
-		func(core.SubagentToolAction) time.Duration { return budget }, DefaultParentTools())
+func subagentCallWithBudget(socket string, _ *core.HarnessKind, role core.SubagentMcpRole, params string, progress *Progress, budget time.Duration) (any, bool, error) {
+	return callWithBudgetAndOptions(socket, role, json.RawMessage(params), progress,
+		func(core.SubagentToolAction) time.Duration { return budget }, DefaultParentTools(), nil)
+}
+
+// testCallWithOptions is the tests' test_call_with_options: one call with
+// options and no report budget.
+func testCallWithOptions(socket string, _ *core.HarnessKind, role core.SubagentMcpRole, params string, progress *Progress, budget time.Duration, options ParentTools) (any, bool, error) {
+	return callWithBudgetAndOptions(socket, role, json.RawMessage(params), progress,
+		func(core.SubagentToolAction) time.Duration { return budget }, options, nil)
 }
 
 // subagentRun is Rust's test-only run: the server with the default parent
@@ -131,11 +169,24 @@ func (w *subagentContractWriter) String() string {
 const subagentInitializeAndList = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
 	`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
 
+// subagentLines is Rust's str::lines: lines split at \n with a trailing \r
+// removed, and no empty last line for a final newline.
+func subagentLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
+}
+
 // subagentReplies parses every output line.
 func subagentReplies(t *testing.T, output string) []any {
 	t.Helper()
 	var replies []any
-	for _, line := range captureLines(output) {
+	for _, line := range subagentLines(output) {
 		reply, err := jsonvalue.Parse([]byte(line))
 		if err != nil {
 			t.Fatalf("%v: %s", err, line)
@@ -199,18 +250,25 @@ func subagentWriteLaunch(t *testing.T, directory string, launch jsonvalue.Object
 
 func TestSpawnOfferingBothTaskTypesKeepsItsDescription(t *testing.T) {
 	spawn := subagentSpawnDefinition(DefaultParentTools())
-	if got := subagentText(spawn, "description"); got != "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`." {
+	if got := subagentText(spawn, "description"); got != "Start a child in your target and filesystem using the task type's configured model and effort. Use `task_type` `straightforward` for bounded work with one clear path: mapping code, running exact build, test, or gate commands, and small mechanical edits. Use `subtle` for multi-file implementation (even from a settled design), multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, and work with a high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by scope and branching, not brief length or command runtime. Escalate stalled or incomplete `straightforward` work to `subtle` after one correction. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`." {
 		t.Fatal(got)
 	}
-	if !subagentEqualJSON(subagentValue(spawn, "inputSchema", "properties", "task_type", "enum"), `["straightforward","subtle"]`) {
-		t.Fatal(subagentValue(spawn, "inputSchema", "properties", "task_type", "enum"))
+	taskType := subagentValue(spawn, "inputSchema", "properties", "task_type")
+	if !subagentEqualJSON(subagentValue(taskType, "enum"), `["straightforward","subtle"]`) {
+		t.Fatal(subagentValue(taskType, "enum"))
+	}
+	description := subagentText(taskType, "description")
+	if !strings.Contains(description, "`straightforward` is for bounded work with a single clear path") ||
+		!strings.Contains(description, "multi-file implementation, multi-stage operational runs or troubleshooting") ||
+		strings.Contains(description, "`orchestrator`") {
+		t.Fatal(description)
 	}
 }
 
 func TestSpawnWithOnlyStraightforwardOffersNoTaskType(t *testing.T) {
 	spawn := subagentSpawnDefinition(subagentStraightforwardOnly)
 	description := subagentText(spawn, "description")
-	for _, absent := range []string{"task_type", "`subtle`", "task type"} {
+	for _, absent := range []string{"task_type", "subtle", "task type"} {
 		if strings.Contains(description, absent) {
 			t.Fatalf("%q in %s", absent, description)
 		}
@@ -218,7 +276,7 @@ func TestSpawnWithOnlyStraightforwardOffersNoTaskType(t *testing.T) {
 	if !strings.HasPrefix(description, "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: ") {
 		t.Fatal(description)
 	}
-	if !strings.Contains(description, "Do work that needs judgment yourself") {
+	if !strings.Contains(description, "Keep multi-file implementation, troubleshooting, ambiguous diagnosis, design choices, and changes with a high risk of hard-to-detect bugs yourself.") {
 		t.Fatal(description)
 	}
 	if subagentHas(spawn, "inputSchema", "properties", "task_type") {
@@ -250,7 +308,7 @@ func TestHandbackIsReadOnlySoPlanModeReviewersCanReport(t *testing.T) {
 
 func TestSpawnOfferingBothTaskTypesRequiresOne(t *testing.T) {
 	_, _, err := subagentCall("unused.sock", nil, core.SubagentMcpRoleParent,
-		`{"name":"spawn","arguments":{"task_name":"t","instructions":"i"}}`, ProgressSilent(time.Second))
+		`{"name":"spawn_worker","arguments":{"task_name":"t","instructions":"i"}}`, ProgressSilent(time.Second))
 	if err == nil || !strings.Contains(err.Error(), "missing field `task_type`") {
 		t.Fatal(err)
 	}
@@ -283,7 +341,7 @@ func TestReviewToolArgumentsAreValidatedWithClearErrors(t *testing.T) {
 		{"set_baseline", `{"commit":"abc","extra":true}`, "unknown field `extra`"},
 		{"request_review", `{"extra":true}`, "unknown field"},
 		{"request_review", `{"path":"/workspace"}`, "now takes `paths`"},
-		{"spawn", `{}`, "unknown review tool"},
+		{"spawn_worker", `{}`, "unknown review tool"},
 	} {
 		if got := refused(check.name, check.arguments); !strings.Contains(got, check.want) {
 			t.Fatalf("%s %s: %q lacks %q", check.name, check.arguments, got, check.want)
@@ -348,6 +406,78 @@ func TestTheReviewServerListsToolsWithoutInitializationGuidance(t *testing.T) {
 	}
 }
 
+func TestListTargetsSchemaAndCallsRequireAnOrchestratorEnabledParent(t *testing.T) {
+	directory := t.TempDir()
+	socket := filepath.Join(directory, "control.sock")
+	for _, check := range []struct {
+		role             core.SubagentMcpRole
+		enabled, offered bool
+	}{
+		{core.SubagentMcpRoleParent, true, true},
+		{core.SubagentMcpRoleParent, false, false},
+		{core.SubagentMcpRoleChild, true, false},
+		{core.SubagentMcpRoleOrchestrator, true, false},
+	} {
+		role := check.role
+		subagentWriteLaunch(t, directory, subagentObject("supervisors_enabled", check.enabled))
+		_, tools := subagentMCPExchange(t, func(reader io.Reader, writer io.Writer) error {
+			return runWithOptions(reader, writer, socket, nil, role, DefaultParentTools())
+		})
+		listTargets := subagentListedTool(tools, "list_targets")
+		if (listTargets != nil) != check.offered {
+			t.Fatalf("%s: list_targets listed %v", role, listTargets != nil)
+		}
+		if listTargets != nil {
+			if subagentValue(listTargets, "annotations", "readOnlyHint") != true {
+				t.Fatal(listTargets)
+			}
+			if !subagentEqualJSON(subagentValue(listTargets, "inputSchema"), `{"type":"object","properties":{},"additionalProperties":false}`) {
+				t.Fatal(listTargets)
+			}
+		}
+		spawn := subagentListedTool(tools, "spawn_orchestrator")
+		if (spawn != nil) != check.offered {
+			t.Fatalf("%s: spawn_orchestrator listed %v", role, spawn != nil)
+		}
+		options := DefaultParentTools()
+		options.OrchestratorsEnabled = check.enabled
+		want := "unknown sub-agent tool"
+		if check.offered {
+			want = "unknown field"
+		}
+		for _, field := range []string{"task_type", "working_directory", "profile", "model", "effort", "cpus", "memory"} {
+			if spawn != nil {
+				if subagentHas(spawn, "inputSchema", "properties", field) {
+					t.Fatalf("spawn_orchestrator offers %s", field)
+				}
+				if subagentValue(spawn, "inputSchema", "additionalProperties") != false {
+					t.Fatal(spawn)
+				}
+			}
+			_, _, err := testCallWithOptions(socket, nil, role,
+				fmt.Sprintf(`{"name":"spawn_orchestrator","arguments":{"task_name":"t","instructions":"i",%s:"unexpected"}}`, strconv.Quote(field)),
+				ProgressSilent(time.Millisecond), time.Millisecond, options)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s %s: %v", role, field, err)
+			}
+		}
+		if role == core.SubagentMcpRoleParent || role == core.SubagentMcpRoleOrchestrator {
+			_, _, err := testCallWithOptions(socket, nil, role,
+				`{"name":"spawn_worker","arguments":{"task_name":"t","instructions":"i","task_type":"orchestrator"}}`,
+				ProgressSilent(time.Millisecond), time.Millisecond, options)
+			if err == nil || !strings.Contains(err.Error(), "unknown variant `orchestrator`") {
+				t.Fatalf("%s: %v", role, err)
+			}
+		}
+		_, _, err := testCallWithOptions(socket, nil, role,
+			`{"name":"list_targets","arguments":{"target":"unexpected"}}`,
+			ProgressSilent(time.Millisecond), time.Millisecond, options)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s list_targets: %v", role, err)
+		}
+	}
+}
+
 func TestDelegationServersNoLongerCarryReviewToolsOrGuidance(t *testing.T) {
 	claude := core.HarnessKindClaude
 	for _, role := range []core.SubagentMcpRole{
@@ -377,17 +507,16 @@ func TestDelegationServersNoLongerCarryReviewToolsOrGuidance(t *testing.T) {
 			}
 		}
 		if role != core.SubagentMcpRoleParent {
-			for _, name := range []string{"spawn", "list_agents", "close"} {
+			for _, name := range []string{"spawn_worker", "list_agents", "close"} {
 				if slices.Contains(names, name) {
 					t.Fatalf("%s lists %s", role, name)
 				}
 			}
 		}
 		for _, name := range core.ReviewMCPTools {
-			_, _, err := callWithBudgetAndOptions("unused.sock", nil, role,
-				json.RawMessage(fmt.Sprintf(`{"name":%s,"arguments":{}}`, strconv.Quote(name))),
-				ProgressSilent(time.Millisecond), func(core.SubagentToolAction) time.Duration { return time.Millisecond },
-				DefaultParentTools())
+			_, _, err := testCallWithOptions("unused.sock", nil, role,
+				fmt.Sprintf(`{"name":%s,"arguments":{}}`, strconv.Quote(name)),
+				ProgressSilent(time.Millisecond), time.Millisecond, DefaultParentTools())
 			if err == nil || !strings.Contains(err.Error(), "unknown sub-agent tool") {
 				t.Fatalf("%s %s: %v", role, name, err)
 			}
@@ -494,7 +623,7 @@ func TestInitializeAndToolListDeliverConciseParentAndChildContracts(t *testing.T
 					t.Fatal(description)
 				}
 			case core.SubagentMcpRoleParent:
-				spawn := subagentListedTool(tools, "spawn")
+				spawn := subagentListedTool(tools, "spawn_worker")
 				props := subagentValue(spawn, "inputSchema", "properties")
 				if subagentHas(spawn, "inputSchema", "properties", "files") || subagentHas(spawn, "inputSchema", "properties", "context") {
 					t.Fatal(props)
@@ -507,7 +636,7 @@ func TestInitializeAndToolListDeliverConciseParentAndChildContracts(t *testing.T
 				if !subagentEqualJSON(subagentValue(props, "task_type", "enum"), `["straightforward","subtle"]`) {
 					t.Fatal(subagentValue(props, "task_type", "enum"))
 				}
-				if !strings.Contains(subagentText(spawn, "description"), "Judge by difficulty, not by the length of the brief") {
+				if !strings.Contains(subagentText(spawn, "description"), "Judge by scope and branching, not brief length or command runtime") {
 					t.Fatal(subagentValue(spawn, "description"))
 				}
 				if subagentValue(spawn, "inputSchema", "additionalProperties") != false {
@@ -564,7 +693,7 @@ func TestLegacyMailboxFlagKeepsPeerToolsAvailable(t *testing.T) {
 	codex := core.HarnessKindCodex
 	for _, role := range []core.SubagentMcpRole{core.SubagentMcpRoleParent, core.SubagentMcpRoleMessageOnly} {
 		initialize, tools := subagentMCPExchange(t, func(reader io.Reader, writer io.Writer) error {
-			return runWithOptions(reader, writer, "unused.sock", &codex, role, subagentMailboxesDisabled)
+			return runWithOptions(reader, writer, "unused.sock", &codex, role, subagentParentWithoutOracle)
 		})
 		if !slices.Contains(subagentListedNames(tools), "send_message") {
 			t.Fatalf("%s lacks send_message", role)
@@ -582,7 +711,7 @@ func TestParentRequiresTaskTypeAndRefusesHiddenToolsAndSelectorOverrides(t *test
 		slices.Contains(names, "send_input") || slices.Contains(names, "interrupt") {
 		t.Fatal(names)
 	}
-	spawn := subagentToolNamed(tools, "spawn")
+	spawn := subagentToolNamed(tools, "spawn_worker")
 	if !subagentEqualJSON(subagentValue(spawn, "inputSchema", "required"), `["task_name","instructions","task_type"]`) {
 		t.Fatal(subagentValue(spawn, "inputSchema", "required"))
 	}
@@ -591,7 +720,7 @@ func TestParentRequiresTaskTypeAndRefusesHiddenToolsAndSelectorOverrides(t *test
 		if subagentHas(spawn, "inputSchema", "properties", key) {
 			t.Fatalf("spawn offers %s", key)
 		}
-		calls = append(calls, fmt.Sprintf(`{"name":"spawn","arguments":{"task_name":"probe","instructions":"report","task_type":"straightforward",%s:"override"}}`, strconv.Quote(key)))
+		calls = append(calls, fmt.Sprintf(`{"name":"spawn_worker","arguments":{"task_name":"probe","instructions":"report","task_type":"straightforward",%s:"override"}}`, strconv.Quote(key)))
 	}
 	for _, params := range calls {
 		_, _, err := subagentCall("unused.sock", nil, core.SubagentMcpRoleParent, params, ProgressSilent(time.Second))
@@ -621,7 +750,7 @@ func TestListAndSpawnSayWhatARefusedLoginLooksLike(t *testing.T) {
 			t.Fatal(wait)
 		}
 	}
-	if spawn := subagentDescription(t, "spawn"); !strings.Contains(spawn, "login the provider has refused") {
+	if spawn := subagentDescription(t, "spawn_worker"); !strings.Contains(spawn, "login the provider has refused") {
 		t.Fatal(spawn)
 	}
 }
@@ -647,7 +776,7 @@ func TestTheToolsExplainParkedChildrenAndTheLiveChildLimit(t *testing.T) {
 	if wait := subagentDescription(t, "list_agents"); !strings.Contains(wait, "parked true") {
 		t.Fatal(wait)
 	}
-	spawn := subagentDescription(t, "spawn")
+	spawn := subagentDescription(t, "spawn_worker")
 	if !strings.Contains(spawn, "live children") || !strings.Contains(spawn, "finished children are parked") {
 		t.Fatal(spawn)
 	}
@@ -731,27 +860,26 @@ func TestAChildGetsHandbackAndCommonToolsWithoutDelegation(t *testing.T) {
 // before running it (R11-1).
 // Hard-won: 91244ea1: Claude sub-agent handback stalled on an unapproved MCP tool.
 func TestEachRoleListsExactlyTheToolsItsHarnessIsAllowed(t *testing.T) {
-	expected := slices.DeleteFunc(slices.Clone(core.SubagentMcpRoleParent.ToolNames(true, false)), func(name string) bool {
-		return name == "ask_oracle"
-	})
+	expected := core.SubagentMcpRoleParent.ToolNames(false, false)
 	if names := subagentToolNames(subagentToolDefinitions()); !slices.Equal(names, expected) {
 		t.Fatal(names)
 	}
 	oracle := DefaultParentTools()
 	oracle.Oracle = true
-	if names := subagentToolNames(toolDefinitionsWithOptions(nil, oracle)); !slices.Equal(names, core.SubagentMcpRoleParent.ToolNames(true, false)) {
+	oracle.OrchestratorsEnabled = true
+	if names := subagentToolNames(toolDefinitionsWithOptions(nil, oracle)); !slices.Equal(names, core.SubagentMcpRoleParent.ToolNames(true, true)) {
 		t.Fatal(names)
 	}
-	if names := subagentToolNames(childToolDefinitions()); !slices.Equal(names, core.SubagentMcpRoleChild.ToolNames(true, false)) {
+	if names := subagentToolNames(childToolDefinitions()); !slices.Equal(names, core.SubagentMcpRoleChild.ToolNames(false, false)) {
 		t.Fatal(names)
 	}
 }
 
-func TestOracleIsReadFromTheLaunchFileAsPlainJson(t *testing.T) {
+func TestOptionalToolsAreReadFromTheLaunchFileAsPlainJson(t *testing.T) {
 	directory := t.TempDir()
 	socket := filepath.Join(directory, "control.sock")
-	if oracleEnabled(socket) {
-		t.Fatal("no launch file")
+	if _, present, err := readLaunchSettings(socket); err != nil || present {
+		t.Fatalf("no launch file: %v %v", present, err)
 	}
 	launch := filepath.Join(directory, "launch.json")
 	for _, check := range []struct {
@@ -768,8 +896,12 @@ func TestOracleIsReadFromTheLaunchFileAsPlainJson(t *testing.T) {
 		if err := os.WriteFile(launch, []byte(check.body), 0o666); err != nil {
 			t.Fatal(err)
 		}
-		if got := oracleEnabled(socket); got != check.expected {
-			t.Fatalf("%s: %v", check.body, got)
+		launch, present, err := readLaunchSettings(socket)
+		if err != nil || !present {
+			t.Fatalf("%s: %v %v", check.body, present, err)
+		}
+		if oracle, _ := subagentMCPGet(launch, "oracle"); (oracle == true) != check.expected {
+			t.Fatalf("%s: %v", check.body, oracle)
 		}
 	}
 }
@@ -804,6 +936,7 @@ func TestOracleToolIsGatedAndNotReadOnlyHinted(t *testing.T) {
 func TestOracleIsListedForEachPrimaryRoleOnlyWhenEnabled(t *testing.T) {
 	for _, role := range []core.SubagentMcpRole{
 		core.SubagentMcpRoleParent,
+		core.SubagentMcpRoleOrchestrator,
 		core.SubagentMcpRoleMessageOnly,
 		core.SubagentMcpRoleFetchOnly,
 		core.SubagentMcpRoleChild,
@@ -825,7 +958,7 @@ func TestEachRoleRefusesTheOtherRolesTools(t *testing.T) {
 	progress := ProgressSilent(50 * time.Millisecond)
 	socket := "/nonexistent/subagents.sock"
 	_, _, child := subagentCallWithBudget(socket, nil, core.SubagentMcpRoleChild,
-		`{"name":"spawn","arguments":{"task_name":"t","instructions":"i","task_type":"straightforward"}}`, progress, 50*time.Millisecond)
+		`{"name":"spawn_worker","arguments":{"task_name":"t","instructions":"i","task_type":"straightforward"}}`, progress, 50*time.Millisecond)
 	if child == nil || !strings.Contains(child.Error(), "unknown sub-agent tool") {
 		t.Fatalf("a child cannot spawn: %v", child)
 	}
@@ -893,7 +1026,7 @@ func TestHandbackRefusesOversizedReportsAndListsTheTenLargestFiles(t *testing.T)
 func TestOlderLaunchFilesWithoutBothReportSettingsSkipTheBudget(t *testing.T) {
 	directory := t.TempDir()
 	socket := filepath.Join(directory, "subagents.sock")
-	if budget, err := childReportBudgetFromSocket(socket); err != nil || budget != nil {
+	if budget, err := subagentLaunchBudget(socket); err != nil || budget != nil {
 		t.Fatalf("%v %v", budget, err)
 	}
 	for _, environment := range []jsonvalue.Object{
@@ -902,9 +1035,29 @@ func TestOlderLaunchFilesWithoutBothReportSettingsSkipTheBudget(t *testing.T) {
 		subagentObject(core.ChildReportLimitEnv, "1"),
 	} {
 		subagentWriteLaunch(t, directory, subagentObject("environment", environment))
-		if budget, err := childReportBudgetFromSocket(socket); err != nil || budget != nil {
+		if budget, err := subagentLaunchBudget(socket); err != nil || budget != nil {
 			t.Fatalf("%v: %v %v", environment, budget, err)
 		}
+	}
+}
+
+// subagentLaunchBudget is the tests' read_launch_settings(socket) followed by
+// ChildReportBudget::from_launch: nil when there is no launch file or no
+// budget in it.
+func subagentLaunchBudget(socket string) (*childReportBudget, error) {
+	launch, present, err := readLaunchSettings(socket)
+	if err != nil || !present {
+		return nil, err
+	}
+	return childReportBudgetFromLaunch(launch)
+}
+
+func TestNewMcpRefusesTheOldSendInputName(t *testing.T) {
+	_, _, err := subagentCall("unused.sock", nil, core.SubagentMcpRoleParent,
+		`{"name":"send_input","arguments":{"child_session_id":"child","message":"keep going"}}`,
+		ProgressSilent(time.Millisecond))
+	if err == nil || !strings.Contains(err.Error(), "unknown sub-agent tool") {
+		t.Fatal(err)
 	}
 }
 
@@ -919,12 +1072,12 @@ func TestAnUnansweredHandbackTellsTheChildToCallAgain(t *testing.T) {
 }
 
 func TestSpawnTakesNoCallerChosenKey(t *testing.T) {
-	spawn := subagentToolNamed(subagentToolDefinitions(), "spawn")
+	spawn := subagentToolNamed(subagentToolDefinitions(), "spawn_worker")
 	if subagentHas(spawn, "inputSchema", "properties", "request_key") || strings.Contains(subagentText(spawn, "description"), "request_key") {
 		t.Fatal(spawn)
 	}
 	_, _, refused := subagentCallWithBudget("/nonexistent/subagents.sock", nil, core.SubagentMcpRoleParent,
-		`{"name":"spawn","arguments":{"task_name":"t","instructions":"i","task_type":"straightforward","request_key":"k"}}`,
+		`{"name":"spawn_worker","arguments":{"task_name":"t","instructions":"i","task_type":"straightforward","request_key":"k"}}`,
 		ProgressSilent(50*time.Millisecond), 50*time.Millisecond)
 	if refused == nil || !strings.Contains(refused.Error(), "unknown field `request_key`") {
 		t.Fatalf("a spawn naming request_key must be refused: %v", refused)

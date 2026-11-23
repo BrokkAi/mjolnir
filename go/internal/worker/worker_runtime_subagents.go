@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +29,7 @@ import (
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/workermcp"
 )
 
 // SubagentSocket is the worker root's sub-agent MCP socket.
@@ -98,7 +98,9 @@ const claudeMailboxHookMarker = "MJOLNIR_MAILBOX_HOOK=1 "
 // person's own, so it is never edited: a delegating parent or a child cannot
 // start without its tools there, while a message-only session starts without
 // `send_message`. Returns whether the role servers were registered.
-func configureClaudeSubagentMCP(root string, sessionID string, home string, role *core.SubagentMcpRole, agentMailboxesEnabled bool, subtleSubagents bool, reviewTools bool) (bool, error) {
+// oracle and orchestratorsEnabled are the launch's tool capabilities, which
+// decide the tools the role's server lists and so the rules allowed here.
+func configureClaudeSubagentMCP(root string, sessionID string, home string, role *core.SubagentMcpRole, oracle bool, orchestratorsEnabled bool, subtleSubagents bool, reviewTools bool) (bool, error) {
 	if !filepath.IsAbs(root) {
 		return false, errors.New("Claude MCP worker root must be absolute")
 	}
@@ -146,8 +148,6 @@ func configureClaudeSubagentMCP(root string, sessionID string, home string, role
 			core.HarnessKindClaude.ID(),
 			"--role",
 			role.ID(),
-			"--agent-mailboxes-enabled",
-			strconv.FormatBool(agentMailboxesEnabled),
 		}
 		if !subtleSubagents {
 			// Only the non-default value is written, as for Codex.
@@ -195,7 +195,7 @@ func configureClaudeSubagentMCP(root string, sessionID string, home string, role
 			return err
 		}
 		var rules []string
-		for _, tool := range role.ToolNames(true, false) {
+		for _, tool := range role.ToolNames(oracle, orchestratorsEnabled) {
 			rules = append(rules, fmt.Sprintf("mcp__%s__%s", core.SubagentMCPServer, tool))
 		}
 		if reviewTools {
@@ -671,7 +671,7 @@ func excludeDefaultClaudeInstructions(root string, sessionID string, home string
 	})
 }
 
-func configureCodexMCPWithMailboxes(root string, sessionID string, home string, role *core.SubagentMcpRole, policy core.ExecutionPolicy, mailboxesEnabled bool, subtleSubagents bool, reviewTools bool, managedSubagent bool) (bool, error) {
+func configureCodexMCPProfile(root string, sessionID string, home string, role *core.SubagentMcpRole, policy core.ExecutionPolicy, subtleSubagents bool, reviewTools bool, managedSubagent bool) (bool, error) {
 	if !privateStagedHome(root, sessionID, home) {
 		return false, nil
 	}
@@ -682,7 +682,7 @@ func configureCodexMCPWithMailboxes(root string, sessionID string, home string, 
 	if err != nil {
 		return false, err
 	}
-	changed, err := configureCodexMCPServers(config, path, root, role, policy, mailboxesEnabled, subtleSubagents, reviewTools)
+	changed, err := configureCodexMCPServers(config, path, root, role, policy, subtleSubagents, reviewTools)
 	if err != nil {
 		return false, err
 	}
@@ -761,7 +761,7 @@ func disableCodexSubagentFeatures(config map[string]any, path string) (bool, err
 }
 
 // configureCodexMCPServers returns whether the configuration changed.
-func configureCodexMCPServers(config map[string]any, path string, root string, role *core.SubagentMcpRole, policy core.ExecutionPolicy, mailboxesEnabled bool, subtleSubagents bool, reviewTools bool) (bool, error) {
+func configureCodexMCPServers(config map[string]any, path string, root string, role *core.SubagentMcpRole, policy core.ExecutionPolicy, subtleSubagents bool, reviewTools bool) (bool, error) {
 	name := core.SubagentMCPServer
 	if _, ok := config["mcp_servers"]; role == nil && !ok {
 		return false, nil
@@ -791,8 +791,6 @@ func configureCodexMCPServers(config map[string]any, path string, root string, r
 		"codex",
 		"--role",
 		role.ID(),
-		"--agent-mailboxes-enabled",
-		strconv.FormatBool(mailboxesEnabled),
 	}
 	if !subtleSubagents {
 		// Written only when off, so a launch offering both types keeps the
@@ -856,12 +854,11 @@ func configureCodexMCPServers(config map[string]any, path string, root string, r
 	return true, nil
 }
 
-func configureCodexProfile(root string, sessionID string, home string, environment map[string]string, role *core.SubagentMcpRole, policy core.ExecutionPolicy, options ParentTools, reviewTools bool, managedSubagent bool) (bool, error) {
+func configureCodexProfile(root string, sessionID string, home string, environment map[string]string, role *core.SubagentMcpRole, policy core.ExecutionPolicy, subtleSubagents bool, reviewTools bool, managedSubagent bool) (bool, error) {
 	if err := configureCodexMailboxHook(root, environment); err != nil {
 		return false, err
 	}
-	return configureCodexMCPWithMailboxes(root, sessionID, home, role, policy,
-		options.AgentMailboxesEnabled, options.SubtleSubagents, reviewTools, managedSubagent)
+	return configureCodexMCPProfile(root, sessionID, home, role, policy, subtleSubagents, reviewTools, managedSubagent)
 }
 
 // configureCodexMailboxHook puts the mailbox hook in codex-acp's per-thread
@@ -1017,15 +1014,16 @@ func defaultSocketAdmission() *socketAdmission {
 }
 
 // workerReplyMargin is how much sooner than the MCP server gives up this
-// worker answers a request. The MCP server waits replyTimeout; answering
-// first lets it tell the model what this worker knows (whether the daemon
-// has picked the request up) instead of only that nothing came back (#1197).
+// worker answers a request. The MCP server waits workermcp.ReplyTimeout;
+// answering first lets it tell the model what this worker knows (whether the
+// daemon has picked the request up) instead of only that nothing came back
+// (#1197).
 const workerReplyMargin = 10 * time.Second
 
 // subagentsReplyBudget is how long a socket call waits for its result:
-// replyTimeout less workerReplyMargin. A variable only so the test that
-// Rust runs on tokio's paused clock can shorten it.
-var subagentsReplyBudget = replyTimeout - workerReplyMargin
+// workermcp.ReplyTimeout less workerReplyMargin. A variable only so the test
+// that Rust runs on tokio's paused clock can shorten it.
+var subagentsReplyBudget = workermcp.ReplyTimeout - workerReplyMargin
 
 // queueState is the durable sub-agent queue (serde deny_unknown_fields; its
 // wire form is queueStateWire).
@@ -1398,11 +1396,11 @@ func (e *SubagentEndpoint) SetMutatingAdmission(open bool) error {
 
 // daemonContact reports whether the daemon has read the queue after the read
 // numbered `mark`, and how long ago it last read it.
-func (e *SubagentEndpoint) daemonContact(mark uint64) DaemonContact {
+func (e *SubagentEndpoint) daemonContact(mark uint64) workermcp.DaemonContact {
 	e.state.mu.Lock()
 	collections := e.state.state.collections
 	e.state.mu.Unlock()
-	contact := DaemonContact{PickedUp: collections.count > mark}
+	contact := workermcp.DaemonContact{PickedUp: collections.count > mark}
 	if collections.last != nil {
 		seconds := uint64(time.Since(*collections.last) / time.Second)
 		contact.LastCollectedSecondsAgo = &seconds
@@ -1592,7 +1590,7 @@ type socketReply struct {
 	AcknowledgmentRequired bool                     `json:"acknowledgment_required"`
 	Result                 *core.SubagentToolResult `json:"result,omitempty"`
 	// Daemon is set only when Result is absent.
-	Daemon *DaemonContact `json:"daemon,omitempty"`
+	Daemon *workermcp.DaemonContact `json:"daemon,omitempty"`
 }
 
 // UnmarshalJSON requires `accepted` and refuses unknown fields.
@@ -1739,7 +1737,8 @@ func subagentsServeOne(ctx context.Context, stream net.Conn, endpoint *SubagentE
 	// Origin attribution belongs to this worker, never to the socket caller.
 	request.OriginatingCommandID = nil
 	lane := endpoint.admission.control
-	if _, spawn := request.Action.(core.SubagentToolActionSpawn); spawn {
+	switch request.Action.(type) {
+	case core.SubagentToolActionSpawn, core.SubagentToolActionSpawnOrchestrator:
 		lane = endpoint.admission.long
 	}
 	select {
@@ -1838,7 +1837,7 @@ func subagentsServeOne(ctx context.Context, stream net.Conn, endpoint *SubagentE
 	// Without a result, say whether the daemon has picked the request up: a
 	// daemon that is restarting or stalled otherwise looks the same as a slow
 	// action, and the model should act differently on the two.
-	var daemon *DaemonContact
+	var daemon *workermcp.DaemonContact
 	if result == nil {
 		contact := endpoint.daemonContact(mark)
 		daemon = &contact

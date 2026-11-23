@@ -25,6 +25,7 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
+	"github.com/BrokkAi/mjolnir/go/internal/workermcp"
 )
 
 // ClaudeLoginIdentity is one observed identity shared by credential
@@ -535,7 +536,7 @@ func ownedACPMCPTools(spec *LaunchSpec) []ownedMcpServerTools {
 		// The history server lists its tools only with a history socket.
 		var tools []string
 		if spec.ProjectMemory != nil && spec.ProjectMemory.HistorySocket != nil {
-			tools = ToolNames()
+			tools = workermcp.ToolNames()
 		}
 		owned = append(owned, ownedMcpServerTools{server: server.Stdio.Name, tools: tools})
 	}

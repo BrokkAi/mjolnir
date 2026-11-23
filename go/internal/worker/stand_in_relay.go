@@ -517,7 +517,7 @@ func testSubagentQueuePath(relayRoot string) string {
 
 // emptyTestSubagentQueue is a fixture queue with no requests or results.
 func emptyTestSubagentQueue() jsonvalue.Object {
-	return subagentObject("requests", jsonvalue.Object{}, "results", jsonvalue.Object{})
+	return standInObject("requests", jsonvalue.Object{}, "results", jsonvalue.Object{})
 }
 
 func readTestSubagentQueue(path string) jsonvalue.Object {
@@ -548,7 +548,7 @@ func writeTestSubagentQueue(path string, queue jsonvalue.Object, what string) {
 func recordTestSubagentAdmission(relayRoot string, open bool) {
 	queuePath := testSubagentQueuePath(relayRoot)
 	queue := readTestSubagentQueue(queuePath)
-	transitions, ok := subagentMCPGet(queue, "admission_transitions")
+	transitions, ok := standInGet(queue, "admission_transitions")
 	if items, isArray := transitions.([]any); ok && isArray {
 		queue.Set("admission_transitions", append(slices.Clone(items), open))
 	} else {
@@ -581,7 +581,7 @@ func projectMemoryRefusal(request *core.RelayRequestEnvelope) *core.RelayRespons
 // standInQueueValues decodes each member of the queue's section object.
 func standInQueueValues[T any](queue jsonvalue.Object, section string) []T {
 	values := []T{}
-	members, _ := subagentMCPGet(queue, section)
+	members, _ := standInGet(queue, section)
 	object, _ := members.(jsonvalue.Object)
 	for _, member := range object {
 		encoded, err := jsonvalue.Marshal(member.Value)
@@ -634,14 +634,14 @@ func subagentConnectionResponse(request *core.RelayRequestEnvelope) *core.RelayR
 		if queuePath == nil {
 			panic("fixture queue root")
 		}
-		pending, _ := subagentMCPGet(queue, "requests")
+		pending, _ := standInGet(queue, "requests")
 		pendingObject, _ := pending.(jsonvalue.Object)
 		pendingObject = pendingObject.Clone()
 		// serde_json's Map::remove with preserve_order swaps the last member
 		// into the removed one's place.
 		pendingObject.SwapDelete(r.Result.RequestID)
 		queue.Set("requests", pendingObject)
-		finished, _ := subagentMCPGet(queue, "results")
+		finished, _ := standInGet(queue, "results")
 		finishedObject, _ := finished.(jsonvalue.Object)
 		finishedObject = finishedObject.Clone()
 		encoded, err := json.Marshal(r.Result)
@@ -937,7 +937,7 @@ func ServeLeasedRelay() {
 			history = core.RelayResponsePayloadHistoryRequests{Requests: requests}
 		case core.RelayRequestSetSubagentAdmission:
 			admission := at("subagent-admission.json")
-			state := subagentObject("open", true, "calls", 0)
+			state := standInObject("open", true, "calls", 0)
 			if body, err := os.ReadFile(admission); err == nil {
 				if parsed, err := jsonvalue.Parse(body); err == nil {
 					if object, ok := parsed.(jsonvalue.Object); ok {
@@ -946,7 +946,7 @@ func ServeLeasedRelay() {
 				}
 			}
 			calls := uint64(0)
-			switch count, _ := subagentMCPGet(state, "calls"); count := count.(type) {
+			switch count, _ := standInGet(state, "calls"); count := count.(type) {
 			case int64:
 				if count >= 0 {
 					calls = uint64(count)
@@ -1170,4 +1170,30 @@ func SeedSourceRelay(workerRoot string) string {
 // alive across relay requests. The result holds it (Rust: Box<dyn Send>).
 func KeepQuestionLive(relay *DurableRelay, question core.ElicitationRequest) any {
 	return relay.operatorAway.keepFixtureQuestionLive(question)
+}
+
+// standInObject is serde_json's json!({...}) with preserve_order: an object
+// whose members are the key and value pairs in order.
+func standInObject(pairs ...any) jsonvalue.Object {
+	if len(pairs)%2 != 0 {
+		panic("standInObject needs key and value pairs")
+	}
+	object := make(jsonvalue.Object, 0, len(pairs)/2)
+	for index := 0; index < len(pairs); index += 2 {
+		object = append(object, jsonvalue.Member{Key: pairs[index].(string), Value: pairs[index+1]})
+	}
+	return object
+}
+
+// standInGet is serde_json's Value::get with a key: the member of an
+// object, or false for any other value.
+func standInGet(value any, key string) (any, bool) {
+	switch object := value.(type) {
+	case jsonvalue.Object:
+		return object.Get(key)
+	case map[string]any:
+		member, ok := object[key]
+		return member, ok
+	}
+	return nil, false
 }

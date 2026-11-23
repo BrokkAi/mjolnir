@@ -14,6 +14,7 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
+	"github.com/BrokkAi/mjolnir/go/internal/workerreview"
 )
 
 // reviewCaptureTestRoot is the canonical temporary directory: Git reports
@@ -168,7 +169,7 @@ func TestScopedPushCaptureIgnoresDirtyRootAndAcceptsLinkedWorktree(t *testing.T)
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstallPrePushHook(checkpoint.SystemGit{}, worktree); err != nil {
+	if _, err := workerreview.InstallPrePushHook(checkpoint.SystemGit{}, worktree); err != nil {
 		t.Fatal(err)
 	}
 	remote := filepath.Join(tempRoot, "remote.git")
@@ -211,7 +212,7 @@ func TestScopedPushCaptureStartsANewWorktreeAtItsForkPoint(t *testing.T) {
 	testSupportGit(root, "add", "tracked.rs")
 	testSupportGit(root, "commit", "-qm", "base")
 	base := testSupportGit(root, "rev-parse", "HEAD")
-	if _, err := EnsureSessionStartHead(checkpoint.SystemGit{}, root, "fork-test"); err != nil {
+	if _, err := workerreview.EnsureSessionStartHead(checkpoint.SystemGit{}, root, "fork-test"); err != nil {
 		t.Fatal(err)
 	}
 	worktree := filepath.Join(tempRoot, "lane")
@@ -260,7 +261,7 @@ func TestScopedPushCaptureReviewsAnOrphanWorktreeFromTheEmptyTree(t *testing.T) 
 	reviewCaptureTestWrite(t, filepath.Join(root, "tracked.rs"), "base\n")
 	testSupportGit(root, "add", "tracked.rs")
 	testSupportGit(root, "commit", "-qm", "base")
-	if _, err := EnsureSessionStartHead(checkpoint.SystemGit{}, root, "orphan-test"); err != nil {
+	if _, err := workerreview.EnsureSessionStartHead(checkpoint.SystemGit{}, root, "orphan-test"); err != nil {
 		t.Fatal(err)
 	}
 	worktree := filepath.Join(tempRoot, "solo")
@@ -510,7 +511,7 @@ func TestPushCaptureAndRecordingUseTheCommittedGitTree(t *testing.T) {
 	testSupportGit(repository, "add", "tracked.rs")
 	testSupportGit(repository, "commit", "-qm", "base")
 	start := testSupportGit(repository, "rev-parse", "HEAD")
-	if _, err := EnsureSessionStartHead(checkpoint.SystemGit{}, repository, "push-test"); err != nil {
+	if _, err := workerreview.EnsureSessionStartHead(checkpoint.SystemGit{}, repository, "push-test"); err != nil {
 		t.Fatal(err)
 	}
 	testSupportGit(repository, "checkout", "-qb", "feature")

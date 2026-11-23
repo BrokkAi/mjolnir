@@ -9,6 +9,8 @@ mj-review 3dde0c11b5832be0a9d810662216d82f9d7e9696
 mj-build-id 3dde0c11b5832be0a9d810662216d82f9d7e9696
 mj-client 3dde0c11b5832be0a9d810662216d82f9d7e9696
 mj-worker 4273087e6464a9dd6e90baba0a662afabaa58579
+mj-worker-mcp 3dde0c11b5832be0a9d810662216d82f9d7e9696
+mj-worker-review 3dde0c11b5832be0a9d810662216d82f9d7e9696
 # These crates were ported while their files were still in mj-core and
 # mj-worker; rust-changes.sh follows them from those paths.
 mj-harness-install 3dde0c11b5832be0a9d810662216d82f9d7e9696

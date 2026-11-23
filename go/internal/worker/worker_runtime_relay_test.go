@@ -46,6 +46,7 @@ import (
 	"github.com/BrokkAi/mjolnir/go/internal/checkpoint"
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/transcript"
+	"github.com/BrokkAi/mjolnir/go/internal/workerreview"
 )
 
 // runtimeRelayTestsSessionID is the session every fixture in this module
@@ -8646,7 +8647,7 @@ func TestAnOwningOrchestratorPinsTheStartAndInstallsThePushGate(t *testing.T) {
 	}
 	runtimeRelayWriteFile(t, filepath.Join(repository, "tracked.rs"), []byte("fn main() { work(); }\n"))
 	testSupportGit(repository, "commit", "-qam", "child work")
-	head, err := ReviewStartHead(checkpoint.SystemGit{}, repository, "review-child")
+	head, err := workerreview.ReviewStartHead(checkpoint.SystemGit{}, repository, "review-child")
 	runtimeRelayMust(t, err)
 	if !runtimeRelayIs(head, start) {
 		t.Fatalf("the first review covers the commits made after the child started: %v, want %q", head, start)

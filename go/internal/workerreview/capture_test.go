@@ -1,8 +1,8 @@
-// Port of the tests in mj-worker/src/review/capture.rs (push_tests).
+// Port of the tests in mj-worker-review/src/capture.rs (push_tests).
 
 //go:build unix
 
-package worker
+package workerreview
 
 import (
 	"errors"
@@ -40,13 +40,13 @@ func pushTestRepository(t *testing.T) string {
 	if err := os.Mkdir(origin, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	testSupportGit(origin, "init", "--bare", "-q", "-b", "main")
-	testSupportGit(temp, "clone", "-q", origin, root)
-	testSupportGit(root, "config", "user.name", "Review Test")
-	testSupportGit(root, "config", "user.email", "review@example.test")
+	testsGit(origin, "init", "--bare", "-q", "-b", "main")
+	testsGit(temp, "clone", "-q", origin, root)
+	testsGit(root, "config", "user.name", "Review Test")
+	testsGit(root, "config", "user.email", "review@example.test")
 	pushTestCommit(t, root, "base")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "remote", "set-head", "origin", "main")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "remote", "set-head", "origin", "main")
 	return temp
 }
 
@@ -57,9 +57,9 @@ func pushTestCommit(t *testing.T, root, text string) string {
 	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte(text+"\n"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	testSupportGit(root, "add", "tracked.txt")
-	testSupportGit(root, "commit", "-qm", text)
-	return testSupportGit(root, "rev-parse", "HEAD")
+	testsGit(root, "add", "tracked.txt")
+	testsGit(root, "commit", "-qm", text)
+	return testsGit(root, "rev-parse", "HEAD")
 }
 
 func pushTestCapture(t *testing.T, root, start string) PushCapture {
@@ -125,12 +125,12 @@ func pushTestBaseCommit(base PushBase) string {
 func TestPushCaptureRefusesDirtyTrackedPathsAndIgnoresUntracked(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	head := testSupportGit(root, "rev-parse", "HEAD")
+	head := testsGit(root, "rev-parse", "HEAD")
 	pushTestWrite(t, filepath.Join(root, "untracked"), "ignored")
 	if patch := pushTestCapture(t, root, head).Delta.Patch; patch != "" {
 		t.Fatalf("patch %q", patch)
 	}
-	testSupportGit(root, "mv", "tracked.txt", "renamed with spaces.txt")
+	testsGit(root, "mv", "tracked.txt", "renamed with spaces.txt")
 	_, err := CapturePushableCommits(checkpoint.SystemGit{}, root, head)
 	var dirty PushCaptureRefusalDirtyTracked
 	if !errors.As(err, &dirty) || !slices.Equal(dirty.Files, []string{"renamed with spaces.txt"}) {
@@ -141,8 +141,8 @@ func TestPushCaptureRefusesDirtyTrackedPathsAndIgnoresUntracked(t *testing.T) {
 func TestPushCaptureUsesOriginDefaultMergeBaseAndSharedDiffSummary(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	base := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	base := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	head := pushTestCommit(t, root, "feature")
 	capture := pushTestCapture(t, root, head)
 	if want := (PushBaseMergeBase{DefaultBranch: "refs/remotes/origin/main", Commit: base}); capture.Base != PushBase(want) {
@@ -151,7 +151,7 @@ func TestPushCaptureUsesOriginDefaultMergeBaseAndSharedDiffSummary(t *testing.T)
 	if capture.HeadCommit != head {
 		t.Fatalf("head %s", capture.HeadCommit)
 	}
-	if baseline := capture.Delta.BaselineTree; baseline == nil || *baseline != testSupportGit(root, "rev-parse", base+"^{tree}") {
+	if baseline := capture.Delta.BaselineTree; baseline == nil || *baseline != testsGit(root, "rev-parse", base+"^{tree}") {
 		t.Fatalf("baseline %v", baseline)
 	}
 	if !strings.Contains(capture.Delta.Patch, "+feature") {
@@ -168,12 +168,12 @@ func TestPushCaptureUsesOriginDefaultMergeBaseAndSharedDiffSummary(t *testing.T)
 func TestPushCaptureUsesReviewedDescendantAndHandlesHeadAsBase(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	reviewed := pushTestCommit(t, root, "reviewed")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
-	if got := testSupportGit(root, "rev-parse", "refs/mj/reviewed/"+tree); got != reviewed {
+	if got := testsGit(root, "rev-parse", "refs/mj/reviewed/"+tree); got != reviewed {
 		t.Fatalf("reviewed ref %s", got)
 	}
 	empty := pushTestCapture(t, root, start)
@@ -194,10 +194,10 @@ func TestPushCaptureUsesReviewedDescendantAndHandlesHeadAsBase(t *testing.T) {
 func TestPushCaptureIgnoresOverriddenCommitsAsABase(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	overridden := pushTestCommit(t, root, "overridden")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	if err := checkpoint.RecordOverriddenTree(checkpoint.SystemGit{}, root, tree, overridden); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestPushCaptureIgnoresOverriddenCommitsAsABase(t *testing.T) {
 	if !strings.Contains(capture.Delta.Patch, "+overridden") && !strings.Contains(capture.Delta.Patch, "+fix") {
 		t.Fatal(capture.Delta.Patch)
 	}
-	if listed := testSupportGit(root, "for-each-ref", "refs/mj/reviewed/"); listed != "" {
+	if listed := testsGit(root, "for-each-ref", "refs/mj/reviewed/"); listed != "" {
 		t.Fatal(listed)
 	}
 }
@@ -217,17 +217,17 @@ func TestPushCaptureIgnoresOverriddenCommitsAsABase(t *testing.T) {
 func TestSetReviewBaseAcceptsReviewedAndOverriddenTreesAndRefusesOthers(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	reviewed := pushTestCommit(t, root, "reviewed")
-	reviewedTree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	reviewedTree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, reviewedTree, reviewed)
 	pushTestCommit(t, root, "overridden")
 	// Review points are ordered by committer date, which has one-second
 	// resolution; give the overridden commit a clearly later one.
 	pushTestAmendLater(t, root)
-	overridden := testSupportGit(root, "rev-parse", "HEAD")
-	overriddenTree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	overridden := testsGit(root, "rev-parse", "HEAD")
+	overriddenTree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	if err := checkpoint.RecordOverriddenTree(checkpoint.SystemGit{}, root, overriddenTree, overridden); err != nil {
 		t.Fatal(err)
 	}
@@ -243,17 +243,17 @@ func TestSetReviewBaseAcceptsReviewedAndOverriddenTreesAndRefusesOthers(t *testi
 	refused(unreviewed, "call request_review first")
 	refused("no-such-revision", "is not a commit")
 	refused("--output=x", "is not a commit")
-	if listed := testSupportGit(root, "for-each-ref", "refs/mj/reviewed/"); len(captureLines(listed)) != 1 {
+	if listed := testsGit(root, "for-each-ref", "refs/mj/reviewed/"); len(captureLines(listed)) != 1 {
 		t.Fatal(listed)
 	}
 
 	// A rejected explicit-ref write must not promote an overridden tree.
-	testSupportGit(root, "update-ref", "refs/mj/push-base", reviewed)
+	testsGit(root, "update-ref", "refs/mj/push-base", reviewed)
 	refused(overridden, "set the review base")
-	if listed := testSupportGit(root, "for-each-ref", "--format=%(objectname)", "refs/mj/reviewed/"); listed != reviewed {
+	if listed := testsGit(root, "for-each-ref", "--format=%(objectname)", "refs/mj/reviewed/"); listed != reviewed {
 		t.Fatal(listed)
 	}
-	testSupportGit(root, "update-ref", "-d", "refs/mj/push-base")
+	testsGit(root, "update-ref", "-d", "refs/mj/push-base")
 
 	// Any revision works: HEAD~1 is the overridden commit. It becomes a
 	// review point and the next capture starts there.
@@ -261,7 +261,7 @@ func TestSetReviewBaseAcceptsReviewedAndOverriddenTreesAndRefusesOthers(t *testi
 	if err != nil || commit != overridden || tree != overriddenTree {
 		t.Fatalf("%s %s %v", commit, tree, err)
 	}
-	if got := testSupportGit(root, "rev-parse", "refs/mj/reviewed/"+overriddenTree); got != overridden {
+	if got := testsGit(root, "rev-parse", "refs/mj/reviewed/"+overriddenTree); got != overridden {
 		t.Fatal(got)
 	}
 	if got := pushTestBaseCommit(pushTestCapture(t, root, start).Base); got != overridden {
@@ -276,30 +276,30 @@ func TestSetReviewBaseAcceptsReviewedAndOverriddenTreesAndRefusesOthers(t *testi
 func TestPushCaptureOrdersReviewedAncestorsByAncestry(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	pushTestCommit(t, root, "reviewed with later clock")
 	pushTestAmendLater(t, root)
-	newerDate := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	newerDate := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, newerDate)
 	later := pushTestCommit(t, root, "reviewed with earlier clock")
-	tree = testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree = testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, later)
 	if got := pushTestBaseCommit(pushTestCapture(t, root, start).Base); got != later {
 		t.Fatal(got)
 	}
 	pushTestAmendLater(t, root)
-	later = testSupportGit(root, "rev-parse", "HEAD")
+	later = testsGit(root, "rev-parse", "HEAD")
 	pushTestRecordReviewed(t, root, tree, later)
 	if got := pushTestBaseCommit(pushTestCapture(t, root, start).Base); got != later {
 		t.Fatal(got)
 	}
-	testSupportGit(root, "checkout", "-qb", "sibling", start)
+	testsGit(root, "checkout", "-qb", "sibling", start)
 	sibling := pushTestCommit(t, root, "not an ancestor")
-	tree = testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree = testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, sibling)
-	testSupportGit(root, "checkout", "-q", "feature")
+	testsGit(root, "checkout", "-q", "feature")
 	if got := pushTestBaseCommit(pushTestCapture(t, root, start).Base); got != later {
 		t.Fatal(got)
 	}
@@ -308,19 +308,19 @@ func TestPushCaptureOrdersReviewedAncestorsByAncestry(t *testing.T) {
 func TestPushCaptureIgnoresReviewedHistoryBeforeCurrentMergeBase(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	old := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	old := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, old)
-	testSupportGit(root, "checkout", "-qb", "feature")
+	testsGit(root, "checkout", "-qb", "feature")
 	pushTestCommit(t, root, "feature before rebase")
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, "default-only"), "advance default\n")
-	testSupportGit(root, "add", "default-only")
-	testSupportGit(root, "commit", "-qm", "advance default")
-	mb := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
-	testSupportGit(root, "rebase", "main")
+	testsGit(root, "add", "default-only")
+	testsGit(root, "commit", "-qm", "advance default")
+	mb := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
+	testsGit(root, "rebase", "main")
 	if got := pushTestBaseCommit(pushTestCapture(t, root, old).Base); got != mb {
 		t.Fatal(got)
 	}
@@ -329,22 +329,22 @@ func TestPushCaptureIgnoresReviewedHistoryBeforeCurrentMergeBase(t *testing.T) {
 func TestPushCaptureUsesReviewedMergeTreeForRenames(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	pushTestWrite(t, filepath.Join(root, "tracked.txt"), "reviewed edit\n")
-	testSupportGit(root, "add", "tracked.txt")
-	testSupportGit(root, "commit", "-qm", "reviewed edit")
-	reviewed := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	testsGit(root, "add", "tracked.txt")
+	testsGit(root, "commit", "-qm", "reviewed edit")
+	reviewed := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
 
-	testSupportGit(root, "checkout", "-q", "main")
-	testSupportGit(root, "mv", "tracked.txt", "renamed.txt")
-	testSupportGit(root, "commit", "-qm", "rename upstream file")
-	mb := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
-	testSupportGit(root, "merge", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
+	testsGit(root, "mv", "tracked.txt", "renamed.txt")
+	testsGit(root, "commit", "-qm", "rename upstream file")
+	mb := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
+	testsGit(root, "merge", "-q", "main")
 
 	captured := pushTestCapture(t, root, start)
 	if got := pushTestBaseCommit(captured.Base); got != reviewed {
@@ -361,18 +361,18 @@ func TestPushCaptureUsesReviewedMergeTreeForRenames(t *testing.T) {
 func TestPushCaptureOldGitRecordsMergedWorkWithoutReview(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	reviewed := pushTestCommit(t, root, "reviewed")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, "upstream-only"), "upstream\n")
-	testSupportGit(root, "add", "upstream-only")
-	testSupportGit(root, "commit", "-qm", "upstream change")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
-	testSupportGit(root, "merge", "-q", "main")
+	testsGit(root, "add", "upstream-only")
+	testsGit(root, "commit", "-qm", "upstream change")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
+	testsGit(root, "merge", "-q", "main")
 
 	captured, err := CapturePushableCommits(versionGit{"2.34.1"}, root, start)
 	if err != nil {
@@ -391,8 +391,8 @@ func TestPushCaptureOldGitRecordsMergedWorkWithoutReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := testSupportGit(root, "merge-tree", "--write-tree", "--allow-unrelated-histories",
-		reviewed, testSupportGit(root, "rev-parse", "main"))
+	expected := testsGit(root, "merge-tree", "--write-tree", "--allow-unrelated-histories",
+		reviewed, testsGit(root, "rev-parse", "main"))
 	if baseline := newGit.Delta.BaselineTree; baseline == nil || *baseline != expected {
 		t.Fatalf("baseline %v, want %s", baseline, expected)
 	}
@@ -404,20 +404,20 @@ func TestPushCaptureOldGitRecordsMergedWorkWithoutReview(t *testing.T) {
 func TestPushCaptureMergesUnrelatedReviewedAndDefaultHistories(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	reviewed := pushTestCommit(t, root, "reviewed")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
-	testSupportGit(root, "checkout", "--orphan", "new-main")
-	testSupportGit(root, "rm", "-qrf", ".")
+	testsGit(root, "checkout", "--orphan", "new-main")
+	testsGit(root, "rm", "-qrf", ".")
 	pushTestWrite(t, filepath.Join(root, "upstream-only"), "upstream\n")
-	testSupportGit(root, "add", "upstream-only")
-	testSupportGit(root, "commit", "-qm", "new upstream root")
-	testSupportGit(root, "branch", "-f", "main")
-	testSupportGit(root, "push", "-qf", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
-	testSupportGit(root, "merge", "-q", "--allow-unrelated-histories", "main")
+	testsGit(root, "add", "upstream-only")
+	testsGit(root, "commit", "-qm", "new upstream root")
+	testsGit(root, "branch", "-f", "main")
+	testsGit(root, "push", "-qf", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
+	testsGit(root, "merge", "-q", "--allow-unrelated-histories", "main")
 	captured := pushTestCapture(t, root, start)
 	if _, ok := captured.Base.(PushBaseMergedReviewPoint); !ok {
 		t.Fatalf("base %#v", captured.Base)
@@ -430,23 +430,23 @@ func TestPushCaptureMergesUnrelatedReviewedAndDefaultHistories(t *testing.T) {
 func TestPushCaptureUsesMergedReviewBaselineAndKeepsLaterEdits(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	reviewed := pushTestCommit(t, root, "reviewed")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
 	if _, _, err := SetReviewBase(checkpoint.SystemGit{}, root, reviewed); err != nil {
 		t.Fatal(err)
 	}
 
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, "upstream-only"), "upstream\n")
-	testSupportGit(root, "add", "upstream-only")
-	testSupportGit(root, "commit", "-qm", "upstream change")
-	mb := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
-	testSupportGit(root, "merge", "-q", "main")
+	testsGit(root, "add", "upstream-only")
+	testsGit(root, "commit", "-qm", "upstream change")
+	mb := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
+	testsGit(root, "merge", "-q", "main")
 
 	merged := pushTestCapture(t, root, start)
 	if got := pushTestBaseCommit(merged.Base); got != reviewed {
@@ -472,30 +472,30 @@ func TestPushCaptureUsesMergedReviewBaselineAndKeepsLaterEdits(t *testing.T) {
 func TestPushCaptureMarksConflictsInMergedReviewBaseline(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "checkout", "-qb", "feature")
 	pushTestWrite(t, filepath.Join(root, "tracked.txt"), "branch resolution\n")
 	pushTestWrite(t, filepath.Join(root, "branch-only"), "reviewed elsewhere\n")
-	testSupportGit(root, "add", "tracked.txt", "branch-only")
-	testSupportGit(root, "commit", "-qm", "reviewed branch change")
-	reviewed := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	testsGit(root, "add", "tracked.txt", "branch-only")
+	testsGit(root, "commit", "-qm", "reviewed branch change")
+	reviewed := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
 
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, "tracked.txt"), "upstream resolution\n")
 	pushTestWrite(t, filepath.Join(root, "upstream-only"), "upstream\n")
-	testSupportGit(root, "add", "tracked.txt", "upstream-only")
-	testSupportGit(root, "commit", "-qm", "upstream conflict change")
-	mb := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
+	testsGit(root, "add", "tracked.txt", "upstream-only")
+	testsGit(root, "commit", "-qm", "upstream conflict change")
+	mb := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
 	if pushTestMergeStatus(t, root) == 0 {
 		t.Fatal("the merge did not conflict")
 	}
 	pushTestWrite(t, filepath.Join(root, "tracked.txt"), "hand resolved\n")
-	testSupportGit(root, "add", "tracked.txt")
-	testSupportGit(root, "commit", "-qm", "resolve merge")
+	testsGit(root, "add", "tracked.txt")
+	testsGit(root, "commit", "-qm", "resolve merge")
 
 	captured := pushTestCapture(t, root, start)
 	if got := pushTestBaseCommit(captured.Base); got != reviewed {
@@ -520,37 +520,37 @@ func TestPushCaptureMarksConflictsInMergedReviewBaseline(t *testing.T) {
 func TestPushCaptureShowsNonTextConflictsResolvedToTheMergeTreeSide(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
+	start := testsGit(root, "rev-parse", "HEAD")
 	pushTestWrite(t, filepath.Join(root, "image.bin"), "\x00base")
 	pushTestWrite(t, filepath.Join(root, "kept.txt"), "base\n")
-	testSupportGit(root, "add", "image.bin", "kept.txt")
-	testSupportGit(root, "commit", "-qm", "shared files")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	testsGit(root, "add", "image.bin", "kept.txt")
+	testsGit(root, "commit", "-qm", "shared files")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-qb", "feature")
 	pushTestWrite(t, filepath.Join(root, "image.bin"), "\x00branch")
 	pushTestWrite(t, filepath.Join(root, "kept.txt"), "branch edit\n")
-	testSupportGit(root, "add", "image.bin", "kept.txt")
-	testSupportGit(root, "commit", "-qm", "reviewed branch change")
-	reviewed := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	testsGit(root, "add", "image.bin", "kept.txt")
+	testsGit(root, "commit", "-qm", "reviewed branch change")
+	reviewed := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
 
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, "image.bin"), "\x00upstream")
 	pushTestWrite(t, filepath.Join(root, "upstream-only"), "upstream\n")
-	testSupportGit(root, "add", "image.bin", "upstream-only")
-	testSupportGit(root, "rm", "-q", "kept.txt")
-	testSupportGit(root, "commit", "-qm", "upstream conflicting change")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
+	testsGit(root, "add", "image.bin", "upstream-only")
+	testsGit(root, "rm", "-q", "kept.txt")
+	testsGit(root, "commit", "-qm", "upstream conflicting change")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
 	if pushTestMergeStatus(t, root) == 0 {
 		t.Fatal("the merge did not conflict")
 	}
 	// Keep the branch's side of both conflicts: the version merge-tree
 	// itself writes for a binary and a modify/delete conflict.
-	testSupportGit(root, "checkout", "--ours", "--", "image.bin")
-	testSupportGit(root, "add", "image.bin", "kept.txt")
-	testSupportGit(root, "commit", "-qm", "resolve merge")
+	testsGit(root, "checkout", "--ours", "--", "image.bin")
+	testsGit(root, "add", "image.bin", "kept.txt")
+	testsGit(root, "commit", "-qm", "resolve merge")
 
 	captured := pushTestCapture(t, root, start)
 	if got := pushTestBaseCommit(captured.Base); got != reviewed {
@@ -569,28 +569,28 @@ func TestPushCaptureShowsConflictedPathsThatAreNotUtf8(t *testing.T) {
 	name := "image-\xff.bin"
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
+	start := testsGit(root, "rev-parse", "HEAD")
 	pushTestWrite(t, filepath.Join(root, name), "\x00base")
-	testSupportGit(root, "add", "-A")
-	testSupportGit(root, "commit", "-qm", "shared file")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-qb", "feature")
+	testsGit(root, "add", "-A")
+	testsGit(root, "commit", "-qm", "shared file")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-qb", "feature")
 	pushTestWrite(t, filepath.Join(root, name), "\x00branch")
-	testSupportGit(root, "commit", "-qam", "reviewed branch change")
-	reviewed := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	testsGit(root, "commit", "-qam", "reviewed branch change")
+	reviewed := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, name), "\x00upstream")
-	testSupportGit(root, "commit", "-qam", "upstream conflicting change")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "feature")
+	testsGit(root, "commit", "-qam", "upstream conflicting change")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "feature")
 	if pushTestMergeStatus(t, root) == 0 {
 		t.Fatal("the merge did not conflict")
 	}
 	pushTestWrite(t, filepath.Join(root, name), "\x00branch")
-	testSupportGit(root, "add", "-A")
-	testSupportGit(root, "commit", "-qm", "resolve merge")
+	testsGit(root, "add", "-A")
+	testsGit(root, "commit", "-qm", "resolve merge")
 
 	captured := pushTestCapture(t, root, start)
 	if got := pushTestBaseCommit(captured.Base); got != reviewed {
@@ -604,11 +604,11 @@ func TestPushCaptureShowsConflictedPathsThatAreNotUtf8(t *testing.T) {
 func TestPushCaptureShowsSubmoduleChangesThatDiffSettingsIgnore(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "config", "diff.ignoreSubmodules", "all")
-	testSupportGit(root, "checkout", "-qb", "feature")
-	testSupportGit(root, "update-index", "--add", "--cacheinfo", "160000,"+start+",vendored")
-	testSupportGit(root, "commit", "-qm", "point at a submodule commit")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "config", "diff.ignoreSubmodules", "all")
+	testsGit(root, "checkout", "-qb", "feature")
+	testsGit(root, "update-index", "--add", "--cacheinfo", "160000,"+start+",vendored")
+	testsGit(root, "commit", "-qm", "point at a submodule commit")
 
 	captured := pushTestCapture(t, root, start)
 	if files := pushTestFilePaths(captured); !slices.Equal(files, []string{"vendored"}) {
@@ -636,22 +636,22 @@ func pushTestStartHead(t *testing.T, get func(checkpoint.GitCommandRunner, strin
 func TestAReviewWithoutARecordedStartNeverReportsEarlierCommitsAsReviewed(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	mainCommit := testSupportGit(root, "rev-parse", "HEAD")
+	mainCommit := testsGit(root, "rev-parse", "HEAD")
 	pushTestCommit(t, root, "on main")
-	testSupportGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "push", "-q", "origin", "main")
 	if _, err := ReviewStartHead(checkpoint.SystemGit{}, root, "unpinned"); err == nil || !strings.Contains(err.Error(), "No starting point was recorded") {
 		t.Fatal(err)
 	}
-	head := testSupportGit(root, "rev-parse", "HEAD")
+	head := testsGit(root, "rev-parse", "HEAD")
 	if got := pushTestStartHead(t, SessionStartHead, root, "unpinned"); got != head {
 		t.Fatalf("later reviews start at the commit recorded now: %s", got)
 	}
 
-	reviewed := testSupportGit(root, "rev-parse", "HEAD")
-	tree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	reviewed := testsGit(root, "rev-parse", "HEAD")
+	tree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, tree, reviewed)
 	pushTestCommit(t, root, "after a review")
-	testSupportGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "push", "-q", "origin", "main")
 	if got := pushTestStartHead(t, ReviewStartHead, root, "reviewed"); got != reviewed {
 		t.Fatalf("an earlier reviewed commit bounds the work after it: %s", got)
 	}
@@ -659,7 +659,7 @@ func TestAReviewWithoutARecordedStartNeverReportsEarlierCommitsAsReviewed(t *tes
 		t.Fatal(got)
 	}
 
-	testSupportGit(root, "checkout", "-qb", "feature", mainCommit)
+	testsGit(root, "checkout", "-qb", "feature", mainCommit)
 	pushTestCommit(t, root, "on a branch")
 	if got := pushTestStartHead(t, ReviewStartHead, root, "branch"); got != mainCommit {
 		t.Fatalf("a branch is bounded by its merge base with the default branch: %s", got)
@@ -672,9 +672,9 @@ func TestAReviewWithoutARecordedStartNeverReportsEarlierCommitsAsReviewed(t *tes
 func TestPushCaptureOnDefaultBranchUsesSessionStart(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
+	start := testsGit(root, "rev-parse", "HEAD")
 	pushTestCommit(t, root, "later")
-	testSupportGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "push", "-q", "origin", "main")
 	if base := pushTestCapture(t, root, start).Base; base != PushBase(PushBaseSessionStart{Commit: start}) {
 		t.Fatalf("%#v", base)
 	}
@@ -683,9 +683,9 @@ func TestPushCaptureOnDefaultBranchUsesSessionStart(t *testing.T) {
 func TestPushCaptureWithoutDefaultBranchUsesSessionStart(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "remote", "remove", "origin")
-	testSupportGit(root, "branch", "-m", "topic")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "remote", "remove", "origin")
+	testsGit(root, "branch", "-m", "topic")
 	pushTestCommit(t, root, "later")
 	if base := pushTestCapture(t, root, start).Base; base != PushBase(PushBaseSessionStart{Commit: start}) {
 		t.Fatalf("%#v", base)
@@ -695,21 +695,21 @@ func TestPushCaptureWithoutDefaultBranchUsesSessionStart(t *testing.T) {
 func TestPushCaptureWithoutOriginHeadPrefersRemoteMainFromLocalMaster(t *testing.T) {
 	temp := pushTestRepository(t)
 	root := filepath.Join(temp, "checkout")
-	start := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-	testSupportGit(root, "branch", "master", start)
-	testSupportGit(root, "checkout", "-q", "master")
+	start := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+	testsGit(root, "branch", "master", start)
+	testsGit(root, "checkout", "-q", "master")
 	reviewed := pushTestCommit(t, root, "reviewed on master")
-	reviewedTree := testSupportGit(root, "rev-parse", "HEAD^{tree}")
+	reviewedTree := testsGit(root, "rev-parse", "HEAD^{tree}")
 	pushTestRecordReviewed(t, root, reviewedTree, reviewed)
-	testSupportGit(root, "checkout", "-q", "main")
+	testsGit(root, "checkout", "-q", "main")
 	pushTestWrite(t, filepath.Join(root, "upstream-only"), "upstream\n")
-	testSupportGit(root, "add", "upstream-only")
-	testSupportGit(root, "commit", "-qm", "advance upstream")
-	mb := testSupportGit(root, "rev-parse", "HEAD")
-	testSupportGit(root, "push", "-q", "origin", "main")
-	testSupportGit(root, "checkout", "-q", "master")
-	testSupportGit(root, "merge", "-q", "origin/main")
+	testsGit(root, "add", "upstream-only")
+	testsGit(root, "commit", "-qm", "advance upstream")
+	mb := testsGit(root, "rev-parse", "HEAD")
+	testsGit(root, "push", "-q", "origin", "main")
+	testsGit(root, "checkout", "-q", "master")
+	testsGit(root, "merge", "-q", "origin/main")
 
 	captured := pushTestCapture(t, root, start)
 	want := PushBaseMergedReviewPoint{Commit: reviewed, MergeBase: mb, DefaultBranch: "refs/remotes/origin/main"}
@@ -736,7 +736,7 @@ func TestSessionStartPinSurvivesRestartAndWorktreeMoves(t *testing.T) {
 		return pushTestStartHead(t, SessionStartHead, root, "session")
 	}
 
-	start := testSupportGit(root, "rev-parse", "HEAD")
+	start := testsGit(root, "rev-parse", "HEAD")
 	if got := recorded(root); got != "<none>" {
 		t.Fatal(got)
 	}
@@ -753,11 +753,11 @@ func TestSessionStartPinSurvivesRestartAndWorktreeMoves(t *testing.T) {
 		t.Fatal(got)
 	}
 	moved := filepath.Join(temp, "moved")
-	testSupportGit(temp, "clone", "-q", root, moved)
+	testsGit(temp, "clone", "-q", root, moved)
 	if got := recorded(moved); got != "<none>" {
 		t.Fatal(got)
 	}
-	movedHead := testSupportGit(moved, "rev-parse", "HEAD")
+	movedHead := testsGit(moved, "rev-parse", "HEAD")
 	if got := ensure(moved); got != movedHead {
 		t.Fatal(got)
 	}
@@ -766,8 +766,8 @@ func TestSessionStartPinSurvivesRestartAndWorktreeMoves(t *testing.T) {
 		t.Fatal(got)
 	}
 	linked := filepath.Join(temp, "linked")
-	testSupportGit(root, "worktree", "add", "-qb", "linked", linked)
-	linkedHead := testSupportGit(linked, "rev-parse", "HEAD")
+	testsGit(root, "worktree", "add", "-qb", "linked", linked)
+	linkedHead := testsGit(linked, "rev-parse", "HEAD")
 	ensure(linked)
 	if got := recorded(linked); got != linkedHead {
 		t.Fatal(got)
@@ -780,8 +780,8 @@ func TestSessionStartPinSurvivesRestartAndWorktreeMoves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testSupportGit(root, "update-ref", "-d", reference)
-	restoredHead := testSupportGit(root, "rev-parse", "HEAD")
+	testsGit(root, "update-ref", "-d", reference)
+	restoredHead := testsGit(root, "rev-parse", "HEAD")
 	ensure(root)
 	if got := ensure(root); got != restoredHead {
 		t.Fatal(got)
@@ -790,9 +790,9 @@ func TestSessionStartPinSurvivesRestartAndWorktreeMoves(t *testing.T) {
 
 func TestEnsuringSessionStartWaitsForAnUnbornHeadToBeCommitted(t *testing.T) {
 	root := t.TempDir()
-	testSupportGit(root, "init", "-q", "-b", "main")
-	testSupportGit(root, "config", "user.name", "Review Test")
-	testSupportGit(root, "config", "user.email", "review@example.test")
+	testsGit(root, "init", "-q", "-b", "main")
+	testsGit(root, "config", "user.name", "Review Test")
+	testsGit(root, "config", "user.email", "review@example.test")
 	if got := pushTestStartHead(t, EnsureSessionStartHead, root, "session"); got != "<none>" {
 		t.Fatal(got)
 	}

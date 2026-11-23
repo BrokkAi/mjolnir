@@ -1,4 +1,4 @@
-// Port of mj-worker/src/subagent_mcp.rs.
+// Port of mj-worker-mcp/src/subagent_mcp.rs.
 //
 // Mjolnir-owned delegation tools for Claude, Codex, DSH, and OpenCode
 // sessions.
@@ -9,7 +9,7 @@
 // and jsonvalue.Object does the same, so the tools and answers this server
 // writes have Rust's member order.
 
-package worker
+package workermcp
 
 import (
 	"bytes"
@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -124,9 +125,9 @@ func notPickedUpAdvice(action core.SubagentToolAction) string {
 		return handbackUnansweredAdvice
 	case core.SubagentToolActionFetch:
 		return "The fetch is safe to repeat; call fetch again later."
-	case core.SubagentToolActionListAgents, core.SubagentToolActionListProfiles:
+	case core.SubagentToolActionListAgents, core.SubagentToolActionListTargets, core.SubagentToolActionListProfiles:
 		return "It changes nothing, so call it again later."
-	case core.SubagentToolActionSpawn:
+	case core.SubagentToolActionSpawn, core.SubagentToolActionSpawnOrchestrator:
 		return "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Continue without this child or call list_agents later to see whether it started; close it if you no longer need it."
 	}
 	return "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Call list_agents later to see whether it ran."
@@ -159,11 +160,11 @@ func pendingReply(requestID string, action core.SubagentToolAction, daemon *Daem
 	), false
 }
 
-// replyTimeout is how long an action may take to be answered. The daemon
+// ReplyTimeout is how long an action may take to be answered. The daemon
 // must notice the queued request, run the action (a spawn may provision a
 // child session) and complete it back to the worker. The worker answers a
 // little sooner by itself, so it can say whether the daemon picked it up.
-const replyTimeout = 120 * time.Second
+const ReplyTimeout = 120 * time.Second
 
 // stillClosingReply is the answer to a close Mjolnir has not confirmed
 // within the call's budget.
@@ -187,11 +188,11 @@ func stillClosingReply(requestID, childSessionID, reason string) jsonvalue.Objec
 	)
 }
 
-// replyTimeoutFor is Rust's reply_timeout (renamed because the constant
-// REPLY_TIMEOUT takes the Go name replyTimeout): calls use the same bounded
+// replyTimeoutFor is Rust's reply_timeout (renamed so it does not read as
+// the constant REPLY_TIMEOUT, Go's ReplyTimeout): calls use the same bounded
 // reply window.
 func replyTimeoutFor(_ core.SubagentToolAction, _ *core.HarnessKind) time.Duration {
-	return replyTimeout
+	return ReplyTimeout
 }
 
 // unansweredReply explains an unconfirmed close or a request with no reply.
@@ -234,18 +235,18 @@ func modelFacing(requestID string, result any) any {
 // configuration.
 type ParentTools struct {
 	Oracle bool
-	// AgentMailboxesEnabled is a legacy option accepted for older launch
-	// arguments; it has no effect.
-	AgentMailboxesEnabled bool
 	// SubtleSubagents is whether spawn offers the subtle task type. Without
 	// it, spawn has no task_type and every child uses the straightforward
 	// choice.
 	SubtleSubagents bool
+	// OrchestratorsEnabled is whether a top-level parent can start
+	// standalone orchestrators.
+	OrchestratorsEnabled bool
 }
 
 // DefaultParentTools is Rust's ParentTools::default().
 func DefaultParentTools() ParentTools {
-	return ParentTools{Oracle: false, AgentMailboxesEnabled: true, SubtleSubagents: true}
+	return ParentTools{Oracle: false, SubtleSubagents: true, OrchestratorsEnabled: false}
 }
 
 // childReportBudget: every harness already supplies the worker socket. Its
@@ -261,22 +262,9 @@ func subagentMCPLaunchFile(socket string) string {
 	return filepath.Join(filepath.Dir(socket), "launch.json")
 }
 
-// childReportBudgetFromSocket reads the budget from the launch file beside
-// socket; nil when the file is absent or an older controller configured no
-// budget.
-func childReportBudgetFromSocket(socket string) (*childReportBudget, error) {
-	path := subagentMCPLaunchFile(socket)
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	launch, err := jsonvalue.Parse(data)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
+// childReportBudgetFromLaunch reads the budget from the launch settings;
+// nil when an older controller configured no budget.
+func childReportBudgetFromLaunch(launch any) (*childReportBudget, error) {
 	environment, _ := subagentMCPGet(launch, "environment")
 	directoryValue, _ := subagentMCPGet(environment, core.ChildReportDirEnv)
 	limitValue, _ := subagentMCPGet(environment, core.ChildReportLimitEnv)
@@ -334,7 +322,7 @@ func (b *childReportBudget) check() error {
 				if order := cmp.Compare(b.size, a.size); order != 0 {
 					return order
 				}
-				return slices.Compare(capturePathComponents(a.path), capturePathComponents(b.path))
+				return slices.Compare(subagentPathComponents(a.path), subagentPathComponents(b.path))
 			})
 			largest = largest[:min(len(largest), 10)]
 		}
@@ -346,7 +334,7 @@ func (b *childReportBudget) check() error {
 	lines := make([]string, 0, len(largest))
 	for _, file := range largest {
 		shown := file.path
-		if relative, err := filepath.Rel(b.directory, file.path); err == nil && capturePathStartsWith(file.path, b.directory) {
+		if relative, err := filepath.Rel(b.directory, file.path); err == nil && subagentPathStartsWith(file.path, b.directory) {
 			shown = relative
 		}
 		lines = append(lines, fmt.Sprintf("  %d bytes: %s", file.size, shown))
@@ -369,19 +357,24 @@ func SubagentMCPRunMCPStdio(socket string, harness *core.HarnessKind, role core.
 // back.
 func runWithOptions(reader io.Reader, writer io.Writer, socket string, harness *core.HarnessKind, role core.SubagentMcpRole, options ParentTools) error {
 	role = core.SubagentMcpRole(role.ID())
-	options.Oracle = options.Oracle || oracleEnabled(socket)
+	launch, hasLaunch, err := readLaunchSettings(socket)
+	if err != nil {
+		return err
+	}
 	var reportBudget *childReportBudget
-	if role == core.SubagentMcpRoleChild {
-		budget, err := childReportBudgetFromSocket(socket)
+	if hasLaunch && (role == core.SubagentMcpRoleChild || role == core.SubagentMcpRoleOrchestrator) {
+		budget, err := childReportBudgetFromLaunch(launch)
 		if err != nil {
 			return err
 		}
 		reportBudget = budget
 	}
-	var launch any
-	if data, err := os.ReadFile(subagentMCPLaunchFile(socket)); err == nil {
-		if parsed, err := jsonvalue.Parse(data); err == nil {
-			launch = parsed
+	if hasLaunch {
+		if oracle, _ := subagentMCPGet(launch, "oracle"); oracle == true {
+			options.Oracle = true
+		}
+		if enabled, _ := subagentMCPGet(launch, "supervisors_enabled"); enabled == true {
+			options.OrchestratorsEnabled = true
 		}
 	}
 	var reviewRole *core.ReviewChildRole
@@ -398,37 +391,27 @@ func runWithOptions(reader io.Reader, writer io.Writer, socket string, harness *
 		}
 		reviewRole = &chosen
 	}
-	var tools []jsonvalue.Object
-	switch role {
-	case core.SubagentMcpRoleMessageOnly:
-		tools = []jsonvalue.Object{sendMessageTool(), fetchTool()}
-		if options.Oracle {
-			tools = append(tools, askOracleTool())
-		}
-	case core.SubagentMcpRoleFetchOnly:
-		tools = []jsonvalue.Object{fetchTool(), sendMessageTool()}
-		if options.Oracle {
-			tools = append(tools, askOracleTool())
-		}
-	case core.SubagentMcpRoleChild:
-		tools = childToolDefinitions()
+	tools := roleToolDefinitions(role, options)
+	if index := slices.IndexFunc(tools, func(tool jsonvalue.Object) bool {
+		name, _ := tool.Get("name")
+		return name == "handback"
+	}); index >= 0 {
 		if reportBudget != nil {
-			description, _ := tools[0].Get("description")
+			description, _ := tools[index].Get("description")
 			text, _ := description.(string)
-			tools[0].Set("description", text+" "+reportBudget.note())
+			tools[index].Set("description", text+" "+reportBudget.note())
 		}
 		if reviewRole != nil {
 			instructions := core.ReviewChildOutputContract(*reviewRole)
-			tools[0].Set("description", instructions)
-			tools[0] = subagentSetPath(tools[0], instructions, "inputSchema", "properties", "message", "description")
+			tools[index].Set("description", instructions)
+			tools[index] = subagentSetPath(tools[index], instructions, "inputSchema", "properties", "message", "description")
 		}
-	default:
-		tools = toolDefinitionsWithOptions(harness, options)
 	}
 	listed := make([]any, len(tools))
 	for index, tool := range tools {
 		listed[index] = tool
 	}
+	budget := func(action core.SubagentToolAction) time.Duration { return replyTimeoutFor(action, harness) }
 	return Serve(reader, writer, MCPServer{
 		Name:             core.SubagentMCPServer,
 		Tools:            listed,
@@ -438,7 +421,7 @@ func runWithOptions(reader io.Reader, writer io.Writer, socket string, harness *
 			if err != nil {
 				return nil, false, err
 			}
-			return callWithOptions(socket, harness, role, raw, progress, options)
+			return callWithBudgetAndOptions(socket, role, raw, progress, budget, options, reportBudget)
 		},
 	})
 }
@@ -482,8 +465,8 @@ type spawnArgs struct {
 	// TaskType is required when the subtle type is offered. Without it, the
 	// spawn tool has no task type and a call that omits one is
 	// straightforward.
-	TaskType         *core.SubagentTaskType `json:"task_type"`
-	WorkingDirectory string                 `json:"working_directory" serde:"default"`
+	TaskType         *core.WorkerTaskType `json:"task_type"`
+	WorkingDirectory string               `json:"working_directory" serde:"default"`
 }
 
 func (a *spawnArgs) UnmarshalJSON(data []byte) error {
@@ -491,14 +474,35 @@ func (a *spawnArgs) UnmarshalJSON(data []byte) error {
 	return subagentMCPDecodeStrict(data, (*plain)(a), true)
 }
 
+// spawnOrchestratorArgs: Target and Repos are nil when not given.
+type spawnOrchestratorArgs struct {
+	TaskName            string    `json:"task_name"`
+	Instructions        string    `json:"instructions"`
+	Target              *string   `json:"target"`
+	Repos               *[]string `json:"repos"`
+	NoGithubCredentials bool      `json:"no_github_credentials" serde:"default"`
+}
+
+func (a *spawnOrchestratorArgs) UnmarshalJSON(data []byte) error {
+	type plain spawnOrchestratorArgs
+	return subagentMCPDecodeStrict(data, (*plain)(a), true)
+}
+
+// listTargetsArgs takes no arguments and refuses any.
+type listTargetsArgs struct{}
+
+func (a *listTargetsArgs) UnmarshalJSON(data []byte) error {
+	type plain listTargetsArgs
+	return subagentMCPDecodeStrict(data, (*plain)(a), true)
+}
+
 type childArgs struct {
-	ChildSessionID string  `json:"child_session_id"`
-	Message        *string `json:"message"`
+	ChildSessionID string `json:"child_session_id"`
 }
 
 func (a *childArgs) UnmarshalJSON(data []byte) error {
 	type plain childArgs
-	return subagentMCPDecodeStrict(data, (*plain)(a), false)
+	return subagentMCPDecodeStrict(data, (*plain)(a), true)
 }
 
 type sendMessageArgs struct {
@@ -531,17 +535,10 @@ func (a *handbackArgs) UnmarshalJSON(data []byte) error {
 	return subagentMCPDecodeStrict(data, (*plain)(a), true)
 }
 
-// callWithOptions answers one mj-agents tool call. params is nil when the
-// request had none.
-func callWithOptions(socket string, harness *core.HarnessKind, role core.SubagentMcpRole, params json.RawMessage, progress *Progress, options ParentTools) (any, bool, error) {
-	options.Oracle = options.Oracle || oracleEnabled(socket)
-	budget := func(action core.SubagentToolAction) time.Duration { return replyTimeoutFor(action, harness) }
-	return callWithBudgetAndOptions(socket, harness, role, params, progress, budget, options)
-}
-
-// callWithBudgetAndOptions answers one tool call, waiting for the worker as
-// long as budget allows for the call's action.
-func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.SubagentMcpRole, params json.RawMessage, progress *Progress, budget func(core.SubagentToolAction) time.Duration, options ParentTools) (any, bool, error) {
+// callWithBudgetAndOptions answers one mj-agents tool call, waiting for the
+// worker as long as budget allows for the call's action. params is nil when
+// the request had none; reportBudget is nil when no report budget applies.
+func callWithBudgetAndOptions(socket string, role core.SubagentMcpRole, params json.RawMessage, progress *Progress, budget func(core.SubagentToolAction) time.Duration, options ParentTools, reportBudget *childReportBudget) (any, bool, error) {
 	if params == nil {
 		return nil, false, errors.New("missing params")
 	}
@@ -550,8 +547,7 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 		return nil, false, err
 	}
 	role = core.SubagentMcpRole(role.ID())
-	legacyAlias := call.Name == "send_input" && (role == core.SubagentMcpRoleParent || role == core.SubagentMcpRoleMessageOnly)
-	if (call.Name == "ask_oracle" && !options.Oracle) || (!slices.Contains(role.ToolNames(true, false), call.Name) && !legacyAlias) {
+	if !slices.Contains(role.ToolNames(options.Oracle, options.OrchestratorsEnabled), call.Name) {
 		return nil, false, fmt.Errorf("unknown sub-agent tool %s for %s", strconv.Quote(call.Name), role.ID())
 	}
 	arguments := call.arguments()
@@ -563,7 +559,7 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 			return nil, false, err
 		}
 		action = core.SubagentToolActionFetch{SessionID: args.SessionID, Path: args.Path, Ls: args.Ls}
-	case "spawn":
+	case "spawn_worker":
 		for _, key := range []string{"files", "context"} {
 			if subagentMCPHasMember(arguments, key) {
 				return nil, false, errors.New("spawn no longer accepts files or context; put context and file, symbol, line-range or earlier-report pointers in instructions")
@@ -596,12 +592,12 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 		}
 		// A subtle request without a subtle choice still reaches the
 		// daemon: the configuration may have gained one since launch.
-		var taskType core.SubagentTaskType
+		var taskType core.WorkerTaskType
 		switch {
 		case args.TaskType != nil:
 			taskType = *args.TaskType
 		case !options.SubtleSubagents:
-			taskType = core.SubagentTaskTypeStraightforward
+			taskType = core.WorkerTaskTypeStraightforward
 		default:
 			return nil, false, errors.New("missing field `task_type`")
 		}
@@ -609,10 +605,26 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 			NoGithubCredentials: args.NoGithubCredentials,
 			TaskName:            args.TaskName,
 			Instructions:        instructions,
-			TaskType:            taskType,
+			TaskType:            taskType.SubagentTaskType(),
 			WorkingDirectory:    args.WorkingDirectory,
 			// Legacy accepted requests keep context and files on the wire;
 			// new calls omit them.
+		}
+	case "spawn_orchestrator":
+		var args spawnOrchestratorArgs
+		if err := json.Unmarshal(arguments, &args); err != nil {
+			return nil, false, err
+		}
+		instructions := strings.TrimSpace(args.Instructions)
+		if instructions == "" {
+			return nil, false, errors.New("spawn_orchestrator instructions cannot be empty")
+		}
+		action = core.SubagentToolActionSpawnOrchestrator{
+			TaskName:            args.TaskName,
+			Instructions:        instructions,
+			Target:              args.Target,
+			Repos:               args.Repos,
+			NoGithubCredentials: args.NoGithubCredentials,
 		}
 	case "ask_oracle":
 		var args askOracleArgs
@@ -622,6 +634,14 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 		action = core.SubagentToolActionAskOracle{Message: args.Message}
 	case "list_agents":
 		action = core.SubagentToolActionListAgents{}
+	case "list_targets":
+		if !bytes.Equal(bytes.TrimSpace(arguments), []byte("null")) {
+			var args listTargetsArgs
+			if err := json.Unmarshal(arguments, &args); err != nil {
+				return nil, false, err
+			}
+		}
+		action = core.SubagentToolActionListTargets{}
 	case "send_message":
 		if subagentMCPHasMember(arguments, "child_session_id") {
 			return nil, false, errors.New("unknown parameter `child_session_id`; use `session_id`")
@@ -631,15 +651,6 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 			return nil, false, err
 		}
 		action = core.SubagentToolActionSendMessage{ChildSessionID: args.SessionID, Message: args.Message}
-	case "send_input":
-		var args childArgs
-		if err := json.Unmarshal(arguments, &args); err != nil {
-			return nil, false, err
-		}
-		if args.Message == nil {
-			return nil, false, errors.New("send_input requires message")
-		}
-		action = core.SubagentToolActionSendInput{ChildSessionID: args.ChildSessionID, Message: *args.Message}
 	case "close":
 		var args childArgs
 		if err := json.Unmarshal(arguments, &args); err != nil {
@@ -647,15 +658,8 @@ func callWithBudgetAndOptions(socket string, _ *core.HarnessKind, role core.Suba
 		}
 		action = core.SubagentToolActionCloseAgent{ChildSessionID: args.ChildSessionID}
 	case "handback":
-		if role != core.SubagentMcpRoleChild {
-			return nil, false, fmt.Errorf("unknown sub-agent tool %s", strconv.Quote(call.Name))
-		}
-		budget, err := childReportBudgetFromSocket(socket)
-		if err != nil {
-			return nil, false, err
-		}
-		if budget != nil {
-			if err := budget.check(); err != nil {
+		if reportBudget != nil {
+			if err := reportBudget.check(); err != nil {
 				return subagentObject("error", err.Error()), true, nil
 			}
 		}
@@ -800,12 +804,12 @@ func subagentMCPAccepted(raw json.RawMessage) bool {
 
 // spawnTwoTaskTypes is how spawn opens when the parent chooses between two
 // task types.
-const spawnTwoTaskTypes = "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type."
+const spawnTwoTaskTypes = "Start a child in your target and filesystem using the task type's configured model and effort. Use `task_type` `straightforward` for bounded work with one clear path: mapping code, running exact build, test, or gate commands, and small mechanical edits. Use `subtle` for multi-file implementation (even from a settled design), multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, and work with a high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by scope and branching, not brief length or command runtime. Escalate stalled or incomplete `straightforward` work to `subtle` after one correction."
 
 // spawnOneTaskType is how spawn opens when only the straightforward type is
 // configured: the parent delegates straightforward work and keeps work
 // needing judgment.
-const spawnOneTaskType = "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Do work that needs judgment yourself, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. Judge by difficulty, not by the length of the brief. The user configures the model and effort."
+const spawnOneTaskType = "Start a child in your target and filesystem using the configured model and effort. Delegate straightforward work: bounded tasks with a single clear path, including locating and mapping code, running exact build, test, or gate commands, and small mechanical edits. Keep multi-file implementation, troubleshooting, ambiguous diagnosis, design choices, and changes with a high risk of hard-to-detect bugs yourself. Judge by scope and branching, not brief length or command runtime."
 
 // spawnTool is the parent's spawn tool. With only the straightforward type
 // configured there is no choice to make, so it has no task_type.
@@ -818,18 +822,21 @@ func spawnTool(subtleSubagents bool) jsonvalue.Object {
 		"no_github_credentials", subagentObject("type", "boolean", "description", "Withhold GitHub credentials from this child and its descendants. A parent's credential opt-out is always inherited."),
 		"task_name", subagentObject("type", "string"),
 		"instructions", subagentObject("type", "string", "description", "The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."),
-		"task_type", subagentObject("type", "string", "enum", []any{"straightforward", "subtle"}, "description", "`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."),
 		"working_directory", subagentObject("type", "string", "description", "Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."),
 	)
-	required := []any{"task_name", "instructions", "task_type"}
-	if !subtleSubagents {
-		// serde_json's Map::remove with preserve_order swaps the last
-		// member into the removed one's place.
-		properties.SwapDelete("task_type")
-		required = []any{"task_name", "instructions"}
+	required := []any{"task_name", "instructions"}
+	if subtleSubagents {
+		// serde_json's `properties["task_type"] = ...` with preserve_order
+		// appends the new member.
+		properties.Set("task_type", subagentObject(
+			"type", "string",
+			"enum", []any{"straightforward", "subtle"},
+			"description", "`straightforward` is for bounded work with a single clear path, such as locating and mapping code, running exact build, test, or gate commands, and small mechanical edits. `subtle` gets a smarter, more expensive agent for multi-file implementation, multi-stage operational runs or troubleshooting, ambiguous diagnosis, design choices, or work with a high risk of subtle bugs.",
+		))
+		required = append(required, "task_type")
 	}
 	return tool(
-		"spawn",
+		"spawn_worker",
 		lead+" Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting "+selection+". An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`.",
 		subagentObject(
 			"type", "object",
@@ -840,55 +847,89 @@ func spawnTool(subtleSubagents bool) jsonvalue.Object {
 	)
 }
 
-// toolDefinitionsWithOptions lists a parent's tools.
-func toolDefinitionsWithOptions(_ *core.HarnessKind, options ParentTools) []jsonvalue.Object {
-	child := subagentObject(
-		"type", "object",
-		"properties", subagentObject(
-			"child_session_id", subagentObject(
-				"type", "string",
-				"description", "Full child session ID or a unique case-insensitive hexadecimal prefix of at least 8 characters.",
-			),
-		),
-		"required", []any{"child_session_id"},
-		"additionalProperties", false,
-	)
-	tools := []jsonvalue.Object{
-		spawnTool(options.SubtleSubagents),
-		readOnly(tool(
-			"list_agents",
-			"List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
-			subagentObject("type", "object", "additionalProperties", false),
-		)),
-		sendMessageTool(),
-		tool(
-			"close",
-			"Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no worker left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
-			child,
-		),
-		fetchTool(),
-	}
-	if options.Oracle {
-		tools = append(tools, askOracleTool())
+// roleToolDefinitions lists the tools role offers with options, in the
+// order core's ToolNames gives them.
+func roleToolDefinitions(role core.SubagentMcpRole, options ParentTools) []jsonvalue.Object {
+	names := role.ToolNames(options.Oracle, options.OrchestratorsEnabled)
+	tools := make([]jsonvalue.Object, 0, len(names))
+	for _, name := range names {
+		var definition jsonvalue.Object
+		switch name {
+		case "spawn_worker":
+			definition = spawnTool(options.SubtleSubagents)
+		case "spawn_orchestrator":
+			definition = tool(
+				name,
+				"Start an orchestrator in its own environment. Use list_targets to choose an enabled target. Omit target to use your target. Omit repos to inherit your project's bundle, image and tooling. Supply repos to create or reuse a project bundle for those URLs. Bare targets require an existing directory, so choose a container target for URL-only repos. Use list_agents for startup status and the report directory, then fetch remote files before closing. Close checkpoints tracked commits, discards untracked files, and tears down the container and report directory.",
+				subagentObject(
+					"type", "object",
+					"properties", subagentObject(
+						"task_name", subagentObject("type", "string"),
+						"instructions", subagentObject("type", "string"),
+						"target", subagentObject("type", "string"),
+						"repos", subagentObject("type", "array", "items", subagentObject("type", "string")),
+						"no_github_credentials", subagentObject("type", "boolean"),
+					),
+					"required", []any{"task_name", "instructions"},
+					"additionalProperties", false,
+				),
+			)
+		case "list_agents":
+			definition = readOnly(tool(
+				"list_agents",
+				"List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
+				subagentObject("type", "object", "additionalProperties", false),
+			))
+		case "list_targets":
+			definition = readOnly(tool(
+				name,
+				"List enabled execution targets, their default container sizes, and recent and hourly host capacity observations.",
+				subagentObject("type", "object", "properties", subagentObject(), "additionalProperties", false),
+			))
+		case "close":
+			definition = tool(
+				name,
+				"Stop a child by its full ID or unique hexadecimal prefix of at least 8 characters, retaining its conversation. Closing a standalone orchestrator checkpoints tracked commits, discards untracked files, and tears down the container and report directory. A borrowed worker's report directory is kept. Closed children cannot receive messages. If cleanup is pending, use list_agents to confirm the child is stopped before replacing it.",
+				subagentObject(
+					"type", "object",
+					"properties", subagentObject("child_session_id", subagentObject("type", "string")),
+					"required", []any{"child_session_id"},
+					"additionalProperties", false,
+				),
+			)
+		case "fetch":
+			definition = fetchTool()
+		case "send_message":
+			definition = sendMessageTool()
+		case "handback":
+			definition = handbackTool()
+		case "ask_oracle":
+			definition = askOracleTool()
+		default:
+			panic("unknown capability " + name)
+		}
+		tools = append(tools, definition)
 	}
 	return tools
 }
 
-// oracleEnabled is whether the controller offered this session the oracle.
-// Like the other target-side checks, it reads the launch file as plain
-// JSON, so neither a field it does not know nor one an older file still
-// carries can hide the tool.
-func oracleEnabled(socket string) bool {
-	data, err := os.ReadFile(subagentMCPLaunchFile(socket))
-	if err != nil {
-		return false
+// readLaunchSettings reads the launch file beside socket as plain JSON, so
+// fields from older or newer launch files are optional. present is false
+// when there is no launch file.
+func readLaunchSettings(socket string) (launch any, present bool, err error) {
+	path := subagentMCPLaunchFile(socket)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
 	}
-	launch, err := jsonvalue.Parse(data)
 	if err != nil {
-		return false
+		return nil, false, fmt.Errorf("read %s: %w", path, err)
 	}
-	oracle, _ := subagentMCPGet(launch, "oracle")
-	return oracle == true
+	launch, err = jsonvalue.Parse(data)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return launch, true, nil
 }
 
 func askOracleTool() jsonvalue.Object {
@@ -932,22 +973,25 @@ func reviewToolDefinitions() []jsonvalue.Object {
 		),
 		tool(
 			"override_review",
-			"Record before-push review findings you will not fix. Pass one entry per finding: the finding in your words and why you will not fix it. Call it as soon as the verdict arrives, before committing any change; it applies only to the exact reviewed commits and is refused once they change. Later reviews are told not to report these findings again. It allows pushing the reviewed commits, but does not move the review baseline.",
+			"Record before-push review findings you will not fix. Pass one entry per finding: the finding in your words and why you will not fix it. Call it as soon as the verdict arrives, before committing any change; it applies only to the exact reviewed commits and is refused once they change. Later reviews are told not to report these findings again. It allows pushing the reviewed commits, but does not move the review baseline. When more than one verdict is outstanding, pass `path`, a worktree that verdict covers.",
 			subagentObject(
 				"type", "object",
-				"properties", subagentObject("overrides", subagentObject(
-					"type", "array",
-					"minItems", 1,
-					"items", subagentObject(
-						"type", "object",
-						"properties", subagentObject(
-							"finding", subagentObject("type", "string", "description", "The finding, in enough words that a later reviewer recognizes it."),
-							"reason", subagentObject("type", "string", "description", "Why this finding does not need fixing."),
+				"properties", subagentObject(
+					"overrides", subagentObject(
+						"type", "array",
+						"minItems", 1,
+						"items", subagentObject(
+							"type", "object",
+							"properties", subagentObject(
+								"finding", subagentObject("type", "string", "description", "The finding, in enough words that a later reviewer recognizes it."),
+								"reason", subagentObject("type", "string", "description", "Why this finding does not need fixing."),
+							),
+							"required", []any{"finding", "reason"},
+							"additionalProperties", false,
 						),
-						"required", []any{"finding", "reason"},
-						"additionalProperties", false,
 					),
-				)),
+					"path", subagentObject("type", "string", "description", "A worktree the outstanding verdict covers. Needed only when more than one verdict is outstanding."),
+				),
 				"required", []any{"overrides"},
 				"additionalProperties", false,
 			),
@@ -979,6 +1023,7 @@ func (a *requestReviewArgs) UnmarshalJSON(data []byte) error {
 
 type overrideReviewArgs struct {
 	Overrides []overrideEntry `json:"overrides"`
+	Path      *string         `json:"path"`
 }
 
 func (a *overrideReviewArgs) UnmarshalJSON(data []byte) error {
@@ -1056,7 +1101,10 @@ func reviewAction(name string, arguments json.RawMessage) (core.SubagentToolActi
 			}
 			overrides = append(overrides, core.ReviewOverride{Finding: finding, Reason: reason})
 		}
-		return core.SubagentToolActionOverrideReview{Overrides: overrides}, nil
+		if args.Path != nil && strings.TrimSpace(*args.Path) == "" {
+			return nil, errors.New("override_review path cannot be empty; omit it when one verdict is outstanding")
+		}
+		return core.SubagentToolActionOverrideReview{Overrides: overrides, Path: args.Path}, nil
 	case "set_baseline":
 		var args setReviewBaselineArgs
 		if err := json.Unmarshal(arguments, &args); err != nil {
@@ -1155,25 +1203,19 @@ func fetchTool() jsonvalue.Object {
 	))
 }
 
-// childToolDefinitions keeps handback first so the report budget can
-// annotate it at launch.
-func childToolDefinitions() []jsonvalue.Object {
+func handbackTool() jsonvalue.Object {
 	message := fmt.Sprintf("Your report, at most %d characters for workers or %d for oracles and reviewers; details go in files in your report directory.",
 		core.SubagentKindWorker.MaxHandbackChars(), core.SubagentKindOracle.MaxHandbackChars())
-	return []jsonvalue.Object{
-		readOnly(tool(
-			"handback",
-			"Hand back once, as your last action. Repeats in one turn are refused. "+core.HandbackReportRules,
-			subagentObject(
-				"type", "object",
-				"properties", subagentObject("message", subagentObject("type", "string", "description", message)),
-				"required", []any{"message"},
-				"additionalProperties", false,
-			),
-		)),
-		fetchTool(),
-		sendMessageTool(),
-	}
+	return readOnly(tool(
+		"handback",
+		"Hand back once, as your last action. Repeats in one turn are refused. "+core.HandbackReportRules,
+		subagentObject(
+			"type", "object",
+			"properties", subagentObject("message", subagentObject("type", "string", "description", message)),
+			"required", []any{"message"},
+			"additionalProperties", false,
+		),
+	))
 }
 
 func tool(name, description string, inputSchema jsonvalue.Object) jsonvalue.Object {
@@ -1341,4 +1383,28 @@ func subagentSaturatingAdd(a, b uint64) uint64 {
 		return sum
 	}
 	return ^uint64(0)
+}
+
+// subagentPathStartsWith is Rust's Path::starts_with: base's components are
+// the leading components of path.
+func subagentPathStartsWith(path, base string) bool {
+	components, prefix := subagentPathComponents(path), subagentPathComponents(base)
+	return len(prefix) <= len(components) && slices.Equal(components[:len(prefix)], prefix)
+}
+
+// subagentPathComponents is a path's components as Rust's Path::components
+// yields them: the root as "/", "." dropped except at the start, ".." kept.
+func subagentPathComponents(path string) []string {
+	separator := func(r rune) bool { return r == '/' || (runtime.GOOS == "windows" && r == '\\') }
+	var components []string
+	if path != "" && separator(rune(path[0])) {
+		components = append(components, "/")
+	}
+	for index, part := range strings.FieldsFunc(path, separator) {
+		if part == "." && !(index == 0 && components == nil && strings.HasPrefix(path, ".")) {
+			continue
+		}
+		components = append(components, part)
+	}
+	return components
 }

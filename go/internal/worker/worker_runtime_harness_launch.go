@@ -29,6 +29,7 @@ import (
 
 	"github.com/BrokkAi/mjolnir/go/internal/core"
 	"github.com/BrokkAi/mjolnir/go/internal/harnessinstall"
+	"github.com/BrokkAi/mjolnir/go/internal/workerreview"
 )
 
 // PreparedHarnessLaunch keeps this preparation alive until the supervisor
@@ -421,14 +422,14 @@ func prepareReviewGate(launch *core.WorkerLaunchConfig) ([]string, error) {
 		notices = append(notices, fmt.Sprintf("Before-push review is not available for %s; this session runs without review.", launch.Harness.DisplayName()))
 		return notices, nil
 	}
-	runner := NewBoundedGit(WorkspaceStateTimeout)
+	runner := workerreview.NewBoundedGit(workerreview.WorkspaceStateTimeout)
 	cancelRunner := runner.CancellationGuard()
 	defer cancelRunner.Cancel()
 	roots := append([]string{launch.Cwd}, reviewerWorkspaceDirectories(launch)...)
-	for _, repository := range DiscoverRepositories(runner, roots) {
+	for _, repository := range workerreview.DiscoverRepositories(runner, roots) {
 		// Every session that may request review records where its work
 		// starts, so its first review covers the commits made after it.
-		if _, err := EnsureSessionStartHead(runner, repository, launch.SessionID); err != nil {
+		if _, err := workerreview.EnsureSessionStartHead(runner, repository, launch.SessionID); err != nil {
 			return nil, err
 		}
 		// Only a gated primary also holds its pushes to review.
@@ -436,16 +437,16 @@ func prepareReviewGate(launch *core.WorkerLaunchConfig) ([]string, error) {
 			continue
 		}
 		var reason *string
-		installed, err := InstallPrePushHook(runner, repository)
+		installed, err := workerreview.InstallPrePushHook(runner, repository)
 		if err != nil {
 			text := err.Error()
 			reason = &text
 		} else {
 			switch installed := installed.(type) {
-			case HookInstallRefusedExistingBackup:
+			case workerreview.HookInstallRefusedExistingBackup:
 				text := fmt.Sprintf("%s already exists", installed.Path)
 				reason = &text
-			case HookInstallRefusedWorkTreeHooksDirectory:
+			case workerreview.HookInstallRefusedWorkTreeHooksDirectory:
 				text := fmt.Sprintf("%s is inside the work tree and is not ignored", installed.Path)
 				reason = &text
 			}
