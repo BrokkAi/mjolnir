@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
-	"weak"
 
 	"github.com/BrokkAi/acp-go/jsonvalue"
 )
@@ -268,7 +267,7 @@ func jevSortNewestFirst(decisions []JevDecision) {
 	})
 }
 
-// jevMessage is a request to the diagnostic writer goroutine.
+// jevMessage is a request to a directory's diagnostic writer.
 type jevMessage interface {
 	isJevMessage()
 }
@@ -288,66 +287,84 @@ type jevReadResult struct {
 	err  error
 }
 
+// jevFlushMessage asks the writer to close done once it has handled every
+// message queued before this one.
+type jevFlushMessage struct {
+	done chan struct{}
+}
+
 func (jevAppendMessage) isJevMessage() {}
 func (jevReadMessage) isJevMessage()   {}
+func (jevFlushMessage) isJevMessage()  {}
 
-// jevQueue is the writer's unbounded inbox, as Rust's mpsc channel is: an
-// append never blocks its caller. It is closed when the last handle on the
-// writer goes away, and the writer goroutine then ends.
-type jevQueue struct {
-	mu       sync.Mutex
-	messages []jevMessage
-	closed   bool
-	wake     chan struct{}
-}
-
-func (q *jevQueue) send(message jevMessage) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.closed {
-		return false
-	}
-	q.messages = append(q.messages, message)
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
-	return true
-}
-
-func (q *jevQueue) close() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.closed = true
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
-}
-
-// receive returns the next message, or false once the queue is closed and
-// drained.
-func (q *jevQueue) receive() (jevMessage, bool) {
-	for {
-		q.mu.Lock()
-		if len(q.messages) > 0 {
-			message := q.messages[0]
-			q.messages[0] = nil
-			q.messages = q.messages[1:]
-			q.mu.Unlock()
-			return message, true
-		}
-		closed := q.closed
-		q.mu.Unlock()
-		if closed {
-			return nil, false
-		}
-		<-q.wake
-	}
-}
-
+// jevWriter owns every file operation on one log directory, so reads are
+// ordered after the writes sent before them. Its inbox is unbounded, as
+// Rust's mpsc channel is: an append never blocks its caller. At most one
+// goroutine serves the inbox; it starts when a message arrives at an idle
+// writer and ends when the inbox is empty, so an idle log holds no
+// goroutine. (Rust's writer thread ends when the last handle drops, which Go
+// cannot observe.)
 type jevWriter struct {
-	queue *jevQueue
+	directory string
+	mu        sync.Mutex
+	messages  []jevMessage
+	serving   bool
+	// failure is the latest write failure, reported with later reads. Only
+	// the serving goroutine touches it, and serving goroutines never overlap.
+	failure *string
+}
+
+func (w *jevWriter) send(message jevMessage) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.messages = append(w.messages, message)
+	if !w.serving {
+		w.serving = true
+		go w.serve()
+	}
+}
+
+// next returns the next message, or false once the inbox is empty, when the
+// caller stops serving.
+func (w *jevWriter) next() (jevMessage, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.messages) == 0 {
+		w.serving = false
+		w.messages = nil
+		return nil, false
+	}
+	message := w.messages[0]
+	w.messages[0] = nil
+	w.messages = w.messages[1:]
+	return message, true
+}
+
+func (w *jevWriter) serve() {
+	for {
+		message, ok := w.next()
+		if !ok {
+			return
+		}
+		switch message := message.(type) {
+		case jevAppendMessage:
+			if err := jevAppend(w.directory, &message.decision, jevSegmentBytes); err != nil {
+				slog.Warn("Jev diagnostic write failed", "error", err)
+				text := fmt.Sprintf("Jev diagnostic write failed: %v", err)
+				w.failure = &text
+			}
+		case jevReadMessage:
+			page, err := jevReadFiles(w.directory, message.session, message.id)
+			if err == nil && w.failure != nil {
+				page.Warnings = append(page.Warnings, *w.failure)
+			}
+			// The reply channel is buffered, so a reader that gave up does
+			// not block the writer.
+			message.reply <- jevReadResult{page: page, err: err}
+		case jevFlushMessage:
+			close(message.done)
+		}
+	}
 }
 
 // DecisionLog appends Jev decisions through one writer per directory.
@@ -355,11 +372,14 @@ type DecisionLog struct {
 	writer *jevWriter
 }
 
-// jevRegistryState maps a log directory to its live writer.
+// jevRegistryState maps a log directory to its writer. Writers are never
+// dropped, so a directory has one writer for the life of the process: a
+// writer still draining when its last handle goes away cannot overlap a
+// later one on the same files.
 var jevRegistryState = struct {
 	sync.Mutex
-	writers map[string]weak.Pointer[jevWriter]
-}{writers: map[string]weak.Pointer[jevWriter]{}}
+	writers map[string]*jevWriter
+}{writers: map[string]*jevWriter{}}
 
 // jevOwner names this process in the records it writes.
 var jevOwner = sync.OnceValue(func() string {
@@ -370,60 +390,34 @@ func ControllerLogDir() string {
 	return filepath.Join(DataDir(), "jev-decisions")
 }
 
-// DecisionLogOpen starts a dedicated writer. Directory creation and all file
-// I/O happen there.
+// DecisionLogOpen returns the directory's dedicated writer, made on first
+// use. Directory creation and all file I/O happen there.
 func DecisionLogOpen(directory string) (DecisionLog, error) {
 	jevRegistryState.Lock()
 	defer jevRegistryState.Unlock()
-	if pointer, ok := jevRegistryState.writers[directory]; ok {
-		if writer := pointer.Value(); writer != nil {
-			return DecisionLog{writer: writer}, nil
-		}
+	writer, ok := jevRegistryState.writers[directory]
+	if !ok {
+		writer = &jevWriter{directory: directory}
+		jevRegistryState.writers[directory] = writer
 	}
-	queue := &jevQueue{wake: make(chan struct{}, 1)}
-	writer := &jevWriter{queue: queue}
-	// Rust's writer thread ends when the last sender drops; here the last
-	// handle's collection closes the queue.
-	runtime.AddCleanup(writer, func(queue *jevQueue) { queue.close() }, queue)
-	go jevServe(directory, queue)
-	jevRegistryState.writers[directory] = weak.Make(writer)
 	return DecisionLog{writer: writer}, nil
-}
-
-// jevServe is the writer goroutine: it owns every file operation on
-// directory, so reads are ordered after the writes sent before them.
-func jevServe(directory string, queue *jevQueue) {
-	var failure *string
-	for {
-		message, ok := queue.receive()
-		if !ok {
-			return
-		}
-		switch message := message.(type) {
-		case jevAppendMessage:
-			if err := jevAppend(directory, &message.decision, jevSegmentBytes); err != nil {
-				slog.Warn("Jev diagnostic write failed", "error", err)
-				text := fmt.Sprintf("Jev diagnostic write failed: %v", err)
-				failure = &text
-			}
-		case jevReadMessage:
-			page, err := jevReadFiles(directory, message.session, message.id)
-			if err == nil && failure != nil {
-				page.Warnings = append(page.Warnings, *failure)
-			}
-			// The reply channel is buffered, so a reader that gave up does
-			// not block the writer.
-			message.reply <- jevReadResult{page: page, err: err}
-		}
-	}
 }
 
 func (l DecisionLog) append(decision *JevDecision) {
 	copied := *decision
 	copied.Technical = slices.Clone(decision.Technical)
-	if !l.writer.queue.send(jevAppendMessage{decision: copied}) {
-		slog.Warn("Jev diagnostic writer stopped", "decision_id", decision.ID)
-	}
+	l.writer.send(jevAppendMessage{decision: copied})
+}
+
+// Flush returns once the writer has handled every message sent to this
+// log's directory before the call. Rust's writer thread drains when the last
+// handle drops; Go cannot observe that, so an owner that is done with the
+// log flushes it before the directory goes away. Records appended after the
+// call are not covered.
+func (l DecisionLog) Flush() {
+	done := make(chan struct{})
+	l.writer.send(jevFlushMessage{done: done})
+	<-done
 }
 
 // jevNextAttempt numbers the attempts this process starts.
@@ -711,17 +705,11 @@ func jevExists(path string) bool {
 // are ordered after writes. (Rust: `jev::read`.)
 func JevRead(directory, session string, id *string) (DecisionPage, error) {
 	jevRegistryState.Lock()
-	var writer *jevWriter
-	if pointer, ok := jevRegistryState.writers[directory]; ok {
-		writer = pointer.Value()
-	}
+	writer := jevRegistryState.writers[directory]
 	jevRegistryState.Unlock()
 	if writer != nil {
 		reply := make(chan jevReadResult, 1)
-		if !writer.queue.send(jevReadMessage{session: session, id: id, reply: reply}) {
-			return DecisionPage{}, errors.New("Jev diagnostic writer stopped")
-		}
-		runtime.KeepAlive(writer)
+		writer.send(jevReadMessage{session: session, id: id, reply: reply})
 		result := <-reply
 		return result.page, result.err
 	}

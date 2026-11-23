@@ -42,6 +42,15 @@ func journalTestOpen(t *testing.T, root, sessionID, version string) *DurableRela
 	if err != nil {
 		t.Fatalf("open relay at %s: %v", root, err)
 	}
+	// Rust's tempdir ignores a failed removal; t.TempDir fails the test, so
+	// the Jev records this relay queued are written before its root goes.
+	// Registered after the t.TempDir that made root, this runs before the
+	// removal.
+	t.Cleanup(func() {
+		if log, ok := relay.turnContext.DecisionLog(); ok {
+			log.Flush()
+		}
+	})
 	return relay
 }
 
@@ -1724,8 +1733,8 @@ func TestOversizedLegacyTerminalLedgerOpensAndPersistsCompactly(t *testing.T) {
 		}
 	}
 	reordered := withMeta(`{"a":0,"z":{"a":1,"b":2}}`)
-	if !jsonvalue.Equal(command.(core.RelayCommandPrompt).Prompt[0].Text.Meta, reordered.(core.RelayCommandPrompt).Prompt[0].Text.Meta) {
-		t.Fatal("reordered metadata is not the same value")
+	if !relayCommandEqual(command, reordered) {
+		t.Fatal("reordered metadata is not the same command")
 	}
 	if accepted := submitRelay(relay, "legacy-329", reordered); accepted != 659 {
 		t.Fatalf("legacy retry accepted at %d", accepted)

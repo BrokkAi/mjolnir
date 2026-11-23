@@ -1329,7 +1329,7 @@ type TerminalRelayCommandIdentity struct {
 // plain-text/structured retries.
 func (h *HandledRelayCommand) MatchesCommand(command RelayCommand) (bool, error) {
 	if h.Command != nil {
-		if relayCommandsEqual(h.Command, command) {
+		if RelayCommandsEqual(h.Command, command) {
 			return true, nil
 		}
 		original, isDelivery := h.Command.(RelayCommandDeliverMailboxEvent)
@@ -1350,43 +1350,53 @@ func (h *HandledRelayCommand) MatchesCommand(command RelayCommand) (bool, error)
 	return h.TerminalIdentity.Digest == digest, nil
 }
 
-// relayCommandsEqual is Rust's derived PartialEq on RelayCommand: the same
-// variant with the same values. Values that differ only in Go's nil versus
+// RelayCommandsEqual is Rust's derived PartialEq on RelayCommand: the same
+// variant with the same values. Object members compare regardless of their
+// order, as serde_json's Map (an IndexMap under preserve_order) does, ACP
+// extension metadata included. Values that differ only in Go's nil versus
 // empty slices are equal, as they serialize alike.
-func relayCommandsEqual(a, b RelayCommand) bool {
+func RelayCommandsEqual(a, b RelayCommand) bool {
 	if reflect.DeepEqual(a, b) {
 		return true
 	}
 	if reflect.TypeOf(a) != reflect.TypeOf(b) {
 		return false
 	}
-	left, err := relayMarshalJSON(a)
+	left, err := relayCommandCanonicalJSON(a)
 	if err != nil {
 		return false
 	}
-	right, err := relayMarshalJSON(b)
+	right, err := relayCommandCanonicalJSON(b)
 	return err == nil && bytes.Equal(left, right)
 }
 
 func relayCommandDigest(command RelayCommand) (string, error) {
 	// Object insertion order is not part of command equality, including ACP
-	// extension metadata. Go's encoder sorts map keys, so a round trip
-	// through generic values sorts every object.
-	encoded, err := relayMarshalJSON(command)
+	// extension metadata.
+	encoded, err := relayCommandCanonicalJSON(command)
 	if err != nil {
 		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return LowerHex(digest[:]), nil
+}
+
+// relayCommandCanonicalJSON is the command's JSON with every object's
+// members sorted, as Rust's sort_all_objects leaves the serde_json Value. Go's
+// encoder sorts map keys, so a round trip through generic values sorts every
+// object.
+func relayCommandCanonicalJSON(command RelayCommand) ([]byte, error) {
+	encoded, err := relayMarshalJSON(command)
+	if err != nil {
+		return nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
-		return "", err
+		return nil, err
 	}
-	if encoded, err = relayMarshalJSON(value); err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(encoded)
-	return LowerHex(digest[:]), nil
+	return relayMarshalJSON(value)
 }
 
 // HandbackChecks is worker-owned assignment identity and evidence, replayed

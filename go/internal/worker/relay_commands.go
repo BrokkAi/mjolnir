@@ -71,18 +71,7 @@ func relayProtocolErrorDebug(refusal *core.RelayProtocolError) string {
 
 // relayCommandEqual is Rust's RelayCommand equality.
 func relayCommandEqual(a, b core.RelayCommand) bool {
-	if reflect.DeepEqual(a, b) {
-		return true
-	}
-	if a == nil || b == nil || reflect.TypeOf(a) != reflect.TypeOf(b) {
-		return false
-	}
-	left, err := json.Marshal(a)
-	if err != nil {
-		return false
-	}
-	right, err := json.Marshal(b)
-	return err == nil && string(left) == string(right)
+	return core.RelayCommandsEqual(a, b)
 }
 
 // relayStagedSnapshot is a copy of the snapshot whose maps, slices and
