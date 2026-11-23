@@ -315,7 +315,7 @@ def run(batch_path, judge=None):
 
 
 def suspend(sid):
-    mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+    mj("suspend", "--session", sid, timeout=900)
 
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"

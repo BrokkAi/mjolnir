@@ -10,7 +10,7 @@ Measure whether one GPT 6.2 Sol reviewer at medium effort improves on GPT 6.1 So
 
 - [x] (2026-11-23 23:50Z) Located the original study and its persistent run directory; delegated runner/scoring mapping and baseline/model checks.
 - [x] (2026-11-23 23:52Z) Confirmed the runner accepts `gpt-6.2-sol:medium`; reserved unused arm O. Baseline metadata has 140 E Sol/medium sessions and 221 A/B Terra/high sessions across 70 diffs. Independent availability/count checks remain in progress.
-- [ ] Register and run one new Sol 6.2 medium review on each original diff, at concurrency 16 (completed: arm O registration, exact jobs/readiness audit, first reviewer launched with actual model and effort confirmed; remaining: first handback audit and full campaign).
+- [ ] Register and run one new Sol 6.2 medium review on each original diff, at concurrency 16 (completed: registration, jobs/readiness audit, successful first review and independent input/capture audit; full campaign running, remaining: all 70 completion audits).
 - [ ] Audit completed runs, verify findings using the established blinded method, and score old and new configurations consistently.
 - [ ] Independently check the comparison, record results, commit, obtain review, and push to origin/master.
 
@@ -21,6 +21,8 @@ The old Sol 6.1 medium arm used two reviewers per diff; the requested Sol 6.2 ar
 The current comparison round is verify6, published in `results/stage4-hydrogen-medium/`. The established judge was changed after the original study: verify6 uses Neon/medium with the gemini and gemini2 profiles. Arm B exists for only 11 diffs, so readiness must enumerate the actual B jobs rather than assume 70. The persistent study now uses the installed default instance through its `mjx` wrapper, which clears inherited session environment; the retired private instance must not be started.
 
 The original discovery worker's read-only assignment caused automatic approval review to reject its later attempt to register the arm after mailbox reassignment. No edit or new review started. A fresh worker received the complete implementation and campaign authorization in its initial assignment.
+
+The installed 2.74.0 CLI removed `suspend --acknowledge-unpublished-work`. The captured first review was preserved and collected again without starting another review. Removing that obsolete flag at the two carrier cleanup sites in `driver.py` and the ordinary judge cleanup in `verify_driver.py` makes the study compatible with the installed command. Ordinary suspend's dry run reported no blockers, untracked work, Git operations, or Git delta.
 
 ## Decision Log
 
@@ -39,7 +41,7 @@ The original discovery worker's read-only assignment caused automatic approval r
 
 ## Outcomes & Retrospective
 
-The first review is running under installed Mjolnir 2.74.0. Its live configuration confirms `gpt-6.2-sol` at medium effort; historical context matches arm N byte for byte. The prompt clock and image digest were captured. Completion and the full comparison remain pending.
+The first review completed under installed Mjolnir 2.74.0 and passed independent audit. Its live configuration confirms `gpt-6.2-sol` at medium effort; historical context matches arms E and N byte for byte. The 57.862-second live-prompt clock matches usage, and inventory was unchanged. Four raw finding bullets await blinded verification. The full campaign is running at concurrency 16, PID 184435 at launch, with durable logs. Completion and the full comparison remain pending. Arm registration checkpoint `b2b743052` passed repository review.
 
 ## Context and Orientation
 
@@ -107,6 +109,8 @@ Use a new arm identifier, job file, verification round, and result directory. Ke
 Original study: `.agents/evals/review-arms/README.md`. Original frontier: `.agents/evals/review-arms/results/pareto.md`; expanded frontier: `.agents/evals/review-arms/results/stage4/pareto.md`. Raw data: `/mnt/optane/review-arms-20261113`.
 
 First-run evidence: `$REVIEW_ARMS_DIR/runs/diff-05bc8c1e68/O/`; driver PID 153560 at launch; log `$REVIEW_ARMS_DIR/arm-O-canary.log`. Captured image digest: `sha256:1f5469c1c7264c025668e465a852199bc165938f6e84e925303f4fb46ca5e0db`. The live model/effort was observed rather than inferred from arm configuration.
+
+Full campaign log and process receipt: `$REVIEW_ARMS_DIR/arm-O-driver.log` and `$REVIEW_ARMS_DIR/arm-O-driver.pid`. First-run audit: `$REVIEW_ARMS_DIR/arm-O-canary-audit.json`. The changed scripts passed Python syntax parsing, and the repaired cleanup completed against the real installed CLI.
 
 ## Interfaces and Dependencies
 

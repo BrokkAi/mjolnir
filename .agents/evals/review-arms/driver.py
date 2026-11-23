@@ -707,7 +707,7 @@ def finish_set_aside(d):
     if state not in ("suspended", "closed"):
         with (d / f"{tag}-suspend.jsonl").open("a") as f:
             f.write(json.dumps({"time_ns": time.time_ns(), "state": state,
-                                "response": mj("suspend", "--session", sid, "--acknowledge-unpublished-work",
+                                "response": mj("suspend", "--session", sid,
                                                timeout=900)}) + "\n")
         # The request is accepted before checkpoint and teardown finish; wait for them within the
         # same bound the suspend call itself allows.
@@ -1198,7 +1198,7 @@ def collect(d, bug, identity, sid, place, before):
               "title": (i["body"].get("call") or {}).get("title")}
              for i in items if i["role"] in ("tool", "terminal") and (not finals or i["seq"] < finals[0])]
     save(d / "carrier-check.json", {"final_delivery_seq": finals[0] if finals else None, "tools_before_final": early})
-    save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+    save(d / "suspend.json", mj("suspend", "--session", sid, timeout=900))
     save(d / "done.json", dict(identity, session_id=sid, reviewers=reviewers, inventory_problems=problems,
                                carrier_tools_before_final=early, finished_ns=time.time_ns()))
     return "done"
