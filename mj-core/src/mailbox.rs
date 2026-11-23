@@ -49,13 +49,20 @@ pub(crate) struct LegacyMailboxEvent<'a> {
     created_at_ms: u64,
 }
 
+pub(crate) const HANDBACK_PARENT_MAILBOX_PREFIX: &str = "subagent-input-mailbox-";
+
 impl MailboxEvent {
-    /// Parent instructions are assignments only for the child's handback check.
+    pub fn is_parent_message(&self) -> bool {
+        matches!(self.body, MailboxEventBody::ParentMessage { .. })
+    }
+
+    /// The stable assignment identity and parent text for the child's handback check.
     pub fn handback_assignment(&self) -> Option<(String, &str)> {
         match &self.body {
-            MailboxEventBody::ParentMessage { text } => {
-                Some((format!("subagent-input-mailbox-{}", self.key), text))
-            }
+            MailboxEventBody::ParentMessage { text } => Some((
+                format!("{HANDBACK_PARENT_MAILBOX_PREFIX}{}", self.key),
+                text,
+            )),
             _ => None,
         }
     }

@@ -798,6 +798,7 @@ async fn operator_away_off_action_persists_and_notifies_only_unblocked_sessions(
                 action: mj_core::elicitation::OPERATOR_AWAY_ACTION.into(),
                 reply: None,
                 answers: None,
+                permission_decision: None,
             },
         ];
         if id == "blocked" {

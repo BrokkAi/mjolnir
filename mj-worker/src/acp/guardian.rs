@@ -51,6 +51,8 @@ impl ReviewEvidence {
             .iter()
             .map(|input| input.id.clone())
             .collect();
+        let (parent_instructions, parent_instructions_omitted) =
+            turn_context.delegated_parent_instructions();
         Self {
             request: GuardianReviewRequest {
                 request_id: tool_call_id.to_owned(),
@@ -63,6 +65,8 @@ impl ReviewEvidence {
                 transcript: turn_context.render_transcript(GUARDIAN_TRANSCRIPT_BYTES),
                 action: action.clone(),
                 trusted_user_inputs,
+                parent_instructions,
+                parent_instructions_omitted,
                 prior_reviews: turn_context.prior_guardian_reviews(),
                 retry_reason: None,
             },
@@ -71,10 +75,9 @@ impl ReviewEvidence {
         }
     }
 
-    /// Whether the person wrote something this evidence does not hold, such
-    /// as a new grant or a revocation. The history's window moving on, or the
-    /// relay republishing it, is not new authorization.
-    pub(super) fn person_wrote_since(&self, earlier: &Self) -> bool {
+    /// Detect a new instruction or answer, including a grant or a revocation.
+    /// Republishing the same retained evidence does not trigger another review.
+    pub(super) fn authorization_changed_since(&self, earlier: &Self) -> bool {
         self.user_message_ids
             .iter()
             .any(|id| !earlier.user_message_ids.contains(id))
@@ -82,6 +85,13 @@ impl ReviewEvidence {
                 .trusted_user_input_ids
                 .iter()
                 .any(|id| !earlier.trusted_user_input_ids.contains(id))
+            || self.request.parent_instructions.iter().any(|input| {
+                !earlier
+                    .request
+                    .parent_instructions
+                    .iter()
+                    .any(|previous| previous.id == input.id)
+            })
     }
 }
 

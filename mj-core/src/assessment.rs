@@ -455,6 +455,9 @@ pub const MESSAGE_TAIL_BYTES: usize = 2 * 1024;
 /// history with this many user messages on its own is refused.
 pub const MAX_MESSAGES: usize = 256;
 
+pub(crate) const TRIM_MIDDLE_MARKER_SUFFIX: &str =
+    " bytes omitted from the middle of this message ...]\n";
+
 /// Keep the first [`MESSAGE_HEAD_BYTES`] and last [`MESSAGE_TAIL_BYTES`] of
 /// a long message, with the omitted byte count in between.
 #[must_use]
@@ -465,7 +468,7 @@ pub fn trim_middle(text: &str) -> String {
     let head_end = text.floor_char_boundary(MESSAGE_HEAD_BYTES);
     let tail_start = text.ceil_char_boundary(text.len() - MESSAGE_TAIL_BYTES);
     format!(
-        "{}\n[... {} bytes omitted from the middle of this message ...]\n{}",
+        "{}\n[... {}{TRIM_MIDDLE_MARKER_SUFFIX}{}",
         &text[..head_end],
         tail_start - head_end,
         &text[tail_start..]

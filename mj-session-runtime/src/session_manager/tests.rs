@@ -1608,7 +1608,9 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
                     elapsed_ms: 1,
                 },
                 "overflow" => GuardianStage1Verdict::Overflow { tokens: 6145 },
-                "long" => GuardianStage1Verdict::EscalatedActionTooLong,
+                "long" => GuardianStage1Verdict::Escalated(
+                    mj_core::guardian::WolfStage1SkipReason::ActionTooLong,
+                ),
                 "unavailable" => GuardianStage1Verdict::Unavailable {
                     reason: "loading".into(),
                 },
@@ -1755,6 +1757,8 @@ async fn guardian_actor_cascades_requests_added_after_attachment() {
                 user_instructions_omitted: false,
                 project_instructions: None,
                 trusted_user_inputs: Vec::new(),
+                parent_instructions: Vec::new(),
+                parent_instructions_omitted: false,
                 prior_reviews: Vec::new(),
                 retry_reason: None,
                 transcript: String::new(),

@@ -788,6 +788,9 @@ impl DurableRelay {
                 // until the daemon has reconciled its durable operation owner.
                 snapshot.legacy_command_retention = true;
             }
+            if snapshot.format_version < 32 {
+                mj_core::relay::seed_legacy_delegated_parent_instructions(&mut snapshot);
+            }
             seed_missing_notification_time(&mut snapshot);
             upgraded_state = snapshot.format_version < RELAY_STATE_VERSION;
             snapshot.format_version = RELAY_STATE_VERSION;
@@ -1211,6 +1214,9 @@ impl DurableRelay {
         relay
             .turn_context
             .set_trusted_user_inputs(relay.snapshot.trusted_user_inputs());
+        relay
+            .turn_context
+            .set_delegated_parent_instructions(&relay.snapshot);
         relay
             .turn_context
             .set_prior_guardian_reviews(relay.snapshot.prior_guardian_reviews());
