@@ -158,6 +158,7 @@ struct AcpPreparationSetup {
     config: WorkerLaunchConfig,
     session_environment: BTreeMap<String, String>,
     supervisor_spec: AcpSupervisorSpec,
+    git_setup: tempfile::TempDir,
     relay: Arc<RelayCell>,
     resume_session: Option<String>,
     native_session_history: NativeSessionHistory,
@@ -248,6 +249,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         config,
         session_environment,
         supervisor_spec,
+        git_setup,
         relay,
         resume_session,
         native_session_history,
@@ -271,6 +273,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
+    publish_git_setup(&root, git_setup)?;
     let review_tools = config.review_tools();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let reviewer = Arc::new(ReviewCapture {
@@ -819,6 +822,10 @@ async fn restart_harness_in_place_response(
     else {
         unreachable!("restart_harness_in_place_response only serves RestartHarnessInPlace")
     };
+    // A previous attempt may already have reported a timeout while its
+    // filesystem writer is still alive. Wait before admission and before any
+    // of this attempt's preparation deadlines start.
+    let writer = PreparationWriter::acquire(&relay.preparation_writer).await;
     let decision = relay
         .lock()
         .expect("relay state lock poisoned")
@@ -873,17 +880,23 @@ async fn restart_harness_in_place_response(
             body: compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
         };
     }
-    let prepared = Box::pin(prepare_harness_environment(
-        relay_root,
-        &mut launch_config,
-        relay,
-        None,
-        &CancellationToken::new(),
-        false,
-    ))
-    .await;
+    let cancel = CancellationToken::new();
+    let prepared = writer
+        .track(
+            &cancel,
+            prepare_harness_environment(
+                relay_root,
+                &mut launch_config,
+                relay,
+                None,
+                &cancel,
+                false,
+            ),
+        )
+        .await;
     let PreparedHarnessEnvironment {
         launch: prepared,
+        git_setup,
         boundary_mailbox_hook_available,
         mailbox_delivery_mode: updated_mailbox_delivery_mode,
         ..
@@ -957,11 +970,27 @@ async fn restart_harness_in_place_response(
                 } else {
                     login_identity.observe_file(None);
                 }
-                if let Err(error) = persisted_launch_config.write(&relay_root.join("launch.json")) {
-                    compaction_error(
-                        RelayErrorCode::Internal,
-                        &format!("persist updated launch.json: {error:#}"),
-                    )
+                let root = relay_root.to_owned();
+                let persist = writer
+                    .track(&cancel, async {
+                        mj_core::runtime::spawn_blocking(move || {
+                            publish_git_setup(&root, git_setup)?;
+                            if persisted_launch_config.no_github_credentials {
+                                mj_core::credentials::remove_github_token(
+                                    &root.join("github-token"),
+                                )?;
+                            }
+                            persisted_launch_config
+                                .write(&root.join("launch.json"))
+                                .context("persist updated launch.json")
+                        })
+                        .await
+                        .context("publish restarted harness state")
+                        .and_then(|result| result)
+                    })
+                    .await;
+                if let Err(error) = persist {
+                    compaction_error(RelayErrorCode::Internal, &format!("{error:#}"))
                 } else if let Err(error) = restart_guard.complete() {
                     compaction_error(
                         RelayErrorCode::Internal,
@@ -2159,6 +2188,51 @@ where
     }
 }
 
+struct PreparationWriter {
+    gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+    threads: tokio_util::task::TaskTracker,
+}
+
+impl PreparationWriter {
+    async fn acquire(gate: &Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self {
+            gate: Some(gate.clone().lock_owned().await),
+            threads: tokio_util::task::TaskTracker::new(),
+        }
+    }
+
+    async fn track<T>(
+        &self,
+        cancel: &CancellationToken,
+        preparation: impl std::future::Future<Output = T>,
+    ) -> T {
+        mj_core::runtime::track_blocking_work(
+            self.threads.clone(),
+            mj_core::subprocess::with_preparation_cancellation(
+                cancel.child_token(),
+                Box::pin(preparation),
+            ),
+        )
+        .await
+    }
+}
+
+impl Drop for PreparationWriter {
+    fn drop(&mut self) {
+        self.threads.close();
+        if !self.threads.is_empty() {
+            let gate = self.gate.take();
+            let threads = self.threads.clone();
+            // A timeout can detach a blocking system call. Its tracked
+            // closure still owns the gate, through this drain, until it exits.
+            mj_core::runtime::spawn(async move {
+                threads.wait().await;
+                drop(gate);
+            });
+        }
+    }
+}
+
 async fn supervise_harness_preparation(
     setup: HarnessPreparationSetup,
     dispatch_wake_rx: mpsc::Receiver<()>,
@@ -2167,8 +2241,10 @@ async fn supervise_harness_preparation(
 ) -> PreparationOutcome {
     let root = setup.root.clone();
     let mut dispatch_wakes = Some(dispatch_wake_rx);
+    let gate = setup.relay.preparation_writer.clone();
     let result = supervise_preparation(
         &root,
+        &gate,
         &status,
         &cancel,
         prepare_and_start_harness(setup, &mut dispatch_wakes, &status, &cancel),
@@ -2195,27 +2271,20 @@ async fn supervise_harness_preparation(
 /// before it removes any of its files.
 async fn supervise_preparation<T>(
     root: &std::path::Path,
+    gate: &Arc<tokio::sync::Mutex<()>>,
     status: &watch::Sender<PreparationSnapshot>,
     cancel: &CancellationToken,
     preparation: impl std::future::Future<Output = Result<T>>,
 ) -> std::result::Result<T, PreparationStop> {
-    let threads = tokio_util::task::TaskTracker::new();
-    // Boxed before it is wrapped: the whole harness preparation is a large
-    // future, and each wrapper would otherwise copy it on the stack.
-    let preparation = mj_core::runtime::track_blocking_work(
-        threads.clone(),
-        mj_core::subprocess::with_preparation_cancellation(
-            cancel.child_token(),
-            Box::pin(preparation),
-        ),
-    );
+    let writer = PreparationWriter::acquire(gate).await;
+    let preparation = writer.track(cancel, preparation);
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => None,
         result = catch_preparation_panic(preparation) => Some(result.and_then(|result| result)),
     };
     // The preparation future is gone: its commands were stopped with it.
-    threads.close();
+    writer.threads.close();
     let (step, step_deadline) = {
         let snapshot = status.borrow();
         let step = match &snapshot.state {
@@ -2254,7 +2323,7 @@ async fn supervise_preparation<T>(
     // Let commands the failed step left running stop before the worker exits,
     // within that step's bound (already spent when the step timed out); the
     // exit ends any thread that does not.
-    if tokio::time::timeout_at(step_deadline, threads.wait())
+    if tokio::time::timeout_at(step_deadline, writer.threads.wait())
         .await
         .is_err()
     {
@@ -2413,6 +2482,7 @@ fn initialize_launch_environment(
 
 struct PreparedHarnessEnvironment {
     launch: super::harness_launch::PreparedHarnessLaunch,
+    git_setup: tempfile::TempDir,
     profile_registration: bool,
     managed_subagent: bool,
     subagent_role: Option<mj_core::subagent::SubagentMcpRole>,
@@ -2480,6 +2550,7 @@ async fn prepare_harness_environment(
     let github_root = root.to_owned();
     let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();
+    let initial_launch = status.is_some();
     let git_config_include = config
         .target_environment
         .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
@@ -2494,20 +2565,28 @@ async fn prepare_harness_environment(
         .as_ref()
         .map(|endpoint| endpoint.home.join(mj_core::slopcop::LOGIN_FILE))
         .map_err(Clone::clone);
-    session_environment =
+    let (session_environment, git_setup) =
         bounded_blocking_preparation_step(&login_budget, cancel, move |step_cancel| {
             if step_cancel.is_cancelled() {
                 anyhow::bail!("preparation cancelled before resolving Git credentials");
             }
-            configure_github_cli(
-                &github_root,
+            let setup = new_git_setup(&github_root)?;
+            let token_path = github_root.join("github-token");
+            configure_git_setup(
+                setup.path(),
+                &token_path,
                 &mut session_environment,
                 github_home.as_deref(),
                 git_config_include.as_deref(),
                 no_github_credentials,
             )?;
+            if initial_launch && no_github_credentials {
+                // There is no running harness to protect on worker startup.
+                // A restart can remove this token only after its reload succeeds.
+                mj_core::credentials::remove_github_token(&token_path)?;
+            }
             match &slopcop_login {
-                Ok(login) => configure_slopcop_cli(&github_root, login)?,
+                Ok(login) => configure_slopcop_cli(setup.path(), login)?,
                 Err(error) => {
                     tracing::warn!("slopcop wrapper not installed: {error}");
                 }
@@ -2516,7 +2595,7 @@ async fn prepare_harness_environment(
                 explicit_environment.contains_key(name)
                     || base_environment_for_filter.get(name) != Some(value)
             });
-            Ok(session_environment)
+            Ok((session_environment, setup))
         })
         .await?;
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
@@ -2925,7 +3004,7 @@ async fn prepare_harness_environment(
         cancel,
     )
     .await?;
-    let mut prepared_harness = bounded_preparation_step(&harness_budget, async {
+    let (mut prepared_harness, git_setup) = bounded_preparation_step(&harness_budget, async {
         let mut prepared = super::prepare_harness_launch(
             config.harness,
             config.harness_runtime,
@@ -2933,8 +3012,9 @@ async fn prepare_harness_environment(
             super::harness_launch::primary_supervisor_spec(config),
         )
         .await?;
-        super::harness_launch::freeze_node_entrypoints(root, &mut prepared).await?;
-        Ok(prepared)
+        let git_setup =
+            super::harness_launch::freeze_node_entrypoints(git_setup, &mut prepared).await?;
+        Ok((prepared, git_setup))
     })
     .await?;
     if let Some(roots) = project_tools_roots
@@ -2957,6 +3037,7 @@ async fn prepare_harness_environment(
     }
     Ok(PreparedHarnessEnvironment {
         launch: prepared_harness,
+        git_setup,
         profile_registration,
         managed_subagent,
         subagent_role,
@@ -2986,6 +3067,7 @@ async fn prepare_and_start_harness(
     let root = root_path.as_path();
     let PreparedHarnessEnvironment {
         launch: prepared_harness,
+        git_setup,
         profile_registration,
         managed_subagent,
         subagent_role,
@@ -3022,6 +3104,7 @@ async fn prepare_and_start_harness(
         config,
         session_environment: prepared_harness.environment,
         supervisor_spec: prepared_harness.spec,
+        git_setup,
         relay: relay.clone(),
         resume_session,
         native_session_history,
@@ -4360,20 +4443,26 @@ mod preparation_tests {
         let prep_cancellation = cancellation.clone();
         let fake_cancellation = prep_cancellation.clone();
         let prep = mj_core::runtime::spawn(async move {
-            supervise_preparation(&prep_root, &prep_status, &prep_cancellation, async move {
-                preparation_step(
-                    &fake_root,
-                    Some(&fake_status),
-                    "harness-resolve",
-                    LOCAL_PREPARATION_STEP_TIMEOUT,
-                    &fake_cancellation,
-                )
-                .await?;
-                let _ = preparation_started.send(());
-                release.await.context("fake preparation gate was dropped")?;
-                fake_status.send_replace(prepared);
-                Ok(())
-            })
+            supervise_preparation(
+                &prep_root,
+                &Arc::default(),
+                &prep_status,
+                &prep_cancellation,
+                async move {
+                    preparation_step(
+                        &fake_root,
+                        Some(&fake_status),
+                        "harness-resolve",
+                        LOCAL_PREPARATION_STEP_TIMEOUT,
+                        &fake_cancellation,
+                    )
+                    .await?;
+                    let _ = preparation_started.send(());
+                    release.await.context("fake preparation gate was dropped")?;
+                    fake_status.send_replace(prepared);
+                    Ok(())
+                },
+            )
             .await
         });
         started.await.unwrap();
@@ -4532,9 +4621,13 @@ mod preparation_tests {
             ..Default::default()
         });
         let cancellation = CancellationToken::new();
-        let result = supervise_preparation::<()>(temp.path(), &status, &cancellation, async {
-            panic_fake_preparation()
-        })
+        let result = supervise_preparation::<()>(
+            temp.path(),
+            &Arc::default(),
+            &status,
+            &cancellation,
+            async { panic_fake_preparation() },
+        )
         .await;
         let failure = startup_failure(result.unwrap_err());
         assert!(
@@ -4564,26 +4657,33 @@ mod preparation_tests {
         let (blocking_finished_tx, blocking_finished_rx) = std::sync::mpsc::channel();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            supervise_preparation::<()>(&root, &status, &cancellation, async move {
-                // Set the step snapshot and budget directly without running
-                // `preparation_step`'s startup-breadcrumb disk write inside the
-                // 200ms budget, so heavy parallel load cannot expire the step
-                // before the blocked closure is spawned.
-                let budget = PreparationStepBudget::new("acp-setup", Duration::from_millis(200));
-                step_status.send_modify(|snapshot| {
-                    snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
-                        step: "acp-setup".to_owned(),
-                        since_ms: chrono::Utc::now().timestamp_millis(),
+            supervise_preparation::<()>(
+                &root,
+                &Arc::default(),
+                &status,
+                &cancellation,
+                async move {
+                    // Set the step snapshot and budget directly without running
+                    // `preparation_step`'s startup-breadcrumb disk write inside the
+                    // 200ms budget, so heavy parallel load cannot expire the step
+                    // before the blocked closure is spawned.
+                    let budget =
+                        PreparationStepBudget::new("acp-setup", Duration::from_millis(200));
+                    step_status.send_modify(|snapshot| {
+                        snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
+                            step: "acp-setup".to_owned(),
+                            since_ms: chrono::Utc::now().timestamp_millis(),
+                        });
+                        snapshot.step_deadline = Some(budget.deadline);
                     });
-                    snapshot.step_deadline = Some(budget.deadline);
-                });
-                bounded_blocking_preparation_step(&budget, &step_cancellation, move |_| {
-                    let _ = release_blocking_rx.recv();
-                    let _ = blocking_finished_tx.send(());
-                    Ok(())
-                })
-                .await
-            }),
+                    bounded_blocking_preparation_step(&budget, &step_cancellation, move |_| {
+                        let _ = release_blocking_rx.recv();
+                        let _ = blocking_finished_tx.send(());
+                        Ok(())
+                    })
+                    .await
+                },
+            ),
         )
         .await
         .expect("an expired step must not wait for its blocked thread");
@@ -4728,16 +4828,22 @@ mod preparation_tests {
             let fake_status = status.clone();
             let fake_wakes = &mut dispatch_wakes;
             let fake_services = services();
-            let stop = supervise_preparation(root, &status, &cancellation, async move {
-                publish_started(
-                    &fake_relay,
-                    &fake_cancellation,
-                    &fake_status,
-                    fake_wakes,
-                    fake_services,
-                )
-                .map(drop)
-            })
+            let stop = supervise_preparation(
+                root,
+                &relay.preparation_writer,
+                &status,
+                &cancellation,
+                async move {
+                    publish_started(
+                        &fake_relay,
+                        &fake_cancellation,
+                        &fake_status,
+                        fake_wakes,
+                        fake_services,
+                    )
+                    .map(drop)
+                },
+            )
             .await
             .expect_err("a bridge started for a relay a Close had sealed");
             assert!(
@@ -4779,25 +4885,34 @@ mod preparation_tests {
         let prep_cancellation = cancellation.clone();
         let fake_cancellation = prep_cancellation.clone();
         let prep = mj_core::runtime::spawn(async move {
-            supervise_preparation::<()>(&prep_root, &prep_status, &prep_cancellation, async move {
-                preparation_step(
-                    &fake_root,
-                    Some(&fake_status),
-                    "harness-resolve",
-                    LOCAL_PREPARATION_STEP_TIMEOUT,
-                    &fake_cancellation,
-                )
-                .await?;
-                let mut child = tokio::process::Command::new("sh");
-                child
-                    .arg("-c")
-                    .arg("printf '%s\\n' \"$$\" > \"$FAKE_PID_FILE\"; exec sleep 60")
-                    .env("FAKE_PID_FILE", &fake_pid_path);
-                let output =
-                    mj_core::subprocess::run_bounded(&mut child, 1024, Duration::from_secs(120))
-                        .await?;
-                anyhow::bail!("fake harness unexpectedly exited: {}", output.status)
-            })
+            supervise_preparation::<()>(
+                &prep_root,
+                &Arc::default(),
+                &prep_status,
+                &prep_cancellation,
+                async move {
+                    preparation_step(
+                        &fake_root,
+                        Some(&fake_status),
+                        "harness-resolve",
+                        LOCAL_PREPARATION_STEP_TIMEOUT,
+                        &fake_cancellation,
+                    )
+                    .await?;
+                    let mut child = tokio::process::Command::new("sh");
+                    child
+                        .arg("-c")
+                        .arg("printf '%s\\n' \"$$\" > \"$FAKE_PID_FILE\"; exec sleep 60")
+                        .env("FAKE_PID_FILE", &fake_pid_path);
+                    let output = mj_core::subprocess::run_bounded(
+                        &mut child,
+                        1024,
+                        Duration::from_secs(120),
+                    )
+                    .await?;
+                    anyhow::bail!("fake harness unexpectedly exited: {}", output.status)
+                },
+            )
             .await
         });
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -5101,6 +5216,15 @@ mod preparation_tests {
     // Hard-won: #1672: in-place Move restarted the harness without the session Git setup
     #[tokio::test]
     async fn restart_harness_in_place_preserves_session_git_environment() {
+        exercise_git_setup_restart(false).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_opt_out_restart_preserves_live_git_setup_and_token() {
+        exercise_git_setup_restart(true).await;
+    }
+
+    async fn exercise_git_setup_restart(reject_opt_out: bool) {
         let _ = mj_harness_install::login_environment::initialize_from_parent();
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
@@ -5115,6 +5239,7 @@ mod preparation_tests {
         launch
             .target_environment
             .insert("PATH".into(), "/usr/bin:/bin".into());
+        launch.excluded_environment.push("MJ_TOOL_CACHE_DIR".into());
         let git_include = root.join("image-gitconfig");
         launch.target_environment.insert(
             mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH.into(),
@@ -5139,17 +5264,19 @@ mod preparation_tests {
         ))
         .await
         .unwrap();
+        let source_config = startup.git_setup.path().join("gitconfig");
+        let source_wrapper = startup.git_setup.path().join("bin/gh");
         let expected = startup.launch.spec.environment;
-        assert!(std::env::split_paths(&expected["PATH"]).any(|path| path == root.join("bin")));
+        let expected_path: Vec<_> = std::env::split_paths(&expected["PATH"]).collect();
+        assert_eq!(expected_path[0], startup.git_setup.path().join("bin"));
         assert_eq!(
             std::path::Path::new(&expected["GIT_CONFIG_GLOBAL"]),
-            root.join("gitconfig")
+            source_config
         );
-        assert!(
-            std::fs::read_to_string(root.join("gitconfig"))
-                .unwrap()
-                .contains(&*git_include.to_string_lossy())
-        );
+        let source_config_before = std::fs::read_to_string(&source_config).unwrap();
+        assert!(source_config_before.contains(&*git_include.to_string_lossy()));
+        let source_wrapper_before = std::fs::read(&source_wrapper).unwrap();
+        publish_git_setup(root, startup.git_setup).unwrap();
         let token_path = root.join("github-token");
         // The daemon may have refreshed the original container token since startup.
         mj_core::credentials::write_github_token(&token_path, b"refreshed-test-token").unwrap();
@@ -5164,6 +5291,7 @@ mod preparation_tests {
             },
         });
         let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
+        launch.no_github_credentials = reject_opt_out;
         let (commands, mut receiver) = mpsc::channel(1);
         let reload = mj_core::runtime::spawn(async move {
             let Some(CommandRequest::ReloadLaunchConfig {
@@ -5175,7 +5303,11 @@ mod preparation_tests {
             else {
                 panic!("expected a replacement harness launch");
             };
-            resolved.send(Ok(())).unwrap();
+            if reject_opt_out {
+                resolved.send(Err("turn active".into())).unwrap();
+            } else {
+                resolved.send(Ok(())).unwrap();
+            }
             let (_, spec) = *supervisor_spec.unwrap();
             (spec.environment, environment)
         });
@@ -5195,27 +5327,118 @@ mod preparation_tests {
             root,
         ))
         .await;
-        assert!(
-            matches!(
-                response.body,
-                RelayResponseBody::Ok {
-                    payload: RelayResponsePayload::HarnessRestartedInPlace
-                }
-            ),
-            "{:?}",
-            response.body
-        );
+        drop(commands);
         let (spec_environment, shell_environment) = reload.await.unwrap();
-        for name in ["PATH", "GIT_CONFIG_GLOBAL"] {
-            assert_eq!(spec_environment.get(name), expected.get(name));
-            assert_eq!(shell_environment.get(name), expected.get(name));
+        let candidate_config = std::path::Path::new(&spec_environment["GIT_CONFIG_GLOBAL"]);
+        let candidate_dir = candidate_config.parent().unwrap();
+        assert!(candidate_dir.starts_with(root));
+        assert_ne!(candidate_config, source_config);
+        let mut export_environment = BTreeMap::new();
+        attach_session_git_environment(root, &mut export_environment, false).unwrap();
+        if reject_opt_out {
+            assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+            assert_eq!(spec_environment["MJ_GITHUB_CREDENTIALS"], "disabled");
+            assert!(
+                !candidate_dir.exists(),
+                "rejected candidate should be removed"
+            );
+            assert_eq!(
+                std::path::Path::new(&export_environment["GIT_CONFIG_GLOBAL"]),
+                source_config
+            );
+        } else {
+            assert!(
+                matches!(
+                    response.body,
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::HarnessRestartedInPlace
+                    }
+                ),
+                "{:?}",
+                response.body
+            );
+            let replacement_path: Vec<_> =
+                std::env::split_paths(&spec_environment["PATH"]).collect();
+            assert_eq!(replacement_path[0], candidate_dir.join("bin"));
+            assert_eq!(replacement_path[1..], expected_path[1..]);
+            for name in ["PATH", "GIT_CONFIG_GLOBAL"] {
+                assert_eq!(shell_environment.get(name), spec_environment.get(name));
+            }
+            assert!(
+                std::fs::read_to_string(candidate_config)
+                    .unwrap()
+                    .contains(&*git_include.to_string_lossy())
+            );
+            assert_eq!(
+                std::path::Path::new(&export_environment["GIT_CONFIG_GLOBAL"]),
+                candidate_config
+            );
         }
-        assert!(
-            std::fs::read_to_string(root.join("gitconfig"))
-                .unwrap()
-                .contains(&*git_include.to_string_lossy())
+        assert_eq!(
+            std::fs::read_to_string(&source_config).unwrap(),
+            source_config_before
+        );
+        assert_eq!(
+            std::fs::read(&source_wrapper).unwrap(),
+            source_wrapper_before
         );
         assert_eq!(std::fs::read(&token_path).unwrap(), token_before);
+    }
+
+    #[tokio::test]
+    async fn restart_preparation_waits_for_the_timed_out_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let relay = test_relay(root);
+        let profile = root.join("profile-setting");
+        let (release, stalled) = std::sync::mpsc::channel::<()>();
+        let (entered, writer_started) = tokio::sync::oneshot::channel();
+        let cancel = CancellationToken::new();
+        let first = PreparationWriter::acquire(&relay.preparation_writer).await;
+        let first_profile = profile.clone();
+        let abandoned = {
+            let attempt = first.track(&cancel, async {
+                let budget = PreparationStepBudget::new("profile", Duration::from_millis(200));
+                bounded_blocking_preparation_step(&budget, &cancel, move |_| {
+                    let setup = new_git_setup(first_profile.parent().unwrap())?;
+                    let _ = entered.send(setup.path().to_owned());
+                    stalled.recv().context("release first preparation writer")?;
+                    std::fs::write(first_profile, "first")?;
+                    Ok(())
+                })
+                .await
+            });
+            tokio::pin!(attempt);
+            let abandoned = tokio::select! {
+                result = &mut attempt => panic!("writer did not start: {result:?}"),
+                started = writer_started => started.unwrap(),
+            };
+            assert!(attempt.await.unwrap_err().to_string().contains("deadline"));
+            abandoned
+        };
+        drop(first);
+        assert!(abandoned.exists(), "first writer still owns its files");
+
+        let second = async {
+            let _writer = PreparationWriter::acquire(&relay.preparation_writer).await;
+            assert_eq!(std::fs::read_to_string(&profile).unwrap(), "first");
+            assert!(
+                !abandoned.exists(),
+                "first writer must retire its generation"
+            );
+            std::fs::write(&profile, "second").unwrap();
+        };
+        tokio::pin!(second);
+        std::future::poll_fn(|context| {
+            assert!(second.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), "second");
     }
 
     // Hard-won: e2c147489: an in-place profile switch discarded Claude's agent and review tools.

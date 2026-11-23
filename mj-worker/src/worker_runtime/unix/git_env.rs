@@ -38,6 +38,49 @@ pub(crate) fn prepend_github_cli_path(
     Ok(())
 }
 
+const GIT_SETUP_PREFIX: &str = "harness-git-";
+const CURRENT_GIT_SETUP: &str = "current-git-setup";
+
+pub(super) fn new_git_setup(root: &std::path::Path) -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(GIT_SETUP_PREFIX)
+        .tempdir_in(root)
+        .context("create harness Git setup")
+}
+
+pub(super) fn publish_git_setup(root: &std::path::Path, setup: tempfile::TempDir) -> Result<()> {
+    // An accepted bridge and any existing shells have this path in their
+    // environment. Keep their files for the lifetime of the worker root.
+    let path = setup.keep();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("resolve accepted harness Git setup name")?;
+    mj_core::config::atomic_write(&root.join(CURRENT_GIT_SETUP), name.as_bytes())
+        .context("publish accepted harness Git setup")
+}
+
+fn current_git_setup(root: &std::path::Path) -> Result<PathBuf> {
+    let name = match std::fs::read_to_string(root.join(CURRENT_GIT_SETUP)) {
+        Ok(name) => name,
+        // Workers from before generation directories laid out Git setup at
+        // the worker root. Branch export also works with those workers.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(root.to_owned()),
+        Err(error) => return Err(error).context("read accepted harness Git setup"),
+    };
+    let path = std::path::Path::new(&name);
+    anyhow::ensure!(
+        name.starts_with(GIT_SETUP_PREFIX) && path.file_name() == Some(path.as_os_str()),
+        "invalid harness Git setup name"
+    );
+    let setup = root.join(path);
+    anyhow::ensure!(
+        std::fs::symlink_metadata(&setup)?.is_dir(),
+        "accepted harness Git setup is not a directory"
+    );
+    Ok(setup)
+}
+
 /// What a person can do about a broken or missing session Git setup. Every
 /// producer of that failure appends this, and the branch-export test matches
 /// on it, so the guidance and the tests cannot drift apart.
@@ -51,8 +94,9 @@ pub fn attach_session_git_environment(
     no_github_credentials: bool,
 ) -> Result<()> {
     let root = std::path::absolute(root).context("resolve session worker root")?;
-    let paths = GithubCliPaths::new(&root);
-    let validate = || -> Result<()> {
+    let validate = || -> Result<_> {
+        let setup = current_git_setup(&root)?;
+        let paths = GithubCliPaths::new(&setup);
         let metadata = std::fs::symlink_metadata(&paths.bin)?;
         anyhow::ensure!(
             metadata.is_dir(),
@@ -68,9 +112,9 @@ pub fn attach_session_git_environment(
             );
             std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
         }
-        Ok(())
+        Ok((setup, paths))
     };
-    validate().with_context(|| {
+    let (setup, paths) = validate().with_context(|| {
         format!(
             "load session Git authentication from {}; {SESSION_SETUP_GUIDANCE}",
             root.display()
@@ -91,7 +135,7 @@ pub fn attach_session_git_environment(
             && name != "GITHUB_TOKEN"
     });
     if no_github_credentials {
-        credential_free_environment(&root, environment);
+        credential_free_environment(&setup, environment);
     }
     Ok(())
 }
@@ -158,6 +202,30 @@ pub fn configure_github_cli(
     extra_global_include: Option<&std::path::Path>,
     no_github_credentials: bool,
 ) -> Result<()> {
+    let token = root.join("github-token");
+    configure_git_setup(
+        root,
+        &token,
+        environment,
+        saved_home,
+        extra_global_include,
+        no_github_credentials,
+    )?;
+    if no_github_credentials {
+        mj_core::credentials::remove_github_token(&token)?;
+    }
+    Ok(())
+}
+
+/// Write a launch's Git setup without mutating the separate session token.
+pub(super) fn configure_git_setup(
+    root: &std::path::Path,
+    token_path: &std::path::Path,
+    environment: &mut BTreeMap<String, String>,
+    saved_home: Option<&std::path::Path>,
+    extra_global_include: Option<&std::path::Path>,
+    no_github_credentials: bool,
+) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let paths = GithubCliPaths::new(root);
@@ -179,8 +247,7 @@ pub fn configure_github_cli(
             wrapper.display()
         );
     }
-    const WRAPPER: &str = r#"token_file=$script_dir/../github-token
-if [ -f "$token_file" ]; then
+    const WRAPPER: &str = r#"if [ -f "$token_file" ]; then
     IFS= read -r GH_TOKEN < "$token_file"
     export GH_TOKEN
     unset GITHUB_TOKEN
@@ -190,7 +257,6 @@ fi
 exec gh "$@"
 "#;
     let body = if no_github_credentials {
-        mj_core::credentials::remove_github_token(&root.join("github-token"))?;
         mj_core::credentials::remove_github_authentication_environment(environment);
         let config = root.join("gh-without-credentials");
         mj_core::config::create_owner_only_directory(&config)?;
@@ -206,8 +272,12 @@ GH_PROMPT_DISABLED=1
 export GH_CONFIG_DIR GH_PROMPT_DISABLED
 exec gh "$@"
 "#
+        .to_owned()
     } else {
-        WRAPPER
+        let token_path =
+            std::path::absolute(token_path).context("resolve session GitHub token path")?;
+        let token = mj_core::targets::posix_quote(&token_path.to_string_lossy());
+        format!("token_file={token}\n{WRAPPER}")
     };
     crate::worker_runtime::shell_environment::write_executable(
         wrapper,

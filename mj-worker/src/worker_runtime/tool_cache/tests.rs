@@ -169,8 +169,8 @@ async fn generated_launchers_preserve_shell_arguments_and_explicit_bazel_flags()
             ]
     );
     ensure!(run(&checkout, &env, "bazel", &["--version"]).await? == "<--version>\n");
-    // Git setup and tool setup must replace the one owned shell hook, never
-    // source each other in a cycle when the worker is prepared again.
+    // Tool setup reuses the Git hook, which restores both tool paths and
+    // keeps sourcing the user hook exactly once after re-preparation.
     let user_hook = root.path().join("user bash env");
     std::fs::write(
         &user_hook,
@@ -182,6 +182,7 @@ async fn generated_launchers_preserve_shell_arguments_and_explicit_bazel_flags()
     prepare(&checkout, &mut env)?;
     super::super::shell_environment::configure(&git_hook, &mut env)?;
     prepare(&checkout, &mut env)?;
+    ensure!(env["MJ_SESSION_BASH_ENV"] == git_hook.to_string_lossy());
     env.insert("PATH".into(), "/usr/bin:/bin".into());
     let output = run(
         &checkout,
