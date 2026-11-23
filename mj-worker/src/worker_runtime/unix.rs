@@ -126,14 +126,18 @@ struct HarnessPreparationSetup {
 #[derive(Clone)]
 struct PreparationStepBudget {
     step: String,
+    started_at: chrono::DateTime<chrono::Utc>,
     deadline: tokio::time::Instant,
     timeout: std::time::Duration,
 }
 
 impl PreparationStepBudget {
     fn new(step: &str, timeout: std::time::Duration) -> Self {
+        let started_at = chrono::Utc::now();
+        let _ = ACTIVE_PREPARATION.try_with(|gate| gate.set_step(step, started_at));
         Self {
             step: step.to_owned(),
+            started_at,
             deadline: tokio::time::Instant::now() + timeout,
             timeout,
         }
@@ -579,7 +583,7 @@ async fn preparation_step(
     status.send_modify(|snapshot| {
         snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
             step: step.to_owned(),
-            since_ms: chrono::Utc::now().timestamp_millis(),
+            since_ms: budget.started_at.timestamp_millis(),
         });
         snapshot.step_deadline = Some(budget.deadline);
     });
@@ -822,10 +826,29 @@ async fn restart_harness_in_place_response(
     else {
         unreachable!("restart_harness_in_place_response only serves RestartHarnessInPlace")
     };
-    // A previous attempt may already have reported a timeout while its
-    // filesystem writer is still alive. Wait before admission and before any
-    // of this attempt's preparation deadlines start.
-    let writer = PreparationWriter::acquire(&relay.preparation_writer).await;
+    let Some(commands) = commands else {
+        return RelayResponseEnvelope {
+            request_id,
+            protocol_version,
+            body: compaction_error(
+                RelayErrorCode::InvalidState,
+                "session is closed; no ACP runtime can restart the harness in place",
+            ),
+        };
+    };
+    let writer = match PreparationWriter::try_acquire(
+        &relay.preparation_writer,
+        format!("in-place harness restart {operation_id}"),
+    ) {
+        Ok(writer) => writer,
+        Err(error) => {
+            return RelayResponseEnvelope {
+                request_id,
+                protocol_version,
+                body: RelayResponseBody::Error { error: *error },
+            };
+        }
+    };
     let decision = relay
         .lock()
         .expect("relay state lock poisoned")
@@ -853,16 +876,6 @@ async fn restart_harness_in_place_response(
             expected_store_id,
             completed: false,
         },
-    };
-    let Some(commands) = commands else {
-        return RelayResponseEnvelope {
-            request_id,
-            protocol_version,
-            body: compaction_error(
-                RelayErrorCode::InvalidState,
-                "session is closed; no ACP runtime can restart the harness in place",
-            ),
-        };
     };
     let mut launch_config = launch_config;
     let persisted_launch_config = launch_config.clone();
@@ -925,6 +938,7 @@ async fn restart_harness_in_place_response(
     let updated_claude_login_path = (updated_harness == HarnessKind::Claude)
         .then(|| mj_core::credentials::claude_oauth_login_path(&launch_config.environment))
         .flatten();
+    writer.gate.set_step("reload harness", chrono::Utc::now());
     let (resolved, resolution) = tokio::sync::oneshot::channel();
     let body = match commands
         .send(CommandRequest::ReloadLaunchConfig {
@@ -970,6 +984,9 @@ async fn restart_harness_in_place_response(
                 } else {
                     login_identity.observe_file(None);
                 }
+                writer
+                    .gate
+                    .set_step("publish harness launch", chrono::Utc::now());
                 let root = relay_root.to_owned();
                 let persist = writer
                     .track(&cancel, async {
@@ -2188,17 +2205,65 @@ where
     }
 }
 
+#[derive(Default)]
+pub(crate) struct PreparationGate(Mutex<Option<PreparationActivity>>);
+
+struct PreparationActivity {
+    attempt: String,
+    step: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PreparationGate {
+    fn set_step(&self, step: &str, started_at: chrono::DateTime<chrono::Utc>) {
+        let mut activity = self.0.lock().expect("preparation gate poisoned");
+        let activity = activity.as_mut().expect("preparation writer owns the gate");
+        activity.step = step.to_owned();
+        activity.started_at = started_at;
+    }
+
+    fn release(&self) {
+        self.0.lock().expect("preparation gate poisoned").take();
+    }
+}
+
+tokio::task_local! {
+    static ACTIVE_PREPARATION: Arc<PreparationGate>;
+}
+
 struct PreparationWriter {
-    gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+    gate: Arc<PreparationGate>,
     threads: tokio_util::task::TaskTracker,
 }
 
 impl PreparationWriter {
-    async fn acquire(gate: &Arc<tokio::sync::Mutex<()>>) -> Self {
-        Self {
-            gate: Some(gate.clone().lock_owned().await),
-            threads: tokio_util::task::TaskTracker::new(),
+    fn try_acquire(
+        gate: &Arc<PreparationGate>,
+        attempt: String,
+    ) -> Result<Self, Box<RelayProtocolError>> {
+        let mut activity = gate.0.lock().expect("preparation gate poisoned");
+        if let Some(activity) = activity.as_ref() {
+            return Err(Box::new(mj_core::relay::relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                format!(
+                    "{} is already in progress at {} (started {}). Retry after it finishes, or restart the worker or session if it is stalled.",
+                    activity.attempt,
+                    activity.step,
+                    activity.started_at.to_rfc3339(),
+                ),
+                false,
+                None,
+            )));
         }
+        *activity = Some(PreparationActivity {
+            attempt,
+            step: "initialize launch".into(),
+            started_at: chrono::Utc::now(),
+        });
+        Ok(Self {
+            gate: gate.clone(),
+            threads: tokio_util::task::TaskTracker::new(),
+        })
     }
 
     async fn track<T>(
@@ -2206,28 +2271,34 @@ impl PreparationWriter {
         cancel: &CancellationToken,
         preparation: impl std::future::Future<Output = T>,
     ) -> T {
-        mj_core::runtime::track_blocking_work(
-            self.threads.clone(),
-            mj_core::subprocess::with_preparation_cancellation(
-                cancel.child_token(),
-                Box::pin(preparation),
-            ),
-        )
-        .await
+        ACTIVE_PREPARATION
+            .scope(
+                self.gate.clone(),
+                mj_core::runtime::track_blocking_work(
+                    self.threads.clone(),
+                    mj_core::subprocess::with_preparation_cancellation(
+                        cancel.child_token(),
+                        Box::pin(preparation),
+                    ),
+                ),
+            )
+            .await
     }
 }
 
 impl Drop for PreparationWriter {
     fn drop(&mut self) {
         self.threads.close();
-        if !self.threads.is_empty() {
-            let gate = self.gate.take();
+        if self.threads.is_empty() {
+            self.gate.release();
+        } else {
+            let gate = self.gate.clone();
             let threads = self.threads.clone();
-            // A timeout can detach a blocking system call. Its tracked
-            // closure still owns the gate, through this drain, until it exits.
+            // Keep the gate occupied until detached blocking writers exit,
+            // including when their request has stopped waiting for them.
             mj_core::runtime::spawn(async move {
                 threads.wait().await;
-                drop(gate);
+                gate.release();
             });
         }
     }
@@ -2271,12 +2342,13 @@ async fn supervise_harness_preparation(
 /// before it removes any of its files.
 async fn supervise_preparation<T>(
     root: &std::path::Path,
-    gate: &Arc<tokio::sync::Mutex<()>>,
+    gate: &Arc<PreparationGate>,
     status: &watch::Sender<PreparationSnapshot>,
     cancel: &CancellationToken,
     preparation: impl std::future::Future<Output = Result<T>>,
 ) -> std::result::Result<T, PreparationStop> {
-    let writer = PreparationWriter::acquire(gate).await;
+    let writer = PreparationWriter::try_acquire(gate, "worker startup".into())
+        .expect("worker startup is the first preparation on a new relay");
     let preparation = writer.track(cancel, preparation);
     let result = tokio::select! {
         biased;
@@ -2391,6 +2463,8 @@ async fn prepare_project_tools(
         config.environment = environment.clone();
         applied = true;
         let Some(status) = status else {
+            let _ = ACTIVE_PREPARATION
+                .try_with(|gate| gate.set_step("project tools", chrono::Utc::now()));
             // The running worker already owns any install in progress. Resolve
             // the same mise runtime and PATH without starting another install.
             let mise =
@@ -5386,7 +5460,8 @@ mod preparation_tests {
     }
 
     #[tokio::test]
-    async fn restart_preparation_waits_for_the_timed_out_writer() {
+    async fn restart_refuses_while_a_timed_out_preparation_writer_is_live() {
+        let _ = mj_harness_install::login_environment::initialize_from_parent();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let relay = test_relay(root);
@@ -5394,7 +5469,11 @@ mod preparation_tests {
         let (release, stalled) = std::sync::mpsc::channel::<()>();
         let (entered, writer_started) = tokio::sync::oneshot::channel();
         let cancel = CancellationToken::new();
-        let first = PreparationWriter::acquire(&relay.preparation_writer).await;
+        let first = PreparationWriter::try_acquire(
+            &relay.preparation_writer,
+            "in-place harness restart move-a".into(),
+        )
+        .unwrap();
         let first_profile = profile.clone();
         let abandoned = {
             let attempt = first.track(&cancel, async {
@@ -5419,26 +5498,101 @@ mod preparation_tests {
         drop(first);
         assert!(abandoned.exists(), "first writer still owns its files");
 
-        let second = async {
-            let _writer = PreparationWriter::acquire(&relay.preparation_writer).await;
-            assert_eq!(std::fs::read_to_string(&profile).unwrap(), "first");
-            assert!(
-                !abandoned.exists(),
-                "first writer must retire its generation"
-            );
-            std::fs::write(&profile, "second").unwrap();
+        let store_id = relay.lock().unwrap().operational_state().store_id.unwrap();
+        let _ = relay.lock().unwrap().handle(RelayRequestEnvelope {
+            request_id: "hold".into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::HoldInPlaceMoveDispatch {
+                operation_id: "move-bc".into(),
+                expected_store_id: store_id.clone(),
+            },
+        });
+        let mut launch = super::super::relay_tests::launch_config(root.to_str().unwrap());
+        launch.cwd = root.to_owned();
+        let credentials = SharedCredentials::new(super::super::credential_endpoint(&launch));
+        let (commands, mut receiver) = mpsc::channel(1);
+        let request = |request_id: &str| RelayRequestEnvelope {
+            request_id: request_id.into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::RestartHarnessInPlace {
+                operation_id: "move-bc".into(),
+                expected_store_id: store_id.clone(),
+                launch_config: Box::new(launch.clone()),
+            },
         };
-        tokio::pin!(second);
-        std::future::poll_fn(|context| {
-            assert!(second.as_mut().poll(context).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
+        let refusal = tokio::time::timeout(
+            Duration::from_secs(5),
+            restart_harness_in_place_response(
+                request("restart-b"),
+                Some(&commands),
+                &relay,
+                &credentials,
+                root,
+            ),
+        )
+        .await
+        .expect("restart B must return while the first writer is still blocked");
+        let RelayResponseBody::Error { error } = refusal.body else {
+            panic!("expected a refusal while restart A holds the gate");
+        };
+        assert_eq!(error.code, RelayErrorCode::InvalidState);
+        assert!(!error.retryable);
+        assert!(
+            error
+                .message
+                .contains("restart move-a is already in progress at profile")
+        );
+        let (_, timestamp) = error.message.split_once("(started ").unwrap();
+        chrono::DateTime::parse_from_rfc3339(timestamp.split_once(')').unwrap().0).unwrap();
+        assert!(
+            error
+                .message
+                .contains("Retry after it finishes, or restart the worker or session")
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(abandoned.exists());
+        assert!(!profile.exists());
+
         release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), second)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&profile).unwrap(), "second");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while relay.preparation_writer.0.lock().unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finishing the first writer must release the gate");
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), "first");
+        assert!(
+            !abandoned.exists(),
+            "first writer must retire its generation"
+        );
+
+        let accepted = mj_core::runtime::spawn(async move {
+            let Some(CommandRequest::ReloadLaunchConfig { resolved, .. }) = receiver.recv().await
+            else {
+                panic!("expected restart C to reach the ACP runtime");
+            };
+            resolved.send(Ok(())).unwrap();
+        });
+        let response = restart_harness_in_place_response(
+            request("restart-c"),
+            Some(&commands),
+            &relay,
+            &credentials,
+            root,
+        )
+        .await;
+        drop(commands);
+        assert!(
+            matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::HarnessRestartedInPlace
+                }
+            ),
+            "{response:?}"
+        );
+        accepted.await.unwrap();
     }
 
     // Hard-won: e2c147489: an in-place profile switch discarded Claude's agent and review tools.

@@ -470,6 +470,9 @@ pub use unix::{
     run_daemon_owned, seed_container_github_token,
 };
 
+#[cfg(unix)]
+pub(crate) use unix::PreparationGate;
+
 #[cfg(all(test, unix))]
 pub(crate) use unix::{record_runtime_event, run_relay_coordinator_with_verdict};
 
