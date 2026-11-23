@@ -12857,6 +12857,8 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
 #[cfg(unix)]
 #[tokio::test]
 async fn child_startup_failure_waits_for_confirmed_worker_death() {
+    use std::os::unix::fs::PermissionsExt;
+
     use mj_controller::controller::checkpoint::stand_in::LATCH_RELAY_SESSION as CHILD;
     use mj_controller::session_manager::{
         WorkerRecoveryOutcome, WorkerRecoveryPlan, recover_worker_controlled,
@@ -12934,8 +12936,46 @@ async fn child_startup_failure_waits_for_confirmed_worker_death() {
     assert_eq!(row().phase, "pending");
     assert!(reports().is_empty());
 
+    // A legacy readiness failure can set Error with the worker still running.
+    let hel = root.join("hel");
+    std::fs::write(
+        &hel,
+        r#"#!/bin/sh
+if [ "$3" = --help ]; then exit 0; fi
+printf '%s\n' "$2" >> "$4/control.log"
+case "$2" in
+    liveness) if [ -e "$4/worker-live" ]; then echo alive; else echo dead; fi ;;
+    stop) echo "stop refused by fixture" >&2; exit 1 ;;
+    *) exit 2 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let live = root.join("worker-live");
+    std::fs::write(&live, "").unwrap();
+    let child = mj_controller::database::read_durable_session_record(CHILD)
+        .unwrap()
+        .unwrap();
+    mj_controller::database::fail_unready_session(CHILD, CAUSE, child.state, &child.updated_at)
+        .unwrap()
+        .unwrap();
+    let error = state
+        .fail_subagent_start(CHILD, &group, CAUSE)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("stop refused by fixture"),
+        "{error:#}"
+    );
+    assert_eq!(row().phase, "pending");
+    assert!(reports().is_empty());
+
     let exit_record = root.join(mj_core::relay::WORKER_EXIT_FILE);
     channels.shutdown.shutdown().await.unwrap();
+    std::fs::remove_file(live).unwrap();
+    // Restore Running so the typed-death recovery path can commit its own Error.
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
     std::fs::write(
         &exit_record,
         serde_json::json!({"reason": "worker exited", "harness_startup_failure": {"message": CAUSE}})
@@ -12979,6 +13019,10 @@ async fn child_startup_failure_waits_for_confirmed_worker_death() {
     .unwrap();
     assert_eq!(state.session_state(CHILD), Some(SessionState::Error));
     assert!(row().error.unwrap().contains(CAUSE));
+    assert_eq!(
+        std::fs::read_to_string(root.join("control.log")).unwrap(),
+        "liveness\nstop\nliveness\n"
+    );
     state.cancel_and_join_startup_prompts().await.unwrap();
 }
 

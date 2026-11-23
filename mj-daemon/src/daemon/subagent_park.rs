@@ -26,8 +26,13 @@ pub(super) fn startup_worker_is_terminal(state: Option<SessionState>) -> bool {
 
 async fn startup_worker_stopped(session_id: &str) -> Result<bool> {
     let id = session_id.to_owned();
-    let state = blocking(move || mj_controller::database::load_session_state(&id)).await?;
-    Ok(startup_worker_is_terminal(state))
+    let record =
+        blocking(move || mj_controller::database::read_durable_session_record(&id)).await?;
+    Ok(record.is_none_or(|record| {
+        // A readiness failure can record Error while the worker still holds its target.
+        startup_worker_is_terminal(Some(record.state))
+            && (record.state != SessionState::Error || record.target.is_none())
+    }))
 }
 
 impl RuntimeState {
