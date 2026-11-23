@@ -1,0 +1,271 @@
+=== raw transcript and composer state (100x24) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Raw transcript source enabled
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> inspect renderer                                                                                │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+render mode: Raw
+
+=== retired transcript shortcut remains local (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Rich transcript rendering enabled
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> inspect renderer                                                                                │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+render mode: Rich
+
+=== retired transcript shortcut remains local (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Rich transcript rendering enabled
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> inspect renderer                                                                                │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+render mode: Rich
+
+=== retired transcript shortcut remains local (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Rich transcript rendering enabled
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> inspect renderer                                                                                │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+render mode: Rich
+
+=== replayed user and agent transcript (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ You                                                                                           ▐│
+│ │ work                                                                                          ▐│
+│                                                                                                 ▐│
+│ ● Agent                                                                                         ▐│
+│ │ done                                                                                          ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
+╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== elicitation reply echoed as a user message after replay (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ You                                                                                           ▐│
+│ │ work                                                                                          ▐│
+│                                                                                                 ▐│
+│ ● Agent                                                                                         ▐│
+│ │ done                                                                                          ▐│
+│                                                                                                 ▐│
+│ ❯ You                                                                                           ▐│
+│ │ Choose an architecture                                                                        ▐│
+│ │                                                                                               ▐│
+│ │ Architecture: Thin callers                                                                    ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
+╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== pending tool call title (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                                                ▐│
+│ │ grep                                                                                          ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+
+=== completed tool call keeps title and suppresses update noise (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                                                   ▐│
+│ │ grep                                                                                          ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+entry text: "grep config"
+
+=== plan entry pending (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ◇ Plan                                                                                          ▐│
+│ │ ○ inspect renderer                                                                            ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+plan entries: 1
+completed: false
+
+=== plan entry completed (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ◇ Plan                                                                                          ▐│
+│ │ ✓ inspect renderer                                                                            ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+plan entries: 1
+completed: true

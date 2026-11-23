@@ -1,0 +1,66 @@
+=== full viewport (3x20) ===
+geometry: max=0 thumb=Rect { x: 1, y: 0, width: 1, height: 20 }
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+=== proportional thumb at start (3x20) ===
+geometry: max=75 thumb=Rect { x: 1, y: 0, width: 1, height: 5 }
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+=== proportional thumb at end (3x20) ===
+geometry: max=75 thumb=Rect { x: 1, y: 15, width: 1, height: 5 }
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ │
+ ▐
+ ▐
+ ▐
+ ▐
+ ▐

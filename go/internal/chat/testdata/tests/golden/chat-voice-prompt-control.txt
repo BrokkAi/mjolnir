@@ -1,0 +1,200 @@
+=== voice unavailable (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+Alt-V action: None
+draft empty: true
+
+=== voice available, host owns Alt-V (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: ToggleVoice
+Alt-V action: None
+
+=== enabled microphone and rendered hitbox (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
+
+=== mouse activates microphone on release (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: ToggleVoice
+press action: None
+
+=== disabled microphone click is inert (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then q detach · : / ? palette
+action: None
+button area: Some(Rect { x: 2, y: 18, width: 5, height: 1 })
+
+=== Enter preserves a draft during active voice capture (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  mic ────────────────────────────────────────────────────────────────────────────────────────────╮
+│> dictated draft                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Listening… click the microphone to stop │ ctrl+b then q detach · : / ? palette
+action: None
+draft: "dictated draft"
+
+=== prompt width 4 microphone geometry (4x8) ===
+╭…─╮
+│  │
+│  │
+│  │
+╰──╯
+╭  ╮
+╰──╯
+
+button area: None
+
+=== prompt width 5 microphone geometry (5x8) ===
+╭ C…╮
+│ N▐│
+│  ▐│
+│  ▐│
+╰───╯
+╭  m╮
+╰───╯
+
+button area: None
+
+=== prompt width 30 microphone geometry (30x8) ===
+╭ Conversation ──────────────╮
+│ No messages yet — send a p▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭  mic ──────────────────────╮
+╰────────────────────────────╯
+q detach · : / ? palette
+button area: Some(Rect { x: 6, y: 2, width: 5, height: 1 })
