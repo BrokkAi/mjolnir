@@ -257,11 +257,11 @@ impl HttpDaemonClient {
                 .context(MISSING_ENDPOINT);
         }
         loop {
-            // The old control socket can still answer Identity while it
-            // drains. Replaying there leaves a second race with shutdown.
-            if let Some(endpoint) = self.local_endpoint().await?
-                && endpoint.instance_id != stale.instance_id
-            {
+            // Accept whichever endpoint is currently published, including the
+            // original daemon if an abandoned handoff reopens admission after
+            // its drain lapses. While it is still draining, the outer retry
+            // loop receives another explicit handoff refusal and backs off.
+            if let Some(endpoint) = self.local_endpoint().await? {
                 return Ok(endpoint);
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -560,7 +560,6 @@ mod tests {
         .unwrap();
         client.allow_reconnect = true;
         client.endpoint.get_mut().instance_id = Some("original-instance".into());
-        let original_endpoint = client.endpoint.get_mut().clone();
         let reconnects = Arc::new(AtomicUsize::new(0));
         let count = reconnects.clone();
         let replacement = replacement.map(|listener| {
@@ -574,17 +573,12 @@ mod tests {
         });
         client.test_reconnect = Some(Box::new(move || {
             let probe = count.fetch_add(1, Ordering::SeqCst);
-            let original_endpoint = original_endpoint.clone();
             let replacement = replacement.clone();
             Box::pin(async move {
                 let replacement = replacement.context("unexpected reconnect")?;
-                // Identity can still answer on the old control connection
-                // after the mutation has already seen a handoff refusal.
-                Ok(Some(if probe == 0 {
-                    original_endpoint
-                } else {
-                    replacement
-                }))
+                // Simulate the handoff gap where the old daemon has exited and
+                // the replacement has not yet published its endpoint.
+                Ok((probe > 0).then_some(replacement))
             })
         }));
         (client, reconnects)
@@ -653,6 +647,48 @@ mod tests {
         assert_eq!(reconnects.load(Ordering::SeqCst), 2);
         assert_eq!(client.instance_id().await.as_deref(), Some("next-instance"));
         assert!(client.shares_client_filesystem().await);
+    }
+
+    #[tokio::test]
+    async fn abandoned_handoff_resumes_against_the_same_daemon() {
+        let daemon = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = HttpDaemonClient::new(
+            format!("http://{}", daemon.local_addr().unwrap()),
+            "endpoint-secret",
+        )
+        .unwrap();
+        client.allow_reconnect = true;
+        client.endpoint.get_mut().instance_id = Some("original-instance".into());
+        let same_endpoint = client.endpoint.get_mut().clone();
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let count = reconnects.clone();
+        client.test_reconnect = Some(Box::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            let endpoint = same_endpoint.clone();
+            Box::pin(async move { Ok(Some(endpoint)) })
+        }));
+        let server = async {
+            // Drain refuses twice, then lapses and the original daemon accepts.
+            for _ in 0..2 {
+                let (stream, line, _, _) = read_request(&daemon).await;
+                assert_eq!(line, "POST /api/v1/workspaces/sample/touch HTTP/1.1");
+                respond(stream, UNAVAILABLE, HANDOFF).await;
+            }
+            let (stream, line, _, _) = read_request(&daemon).await;
+            assert_eq!(line, "POST /api/v1/workspaces/sample/touch HTTP/1.1");
+            respond(stream, "204 No Content", "").await;
+        };
+        let ((), result) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, client.touch_workspace("sample".into()))
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(reconnects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            client.instance_id().await.as_deref(),
+            Some("original-instance")
+        );
     }
 
     #[tokio::test]
