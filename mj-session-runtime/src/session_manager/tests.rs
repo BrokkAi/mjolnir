@@ -2045,14 +2045,33 @@ async fn project_memory_install_queues_only_replica_changes() {
     assert_eq!(additive.files["/old.md"], "old\n");
 
     let entries = pending();
-    assert_eq!(entries.len(), 2);
-    for (installed, removed) in [(replaced, " Removed old.md."), (additive, "")] {
-        let key = format!(
-            "project-memory:{LEASED_RELAY_SESSION}:{}:{}",
-            replica.version().0,
-            installed.version().0
-        );
-        let entry = entries.iter().find(|entry| entry.event_key == key).unwrap();
+    assert_eq!(entries.len(), 3);
+    let replaced_prefix = format!(
+        "project-memory:{LEASED_RELAY_SESSION}:{}:{}:",
+        replica.version().0,
+        replaced.version().0
+    );
+    let additive_prefix = format!(
+        "project-memory:{LEASED_RELAY_SESSION}:{}:{}:",
+        replica.version().0,
+        additive.version().0
+    );
+    let replaced_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event_key.starts_with(&replaced_prefix))
+        .collect();
+    assert_eq!(replaced_entries.len(), 2);
+    assert_ne!(replaced_entries[0].event_key, replaced_entries[1].event_key);
+    let additive_entries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event_key.starts_with(&additive_prefix))
+        .collect();
+    assert_eq!(additive_entries.len(), 1);
+    for (entry, removed) in [
+        (replaced_entries[0], " Removed old.md."),
+        (replaced_entries[1], " Removed old.md."),
+        (additive_entries[0], ""),
+    ] {
         let event: MailboxEvent = serde_json::from_str(&entry.event_json).unwrap();
         assert_eq!(entry.target_session_id, LEASED_RELAY_SESSION);
         assert_eq!(event.key, entry.event_key);

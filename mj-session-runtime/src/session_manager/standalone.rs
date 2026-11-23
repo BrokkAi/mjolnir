@@ -1347,10 +1347,17 @@ pub(super) async fn install_project_memory_and_notify<W: ProjectMemoryWorker>(
         return Ok(());
     };
 
-    // The delivery owner derives the relay command ID from this outbox key.
+    // Give each successful installation its own occurrence key so recurring
+    // A -> B -> A -> B transitions are never suppressed by prior accepted rows;
+    // mailbox delivery reuses this persisted key across all worker retries.
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| anyhow::anyhow!("generate project-memory notice nonce: {error}"))?;
     let key = format!(
-        "project-memory:{session_id}:{}:{}",
-        notice.before.0, notice.after.0
+        "project-memory:{session_id}:{}:{}:{}",
+        notice.before.0,
+        notice.after.0,
+        mj_core::hex::lower_hex(nonce),
     );
     let event = MailboxEvent {
         key: key.clone(),
