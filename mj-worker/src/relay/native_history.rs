@@ -224,6 +224,7 @@ impl NativeHistoryEvidence {
             }
             | RelayObservation::HarnessTurnStarted { .. }
             | RelayObservation::PermissionAutoApproved { .. }
+            | RelayObservation::GuardianReviewed { .. }
             | RelayObservation::ElicitationRequested { .. } => self.used = true,
             RelayObservation::ManagedSubagentConfigured { .. }
             | RelayObservation::WorkLivenessChanged { .. }
@@ -414,6 +415,7 @@ mod tests {
                 elicitation_id: question.id.clone(),
                 action: "accept".into(),
                 reply: None,
+                answers: None,
             })
             .unwrap();
         assert!(relay.snapshot.pending_elicitations.is_empty());

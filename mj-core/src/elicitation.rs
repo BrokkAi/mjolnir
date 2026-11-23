@@ -283,6 +283,81 @@ impl ElicitationRequest {
                 .is_some_and(|parent| parent.secret)
     }
 
+    fn submitted_fields<'a>(
+        &'a self,
+        content: &'a BTreeMap<String, ElicitationValue>,
+    ) -> impl Iterator<Item = (&'a ElicitationField, &'a str, &'a ElicitationValue)> {
+        self.fields.iter().filter_map(|field| {
+            let value = content.get(&field.id)?;
+            let parent = field
+                .custom_answer_for
+                .as_ref()
+                .and_then(|id| self.fields.iter().find(|parent| parent.id == *id));
+            let title = parent
+                .filter(|parent| !content.contains_key(&parent.id))
+                .map_or(field.title.as_str(), |parent| parent.title.as_str());
+            Some((field, title, value))
+        })
+    }
+
+    /// Extract human answers without using harness labels as values.
+    pub fn trusted_answers(
+        &self,
+        response: &ElicitationResponse,
+    ) -> Vec<crate::guardian::TrustedUserAnswerField> {
+        let ElicitationResponse::Accept { content } = response else {
+            return Vec::new();
+        };
+        self.submitted_fields(content)
+            .map(|(field, title, value)| {
+                let secret = self.field_is_secret(field);
+                let selected_option = match (&field.kind, value) {
+                    (
+                        ElicitationFieldKind::SingleSelect { options, .. },
+                        ElicitationValue::String(value),
+                    ) => options.iter().any(|option| option.value == *value),
+                    (
+                        ElicitationFieldKind::MultiSelect { options, .. },
+                        ElicitationValue::StringArray(values),
+                    ) => {
+                        !values.is_empty()
+                            && values
+                                .iter()
+                                .all(|value| options.iter().any(|option| option.value == *value))
+                    }
+                    _ => false,
+                };
+                let (value, option_label) = if selected_option {
+                    let displayed = if secret {
+                        "[hidden]".to_owned()
+                    } else {
+                        field.reply_value_text(value)
+                    };
+                    (String::new(), Some(displayed))
+                } else {
+                    let entered = if secret {
+                        "[hidden]".to_owned()
+                    } else {
+                        match value {
+                            ElicitationValue::String(text) => text.clone(),
+                            ElicitationValue::StringArray(values) => values.join(", "),
+                            ElicitationValue::Integer(number) => number.to_string(),
+                            ElicitationValue::Number(number) => number.to_string(),
+                            ElicitationValue::Boolean(flag) => flag.to_string(),
+                        }
+                    };
+                    (entered, None)
+                };
+                crate::guardian::TrustedUserAnswerField {
+                    field_label: title.to_owned(),
+                    selected_option,
+                    value,
+                    option_label,
+                }
+            })
+            .collect()
+    }
+
     /// The user's reply for conversation history. Mask secrets here, before
     /// the runtime event or durable journal can retain them.
     pub fn reply_text(&self, response: &ElicitationResponse) -> String {
@@ -292,17 +367,7 @@ impl ElicitationRequest {
         ];
         match response {
             ElicitationResponse::Accept { content } => {
-                for field in &self.fields {
-                    let Some(value) = content.get(&field.id) else {
-                        continue;
-                    };
-                    let parent = field
-                        .custom_answer_for
-                        .as_ref()
-                        .and_then(|id| self.fields.iter().find(|parent| parent.id == *id));
-                    let title = parent
-                        .filter(|parent| !content.contains_key(&parent.id))
-                        .map_or(&field.title, |parent| &parent.title);
+                for (field, title, value) in self.submitted_fields(content) {
                     let text = if self.field_is_secret(field) {
                         "[hidden]".to_owned()
                     } else {
@@ -1171,10 +1236,36 @@ mod tests {
         // An answer written in the note is the question's own answer. The
         // harness gets it in the question field, where codex-acp reads an Air
         // client's typed answer, so the required field is never missing.
-        assert_eq!(
-            request.harness_response(answer(&[("scope_note", "Only the parser")])),
-            Ok(answer(&[("scope", "Only the parser")]))
-        );
+        let normalized = request
+            .harness_response(answer(&[("scope_note", "Only the parser")]))
+            .unwrap();
+        assert_eq!(normalized, answer(&[("scope", "Only the parser")]));
+        let answers = request.trusted_answers(&normalized);
+        let [entered] = answers.as_slice() else {
+            panic!("expected one typed answer")
+        };
+        assert!(!entered.selected_option);
+        assert_eq!(entered.value, "Only the parser");
+        assert!(entered.option_label.is_none());
+
+        let input = crate::guardian::TrustedUserInput::from_elicitation(
+            "elicitation:1:typed-answer".into(),
+            &request.id,
+            Some(&request),
+            "accept",
+            None,
+            Some(&answers),
+        )
+        .unwrap();
+        let review: crate::guardian::GuardianReviewRequest = serde_json::from_value(json!({
+            "request_id": "review", "harness": "codex", "session_id": "forms",
+            "tool_call_id": "tool", "action": {}, "user_instructions": [],
+            "user_instructions_omitted": false, "transcript": "", "trusted_user_inputs": [input],
+        }))
+        .unwrap();
+        let prompt = review.request_text_tool_free();
+        assert!(prompt.contains(r#"Human entered value: "Only the parser""#));
+        assert!(!prompt.contains("Human selected option shown on screen"));
         // The note is an alternative to a pick, never beside one: codex-acp's
         // async question path reads a note in place of the pick, so sending
         // both would lose the pick.
