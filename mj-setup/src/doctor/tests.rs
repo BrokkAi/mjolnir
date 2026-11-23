@@ -104,6 +104,8 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
 }
 
 // Hard-won: #1266: a working Claude Bedrock profile was reported as needing subscription login.
+const ROOTLESS_DOCKER_INFO: &[u8] = br#"{"ServerVersion":"27.5.1","OSType":"linux","CgroupDriver":"systemd","CgroupVersion":"2","SecurityOptions":["name=rootless"],"CpuCfsQuota":false,"MemoryLimit":true}"#;
+
 #[test]
 fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     let ssh = RuntimeSshTarget {
@@ -112,7 +114,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     };
     let docker = FakeExecutor::new([
         Ok(output(b"")),
-        Ok(output(b"27.5.1 linux\n")),
+        Ok(output(ROOTLESS_DOCKER_INFO)),
         Ok(output(
             br#"[{"Id":"sha256:0123456789abcdef","RepoTags":["ghcr.io/example/dev:1.2.3"],"Config":{"Labels":{"org.brokk.mjolnir.worker-build":"2.0.0+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}]"#,
         )),
@@ -124,6 +126,8 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         &docker,
         false,
     );
+    let local_docker =
+        local_docker_runtime_check(&FakeExecutor::new([Ok(output(ROOTLESS_DOCKER_INFO))]));
     let docker_commands = docker.commands.borrow();
     assert_eq!(docker_commands.len(), 3);
     assert!(
@@ -139,7 +143,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         docker_commands[1]
             .args
             .last()
-            .is_some_and(|command| command.contains("'docker' 'version' '--format'"))
+            .is_some_and(|command| command.contains("'docker' 'info' '--format'"))
     );
     assert!(
         docker_commands[2]
@@ -274,6 +278,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     let subagent_checks = subagent_policy_checks(Ok(&config));
     let mut checks = vec![
         docker_check,
+        local_docker,
         nitro_check,
         nitro_missing_engine_check,
         nitro_no_pool_check,
@@ -437,7 +442,12 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         Ok(output(crate::setup::machine_probe_fixture(&[
             ("platform", 0, b"Linux x86_64\n", ""),
             ("podman", 0, &podman_missing, ""),
-            ("docker", 0, b"27.5.1 linux\n", ""),
+            (
+                "docker",
+                0,
+                br#"{"ServerVersion":"27.5.1","OSType":"linux"}"#,
+                "",
+            ),
         ]))),
         // laptop
         Ok(CommandOutput {
@@ -890,7 +900,7 @@ fn a_missing_docker_is_reported_as_not_installed() {
 #[test]
 fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
     let executor = FakeExecutor::new([
-        Ok(output(b"29.0.1 linux\n")),
+        Ok(output(ROOTLESS_DOCKER_INFO)),
         Ok(output(b"image metadata\n")),
     ]);
     let checks = docker_checks(Ok(&Config::default()), &executor, false);
@@ -900,12 +910,15 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
             .map(|check| (check.id.as_str(), check.status))
             .collect::<Vec<_>>(),
         vec![
-            ("runtime.docker", CheckStatus::Ready),
+            ("runtime.docker", CheckStatus::Warning),
             ("runtime.docker.image.docker", CheckStatus::Ready)
         ]
     );
 
-    let missing_image = FakeExecutor::new([Ok(output(b"29.0.1 linux\n")), Ok(failed(b""))]);
+    let missing_image = FakeExecutor::new([
+        Ok(output(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#)),
+        Ok(failed(b"")),
+    ]);
     let checks = docker_checks(Ok(&Config::default()), &missing_image, false);
     assert_eq!(
         checks[1].status,
@@ -940,7 +953,7 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
     assert!(!all_ready(&checks));
 
     let available = FakeExecutor::new([
-        Ok(output(b"29.0.1 linux\n")),
+        Ok(output(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#)),
         Ok(output(b"image metadata\n")),
         Ok(output(b"image metadata\n")),
     ]);
@@ -998,7 +1011,10 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
         podman[0].detail
     );
 
-    let missing_image = FakeExecutor::new([Ok(output(b"29.0.1 linux\n")), Ok(failed(b""))]);
+    let missing_image = FakeExecutor::new([
+        Ok(output(br#"{"ServerVersion":"29.0.1","OSType":"linux"}"#)),
+        Ok(failed(b"")),
+    ]);
     let checks = docker_checks(Ok(&written), &missing_image, false);
     assert_eq!(
         checks[1].status,

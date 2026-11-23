@@ -26,19 +26,20 @@ pub(super) fn managed_resource_identity_args(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PodmanPreflight {
+pub struct ContainerPreflight {
     pub version: String,
     /// Non-fatal host configuration problems that can make sessions fragile.
-    pub warnings: Vec<PodmanPreflightWarning>,
+    pub warnings: Vec<ContainerPreflightWarning>,
+    pub cgroups: CgroupCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PodmanPreflightWarning {
+pub struct ContainerPreflightWarning {
     pub detail: String,
     pub remediation: String,
 }
 
-impl PodmanPreflightWarning {
+impl ContainerPreflightWarning {
     pub fn notice(&self) -> String {
         format!("{} {}", self.detail, self.remediation)
     }
@@ -90,20 +91,15 @@ impl PodmanHost<'_> {
 ///
 /// This intentionally never pulls an image. Image availability is verified by
 /// `mj doctor --smoke` and by the subsequent target creation command.
-pub fn verify_local_podman(executor: &impl CommandExecutor) -> Result<PodmanPreflight> {
+pub fn verify_local_podman(executor: &impl CommandExecutor) -> Result<ContainerPreflight> {
     verify_podman(PodmanHost::Local, executor)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DockerPreflight {
-    pub version: String,
 }
 
 /// Verify that the Docker CLI can reach a Linux Docker daemon.
 ///
 /// Image and OverlayFS support are exercised by `mj doctor --smoke`;
 /// this fast probe runs before every launch and never pulls an image.
-pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPreflight> {
+pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<ContainerPreflight> {
     verify_docker(None, executor)
 }
 
@@ -232,7 +228,7 @@ fn apple_container_output(output: &CommandOutput) -> String {
 pub fn verify_ssh_docker(
     ssh: &SshTarget,
     executor: &impl CommandExecutor,
-) -> Result<DockerPreflight> {
+) -> Result<ContainerPreflight> {
     validate_ssh(ssh)?;
     verify_docker(Some(ssh), executor).with_context(|| {
         format!(
@@ -502,14 +498,14 @@ impl std::fmt::Display for DockerUnavailable {
                     "Docker is installed, but its daemon is not running."
                 )?;
                 if !reported.is_empty() {
-                    write!(formatter, " `docker version` said: {reported}")?;
+                    write!(formatter, " `docker info` said: {reported}")?;
                 }
                 Ok(())
             }
             Self::NotAnswering { status, reported } => {
                 write!(
                     formatter,
-                    "Docker did not answer its check on this host: `docker version` exited with status {status}"
+                    "Docker did not answer its check on this host: `docker info` exited with status {status}"
                 )?;
                 if !reported.is_empty() {
                     write!(formatter, ": {reported}")?;
@@ -541,20 +537,15 @@ fn is_missing_program(error: &anyhow::Error) -> bool {
 }
 
 /// The command the Docker check runs: it answers only when a daemon does.
-pub const DOCKER_SERVER_VERSION: [&str; 4] = [
-    "docker",
-    "version",
-    "--format",
-    "{{.Server.Version}} {{.Server.Os}}",
-];
+pub const DOCKER_SERVER_INFO: [&str; 4] = ["docker", "info", "--format", "{{json .}}"];
 
 pub(super) fn verify_docker(
     ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
-) -> Result<DockerPreflight> {
+) -> Result<ContainerPreflight> {
     let command = CommandSpec::new(
-        DOCKER_SERVER_VERSION[0],
-        DOCKER_SERVER_VERSION[1..].iter().copied(),
+        DOCKER_SERVER_INFO[0],
+        DOCKER_SERVER_INFO[1..].iter().copied(),
     )
     .purpose("check Docker daemon")
     .stage(ProvisionStage::Provisioning);
@@ -590,21 +581,42 @@ pub(super) fn verify_docker(
             return Err(problem.into());
         }
         bail!(
-            "Docker preflight failed: `docker version` exited with status {}: {reported}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
+            "Docker preflight failed: `docker info` exited with status {}: {reported}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
             output.status
         );
     }
-    let reported = String::from_utf8_lossy(&output.stdout);
-    let mut fields = reported.split_whitespace();
-    let version = fields.next().unwrap_or_default();
-    let os = fields.next().unwrap_or_default();
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("Docker preflight failed: `docker info` returned unparsable JSON")?;
+    let version = info["ServerVersion"].as_str().unwrap_or_default();
     ensure!(
-        !version.is_empty() && os == "linux",
-        "Docker preflight failed: expected a Linux Docker daemon, got {:?}. See {DOCKER_DOCUMENTATION_URL}.",
-        reported.trim()
+        !version.is_empty() && info["OSType"].as_str() == Some("linux"),
+        "Docker preflight failed: expected a Linux Docker daemon, got version {version:?} and OS {}. See {DOCKER_DOCUMENTATION_URL}.",
+        info["OSType"]
     );
-    Ok(DockerPreflight {
+    let no_driver = info["CgroupDriver"].as_str() == Some("none");
+    let rootless = no_driver
+        || info["SecurityOptions"].as_array().is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| option.as_str() == Some("name=rootless"))
+        });
+    let cgroup_version = info["CgroupVersion"].as_str();
+    let mut cgroups = CgroupCapabilities::default();
+    if rootless && (cgroup_version == Some("2") || no_driver) {
+        let unsupported = |field: &str| info[field].as_bool() == Some(false);
+        if unsupported("CpuCfsQuota") || unsupported("CpuCfsPeriod") {
+            cgroups.unenforceable_limits.push(CgroupLimit::Cpu);
+        }
+        if unsupported("MemoryLimit") {
+            cgroups.unenforceable_limits.push(CgroupLimit::Memory);
+        }
+        cgroups.needs_cgroup_v2 = cgroup_version == Some("1");
+    }
+    let warnings = cgroups.warning("Docker", ssh).into_iter().collect();
+    Ok(ContainerPreflight {
         version: version.to_owned(),
+        warnings,
+        cgroups,
     })
 }
 
@@ -615,7 +627,7 @@ pub(super) fn verify_docker(
 pub fn verify_ssh_podman(
     ssh: &SshTarget,
     executor: &impl CommandExecutor,
-) -> Result<PodmanPreflight> {
+) -> Result<ContainerPreflight> {
     let host = PodmanHost::Ssh(ssh);
     validate_ssh(ssh).map_err(|error| {
         anyhow::anyhow!(
@@ -806,7 +818,7 @@ impl PodmanPostcondition {
 pub(super) fn verify_podman(
     host: PodmanHost<'_>,
     executor: &impl CommandExecutor,
-) -> Result<PodmanPreflight> {
+) -> Result<ContainerPreflight> {
     verify_podman_probes(host, cfg!(target_os = "macos"), |probe| {
         execute_podman_probe(executor, host, probe)
     })
@@ -821,7 +833,7 @@ pub(super) fn verify_podman_probes(
     host: PodmanHost<'_>,
     macos_host: bool,
     probe_output: impl Fn(PodmanProbe) -> Result<CommandOutput>,
-) -> Result<PodmanPreflight> {
+) -> Result<ContainerPreflight> {
     let version = probe_output(PodmanProbe::Version)?;
     let version = parse_podman_version(host, &version.stdout)?;
 
@@ -873,20 +885,23 @@ pub(super) fn verify_podman_probes(
     }
 
     let mut warnings = Vec::new();
-    if !info.unenforceable_limits.is_empty() {
-        warnings.push(PodmanPreflightWarning {
-            detail: unenforceable_limits_detail(&info.unenforceable_limits),
-            remediation: format!(
-                "{}{}",
-                host.remediation_scope(),
-                CGROUP_DELEGATION_REMEDIATION
-            ),
-        });
-    }
-    Ok(PodmanPreflight { version, warnings })
+    let cgroups = CgroupCapabilities {
+        unenforceable_limits: info.unenforceable_limits,
+        ..Default::default()
+    };
+    let ssh = match host {
+        PodmanHost::Local => None,
+        PodmanHost::Ssh(ssh) => Some(ssh),
+    };
+    warnings.extend(cgroups.warning("Podman", ssh));
+    Ok(ContainerPreflight {
+        version,
+        warnings,
+        cgroups,
+    })
 }
 
-/// A session container limit that rootless Podman applies through a cgroup v2
+/// A session container limit that a rootless engine applies through a cgroup v2
 /// controller, which systemd must delegate to the user's session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CgroupLimit {
@@ -904,7 +919,7 @@ impl CgroupLimit {
         }
     }
 
-    /// The `podman run` flag, as `backend_container` writes it, `--cpus=4`.
+    /// The run flag prefix used by `backend_container`.
     pub fn run_flag_prefix(self) -> &'static str {
         match self {
             Self::Cpu => "--cpus=",
@@ -917,22 +932,83 @@ impl CgroupLimit {
 /// Podman runs with only the pids controller. runc then fails every container
 /// that sets `--cpus` or `--memory`, naming a missing `cpu.max` or
 /// `memory.swap.max`.
-pub const CGROUP_DELEGATION_REMEDIATION: &str = "To enforce them, have systemd delegate the controllers to user sessions: create `/etc/systemd/system/user@.service.d/80-delegate.conf` containing `[Service]` and `Delegate=pids memory cpu`, run `sudo systemctl daemon-reload`, then log in again.";
+const CGROUP_DELEGATION_REMEDIATION: &str = "Have systemd delegate the controllers to user sessions: create `/etc/systemd/system/user@.service.d/80-delegate.conf` containing `[Service]` and `Delegate=pids memory cpu`, run `sudo systemctl daemon-reload`, then log in again.";
 
-pub fn unenforceable_limits_detail(limits: &[CgroupLimit]) -> String {
-    let controllers = limits
-        .iter()
-        .map(|limit| limit.controller())
-        .collect::<Vec<_>>()
-        .join(" and ");
-    let noun = if limits.len() == 1 {
-        "controller"
-    } else {
-        "controllers"
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CgroupCapabilities {
+    pub unenforceable_limits: Vec<CgroupLimit>,
+    needs_cgroup_v2: bool,
+}
+
+impl CgroupCapabilities {
+    fn warning(&self, engine: &str, ssh: Option<&SshTarget>) -> Option<ContainerPreflightWarning> {
+        if self.unenforceable_limits.is_empty() {
+            return None;
+        }
+        let controllers = self
+            .unenforceable_limits
+            .iter()
+            .map(|limit| limit.controller())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let scope = ssh.map_or_else(String::new, |ssh| format!("On {}: ", ssh.destination));
+        let upgrade = if self.needs_cgroup_v2 {
+            "Enable cgroup v2, then configure delegation. "
+        } else {
+            ""
+        };
+        let restart = if engine == "Docker" {
+            " Restart the user Docker service after changing delegation."
+        } else {
+            ""
+        };
+        Some(ContainerPreflightWarning {
+            detail: format!(
+                "Rootless {engine} cannot enforce session {controllers} limits with its current cgroup configuration, so sessions start without them."
+            ),
+            remediation: format!("{scope}{upgrade}{CGROUP_DELEGATION_REMEDIATION}{restart}"),
+        })
+    }
+}
+
+/// Identify and report requested limits the destination engine cannot enforce.
+/// Reuse capabilities from launch preflight when the engine was just checked.
+pub fn unenforceable_container_limits(
+    host: &ImageHost,
+    preflight: Option<CgroupCapabilities>,
+    requested: impl Fn(CgroupLimit) -> bool,
+    executor: &impl CommandExecutor,
+) -> Vec<CgroupLimit> {
+    let (engine, ssh) = match host {
+        ImageHost::LocalPodman => ("Podman", None),
+        ImageHost::SshPodman(ssh) => ("Podman", Some(ssh)),
+        ImageHost::LocalDocker => ("Docker", None),
+        ImageHost::SshDocker(ssh) => ("Docker", Some(ssh)),
+        _ => return Vec::new(),
     };
-    format!(
-        "Rootless Podman cannot enforce session {controllers} limits because systemd does not delegate the {controllers} cgroup {noun} to this user, so sessions start without them."
-    )
+    if !CgroupLimit::ALL.into_iter().any(&requested) {
+        return Vec::new();
+    }
+    let mut cgroups = match preflight
+        .map_or_else(|| probe_container_unenforceable_limits(host, executor), Ok)
+    {
+        Ok(cgroups) => cgroups,
+        Err(error) => {
+            tracing::warn!(host = %host.label(), error = format!("{error:#}"), "could not read cgroup capabilities; keeping container limits");
+            executor.notify_notice(&format!(
+                "Could not read cgroup capabilities for {}, so the session keeps its CPU and memory limits: {error:#}",
+                host.label()
+            ));
+            return Vec::new();
+        }
+    };
+    cgroups
+        .unenforceable_limits
+        .retain(|limit| requested(*limit));
+    if let Some(warning) = cgroups.warning(engine, ssh) {
+        executor.notify_notice(&warning.notice());
+    }
+    cgroups.unenforceable_limits
 }
 
 /// The limits Podman cannot enforce, read from the `host` object of
@@ -963,14 +1039,17 @@ fn unenforceable_limits(host: &serde_json::Value) -> Vec<CgroupLimit> {
         .collect()
 }
 
-/// Ask the Podman that will run a container which limits it cannot enforce.
-pub fn probe_podman_unenforceable_limits(
-    ssh: Option<&SshTarget>,
+/// Ask the engine that will run the container which limits it can enforce.
+fn probe_container_unenforceable_limits(
+    host: &ImageHost,
     executor: &impl CommandExecutor,
-) -> Result<Vec<CgroupLimit>> {
-    let host = match ssh {
-        Some(ssh) => PodmanHost::Ssh(ssh),
-        None => PodmanHost::Local,
+) -> Result<CgroupCapabilities> {
+    let host = match host {
+        ImageHost::LocalPodman => PodmanHost::Local,
+        ImageHost::SshPodman(ssh) => PodmanHost::Ssh(ssh),
+        ImageHost::LocalDocker => return Ok(verify_docker(None, executor)?.cgroups),
+        ImageHost::SshDocker(ssh) => return Ok(verify_docker(Some(ssh), executor)?.cgroups),
+        _ => return Ok(CgroupCapabilities::default()),
     };
     let output = executor.execute(&host.command(
         &["podman", "info", "--format", "{{json .Host}}"],
@@ -985,7 +1064,10 @@ pub fn probe_podman_unenforceable_limits(
     }
     let host: serde_json::Value = serde_json::from_slice(&output.stdout)
         .context("`podman info --format '{{json .Host}}'` returned unparsable output")?;
-    Ok(unenforceable_limits(&host))
+    Ok(CgroupCapabilities {
+        unenforceable_limits: unenforceable_limits(&host),
+        ..Default::default()
+    })
 }
 
 /// The parts of `podman info` the preflight checks.
@@ -1086,7 +1168,7 @@ fn podman_info_failure(host: PodmanHost<'_>, observation: &str) -> anyhow::Error
 pub(super) fn ssh_podman_linger_warning(
     ssh: &SshTarget,
     output: Option<&CommandOutput>,
-) -> Option<PodmanPreflightWarning> {
+) -> Option<ContainerPreflightWarning> {
     let Some(output) = output else {
         return Some(linger_unavailable_warning(
             ssh,
@@ -1096,7 +1178,7 @@ pub(super) fn ssh_podman_linger_warning(
     let linger = String::from_utf8_lossy(&output.stdout);
     match (output.status, linger.trim().to_ascii_lowercase().as_str()) {
         (0, "yes") => None,
-        (0, "no") => Some(PodmanPreflightWarning {
+        (0, "no") => Some(ContainerPreflightWarning {
             detail: format!(
                 "Remote user lingering is disabled on {}; SSH-Podman sessions may be terminated when the last SSH connection closes.",
                 ssh.destination
@@ -1124,8 +1206,8 @@ pub(super) fn ssh_podman_linger_warning(
 pub(super) fn linger_unavailable_warning(
     ssh: &SshTarget,
     reason: String,
-) -> PodmanPreflightWarning {
-    PodmanPreflightWarning {
+) -> ContainerPreflightWarning {
+    ContainerPreflightWarning {
         detail: format!(
             "Remote user-manager durability check is unavailable on {} because {reason}. Mjolnir cannot verify whether rootless Podman sessions survive logout.",
             ssh.destination

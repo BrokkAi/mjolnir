@@ -2232,8 +2232,25 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
     downloader.join().expect("the download thread finishes");
 }
 
-/// Answers `podman info --format '{{json .Host}}'` with a fixed host object.
-struct CgroupExecutor(serde_json::Value);
+#[derive(Default)]
+struct CgroupExecutor {
+    responses: std::cell::RefCell<Vec<CommandOutput>>,
+    probes: std::cell::RefCell<Vec<CommandSpec>>,
+    notices: std::cell::RefCell<Vec<String>>,
+}
+
+impl CgroupExecutor {
+    fn answering(stdout: serde_json::Value) -> Self {
+        Self {
+            responses: std::cell::RefCell::new(vec![CommandOutput {
+                status: 0,
+                stdout: stdout.to_string().into_bytes(),
+                stderr: Vec::new(),
+            }]),
+            ..Default::default()
+        }
+    }
+}
 
 impl CommandExecutor for CgroupExecutor {
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
@@ -2260,12 +2277,12 @@ impl CommandExecutor for CgroupExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        assert_eq!(command.purpose, "check Podman cgroup controllers");
-        Ok(CommandOutput {
-            status: 0,
-            stdout: self.0.to_string().into_bytes(),
-            stderr: Vec::new(),
-        })
+        self.probes.borrow_mut().push(command.clone());
+        Ok(self.responses.borrow_mut().remove(0))
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.notices.borrow_mut().push(notice.to_owned());
     }
 }
 
@@ -2299,13 +2316,14 @@ fn container_run_args(target: &targets::TargetTemplate) -> Vec<String> {
 #[test]
 fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     let mut target = limited_podman_target();
-    let executor = CgroupExecutor(serde_json::json!({
+    let executor = CgroupExecutor::answering(serde_json::json!({
         "cgroupManager": "systemd",
         "cgroupVersion": "v2",
         "cgroupControllers": ["pids"],
     }));
 
-    let notices = enforce_cgroup_capable_limits(&mut target, &executor);
+    enforce_cgroup_capable_limits(&mut target, None, &executor);
+    let notices = executor.notices.borrow();
 
     let args = container_run_args(&target);
     assert!(
@@ -2324,11 +2342,74 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
 
     // A host that does not report its controllers is unknown, not empty.
     let mut target = limited_podman_target();
-    let executor = CgroupExecutor(serde_json::json!({ "cgroupVersion": "v2" }));
-    assert!(enforce_cgroup_capable_limits(&mut target, &executor).is_empty());
+    let executor = CgroupExecutor::answering(serde_json::json!({ "cgroupVersion": "v2" }));
+    enforce_cgroup_capable_limits(&mut target, None, &executor);
+    assert!(executor.notices.borrow().is_empty());
     let args = container_run_args(&target);
     assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
+}
+
+#[test]
+fn docker_cgroup_limits_reuse_local_preflight_and_probe_ssh_once() {
+    let info = serde_json::json!({
+        "ServerVersion": "27.5.1",
+        "OSType": "linux",
+        "SecurityOptions": ["name=rootless"],
+        "CgroupDriver": "systemd",
+        "CgroupVersion": "2",
+        "CpuCfsPeriod": false,
+        "MemoryLimit": true,
+    });
+    let targets::TargetTemplate::LocalPodman(container) = limited_podman_target() else {
+        unreachable!()
+    };
+    let ssh = SshTarget {
+        destination: "dev@docker.example.test".into(),
+        ssh_args: Vec::new(),
+    };
+    let config = mj_core::config::TargetTemplate::LocalDocker {
+        container: ConfigContainer {
+            image: container.image.clone(),
+            memory_hard_limit: None,
+            build_cache: None,
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+
+    let mut local = targets::TargetTemplate::LocalDocker(container.clone());
+    let local_executor = CgroupExecutor::answering(info.clone());
+    let capabilities = preflight_target(&config, &local_executor, TargetCheck::Launch).unwrap();
+    enforce_cgroup_capable_limits(&mut local, capabilities, &local_executor);
+    let mut remote = targets::TargetTemplate::SshDocker { ssh, container };
+    let remote_executor = CgroupExecutor::answering(info);
+    enforce_cgroup_capable_limits(&mut remote, None, &remote_executor);
+    let local_probes = local_executor.probes.borrow();
+    assert_eq!(local_probes.len(), 1);
+    assert_eq!(local_probes[0].args, ["info", "--format", "{{json .}}"]);
+    let remote_probes = remote_executor.probes.borrow();
+    assert_eq!(remote_probes.len(), 1);
+    assert_eq!(remote_probes[0].program, "ssh");
+    assert!(
+        remote_probes[0]
+            .args
+            .last()
+            .unwrap()
+            .contains("'docker' 'info' '--format' '{{json .}}'")
+    );
+    for (target, executor) in [(&local, &local_executor), (&remote, &remote_executor)] {
+        let args = &target.image_host().unwrap().1.extra_run_args;
+        assert_eq!(args, &["--memory=8589934592"]);
+        let notices = executor.notices.borrow();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("Rootless Docker cannot enforce session cpu limits"));
+    }
+    assert!(remote_executor.notices.borrow()[0].contains("On dev@docker.example.test"));
 }
 
 /// A held real Git checkout overlaps file staging. Harness preflight waits for
