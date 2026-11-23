@@ -1581,7 +1581,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
-            subagents: Some(mj_core::subagent::SubagentPolicy::Native),
+            subagents: None,
             review: None,
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
@@ -2013,7 +2013,7 @@ fn raw_localhost_uses_local_project_history() {
             supervisors: None,
             oracle_choice: None,
             remember_container_size: false,
-            subagents: Some(mj_core::subagent::SubagentPolicy::Native),
+            subagents: None,
             review: None,
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
@@ -6293,13 +6293,6 @@ fn golden_create_delegation_availability_and_submission() {
                 effort: Some("high".into()),
             }];
         }
-        dashboard.state.last_subagent_policies.insert(
-            String::new(),
-            SubagentPolicy::Mjolnir {
-                straightforward: None,
-                subtle: None,
-            },
-        );
         dashboard.begin_new_wizard();
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new");
@@ -6320,8 +6313,6 @@ fn golden_create_delegation_availability_and_submission() {
                 SubagentPolicy::Native
             }
         );
-        wizard.subagents.select_policy(0);
-        assert_eq!(wizard.subagents.select_policy(1), configured);
         let screen = drawn(&mut dashboard, 140, 40).join("\n");
         assert!(screen.contains("Sub-agents"));
         if !configured {
@@ -6336,17 +6327,7 @@ fn golden_create_delegation_availability_and_submission() {
         else {
             panic!("create");
         };
-        assert_eq!(
-            subagents,
-            Some(if configured {
-                SubagentPolicy::Mjolnir {
-                    straightforward: None,
-                    subtle: None,
-                }
-            } else {
-                SubagentPolicy::Native
-            })
-        );
+        assert_eq!(subagents, None);
         // None is available even without configured Mjolnir models.
         let Mode::New(wizard) = &mut dashboard.mode else {
             unreachable!()
@@ -6629,13 +6610,6 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     use mj_core::config::SubagentChoice;
     use mj_core::subagent::SubagentPolicy;
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.state.last_subagent_policies.insert(
-        String::new(),
-        SubagentPolicy::Mjolnir {
-            straightforward: None,
-            subtle: None,
-        },
-    );
     dashboard.begin_new_wizard();
     let supported = dashboard
         .config
@@ -6680,6 +6654,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
         SubagentPolicy::Native
     );
     assert!(new_wizard(&dashboard).subagents.error().is_none());
+    assert_eq!(new_wizard(&dashboard).subagents.create_selection(), None);
     dashboard.config.subagents.straightforward = vec![choice.clone()];
     dashboard.set_profile_capabilities(Default::default());
     let Mode::New(wizard) = &mut dashboard.mode else {
@@ -6692,6 +6667,7 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
             subtle: None
         }
     );
+    assert_eq!(wizard.subagents.create_selection(), None);
     wizard
         .subagents
         .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 1));
@@ -6713,6 +6689,13 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
             straightforward: None,
             subtle: None
         }
+    );
+    assert_eq!(
+        new_wizard(&dashboard).subagents.create_selection(),
+        Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        })
     );
 }
 

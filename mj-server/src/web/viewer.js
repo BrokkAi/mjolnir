@@ -3307,19 +3307,15 @@ function freshDraft() {
     resourceMemoryText: '',
     rememberContainerSize: false,
   };
-  draft.subagents = rememberedDelegationPolicy(draft.profileId);
-  draft.oracle = rememberedOracleChoice(draft.profileId);
-  draft.supervisors = rememberedSupervisorChoice(draft.profileId);
-  if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
+  initializeNewDelegation(draft);
   setNewTargetSizing(draft, draft.targetId);
   return draft;
 }
 
 function rememberedDelegationPolicy(profileId) {
   const policies = snapshot?.last_subagent_policies || {};
-  return delegationPolicy(Object.hasOwn(policies, profileId)
-    ? policies[profileId]
-    : Object.hasOwn(policies, '') ? policies[''] : { mode: 'native' });
+  const policy = Object.hasOwn(policies, profileId) ? policies[profileId] : policies[''];
+  return policy ? delegationPolicy(policy) : null;
 }
 
 function rememberedOracleChoice(profileId) {
@@ -3333,10 +3329,14 @@ function rememberedSupervisorChoice(profileId) {
 function selectNewProfile(draft, profileId) {
   if (draft.profileId === profileId) return;
   draft.profileId = profileId;
-  draft.subagents = rememberedDelegationPolicy(profileId);
-  draft.oracle = rememberedOracleChoice(profileId);
-  draft.supervisors = rememberedSupervisorChoice(profileId);
-  if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
+  initializeNewDelegation(draft);
+}
+
+function initializeNewDelegation(draft) {
+  draft.subagents = rememberedDelegationPolicy(draft.profileId);
+  draft.oracle = rememberedOracleChoice(draft.profileId);
+  draft.supervisors = rememberedSupervisorChoice(draft.profileId);
+  if (draft.subagents?.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
 }
 
 
@@ -3398,7 +3398,8 @@ function subagentNativeOffered(draft = newDraft) {
 // profile (SubagentPolicy::as_choice_for): Native reads as None where the
 // harness has no sub-agents of its own.
 function shownDelegation(draft, policy) {
-  return policy?.mode === 'native' && !subagentNativeOffered(draft) ? { mode: 'none' } : policy;
+  policy ??= { mode: mjolnirAvailable(draft) ? 'mjolnir' : 'native' };
+  return policy.mode === 'native' && !subagentNativeOffered(draft) ? { mode: 'none' } : policy;
 }
 
 const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir'], ['none', 'None']];
@@ -3418,7 +3419,8 @@ function delegationPolicy(policy) {
 }
 
 function mjolnirAvailable(draft) {
-  return (targetSubagentsConfigured(draft) || !!draft?.subagents?.straightforward || !!draft?.subagents?.subtle || !!draft?.storedSubagents?.straightforward || !!draft?.storedSubagents?.subtle) && subagentChoiceApplies(draft);
+  return subagentChoiceApplies(draft)
+    && (targetSubagentsConfigured(draft) || !!draft?.subagents?.straightforward || !!draft?.storedSubagents?.straightforward);
 }
 
 function subagentSelectionError(draft) {
@@ -3481,7 +3483,7 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   select.onchange = () => {
     // Compare with the draft as it is now: the control can change more than
     // once before the form renders again.
-    if (select.value !== shownDelegation(draft, draft.subagents).mode) {
+    if (!draft.subagents || select.value !== shownDelegation(draft, draft.subagents).mode) {
       draft.subagents = select.value === 'mjolnir' && draft.storedSubagents?.mode === 'mjolnir'
         ? { ...draft.storedSubagents } : { mode: select.value };
     }
@@ -3615,7 +3617,7 @@ function renderNewForm() {
         ? snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories
         : newDraft.projectPicker.mode === 'home' ? [snapshot.bundles, [...recentProjectIds()].sort()] : null,
     ] : null,
-    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.reviewNotice, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, newDraft.mountEditors[newDraft.targetId]?.mounts, snapshot.subagents_configured, subagentChoiceApplies(newDraft)] : null,
+    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.reviewNotice, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, newDraft.mountEditors[newDraft.targetId]?.mounts, mjolnirAvailable(newDraft), subagentChoiceApplies(newDraft)] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -4581,7 +4583,7 @@ async function commitNew() {
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
-    subagents: shownDelegation(draft, draft.subagents),
+    subagents: draft.subagents ? shownDelegation(draft, draft.subagents) : undefined,
     no_github_events: false,
   };
   if (oracleChoiceApplies(draft) && (targetOracleConfigured(draft) || draft.oracleChoice)) body.oracle = draft.oracle;

@@ -20,6 +20,7 @@ pub(crate) struct SubagentDraft {
     /// submits Native as None; see [`Self::selected`].
     pub(crate) policy: SubagentPolicy,
     chosen_policy: Option<Box<SubagentPolicy>>,
+    has_remembered_policy: bool,
     last_mjolnir_policy: Option<Box<SubagentPolicy>>,
     pub(crate) combo: ComboBoxState<WizardControl>,
     pub(crate) discovery: Option<SubagentDiscovery>,
@@ -110,9 +111,13 @@ impl SubagentDraft {
             None => policy.clone(),
         }
     }
-    /// The policy the draft shows and submits.
+    /// The policy the draft shows.
     pub(crate) fn selected(&self) -> SubagentPolicy {
         self.shown(&self.policy)
+    }
+    /// Admission resolves an untouched Create default against current capabilities.
+    pub(crate) fn create_selection(&self) -> Option<SubagentPolicy> {
+        (self.chosen_policy.is_some() || self.has_remembered_policy).then(|| self.selected())
     }
     /// Whether the combo box entry at `index` is Mjolnir.
     pub(crate) fn is_mjolnir_index(&self, index: usize) -> bool {
@@ -292,7 +297,7 @@ impl SubagentDraft {
         target_id: &str,
         config: &Config,
         snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
-        remembered: &SubagentPolicy,
+        remembered: Option<&SubagentPolicy>,
         remembered_oracle: bool,
         remembered_supervisors: bool,
     ) {
@@ -301,30 +306,33 @@ impl SubagentDraft {
             self.supervisors = remembered_supervisors;
             self.profile_id = Some(profile.to_owned());
             self.chosen_policy = None;
-            self.last_mjolnir_policy = remembered
-                .uses_mjolnir()
-                .then(|| Box::new(remembered.clone()));
-            self.policy = remembered.clone();
+            self.last_mjolnir_policy = None;
+            self.policy = remembered.cloned().unwrap_or_default();
             self.combo = ComboBoxState::default();
         }
-        self.update_choices(profile, target_id, config, snapshot);
+        self.has_remembered_policy = remembered.is_some();
         // Keep the user's intent separate from the available displayed policy.
         let desired = self
             .chosen_policy
             .as_deref()
+            .or(remembered)
             .cloned()
-            .unwrap_or_else(|| remembered.clone());
+            .unwrap_or(SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            });
+        if desired.uses_mjolnir() {
+            self.last_mjolnir_policy = Some(Box::new(desired.clone()));
+        }
+        self.update_choices(profile, target_id, config, snapshot);
         let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_some() {
             SubagentPolicy::Native
         } else {
-            desired.clone()
+            desired
         };
         if self.policy != policy {
             self.policy = policy;
             self.combo = ComboBoxState::default();
-        }
-        if desired.uses_mjolnir() {
-            self.last_mjolnir_policy = Some(Box::new(desired));
         }
     }
 
@@ -403,7 +411,7 @@ impl DashboardState {
         let creating = matches!(&self.mode, Mode::New(_));
         let remembered = if let Mode::New(wizard) = &self.mode {
             let profile = wizard.selected_profile_id(self)?;
-            Some(self.state.last_subagent_policy_for(&profile))
+            self.state.remembered_subagent_policy_for(&profile)
         } else {
             None
         };
@@ -420,7 +428,7 @@ impl DashboardState {
                 &target_id,
                 &config,
                 &snapshot,
-                remembered.as_ref().expect("Create preference was resolved"),
+                remembered.as_ref(),
                 remembered_oracle,
                 remembered_supervisors,
             );

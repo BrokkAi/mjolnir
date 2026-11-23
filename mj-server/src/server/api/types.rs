@@ -297,7 +297,7 @@ pub struct StartSessionRequest {
     /// must hold one repository. The session cannot be resumed or moved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_later_history: bool,
-    /// Omitted uses the selected profile's subagent setting.
+    /// Omitted tries Mjolnir and may fall back to the selected harness's default.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

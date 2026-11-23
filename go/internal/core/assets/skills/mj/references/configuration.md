@@ -576,8 +576,12 @@ that needs judgment itself. Mjolnir chooses the enabled profile offering that
 task type's model and effort with the strongest quota headroom paced against
 its reset times. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
-Native, or to None for DSH, which refuses `native`; `mj move --subagents native|mjolnir|none` retains the recorded policy when
-omitted, including any session override. `--subagent-straightforward M` and `--subagent-subtle M` independently override
+Mjolnir. If Mjolnir delegation is unconfigured or unavailable, Create reports
+a notice and uses `native` where supported or `none` on DSH and Antigravity.
+An explicit `--subagents mjolnir` or `--supervisors enabled` requires Mjolnir
+delegation to be available. `mj move --subagents native|mjolnir|none` retains
+the recorded policy when omitted, including any session override.
+`--subagent-straightforward M` and `--subagent-subtle M` independently override
 their matching task type and imply Mjolnir. An unspecified type uses its global
 choice, so one override can be combined with one global choice. Each model and
 optional effort must be offered by an enabled profile. Each effort flag requires

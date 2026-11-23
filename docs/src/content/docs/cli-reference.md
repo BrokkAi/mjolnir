@@ -390,13 +390,16 @@ mj new --workspace eval --bundle product --target builder \
   listed, then the saved default profile. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
-- `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
-  Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
-  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; every
-  profile accepts it. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
-  choice in `[subagents.straightforward]`, or `[subagents.yolo.straightforward]`
-  on a container target or an SSH bare target with `permissions = "yolo"`, or a session override. The subtle
-  choice in the same set is optional. Configure global defaults in
+- `mj new --subagents native|mjolnir|none` selects delegation. When omitted,
+  Mjolnir is the default. If Mjolnir delegation is unconfigured or unavailable,
+  the session uses `native` on harnesses with native delegation and `none` on
+  DSH and Antigravity, with a notice on stderr. An explicit `--subagents mjolnir`
+  or `--supervisors enabled` requires Mjolnir delegation to be available.
+  A named DSH or Antigravity profile refuses an explicit `native` choice.
+  Every profile accepts `none`, which turns off delegation.
+  Mjolnir delegation supports Claude, Codex, DSH, OpenCode, and Antigravity
+  parents and requires a choice in `[subagents.straightforward]` or a session
+  override. The subtle choice is optional. Configure global choices in
   config.toml or TUI Settings → Sub-agents.
   `--subagent-straightforward M` and `--subagent-subtle M` override only their
   named task type; an unspecified type uses its global choice. Either implies

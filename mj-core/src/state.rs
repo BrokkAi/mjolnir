@@ -2682,11 +2682,19 @@ impl State {
     /// The remembered choice for a profile, falling back to the legacy global
     /// choice and then the default when that profile has no saved choice.
     pub fn last_subagent_policy_for(&self, profile_id: &str) -> crate::subagent::SubagentPolicy {
+        self.remembered_subagent_policy_for(profile_id)
+            .unwrap_or_default()
+    }
+
+    /// The saved profile choice or the legacy global choice.
+    pub fn remembered_subagent_policy_for(
+        &self,
+        profile_id: &str,
+    ) -> Option<crate::subagent::SubagentPolicy> {
         self.last_subagent_policies
             .get(profile_id)
             .or_else(|| self.last_subagent_policies.get(""))
             .cloned()
-            .unwrap_or_default()
     }
     /// The remembered Oracle choice for a profile; enabled when it has none.
     pub fn last_oracle_choice_for(&self, profile_id: &str) -> bool {

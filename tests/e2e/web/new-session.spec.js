@@ -449,6 +449,9 @@ test('golden_viewer_new_session', async ({ context }) => {
       state.snapshot.oracle_configured = configured;
       state.snapshot.last_oracle_choices = { alpha: false };
       state.snapshot.last_subagent_policies = { alpha: { mode: remembered } };
+      if (!configured && remembered === 'mjolnir') {
+        state.snapshot.last_subagent_policies.alpha.subtle = { model: 'subtle-only' };
+      }
       await refresh(page, state);
       // Restart the draft so the remembered policy is read for this creation.
       await page.evaluate(() => { location.hash = '#workspace/test'; });
@@ -464,7 +467,7 @@ test('golden_viewer_new_session', async ({ context }) => {
       if (!configured) {
         await expect(delegation).toHaveValue(remembered === 'none' ? 'none' : 'native');
         await expect(page.locator('#new-step')).toContainText("Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents");
-      } else if (remembered === 'mjolnir') await expect(delegation).toHaveValue('mjolnir');
+      } else await expect(delegation).toHaveValue(remembered);
       await delegation.selectOption(selected);
       await captureNewSessionState(output, page, `review delegation ${label}`, state);
       const release = await startHeldLaunch(page, state);
@@ -625,6 +628,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     await projectStep(page, 'container');
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    await page.locator('#new-subagents').selectOption('none');
     await page.locator('#new-subagents').selectOption('mjolnir');
     await captureNewSessionState(output, page, 'review shows unavailable subagent policy', state);
     await page.locator('#new-next').click();
@@ -681,14 +685,17 @@ test('golden_web_new_session_wizard_steps', async ({ context }) => {
   const skippedPage = await context.newPage();
   const skippedState = await mount(skippedPage, {
     profiles: [{ id: 'fake', harness_kind: 'codex' }],
+    subagentsConfigured: true,
     targets: [bare],
     bundles: [{ id: 'existing', repositories: [] }],
   });
   try {
     await skippedPage.locator('#new-next').click();
     await expect(skippedPage.locator('#new-step')).not.toContainText('Checking project');
+    await expect(skippedPage.locator('#new-subagents')).toHaveValue('mjolnir');
     await captureNewSessionState(output, skippedPage, 'review after skipped steps supplies all required values', skippedState);
     const finishLaunch = await startHeldLaunch(skippedPage, skippedState);
+    expect(skippedState.actions[0]).not.toHaveProperty('subagents');
     await captureNewSessionState(output, skippedPage, 'launch payload after skipped steps', skippedState);
     await finishLaunch();
   } finally {
@@ -1053,7 +1060,8 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(page.locator('#new-step')).toContainText('/resolved/project');
   await page.locator('#new-next').click();
   await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toMatchObject({ project_directory: '/resolved/project', subagents: { mode: 'native' } });
+  expect(state.actions[0]).toMatchObject({ project_directory: '/resolved/project' });
+  expect(state.actions[0]).not.toHaveProperty('subagents');
 });
 
 test('failed Review retries without launching and Back abandons a pending check', async ({ page }) => {

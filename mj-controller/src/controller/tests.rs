@@ -811,6 +811,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         supervisors: None,
         oracle_choice: None,
         remember_launch_choices: true,
+        skip_remembering_subagent_policy: false,
         remember_container_size: true,
         review: None,
         no_project_memory: false,

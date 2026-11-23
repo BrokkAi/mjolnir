@@ -296,7 +296,9 @@ child model and effort for each task type. Set `task_type` to `straightforward`
 for work with a clear method, including locating code, running commands or
 test suites, and implementing a settled design. Use `subtle` for ambiguous
 diagnosis, design choices, and work with a high risk of subtle bugs. A subtle
-task gets a smarter, more expensive agent. Judge difficulty, not brief length.";
+task gets a smarter, more expensive agent. Judge difficulty, not brief length.
+When a `straightforward` child stalls or returns incomplete after one correction,
+escalate that slice to `subtle` rather than taking it over yourself.";
 
 /// The same description when only the straightforward type is configured.
 /// There is no type to choose, so the parent delegates straightforward
@@ -3447,6 +3449,12 @@ mod tests {
             "{both}"
         );
         assert!(both.contains("A subtle\ntask gets a smarter, more expensive agent."));
+        assert!(
+            both.contains(
+                "When a `straightforward` child stalls or returns incomplete after one correction,\nescalate that slice to `subtle` rather than taking it over yourself."
+            ),
+            "{both}"
+        );
         // With only straightforward, there is no choice: the parent delegates
         // straightforward work and keeps work that needs judgment.
         let one = delegation_policy(4, false);
