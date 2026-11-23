@@ -503,6 +503,13 @@ pub struct UsageCoverage {
     pub missing_cost_turns: u64,
 }
 
+impl UsageCoverage {
+    /// Whole-turn totals omit turns with incomplete or missing reports.
+    pub fn is_partial(&self) -> bool {
+        self.full_turn_reports < self.recorded_turns || self.unfinished_turns > 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageCounterTotal {
     pub tokens: u64,

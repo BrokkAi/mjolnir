@@ -4194,6 +4194,40 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+#[tokio::test]
+async fn viewer_turn_control_preserves_an_exact_restart_target() {
+    let (app, mut actions, _, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    let command = mj_core::relay::RelayCommand::CancelTurnTarget {
+        target: mj_core::relay::TurnInterruptTarget::QueuedRestart {
+            command_id: "auto-continue-restart-1-prompt-1".into(),
+        },
+    };
+    let action = ControllerAction::TurnControl {
+        session_id: "session-1".into(),
+        command,
+    };
+    let response = mj_core::runtime::spawn(
+        app.oneshot(
+            Request::post("/api/v1/actions")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&action).unwrap()))
+                .unwrap(),
+        ),
+    );
+    let request = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.action, action);
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+}
+
 // Hard-won: feddc733: receipt feedback loop consumed action slots and rejected real actions.
 #[tokio::test]
 async fn conversation_read_receipt_never_contends_with_a_running_action() {

@@ -258,7 +258,11 @@ impl CommandExecutor for DockerDesktopExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.program.as_str() {
             "docker" => "Docker Desktop 4.40.0 (187762)\n",
-            "sh" if command.purpose == "probe mount source filesystem" => "ext4\n",
+            "ssh" if command.purpose == "identify the SSH Docker host and daemon platform" => {
+                assert!(command.args.last().unwrap().contains("uname -s"));
+                "Darwin\n"
+            }
+            "ssh" if command.purpose == "validate remote directory" => "",
             other => panic!("unexpected command {other}"),
         };
         Ok(CommandOutput {
@@ -301,6 +305,67 @@ fn docker_desktop_attachments_are_mounted_read_only_and_reported() {
         notices[0].starts_with("Mounted /Users/dev/project read-only: Docker runs in a VM"),
         "{notices:?}"
     );
+}
+
+#[test]
+fn mac_container_attachments_agree_in_mount_editor_and_launch_plan() {
+    let source = tempfile::tempdir().unwrap();
+    let mut config = ssh_docker_registration_config();
+    let TargetTemplate::SshDocker { ssh, container } = config.targets["docker"].clone() else {
+        unreachable!()
+    };
+    config.targets.insert(
+        "local-apple".into(),
+        TargetTemplate::AppleContainer {
+            container: container.clone(),
+        },
+    );
+    config.targets.insert(
+        "remote-apple".into(),
+        TargetTemplate::SshAppleContainer { ssh, container },
+    );
+    let controller = super::super::Controller {
+        config,
+        state: Default::default(),
+    };
+    let executor = DockerDesktopExecutor;
+    for (id, expected) in [
+        ("docker", "Docker runs in a VM"),
+        (
+            "local-apple",
+            "Apple container does not support copy-on-write directory overlays",
+        ),
+        (
+            "remote-apple",
+            "Apple container does not support copy-on-write directory overlays",
+        ),
+    ] {
+        let reason = controller
+            .validate_mount_source(id, source.path(), &executor)
+            .unwrap()
+            .expect("the editor should explain why it disables copy-on-write");
+        assert!(reason.starts_with(expected), "{id}: {reason}");
+
+        let mut mounts = [
+            AdditionalMount {
+                source: source.path().to_owned(),
+                destination: PathBuf::from("/mnt/project"),
+                access: targets::MountAccess::Cow,
+            },
+            AdditionalMount {
+                source: source.path().to_owned(),
+                destination: PathBuf::from("/mnt/scratch"),
+                access: targets::MountAccess::Rw,
+            },
+        ];
+        let target =
+            backend_target(&controller.config.targets[id], None, Default::default()).unwrap();
+        let notices = enforce_overlay_capable_mounts(&target, &mut mounts, &executor);
+        assert_eq!(notices.len(), 1, "{id}: {notices:?}");
+        assert!(notices[0].contains(&reason), "{id}: {notices:?}");
+        assert_eq!(mounts[0].access, targets::MountAccess::Ro);
+        assert_eq!(mounts[1].access, targets::MountAccess::Rw);
+    }
 }
 
 #[test]

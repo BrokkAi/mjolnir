@@ -2715,6 +2715,46 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
     assert_eq!(json_body(response).await["turn_id"], 3);
 }
 
+#[tokio::test]
+async fn public_interrupt_submits_only_when_the_session_offers_it() {
+    let (app, mut actions, snapshot_tx, _) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            // The daemon can publish an interrupt for queued recovery with no active prompt.
+            snapshot.sessions[0].capabilities.interrupt_turn = true;
+        });
+    let request = || {
+        bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = mj_core::runtime::spawn(app.clone().oneshot(request()));
+    let action = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        action.action,
+        ControllerAction::InterruptTurn {
+            session_id: "session-1".into()
+        }
+    );
+    action
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.interrupt_turn = false);
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert!(actions.try_recv().is_err());
+}
+
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
 // Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
 #[tokio::test]

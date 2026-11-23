@@ -1,6 +1,6 @@
 === parent session usage tree (CLI text) ===
 usage tree session-parent: 2 sessions
-totals from the 3 of 5 turns that reported a whole turn; 1 started turns without a completion report
+lower bound: totals from the 3 of 5 turns that reported a whole turn; 1 started turns without a completion report
 model gpt-5.4; effort high:
   input_tokens  1800  (2 turns)
   output_tokens  500  (2 turns)
